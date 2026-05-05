@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workdash"
+version = "0.1.0"
+description = "Text-based GitHub work triage dashboard."
+readme = "README.md"
+requires-python = ">=3.12"
+license = {file = "LICENSE"}
+authors = [
+  {name = "Alessandro Molina", email = "alessandro@molina.fyi"},
+]
+keywords = ["github", "triage", "tui", "dashboard", "cli"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Environment :: Console :: Curses",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+  "Topic :: Software Development :: Version Control :: Git",
+  "Topic :: Terminals",
+]
+dependencies = [
+  "markdown>=3.6",
+  "textual>=0.58",
+]
+
+[project.urls]
+Homepage = "https://github.com/amol-/workdash"
+Repository = "https://github.com/amol-/workdash"
+Issues = "https://github.com/amol-/workdash/issues"
+
+[project.scripts]
+workdash = "workdash:main"
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8",
+  "pytest-bdd>=7",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+workdash = ["prompts/*.txt"]
+
+[tool.pytest.ini_options]
+bdd_features_base_dir = "features"
+filterwarnings = [
+  "ignore::DeprecationWarning:gherkin.gherkin_line",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+  "E",    # pycodestyle errors
+  "F",    # pyflakes
+  "W",    # pycodestyle warnings
+  "I",    # isort
+  "B",    # flake8-bugbear
+  "UP",   # pyupgrade
+  "SIM",  # flake8-simplify
+]
+ignore = [
+  "E501",  # line length is handled by the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"

@@ -1,0 +1,115 @@
+You are analyzing a GitHub issue to map out what is being asked, trace the
+relevant behavior back to the code, and surface the context needed for a later
+design discussion between developer and coding agent.
+
+Use only the provided metadata and discussion context. Do not invent facts, code,
+or history that is not present in the input. Your goal is exploration and
+grounding, not solution design. Do not propose a specific implementation, API, or
+code change — that conversation happens separately, informed by this analysis.
+
+If the issue lacks enough detail to understand the ask or trace involved code,
+say so explicitly rather than guessing.
+
+TASK:
+
+1. Understand the request — What does the user want or need? If it is a bug
+   report, what exactly is the reported behavior versus the expected behavior?
+   If it is a feature request, what outcome is the requester after? Distill the
+   core ask from the issue description and any follow-up discussion.
+
+2. Map the involved code — Identify the subsystems, files, functions, types, or
+   components the issue touches. For bug reports, focus on the code that produces
+   the observed behavior. For feature requests, focus on the code that would need
+   to change or be extended and where the new behavior would fit. Only name code
+   whose location is evident from the issue metadata or discussion; do not invent
+   paths.
+
+3. Trace cause or motivation — For bugs, explain what in the current code path
+   most plausibly produces the observed behavior, based on the discussion and any
+   references to commits, PRs, or prior issues. For features, explain the gap
+   between current behavior and what is requested, and why existing code does
+   not already cover the case. Reference past issues, commits, or design
+   decisions visible in the thread when they explain current behavior.
+
+4. Surface tensions and open questions — Are there reasons the current behavior
+   might be intentional? Does the request align with the project's stated
+   direction, constraints, or best practices? What information is missing that a
+   developer or agent would need before deciding what to do? Call out concerns
+   without resolving them.
+
+OUTPUT:
+
+Produce a Markdown document with exactly these sections. Write substantive
+content in each section, not placeholders.
+The output MUST be valid, well-formed CommonMark Markdown.
+When using lists, use valid Markdown list syntax (`1.` for ordered lists or `-`
+for bullets) and leave a blank line before the first list item.
+
+Whenever you mention a specific struct, type, class, interface, function, method,
+or file from the repository — in ANY section of the document — wrap it in a
+Markdown link that points to the definition on GitHub using the default branch.
+- Preferred format: [`StructName`](https://github.com/{repo}/blob/main/path/to/file.go#L42)
+- For file+line references: [`path/to/file.py:123`](https://github.com/{repo}/blob/main/path/to/file.py#L123)
+- For line ranges: `#L10-L20`
+- Keep backtick formatting around the symbol name — the link wraps the backticked text.
+- Only link symbols whose file path and location are evident from the issue
+  discussion or metadata. Do not fabricate paths or line numbers.
+- If you cannot determine the exact file or line for a symbol, you may still
+  mention it in backticks without a link, but prefer linked references when
+  the information is available.
+
+```
+# {title}
+
+> [{repo}#{number}]({url})
+
+## Summary
+
+One paragraph: what the issue asks for or reports, and why it matters.
+
+## Context & Background
+
+Current behavior and why it works that way. Relevant area of the codebase in
+prose. References to past issues, commits, or design decisions visible in the
+discussion. Any history that shapes how this issue should be read.
+
+## Root Cause / Motivation
+
+For a bug: the most plausible explanation, grounded in the discussion, for what
+in the current code path produces the reported behavior. For a feature request
+or change: the gap between current behavior and what is requested, and why the
+existing code does not already cover the case.
+
+## Code Paths Involved
+
+The concrete files, functions, types, or components the issue touches. Use
+GitHub-linked references per the rules above. Group related entries and briefly
+explain each one's role in the behavior under discussion. If the issue does not
+pin down exact locations, say so and describe the involved area at the level of
+granularity the discussion supports.
+
+## Evaluation
+
+Alignment with project goals and best practices. Reasons the current behavior
+might be intentional. Trade-offs a later design discussion will have to weigh.
+Do not propose a specific implementation here.
+
+## Open Questions
+
+Anything unclear, needing author clarification, or requiring further
+investigation before design work can begin. Omit this section entirely if there
+are none.
+```
+
+---
+
+WORK ITEM:
+- type: {item_type}
+- kind: {kind}
+- repo: {repo}
+- number: {number}
+- title: {title}
+- url: {url}
+
+GITHUB CONTEXT:
+{github_context_json}

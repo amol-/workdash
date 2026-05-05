@@ -1,0 +1,517 @@
+import asyncio
+import threading
+from datetime import UTC, datetime
+
+import pytest
+
+pytest.importorskip("textual")
+
+from textual.widgets import DataTable, Static
+
+from workdash.models import WorkItem, WorkItemKind, WorkItemType
+from workdash.tui import WorkdashApp
+
+
+def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_columns() -> None:
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_items = [
+        WorkItem(
+            kind=WorkItemKind.TRACKED_PR,
+            item_type=WorkItemType.PR,
+            repo="owner/repo",
+            number=22,
+            title="Implement renderer",
+            created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+            url="https://example.com/pull/22",
+        ),
+        WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE,
+            item_type=WorkItemType.ISSUE,
+            repo="owner/repo",
+            number=11,
+            title="Fix parser",
+            created_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+            url="https://example.com/issues/11",
+        ),
+    ]
+    app = WorkdashApp(
+        work_items=work_items,
+        suggestion_markers={(WorkItemType.ISSUE, "owner/repo", 11): "*"},
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as _:
+            table = app.query_one("#work-items", DataTable)
+            assert [str(column.label) for column in table.columns.values()] == [
+                "Type",
+                "Repo",
+                "Title",
+                "Age",
+                "Last Update",
+            ]
+            assert table.row_count == 2
+            # Sorted by updated_at descending; PR #22 (updated 2/25) before issue #11 (updated 2/20)
+            # PR #22 is within 24h of now_utc so cells are bold Text objects
+            assert [str(c) for c in table.get_row_at(0)] == [
+                "PR",
+                "owner/repo",
+                "Implement renderer",
+                "1d",
+                "1d",
+            ]
+            assert table.get_row_at(1) == [
+                "ISSUE",
+                "owner/repo",
+                "* Fix parser",
+                "6d",
+                "6d",
+            ]
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_renders_review_for_review_requested_pr_type() -> None:
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_items = [
+        WorkItem(
+            kind=WorkItemKind.REVIEW_REQUESTED_PR,
+            item_type=WorkItemType.PR,
+            repo="owner/repo",
+            number=22,
+            title="Needs review",
+            created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+            url="https://example.com/pull/22",
+        ),
+    ]
+    app = WorkdashApp(
+        work_items=work_items,
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as _:
+            table = app.query_one("#work-items", DataTable)
+            assert [str(c) for c in table.get_row_at(0)] == [
+                "REVIEW",
+                "owner/repo",
+                "Needs review",
+                "1d",
+                "1d",
+            ]
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("workdash.tui.open_markdown", lambda path: None)
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_items = [
+        WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE,
+            item_type=WorkItemType.ISSUE,
+            repo="owner/repo",
+            number=11,
+            title="Fix parser",
+            created_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+            url="https://example.com/issues/11",
+        ),
+        WorkItem(
+            kind=WorkItemKind.TRACKED_PR,
+            item_type=WorkItemType.PR,
+            repo="owner/repo",
+            number=22,
+            title="Implement renderer",
+            created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+            url="https://example.com/pull/22",
+        ),
+    ]
+    open_calls: list[tuple[WorkItemType, int]] = []
+    analyze_calls: list[tuple[WorkItemType, int, str]] = []
+    launch_calls: list[tuple[WorkItemType, int, str]] = []
+    terminal_calls: list[tuple[WorkItemType, int]] = []
+
+    def open_callback(item: WorkItem) -> None:
+        open_calls.append((item.item_type, item.number))
+
+    def analyze_callback(item: WorkItem, tool: str = "codex") -> str:
+        analyze_calls.append((item.item_type, item.number, tool))
+
+        return "/tmp/analyses/analysis.md"
+
+    def launch_callback(item: WorkItem, tool: str = "codex") -> None:
+        launch_calls.append((item.item_type, item.number, tool))
+
+    def terminal_callback(item: WorkItem) -> None:
+        terminal_calls.append((item.item_type, item.number))
+
+    app = WorkdashApp(
+        work_items=work_items,
+        open_callback=open_callback,
+        analyze_callback=analyze_callback,
+        launch_callback=launch_callback,
+        terminal_callback=terminal_callback,
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            table = app.query_one("#work-items", DataTable)
+            # PR #22 is row 0 (sorted by updated_at desc: 2/25 before 2/20)
+            await pilot.pause()
+
+            await pilot.press("o")
+            await pilot.pause()
+
+            # Press "a" to open the AnalyzeDialog, then "c" to choose Claude
+            await pilot.press("a")
+            await pilot.pause()
+            await pilot.press("c")
+            await pilot.pause()
+
+            # Press "c" to open CodeDialog, then "g" to choose Codex
+            await pilot.press("c")
+            await pilot.pause()
+            await pilot.press("g")
+            await pilot.pause()
+
+            # Press "c" to open CodeDialog, then "v" to choose VSCode
+            await pilot.press("c")
+            await pilot.pause()
+            await pilot.press("v")
+            await pilot.pause()
+
+            await pilot.press("t")
+            await pilot.pause()
+
+            await pilot.press("q")
+
+            assert open_calls == [(WorkItemType.PR, 22)]
+            assert analyze_calls == [(WorkItemType.PR, 22, "claude")]
+            assert launch_calls == [(WorkItemType.PR, 22, "codex"), (WorkItemType.PR, 22, "vscode")]
+            assert terminal_calls == [(WorkItemType.PR, 22)]
+            assert [str(c) for c in table.get_row_at(0)] == [
+                "PR",
+                "owner/repo",
+                "Implement renderer",
+                "1d",
+                "1d",
+            ]
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_refresh_keybinding_invokes_callback_and_reloads_rows() -> None:
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    initial_item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=11,
+        title="Fix parser",
+        created_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/issues/11",
+    )
+    refreshed_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=33,
+        title="Ship refresh",
+        created_at=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/33",
+    )
+    refresh_calls: list[str] = []
+
+    def refresh_callback() -> tuple[list[WorkItem], dict[tuple[WorkItemType, str, int], str]]:
+        refresh_calls.append("called")
+        return [refreshed_item], {(WorkItemType.PR, "owner/repo", 33): "*"}
+
+    app = WorkdashApp(
+        work_items=[initial_item],
+        refresh_callback=refresh_callback,
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await pilot.press("r")
+            await pilot.press("q")
+
+            table = app.query_one("#work-items", DataTable)
+            assert refresh_calls == ["called"]
+            assert table.row_count == 1
+            assert [str(c) for c in table.get_row_at(0)] == [
+                "PR",
+                "owner/repo",
+                "* Ship refresh",
+                "0d",
+                "0d",
+            ]
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_footer_shows_success_status_for_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("workdash.tui.open_markdown", lambda path: None)
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+    )
+
+    def analyze_callback(item: WorkItem, tool: str = "codex") -> str:
+
+        return "/tmp/analysis.md"
+
+    app = WorkdashApp(
+        work_items=[work_item],
+        open_callback=lambda _: None,
+        refresh_callback=lambda: [work_item],
+        analyze_callback=analyze_callback,
+        launch_callback=lambda _, __tool="codex": None,
+        terminal_callback=lambda _: None,
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+            assert footer.render().plain == "Ready."
+
+            await pilot.press("o")
+            await pilot.pause()
+            assert footer.render().plain == "Opened pr owner/repo#22."
+
+            await pilot.press("r")
+            await pilot.pause()
+            assert footer.render().plain == "Refreshed 1 item(s)."
+
+            # Press "a" to open AnalyzeDialog, then "c" to choose Claude
+            await pilot.press("a")
+            await pilot.pause()
+            await pilot.press("c")
+            await pilot.pause()
+            assert footer.render().plain == "Analyzed pr owner/repo#22 with Claude."
+
+            # Press "c" to open CodeDialog, then "g" to choose Codex
+            await pilot.press("c")
+            await pilot.pause()
+            await pilot.press("g")
+            await pilot.pause()
+            assert footer.render().plain == "Launched Codex for pr owner/repo#22."
+
+            # Press "c" to open CodeDialog, then "v" to choose VSCode
+            await pilot.press("c")
+            await pilot.pause()
+            await pilot.press("v")
+            await pilot.pause()
+            assert footer.render().plain == "Launched VSCode for pr owner/repo#22."
+
+            await pilot.press("t")
+            await pilot.pause()
+            assert footer.render().plain == "Opened terminal for pr owner/repo#22."
+
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_analyze_opens_markdown_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=11,
+        title="Fix parser",
+        created_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/issues/11",
+    )
+    opened_paths: list[str] = []
+    monkeypatch.setattr("workdash.tui.open_markdown", lambda path: opened_paths.append(path))
+
+    def analyze_callback(item: WorkItem, tool: str = "codex") -> str:
+
+        return "/tmp/analyses/owner_repo_ISSUE11.md"
+
+    app = WorkdashApp(
+        work_items=[work_item],
+        analyze_callback=analyze_callback,
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            # Press "a" to open AnalyzeDialog, then "g" to choose Codex
+            await pilot.press("a")
+            await pilot.pause()
+            await pilot.press("g")
+            await pilot.pause()
+            assert opened_paths == ["/tmp/analyses/owner_repo_ISSUE11.md"]
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_analyze_runs_without_blocking_ui_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("workdash.tui.open_markdown", lambda path: None)
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=11,
+        title="Fix parser",
+        created_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/issues/11",
+    )
+    analyze_started = threading.Event()
+    allow_finish = threading.Event()
+
+    def analyze_callback(item: WorkItem, tool: str = "codex") -> str:
+        analyze_started.set()
+        allow_finish.wait(timeout=30)
+
+        return "/tmp/analysis.md"
+
+    app = WorkdashApp(
+        work_items=[work_item],
+        analyze_callback=analyze_callback,
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            # Press "a" to open the dialog, then "c" to trigger analysis
+            await pilot.press("a")
+            await pilot.pause()
+            analyze_press = asyncio.create_task(pilot.press("c"))
+            while not analyze_started.is_set():
+                await pilot.pause()
+            table = app.query_one("#work-items", DataTable)
+            assert table.row_count == 1
+            assert analyze_press.done() is False
+            allow_finish.set()
+            await analyze_press
+            await pilot.pause()
+            assert table.get_row_at(0) == [
+                "ISSUE",
+                "owner/repo",
+                "Fix parser",
+                "6d",
+                "6d",
+            ]
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_shows_command_hint_bar() -> None:
+    app = WorkdashApp()
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            command_bar = app.query_one("#command-footer", Static)
+            assert (
+                command_bar.render().plain == "(o)pen (r)efresh (a)nalyze (c)ode (t)erminal (q)uit"
+            )
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+    )
+
+    def failing_open_callback(_: WorkItem) -> None:
+        raise RuntimeError("xdg-open failed")
+
+    def failing_refresh_callback() -> list[WorkItem]:
+        raise RuntimeError("gh refresh failed")
+
+    def failing_analyze_callback(_: WorkItem, __tool: str = "codex") -> str:
+        raise RuntimeError("codex analyze failed")
+
+    def failing_launch_callback(_: WorkItem, __tool: str = "codex") -> None:
+        raise RuntimeError("codex launch failed")
+
+    def failing_terminal_callback(_: WorkItem) -> None:
+        raise RuntimeError("zellij pane failed")
+
+    app = WorkdashApp(
+        work_items=[work_item],
+        open_callback=failing_open_callback,
+        refresh_callback=failing_refresh_callback,
+        analyze_callback=failing_analyze_callback,
+        launch_callback=failing_launch_callback,
+        terminal_callback=failing_terminal_callback,
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+
+            await pilot.press("o")
+            await pilot.pause()
+            assert footer.render().plain == "Open failed: xdg-open failed"
+
+            await pilot.press("r")
+            await pilot.pause()
+            assert footer.render().plain == "Refresh failed: gh refresh failed"
+
+            # Press "a" to open AnalyzeDialog, then "c" to choose Claude
+            await pilot.press("a")
+            await pilot.pause()
+            await pilot.press("c")
+            await pilot.pause()
+            assert footer.render().plain == "Analyze failed: codex analyze failed"
+
+            # Press "c" to open CodeDialog, then "g" to choose Codex
+            await pilot.press("c")
+            await pilot.pause()
+            await pilot.press("g")
+            await pilot.pause()
+            assert footer.render().plain == "Launch failed: codex launch failed"
+
+            await pilot.press("t")
+            await pilot.pause()
+            assert footer.render().plain == "Terminal failed: zellij pane failed"
+
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())

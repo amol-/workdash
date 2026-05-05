@@ -1,0 +1,604 @@
+import shutil
+import subprocess
+from datetime import UTC, datetime
+
+import pytest
+
+from workdash.launcher import (
+    build_launch_agent_prompt,
+    launch_agent_context,
+    launch_terminal_context,
+    launch_vscode_context,
+    open_in_browser,
+    prepare_launch_agent_prompt,
+)
+from workdash.models import WorkItem, WorkItemKind, WorkItemType
+
+
+def make_work_item(
+    item_type: WorkItemType,
+    *,
+    kind: WorkItemKind | None = None,
+) -> WorkItem:
+    return WorkItem(
+        kind=(
+            kind
+            if kind is not None
+            else (
+                WorkItemKind.AUTHORED_PR
+                if item_type == WorkItemType.PR
+                else WorkItemKind.TRACKED_ISSUE
+            )
+        ),
+        item_type=item_type,
+        repo="owner/repo",
+        number=42,
+        title="Implement launch prompt",
+        created_at=datetime(2026, 2, 20, 10, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 21, 10, 0, 0, tzinfo=UTC),
+        url="https://github.com/owner/repo/pull/42",
+    )
+
+
+def test_open_in_browser_runs_xdg_open_for_valid_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["command"] = args[0]
+        captured["check"] = kwargs.get("check")
+        captured["capture_output"] = kwargs.get("capture_output")
+        captured["text"] = kwargs.get("text")
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    open_in_browser("https://example.com/issues/11")
+
+    assert captured["command"] == ["xdg-open", "https://example.com/issues/11"]
+    assert captured["check"] is True
+
+
+def test_open_in_browser_rejects_empty_url() -> None:
+    with pytest.raises(ValueError, match="URL must be a non-empty string"):
+        open_in_browser("   ")
+
+
+def test_open_in_browser_raises_clear_error_when_xdg_open_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("xdg-open")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="xdg-open is not installed or not on PATH"):
+        open_in_browser("https://example.com/issues/11")
+
+
+def test_open_in_browser_raises_clear_error_when_xdg_open_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=args[0],
+            stderr="cannot open display",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Failed to open URL via xdg-open: exit code 1"):
+        open_in_browser("https://example.com/issues/11")
+
+
+def test_launch_agent_context_uses_new_zellij_pane_when_in_zellij(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["command"] = args[0]
+        captured["check"] = kwargs.get("check")
+        captured["capture_output"] = kwargs.get("capture_output")
+        captured["text"] = kwargs.get("text")
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/zellij" if name == "zellij" else None
+    )
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launch_agent_context("/tmp/repo", "review this change")
+
+    assert captured["command"] == [
+        "zellij",
+        "action",
+        "new-pane",
+        "--cwd",
+        "/tmp/repo",
+        "--",
+        "/bin/bash",
+        "-ic",
+        "codex 'review this change'",
+    ]
+    assert captured["check"] is True
+    assert captured["capture_output"] is True
+    assert captured["text"] is True
+
+
+def test_launch_agent_context_prefers_ptyxis_outside_zellij(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["command"] = args[0]
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    def fake_which(name: str) -> str | None:
+        if name in {"zellij", "ptyxis"}:
+            return f"/usr/bin/{name}"
+        return None
+
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launch_agent_context("/tmp/repo", "review this change")
+
+    assert captured["command"] == [
+        "ptyxis",
+        "--new-window",
+        "-d",
+        "/tmp/repo",
+        "--",
+        "zellij",
+        "--session",
+        "workdash-agent",
+        "run",
+        "--cwd",
+        "/tmp/repo",
+        "--",
+        "/bin/bash",
+        "-ic",
+        "codex 'review this change'",
+    ]
+
+
+def test_launch_agent_context_falls_back_to_konsole_when_ptyxis_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["command"] = args[0]
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    def fake_which(name: str) -> str | None:
+        if name in {"zellij", "konsole"}:
+            return f"/usr/bin/{name}"
+        return None
+
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launch_agent_context("/tmp/repo", "review this change")
+
+    assert captured["command"] == [
+        "konsole",
+        "--new-window",
+        "--workdir",
+        "/tmp/repo",
+        "-e",
+        "zellij",
+        "--session",
+        "workdash-agent",
+        "run",
+        "--cwd",
+        "/tmp/repo",
+        "--",
+        "/bin/bash",
+        "-ic",
+        "codex 'review this change'",
+    ]
+
+
+def test_launch_agent_context_raises_clear_error_when_zellij_launch_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=args[0],
+            stderr="pane launch failed",
+        )
+
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/zellij" if name == "zellij" else None
+    )
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(
+        RuntimeError, match="Failed to launch coding agent in zellij: pane launch failed"
+    ):
+        launch_agent_context("/tmp/repo", "review this change")
+
+
+def test_launch_agent_context_raises_clear_error_when_terminal_command_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("ptyxis")
+
+    def fake_which(name: str) -> str | None:
+        if name in {"zellij", "ptyxis"}:
+            return f"/usr/bin/{name}"
+        return None
+
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Failed to launch coding agent via ptyxis: required command 'ptyxis' is not on PATH",
+    ):
+        launch_agent_context("/tmp/repo", "review this change")
+
+
+def test_launch_agent_context_raises_clear_error_when_no_terminal_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/zellij" if name == "zellij" else None
+    )
+
+    with pytest.raises(RuntimeError, match="No supported terminal emulator found"):
+        launch_agent_context("/tmp/repo", "review this change")
+
+
+def test_launch_terminal_context_uses_new_zellij_pane_when_in_zellij(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["command"] = args[0]
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/zellij" if name == "zellij" else None
+    )
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launch_terminal_context("/tmp/repo")
+
+    assert captured["command"] == [
+        "zellij",
+        "action",
+        "new-pane",
+        "--cwd",
+        "/tmp/repo",
+        "--",
+        "/bin/bash",
+        "-i",
+    ]
+
+
+def test_launch_terminal_context_prefers_ptyxis_outside_zellij(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["command"] = args[0]
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    def fake_which(name: str) -> str | None:
+        if name in {"zellij", "ptyxis"}:
+            return f"/usr/bin/{name}"
+        return None
+
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launch_terminal_context("/tmp/repo")
+
+    assert captured["command"] == [
+        "ptyxis",
+        "--new-window",
+        "-d",
+        "/tmp/repo",
+        "--",
+        "zellij",
+        "--session",
+        "workdash-terminal",
+        "run",
+        "--cwd",
+        "/tmp/repo",
+        "--",
+        "/bin/bash",
+        "-i",
+    ]
+
+
+def test_launch_terminal_context_raises_clear_error_when_zellij_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+
+    with pytest.raises(RuntimeError, match="zellij is not installed or not on PATH"):
+        launch_terminal_context("/tmp/repo")
+
+
+def test_build_launch_agent_prompt_includes_required_metadata_and_non_start_instruction() -> None:
+    prompt = build_launch_agent_prompt(
+        item=make_work_item(WorkItemType.PR),
+        repo_path="/tmp/repo",
+        github_context={
+            "state": "OPEN",
+            "author": {"login": "amol-"},
+            "assignees": [{"login": "dev1"}],
+            "labels": [{"name": "bug"}],
+            "createdAt": "2026-02-20T10:00:00Z",
+            "updatedAt": "2026-02-21T10:00:00Z",
+            "isDraft": False,
+            "reviewDecision": "REVIEW_REQUIRED",
+            "body": "details",
+        },
+    )
+
+    assert "session for this GitHub pull request" in prompt
+    assert "Propose a concrete implementation plan and clarifying questions." in prompt
+    assert "Do not start implementing code yet." in prompt
+    assert "- type: pr" in prompt
+    assert "- repo: owner/repo" in prompt
+    assert "- number: 42" in prompt
+    assert "- title: Implement launch prompt" in prompt
+    assert "- url: https://github.com/owner/repo/pull/42" in prompt
+    assert "- expected local checkout path: /tmp/repo" in prompt
+    assert '"state": "OPEN"' in prompt
+    assert "PREVIOUS ANALYSIS" not in prompt
+
+
+def test_build_launch_agent_prompt_for_review_requested_pr_is_review_focused() -> None:
+    prompt = build_launch_agent_prompt(
+        item=make_work_item(
+            WorkItemType.PR,
+            kind=WorkItemKind.REVIEW_REQUESTED_PR,
+        ),
+        repo_path="/tmp/repo",
+        github_context={
+            "state": "OPEN",
+            "author": {"login": "amol-"},
+            "assignees": [{"login": "dev1"}],
+            "labels": [{"name": "bug"}],
+            "createdAt": "2026-02-20T10:00:00Z",
+            "updatedAt": "2026-02-21T10:00:00Z",
+            "isDraft": False,
+            "reviewDecision": "REVIEW_REQUIRED",
+            "body": "details",
+        },
+    )
+
+    assert "session to review this GitHub pull request" in prompt
+    assert "Discuss review findings, risks, and open questions for the author." in prompt
+    assert "Do not start implementing code changes." in prompt
+    assert "- kind: review_requested_pr" in prompt
+
+
+def test_build_launch_agent_prompt_includes_analysis_path_when_provided() -> None:
+    prompt = build_launch_agent_prompt(
+        item=make_work_item(WorkItemType.PR),
+        repo_path="/tmp/repo",
+        github_context={"state": "OPEN"},
+        analysis_path="/tmp/cache/analyses/owner_repo_PR42.md",
+    )
+    assert "PREVIOUS ANALYSIS:" in prompt
+    assert "/tmp/cache/analyses/owner_repo_PR42.md" in prompt
+    assert "Read it before proceeding" in prompt
+
+
+def test_build_launch_agent_prompt_uses_issue_template_for_issues() -> None:
+    prompt = build_launch_agent_prompt(
+        item=make_work_item(WorkItemType.ISSUE),
+        repo_path="/tmp/repo",
+        github_context={"state": "OPEN"},
+    )
+    assert "session for this GitHub issue" in prompt
+    assert "- type: issue" in prompt
+
+
+def test_prepare_launch_agent_prompt_collects_gh_context_and_builds_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=(
+                '{"number":42,"title":"Implement launch prompt","state":"OPEN",'
+                '"author":{"login":"amol-"},"assignees":[],"labels":[],'
+                '"createdAt":"2026-02-20T10:00:00Z","updatedAt":"2026-02-21T10:00:00Z"}'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    prompt = prepare_launch_agent_prompt(make_work_item(WorkItemType.PR), "/tmp/repo")
+
+    assert calls == [
+        [
+            "gh",
+            "pr",
+            "view",
+            "42",
+            "--repo",
+            "owner/repo",
+            "--json",
+            (
+                "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,"
+                "isDraft,reviewDecision,additions,deletions,changedFiles,headRefName,baseRefName"
+            ),
+        ]
+    ]
+    assert "- expected local checkout path: /tmp/repo" in prompt
+    assert "Do not start implementing code yet." in prompt
+    assert '"state": "OPEN"' in prompt
+
+
+def test_prepare_launch_agent_prompt_collects_issue_gh_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=(
+                '{"number":42,"title":"Implement launch prompt","state":"OPEN",'
+                '"author":{"login":"amol-"},"assignees":[],"labels":[],'
+                '"createdAt":"2026-02-20T10:00:00Z","updatedAt":"2026-02-21T10:00:00Z"}'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    prompt = prepare_launch_agent_prompt(make_work_item(WorkItemType.ISSUE), "/tmp/repo")
+
+    assert calls == [
+        [
+            "gh",
+            "issue",
+            "view",
+            "42",
+            "--repo",
+            "owner/repo",
+            "--json",
+            "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt",
+        ]
+    ]
+    assert "- type: issue" in prompt
+
+
+def test_prepare_launch_agent_prompt_raises_clear_error_when_gh_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("gh")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="gh CLI is not installed or not on PATH"):
+        prepare_launch_agent_prompt(make_work_item(WorkItemType.PR), "/tmp/repo")
+
+
+def test_prepare_launch_agent_prompt_raises_clear_error_when_gh_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=args[0],
+            stderr="permission denied",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Failed to gather launch context for pr owner/repo#42"):
+        prepare_launch_agent_prompt(make_work_item(WorkItemType.PR), "/tmp/repo")
+
+
+def test_launch_vscode_context_opens_folder_then_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(
+            {
+                "command": args[0],
+                "check": kwargs.get("check"),
+                "capture_output": kwargs.get("capture_output"),
+                "text": kwargs.get("text"),
+            }
+        )
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launch_vscode_context("/tmp/repo", "explain this codebase")
+
+    assert len(calls) == 2
+    assert calls[0]["command"] == ["code", "--new-window", "/tmp/repo"]
+    assert calls[0]["check"] is True
+    assert calls[0]["capture_output"] is True
+    assert calls[0]["text"] is True
+    assert calls[1]["command"] == ["code", "chat", "explain this codebase", "--reuse-window"]
+    assert calls[1]["check"] is True
+    assert calls[1]["capture_output"] is True
+    assert calls[1]["text"] is True
+
+
+def test_launch_vscode_context_raises_when_code_not_on_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("code")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Failed to open VSCode"):
+        launch_vscode_context("/tmp/repo", "explain this codebase")
+
+
+def test_launch_vscode_context_raises_when_chat_command_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call_count = 0
+
+    def fake_run(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=args[0],
+            stderr="copilot not available",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Failed to start Copilot chat"):
+        launch_vscode_context("/tmp/repo", "explain this codebase")
+
+
+def test_launch_vscode_context_rejects_empty_repo_path() -> None:
+    with pytest.raises(ValueError, match="Repository path must be a non-empty string"):
+        launch_vscode_context("  ", "explain this codebase")
+
+
+def test_launch_vscode_context_rejects_empty_prompt() -> None:
+    with pytest.raises(ValueError, match="Prompt must be a non-empty string"):
+        launch_vscode_context("/tmp/repo", "  ")

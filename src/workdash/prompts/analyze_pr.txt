@@ -1,0 +1,137 @@
+You are reviewing a GitHub pull request to assess whether it is a good, solid,
+robust, and simple approach to the problem it addresses.
+
+Use only the provided metadata, discussion, and diff context. Do not invent facts
+not present in the input.
+
+If you have access to specialized agents or tools for code review, bug hunting,
+quality assurance, or test design, delegate the relevant parts of this review to
+them. Use whatever review capabilities are available to produce the most thorough
+and multi-perspective assessment possible.
+
+TASK:
+
+1. Understand the context — Study all discussion on the PR. Identify related issues,
+   design documents, or historical context referenced in the conversation. Understand
+   what problem this PR is solving and what solution approach was chosen or agreed
+   upon.
+
+2. Assess the approach — Is this a good solution to the problem? Is it simple,
+   robust, and well-scoped? Are there simpler alternatives that were overlooked?
+   Does it introduce unnecessary complexity or coupling?
+
+3. Review code quality — Examine the diff for: unclear naming, excessive complexity,
+   duplicated logic, poor separation of concerns, missing error handling that
+   matters, or patterns that diverge from the rest of the codebase. Focus on issues
+   that affect correctness and maintainability, not style nitpicks.
+
+4. Evaluate test design — Are the tests meaningful and sufficient? Do they cover
+   edge cases and failure modes, not just the happy path? Are they testing behavior
+   or just implementation details? Is anything important left untested?
+
+5. Identify risks — What could go wrong? Backward compatibility concerns, performance
+   implications, security issues, or subtle bugs in the implementation. Consider
+   what breaks if assumptions in the PR turn out to be wrong.
+
+6. Trace the code flow — Identify the key actors (components, classes, services,
+   goroutines, etc.) involved in the PR's changes. Walk through the execution path
+   step by step: what triggers the flow, what calls what, where decisions branch,
+   and what the outcome is. For small, targeted PRs, trace the broader execution
+   context that the changed code participates in. For large PRs touching many
+   components, focus on the flow through the changed code itself. Use your judgment
+   on which framing is most useful for understanding the PR.
+
+OUTPUT:
+
+Produce a Markdown document with exactly these sections. Write substantive content
+in each section, not placeholders.
+The output MUST be valid, well-formed CommonMark Markdown.
+When using lists, use valid Markdown list syntax (`1.` for ordered lists or `-`
+for bullets), and leave a blank line before the first list item.
+Whenever you mention a specific struct, type, class, interface, function, method,
+or file from the repository — in ANY section of the document — wrap it in a
+Markdown link that points to the exact definition line on GitHub.
+- Preferred format: [`StructName`](https://github.com/{repo}/blob/<headRefName>/path/to/file.go#L42)
+- For file+line references: [`path/to/file.py:123`](https://github.com/{repo}/blob/<headRefName>/path/to/file.py#L123)
+- For line ranges: `#L10-L20`
+- Use `headRefName` from the provided GITHUB CONTEXT.
+- Keep backtick formatting around the symbol name — the link wraps the backticked text.
+- Do not output plain backticked references to in-repo symbols without links.
+- If you cannot determine the exact file or line for a symbol, you may still
+  mention it in backticks without a link, but prefer linked references.
+
+```
+# {title}
+
+> [{repo}#{number}]({url})
+
+## Summary
+
+One paragraph: what this PR does and the problem it solves.
+
+## Context
+
+Related issues, design decisions, and key points from discussion. What approach
+was agreed upon and why.
+
+## Approach Assessment
+
+Is this a good, simple, robust solution? Are there simpler alternatives? Does the
+scope match the problem? Does it introduce unnecessary complexity?
+
+## Code Quality
+
+Concrete findings with file and line references where possible. Focus on issues
+that affect correctness and maintainability.
+
+## Test Design
+
+Coverage assessment. Missing edge cases or failure modes. Quality of test
+assertions. If there are no tests, say so.
+
+## Risks & Concerns
+
+Backward compatibility, performance, security, subtle bugs, or anything that could
+cause problems after merge. Omit this section if there are genuinely no concerns.
+
+## Code Flow
+
+Trace how the code involved in this PR executes, step by step.
+
+### Components
+
+List the key actors (structs, classes, functions, services, goroutines, modules)
+that participate in the flow. Each must be a GitHub-linked reference.
+
+### Execution Trace
+
+Numbered steps showing the execution path. Each step names the actor and action,
+links to the source line, and explains what happens and why. Use arrow connectors
+(→ or ↓) to show flow direction. Call out key decision points, branching, and
+error paths.
+
+### Flow Diagram
+
+An ASCII text diagram showing how the components interact. Use a swim-lane or
+sequence-diagram style when multiple concurrent actors are involved. For linear
+flows, a simple vertical trace is fine. The diagram should make it possible to
+see the full flow at a glance without reading every step.
+
+## Recommendation
+
+Clear recommendation: approve, request changes, or needs discussion. List specific
+items that must be addressed versus items that are suggestions.
+```
+
+---
+
+WORK ITEM:
+- type: {item_type}
+- kind: {kind}
+- repo: {repo}
+- number: {number}
+- title: {title}
+- url: {url}
+
+GITHUB CONTEXT (includes PR metadata, discussion, and diff):
+{github_context_json}

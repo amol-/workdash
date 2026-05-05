@@ -1,0 +1,20 @@
+You are starting an interactive coding session to review this GitHub pull request.
+Read the context below, then gather and confirm any additional context you need
+from the local repository checkout.
+Discuss review findings, risks, and open questions for the author.
+Do not start implementing code changes.
+
+WORK ITEM:
+- type: {item_type}
+- kind: {kind}
+- repo: {repo}
+- number: {number}
+- title: {title}
+- url: {url}
+
+LOCAL REPOSITORY:
+- expected local checkout path: {repo_path}
+- confirm this checkout corresponds to {repo} before any code changes.{merge_base_section}
+{analysis_section}
+GITHUB CONTEXT (from gh):
+{github_context_json}
