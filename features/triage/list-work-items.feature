@@ -13,6 +13,7 @@ Feature: List work items
     - Entries are sorted by last update, most recently updated first.
     - The same GitHub issue or pull request never appears twice in the list.
     - When the same item qualifies for multiple sources, the strongest relationship wins in this order: authored pull request, then REVIEW pull request, then assigned issue, then plain tracked item.
+    - When GitHub denies access to a repository while loading a specific work source because further repository authorization is required, the system warns the user, skips that inaccessible repository or item, and keeps loading other work.
     - When no work items match, the system reports that no work items were found.
 
   @id:F-TRIAGE-LIST-S001
@@ -51,3 +52,19 @@ Feature: List work items
     Given the user has no open work items matching any source
     When the user opens the dashboard
     Then the system reports that no work items were found
+
+  @id:F-TRIAGE-LIST-S006
+  Scenario: Repository authorization failure skips only that tracked repository
+    Given one tracked repository requires additional GitHub authorization
+    And another tracked repository has open work
+    When the user opens the dashboard
+    Then the accessible repository's work items appear
+    And the system warns that the unauthorized repository was skipped
+
+  @id:F-TRIAGE-LIST-S007
+  Scenario: Repository authorization failure skips one review-requested pull request
+    Given one review-requested pull request requires additional GitHub authorization
+    And another review-requested pull request has requested the user directly
+    When the user opens the dashboard
+    Then the authorized review-requested pull request appears
+    And the system warns that the unauthorized review-requested pull request was skipped

@@ -20,7 +20,7 @@ from .launcher import (
     open_in_browser,
     prepare_launch_agent_prompt,
 )
-from .models import WorkItem, WorkItemKind
+from .models import WorkItem, format_type_label
 from .repo_worktree import ensure_worktree, get_merge_base
 from .tui import WorkdashApp
 
@@ -86,7 +86,7 @@ def _print_work_items(
     for item in sorted(work_items, key=lambda entry: entry.updated_at, reverse=True):
         suggestion_marker = suggestion_markers.get((item.item_type, item.repo, item.number), "")
         print(
-            f"{'REVIEW' if item.kind == WorkItemKind.REVIEW_REQUESTED_PR else item.item_type.value.upper():6} "
+            f"{format_type_label(item):7} "
             f"{item.repo}#{item.number:<5} "
             f"{item.created_at.date().isoformat()} "
             f"{f'* {item.title}' if suggestion_marker else item.title}"
@@ -176,6 +176,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         terminal_callback=lambda item: launch_terminal_context(
             ensure_worktree(config.workdir, item)
         ),
+        include_callback=backend.include_item_by_url,
     )
     app.run()
     return 0

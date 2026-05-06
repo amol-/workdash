@@ -10,6 +10,7 @@ from workdash.launcher import (
     launch_terminal_context,
     launch_vscode_context,
     open_in_browser,
+    open_markdown,
     prepare_launch_agent_prompt,
 )
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
@@ -51,6 +52,9 @@ def test_open_in_browser_runs_xdg_open_for_valid_url(monkeypatch: pytest.MonkeyP
         return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        shutil, "which", lambda name: f"/usr/bin/{name}" if name == "xdg-open" else None
+    )
 
     open_in_browser("https://example.com/issues/11")
 
@@ -58,20 +62,38 @@ def test_open_in_browser_runs_xdg_open_for_valid_url(monkeypatch: pytest.MonkeyP
     assert captured["check"] is True
 
 
+def test_open_in_browser_uses_open_when_xdg_open_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["command"] = args[0]
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: "/usr/bin/open" if name == "open" else None,
+    )
+
+    open_in_browser("https://example.com/issues/11")
+
+    assert captured["command"] == ["open", "https://example.com/issues/11"]
+
+
 def test_open_in_browser_rejects_empty_url() -> None:
     with pytest.raises(ValueError, match="URL must be a non-empty string"):
         open_in_browser("   ")
 
 
-def test_open_in_browser_raises_clear_error_when_xdg_open_missing(
+def test_open_in_browser_raises_clear_error_when_no_browser_open_command_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_run(*args, **kwargs):
-        raise FileNotFoundError("xdg-open")
+    monkeypatch.setattr(shutil, "which", lambda name: None)
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    with pytest.raises(RuntimeError, match="xdg-open is not installed or not on PATH"):
+    with pytest.raises(RuntimeError, match="Neither xdg-open nor open is installed or on PATH"):
         open_in_browser("https://example.com/issues/11")
 
 
@@ -86,9 +108,36 @@ def test_open_in_browser_raises_clear_error_when_xdg_open_fails(
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        shutil, "which", lambda name: f"/usr/bin/{name}" if name == "xdg-open" else None
+    )
 
     with pytest.raises(RuntimeError, match="Failed to open URL via xdg-open: exit code 1"):
         open_in_browser("https://example.com/issues/11")
+
+
+def test_open_markdown_uses_open_when_xdg_open_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    captured: dict[str, object] = {}
+    markdown_path = tmp_path / "analysis.md"
+    markdown_path.write_text("# Analysis\n", encoding="utf-8")
+
+    def fake_run(*args, **kwargs):
+        captured["command"] = args[0]
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: "/usr/bin/open" if name == "open" else None,
+    )
+
+    open_markdown(str(markdown_path))
+
+    assert captured["command"] == ["open", str(markdown_path.with_suffix(".html"))]
 
 
 def test_launch_agent_context_uses_new_zellij_pane_when_in_zellij(
@@ -348,7 +397,7 @@ def test_build_launch_agent_prompt_includes_required_metadata_and_non_start_inst
         repo_path="/tmp/repo",
         github_context={
             "state": "OPEN",
-            "author": {"login": "amol-"},
+            "author": {"login": "testuser"},
             "assignees": [{"login": "dev1"}],
             "labels": [{"name": "bug"}],
             "createdAt": "2026-02-20T10:00:00Z",
@@ -381,7 +430,7 @@ def test_build_launch_agent_prompt_for_review_requested_pr_is_review_focused() -
         repo_path="/tmp/repo",
         github_context={
             "state": "OPEN",
-            "author": {"login": "amol-"},
+            "author": {"login": "testuser"},
             "assignees": [{"login": "dev1"}],
             "labels": [{"name": "bug"}],
             "createdAt": "2026-02-20T10:00:00Z",
@@ -433,7 +482,7 @@ def test_prepare_launch_agent_prompt_collects_gh_context_and_builds_prompt(
             returncode=0,
             stdout=(
                 '{"number":42,"title":"Implement launch prompt","state":"OPEN",'
-                '"author":{"login":"amol-"},"assignees":[],"labels":[],'
+                '"author":{"login":"testuser"},"assignees":[],"labels":[],'
                 '"createdAt":"2026-02-20T10:00:00Z","updatedAt":"2026-02-21T10:00:00Z"}'
             ),
             stderr="",
@@ -476,7 +525,7 @@ def test_prepare_launch_agent_prompt_collects_issue_gh_context(
             returncode=0,
             stdout=(
                 '{"number":42,"title":"Implement launch prompt","state":"OPEN",'
-                '"author":{"login":"amol-"},"assignees":[],"labels":[],'
+                '"author":{"login":"testuser"},"assignees":[],"labels":[],'
                 '"createdAt":"2026-02-20T10:00:00Z","updatedAt":"2026-02-21T10:00:00Z"}'
             ),
             stderr="",

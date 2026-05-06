@@ -13,19 +13,21 @@ from workdash.repo_resolver import (
 def test_validate_repository_selectors_accepts_valid_owner_wildcard_and_owner_repo_with_trimming() -> (
     None
 ):
-    assert validate_repository_selectors(["  amol-/*  ", "\tbbangert/beaker\t"]) == [
-        "amol-/*",
+    assert validate_repository_selectors(["  testuser/*  ", "\tbbangert/beaker\t"]) == [
+        "testuser/*",
         "bbangert/beaker",
     ]
 
 
 def test_validate_repository_selectors_skips_blank_entries() -> None:
-    assert validate_repository_selectors(["", "  ", "amol-/public-repo"]) == ["amol-/public-repo"]
+    assert validate_repository_selectors(["", "  ", "testuser/public-repo"]) == [
+        "testuser/public-repo"
+    ]
 
 
 def test_validate_repository_selectors_raises_value_error_with_invalid_selector_position() -> None:
     with pytest.raises(ValueError, match=r"Invalid repository selector at position 2"):
-        validate_repository_selectors(["amol-/public-repo", "bad selector"])
+        validate_repository_selectors(["testuser/public-repo", "bad selector"])
 
 
 def test_expand_repository_selectors_expands_owner_wildcards_with_gh(
@@ -35,15 +37,15 @@ def test_expand_repository_selectors_expands_owner_wildcards_with_gh(
         return subprocess.CompletedProcess(
             args=args[0],
             returncode=0,
-            stdout='[{"nameWithOwner":"amol-/public-repo"},{"nameWithOwner":"amol-/private-repo"}]',
+            stdout='[{"nameWithOwner":"testuser/public-repo"},{"nameWithOwner":"testuser/private-repo"}]',
             stderr="",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert expand_repository_selectors(["bbangert/beaker", "amol-/*"]) == [
+    assert expand_repository_selectors(["bbangert/beaker", "testuser/*"]) == [
         "bbangert/beaker",
-        "amol-/public-repo",
-        "amol-/private-repo",
+        "testuser/public-repo",
+        "testuser/private-repo",
     ]
 
 
@@ -71,8 +73,8 @@ def test_expand_repository_selectors_raises_clear_error_when_gh_fails(
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    with pytest.raises(RuntimeError, match="Failed to list repositories for owner 'amol-' via gh"):
-        expand_repository_selectors(["amol-/*"])
+    with pytest.raises(RuntimeError, match="Failed to list repositories for owner 'testuser' via gh"):
+        expand_repository_selectors(["testuser/*"])
 
 
 def test_expand_repository_selectors_raises_clear_error_when_gh_missing(
@@ -83,7 +85,7 @@ def test_expand_repository_selectors_raises_clear_error_when_gh_missing(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     with pytest.raises(RuntimeError, match="gh CLI is not installed or not on PATH"):
-        expand_repository_selectors(["amol-/*"])
+        expand_repository_selectors(["testuser/*"])
 
 
 def test_resolve_repositories_dedupes_and_sorts_concrete_results(
@@ -93,17 +95,17 @@ def test_resolve_repositories_dedupes_and_sorts_concrete_results(
         return subprocess.CompletedProcess(
             args=args[0],
             returncode=0,
-            stdout='[{"nameWithOwner":"amol-/private-repo"},{"nameWithOwner":"amol-/public-repo"}]',
+            stdout='[{"nameWithOwner":"testuser/private-repo"},{"nameWithOwner":"testuser/public-repo"}]',
             stderr="",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert resolve_repositories(
-        ["zebra-org/zeta", "amol-/*", "alpha-org/alpha", "amol-/public-repo"]
+        ["zebra-org/zeta", "testuser/*", "alpha-org/alpha", "testuser/public-repo"]
     ) == [
         "alpha-org/alpha",
-        "amol-/private-repo",
-        "amol-/public-repo",
+        "testuser/private-repo",
+        "testuser/public-repo",
         "zebra-org/zeta",
     ]
 
@@ -114,8 +116,8 @@ def test_resolve_repositories_rejects_non_concrete_expansion_results(
     monkeypatch.setattr(
         repo_resolver,
         "expand_repository_selectors",
-        lambda selectors: ["amol-/repo", "amol-/*"],
+        lambda selectors: ["testuser/repo", "testuser/*"],
     )
 
     with pytest.raises(RuntimeError, match="not a concrete owner/repo"):
-        resolve_repositories(["amol-/repo"])
+        resolve_repositories(["testuser/repo"])

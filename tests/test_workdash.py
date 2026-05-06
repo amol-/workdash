@@ -33,6 +33,9 @@ def test_main_prints_loading_message_before_tui_start(
         def analyze_item(self, _item, tool="codex"):
             return None
 
+        def include_item_by_url(self, _url, _existing_identities):
+            return None
+
     class FakeApp:
         def __init__(self, **kwargs) -> None:
             assert kwargs["work_items"] == []

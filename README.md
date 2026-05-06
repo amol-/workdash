@@ -1,5 +1,7 @@
 # workdash
 
+![workdash screenshot](site/workdash.png)
+
 Text-based GitHub work triage dashboard.
 
 `workdash` pulls together the issues and pull requests that matter to you across
@@ -9,17 +11,19 @@ analysis, or a full coding session in a dedicated worktree.
 
 ## Platform
 
-Linux only. `workdash` relies on `xdg-open` and expects a terminal emulator
-from a small hard-coded list (`ptyxis` or `konsole`). It has not been tested
-on macOS or Windows.
+Linux and macOS. `workdash` relies on `xdg-open` or `open` and expects a terminal
+emulator from a small hard-coded list (`ptyxis` or `konsole`). It has not been
+tested on Windows.
 
 ## Requirements
 
 - Python `>=3.12`.
 - [`gh`](https://cli.github.com/) installed and authenticated (`gh auth status`
-  must succeed). The authenticated account needs access to every repository you
-  want to track.
-- `xdg-open` for opening links and rendered analyses in your browser.
+  must succeed). The authenticated account should have access to the repositories
+  you want to track; if GitHub requires additional repository authorization for a
+  repository while loading a specific work source, `workdash` warns, skips that
+  inaccessible repository or item, and still loads the others.
+- `xdg-open` or `open` for opening links and rendered analyses in your browser.
 - `zellij` for launching terminal and agent sessions.
 - A supported terminal emulator: `ptyxis` or `konsole`.
 - Optional, depending on which actions you use from the TUI:
@@ -29,10 +33,11 @@ on macOS or Windows.
 
 ## Installation
 
+With [`uv`](https://docs.astral.sh/uv/) — one isolated install, `workdash` on
+your `PATH`:
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install workdash
+uv tool install workdash
 ```
 
 For development install:

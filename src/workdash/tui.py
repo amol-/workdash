@@ -7,8 +7,9 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TypeVar
 
+from .backend import IncludeResult, compute_suggestion_markers
 from .launcher import open_markdown
-from .models import WorkItem, WorkItemKind, WorkItemType
+from .models import WorkItem, WorkItemType, format_type_label
 
 SuggestionMarkers = dict[tuple[WorkItemType, str, int], str]
 RefreshCallbackResult = Sequence[WorkItem] | tuple[Sequence[WorkItem], SuggestionMarkers]
@@ -27,7 +28,7 @@ try:
     from textual.app import App, ComposeResult
     from textual.containers import VerticalScroll
     from textual.screen import ModalScreen
-    from textual.widgets import DataTable, Static
+    from textual.widgets import DataTable, Input, Static
 except ModuleNotFoundError:  # pragma: no cover - allows import before deps are installed
 
     class WorkdashApp:  # type: ignore[no-redef]
@@ -44,6 +45,9 @@ except ModuleNotFoundError:  # pragma: no cover - allows import before deps are 
             analyze_callback: Callable[[WorkItem, str], AnalyzeCallbackResult] | None = None,
             launch_callback: Callable[[WorkItem, str], None] | None = None,
             terminal_callback: Callable[[WorkItem], None] | None = None,
+            include_callback: (
+                Callable[[str, set[tuple[WorkItemType, str, int]]], IncludeResult] | None
+            ) = None,
             now_utc: datetime | None = None,
         ) -> None:
             self.work_items = tuple(work_items or ())
@@ -53,6 +57,7 @@ except ModuleNotFoundError:  # pragma: no cover - allows import before deps are 
             self.analyze_callback = analyze_callback
             self.launch_callback = launch_callback
             self.terminal_callback = terminal_callback
+            self.include_callback = include_callback
             self.now_utc = now_utc or datetime.now(UTC)
             self.status_message = "Ready."
 else:
@@ -189,6 +194,40 @@ else:
         def action_cancel(self) -> None:
             self.dismiss(None)
 
+    class IncludeDialog(ModalScreen[str | None]):
+        """Modal dialog that accepts a GitHub issue or pull request URL."""
+
+        DEFAULT_CSS = """
+        #include-shell {
+            align: center middle;
+            width: 70;
+            height: auto;
+            max-height: 9;
+            border: solid $accent;
+            background: $surface;
+            padding: 1 2;
+        }
+        #include-url {
+            width: 100%;
+        }
+        """
+        BINDINGS = [("escape", "cancel", "Cancel")]
+
+        def compose(self) -> ComposeResult:
+            with VerticalScroll(id="include-shell"):
+                yield Static("Paste a GitHub issue or pull request URL:")
+                yield Input(placeholder="https://github.com/owner/repo/pull/123", id="include-url")
+                yield Static("(Enter to confirm, Esc to cancel)")
+
+        def on_mount(self) -> None:
+            self.query_one("#include-url", Input).focus()
+
+        def on_input_submitted(self, event: Input.Submitted) -> None:
+            self.dismiss(event.value.strip())  # single strip; caller trusts this value
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
+
     class WorkdashApp(App[None]):
         """Main Textual app shell."""
 
@@ -205,13 +244,14 @@ else:
             padding: 0 1;
         }
         """
-        COMMAND_HINT_TEXT = "(o)pen (r)efresh (a)nalyze (c)ode (t)erminal (q)uit"
+        COMMAND_HINT_TEXT = "(o)pen (r)efresh (a)nalyze (c)ode (t)erminal (i)nclude (q)uit"
         BINDINGS = [
             ("o", "open_link", "Open"),
             ("r", "refresh_items", "Refresh"),
             ("a", "analyze_item", "Analyze"),
             ("c", "launch_code", "Code"),
             ("t", "open_terminal", "Terminal"),
+            ("i", "include_item", "Include"),
             ("q", "quit_app", "Quit"),
         ]
 
@@ -225,6 +265,9 @@ else:
             launch_callback: Callable[[WorkItem, str], None] | None = None,
             worktree_callback: Callable[[WorkItem], str] | None = None,
             terminal_callback: Callable[[WorkItem], None] | None = None,
+            include_callback: (
+                Callable[[str, set[tuple[WorkItemType, str, int]]], IncludeResult] | None
+            ) = None,
             now_utc: datetime | None = None,
         ) -> None:
             super().__init__()
@@ -237,6 +280,7 @@ else:
             self._launch_callback = launch_callback
             self._worktree_callback = worktree_callback
             self._terminal_callback = terminal_callback
+            self._include_callback = include_callback
             self._now_utc = now_utc or datetime.now(UTC)
             self._status_message = "Ready."
 
@@ -256,7 +300,7 @@ else:
             marker = self._suggestion_markers.get((item.item_type, item.repo, item.number))
             return f"* {item.title}" if marker else item.title
 
-        def _render_table(self) -> None:
+        def _render_table(self, *, focus_item: WorkItem | None = None) -> None:
             table = self.query_one("#work-items", DataTable)
             table.cursor_type = "row"
             previous_row = table.cursor_row if table.cursor_row is not None else 0
@@ -271,11 +315,7 @@ else:
             for item in self._sorted_work_items:
                 age_days = max(0, (self._now_utc - _to_utc(item.created_at)).days)
                 update_days = max(0, (self._now_utc - _to_utc(item.updated_at)).days)
-                type_label = (
-                    "REVIEW"
-                    if item.kind == WorkItemKind.REVIEW_REQUESTED_PR
-                    else item.item_type.value.upper()
-                )
+                type_label = format_type_label(item)
                 title = self._title_with_suggestion_marker(item)
                 if _to_utc(item.updated_at) >= cutoff:
                     table.add_row(
@@ -288,7 +328,17 @@ else:
                 else:
                     table.add_row(type_label, item.repo, title, f"{age_days}d", f"{update_days}d")
             if self._sorted_work_items:
-                table.move_cursor(row=min(max(previous_row, 0), len(self._sorted_work_items) - 1))
+                target_row = previous_row
+                if focus_item is not None:
+                    for index, item in enumerate(self._sorted_work_items):
+                        if (
+                            item.item_type == focus_item.item_type
+                            and item.repo == focus_item.repo
+                            and item.number == focus_item.number
+                        ):
+                            target_row = index
+                            break
+                table.move_cursor(row=min(max(target_row, 0), len(self._sorted_work_items) - 1))
 
         def _selected_item(self) -> WorkItem | None:
             table = self.query_one("#work-items", DataTable)
@@ -484,6 +534,74 @@ else:
                 return
             self._update_status(
                 f"Opened terminal for {selected_item.item_type.value} {selected_item.repo}#{selected_item.number}."
+            )
+
+        async def action_include_item(self) -> None:
+            if self._include_callback is None:
+                self._update_status("Include skipped.")
+                return
+            dialog = IncludeDialog()
+
+            def _on_dialog_result(normalized_url: str | None) -> None:
+                if normalized_url is None:
+                    return
+                self.call_later(lambda: self._perform_include(normalized_url))
+
+            self.push_screen(dialog, callback=_on_dialog_result)
+
+        async def _perform_include(self, url: str) -> None:
+            """Fetch the pasted URL and fold the item into the visible list."""
+
+            if not url:
+                self._update_status("No URL provided.")
+                self.notify("No URL provided.", severity="warning", timeout=10)
+                return
+            existing_identities = {
+                (item.item_type, item.repo, item.number) for item in self._work_items
+            }
+            try:
+                result = await self._run_with_busy_screen(
+                    message="Including work item...",
+                    callback=lambda: self._include_callback(url, existing_identities),
+                )
+            except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
+                message = f"Failed to persist URL: {error}"
+                self._update_status(message)
+                self.notify(message, severity="error", timeout=10)
+                return
+            if result.invalid:
+                self._update_status(f"Invalid URL: {url}")
+                self.notify(f"Invalid URL: {url}", severity="error", timeout=10)
+                return
+            if result.transient_failure:
+                message = "GitHub unreachable — URL not saved. Try again later."
+                self._update_status(message)
+                self.notify(message, severity="error", timeout=10)
+                return
+            if result.duplicate_identity is not None:
+                item_type, repo, number = result.duplicate_identity
+                existing = next(
+                    item
+                    for item in self._work_items
+                    if item.item_type == item_type and item.repo == repo and item.number == number
+                )
+                existing.included = True
+                self._render_table(focus_item=existing)
+                self._update_status(
+                    f"Already tracking {existing.item_type.value} "
+                    f"{existing.repo}#{existing.number}; moved cursor."
+                )
+                return
+            fetched_item = result.fetched_item
+            assert fetched_item is not None  # IncludeResult invariant
+            self._work_items.append(fetched_item)
+            # Suggestion markers depend on the full item set; recompute so any
+            # newer/better candidate is highlighted correctly on the next render.
+            self._suggestion_markers = compute_suggestion_markers(self._work_items)
+            self._render_table(focus_item=fetched_item)
+            self._update_status(
+                f"Included {fetched_item.item_type.value} "
+                f"{fetched_item.repo}#{fetched_item.number}."
             )
 
         def action_quit_app(self) -> None:

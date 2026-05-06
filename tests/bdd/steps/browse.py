@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from typing import Any
 
@@ -20,7 +21,7 @@ def run_open_scenario(
     work_items: list[WorkItem],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Drive pressing 'o' in the TUI and capture the xdg-open invocation."""
+    """Drive pressing 'o' in the TUI and capture the browser-open invocation."""
 
     invocations: list[list[str]] = []
 
@@ -32,6 +33,11 @@ def run_open_scenario(
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            shutil,
+            "which",
+            lambda name: f"/usr/bin/{name}" if name == "xdg-open" else None,
+        )
         open_in_browser(item.url)
 
     captured: dict[str, Any] = {}
@@ -57,8 +63,8 @@ def run_open_scenario(
 @then("the selected work item's GitHub URL is opened in the user's default browser")
 def _url_opened(scenario_state: dict[str, Any]) -> None:
     invocations = scenario_state["open_invocations"]
-    assert invocations, "Expected xdg-open to be invoked"
-    assert invocations[0][0] == "xdg-open"
+    assert invocations, "Expected a browser-open command to be invoked"
+    assert invocations[0][0] in {"xdg-open", "open"}
     assert invocations[0][1] == scenario_state["selected_item"].url
 
 

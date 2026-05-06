@@ -12,7 +12,27 @@ from workdash.github_client import (
     normalize_review_requested_pull_requests,
     parse_github_datetime,
 )
-from workdash.models import WorkItemKind, WorkItemType
+from workdash.models import WorkItem, WorkItemKind, WorkItemType
+
+
+def _make_item(
+    *,
+    kind: WorkItemKind,
+    item_type: WorkItemType,
+    number: int,
+    included: bool,
+) -> WorkItem:
+    return WorkItem(
+        kind=kind,
+        item_type=item_type,
+        repo="owner/repo",
+        number=number,
+        title=f"Item {number}",
+        created_at=datetime(2026, 2, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 1, tzinfo=UTC),
+        url=f"https://github.com/owner/repo/pull/{number}",
+        included=included,
+    )
 
 
 def test_normalize_authored_pull_request_maps_to_work_item() -> None:
@@ -379,3 +399,57 @@ def test_normalize_assigned_issue_maps_to_work_item() -> None:
     assert item.item_type == WorkItemType.ISSUE
     assert item.repo == "owner/repo"
     assert item.number == 5
+
+
+def test_merge_keeps_included_flag_when_primary_has_it() -> None:
+    """Primary carrying ``included=True`` must not be demoted by a non-included secondary.
+
+    Losing this property would cause an included item surfaced by a regular
+    source (e.g. review-requested) to lose its "+" suffix on the next merge pass.
+    """
+
+    primary = _make_item(
+        kind=WorkItemKind.REVIEW_REQUESTED_PR,
+        item_type=WorkItemType.PR,
+        number=42,
+        included=True,
+    )
+    secondary = _make_item(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        number=42,
+        included=False,
+    )
+
+    merged = merge_normalized_work_items([primary], [secondary])
+
+    assert len(merged) == 1
+    assert merged[0].included is True
+    assert merged[0].kind == WorkItemKind.REVIEW_REQUESTED_PR
+
+
+def test_merge_keeps_included_flag_when_secondary_has_it() -> None:
+    """Secondary carrying ``included=True`` must lift the flag onto the primary row.
+
+    This is the ordering exercised by the production refresh path, where the
+    included payload is merged onto existing authored/review rows.
+    """
+
+    primary = _make_item(
+        kind=WorkItemKind.REVIEW_REQUESTED_PR,
+        item_type=WorkItemType.PR,
+        number=42,
+        included=False,
+    )
+    secondary = _make_item(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        number=42,
+        included=True,
+    )
+
+    merged = merge_normalized_work_items([primary], [secondary])
+
+    assert len(merged) == 1
+    assert merged[0].included is True
+    assert merged[0].kind == WorkItemKind.REVIEW_REQUESTED_PR

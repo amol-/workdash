@@ -8,6 +8,7 @@ pytest.importorskip("textual")
 
 from textual.widgets import DataTable, Static
 
+from workdash.backend import IncludeResult
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import WorkdashApp
 
@@ -437,7 +438,8 @@ def test_workdash_app_shows_command_hint_bar() -> None:
         async with app.run_test() as pilot:
             command_bar = app.query_one("#command-footer", Static)
             assert (
-                command_bar.render().plain == "(o)pen (r)efresh (a)nalyze (c)ode (t)erminal (q)uit"
+                command_bar.render().plain
+                == "(o)pen (r)efresh (a)nalyze (c)ode (t)erminal (i)nclude (q)uit"
             )
             await pilot.press("q")
 
@@ -512,6 +514,104 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
             await pilot.pause()
             assert footer.render().plain == "Terminal failed: zellij pane failed"
 
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_include_recomputes_suggestion_marker() -> None:
+    """A successful include must reshuffle the suggestion marker to the new oldest item.
+
+    The v1 suggestion heuristic picks the item with the earliest ``created_at``.
+    If ``_perform_include`` appends an item without recomputing the markers,
+    the render would still star the previously-suggested row even though the
+    freshly fetched item is now the oldest (and thus the true suggestion).
+    """
+
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    existing_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Previously suggested",
+        created_at=datetime(2026, 2, 10, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        url="https://github.com/owner/repo/pull/22",
+    )
+    # Older created_at so after the include this becomes the new suggestion.
+    newly_fetched_item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=77,
+        title="Freshly fetched older issue",
+        created_at=datetime(2026, 1, 5, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 24, 0, 0, 0, tzinfo=UTC),
+        url="https://github.com/owner/repo/issues/77",
+        included=True,
+    )
+
+    app = WorkdashApp(
+        work_items=[existing_item],
+        suggestion_markers={(WorkItemType.PR, "owner/repo", 22): "*"},
+        include_callback=lambda _url, _identities: IncludeResult(fetched_item=newly_fetched_item),
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await app._perform_include("https://github.com/owner/repo/issues/77")
+            await pilot.pause()
+            # Marker must now point at the freshly included item's identity.
+            assert app._suggestion_markers == {(WorkItemType.ISSUE, "owner/repo", 77): "*"}
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_include_duplicate_url_surfaces_persist_failure() -> None:
+    """An OSError raised by the backend callback must be reported, not raised.
+
+    When the pasted URL matches an already-tracked item the backend
+    persists the canonical URL synchronously; if that write fails the TUI
+    must keep running, surface the error via status, and MUST NOT flip
+    ``included=True`` since the store and the UI would otherwise disagree.
+    """
+
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://github.com/owner/repo/pull/22",
+    )
+    assert work_item.included is False
+
+    def failing_include_callback(_url: str, _identities) -> IncludeResult:
+        raise OSError("disk full")
+
+    app = WorkdashApp(
+        work_items=[work_item],
+        include_callback=failing_include_callback,
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await app._perform_include("https://github.com/owner/repo/pull/22")
+            await pilot.pause()
+            footer = app.query_one("#status-footer", Static)
+            assert footer.render().plain == "Failed to persist URL: disk full"
+            # The in-memory flag must not have been flipped before the write
+            # succeeded, otherwise the UI and the store disagree.
+            assert work_item.included is False
             await pilot.press("q")
 
     asyncio.run(run_smoke())

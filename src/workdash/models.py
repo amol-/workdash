@@ -38,3 +38,13 @@ class WorkItem:
     url: str
     analysis: str | None = None
     analyzed_at: datetime | None = None
+    included: bool = False
+
+
+def format_type_label(item: WorkItem) -> str:
+    """Return the type column label for ``item`` including the ``+`` include suffix."""
+
+    base = (
+        "REVIEW" if item.kind == WorkItemKind.REVIEW_REQUESTED_PR else item.item_type.value.upper()
+    )
+    return f"{base}+" if item.included else base

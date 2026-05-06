@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from pytest_bdd import given, then, when
 
-from workdash.backend import compute_suggestion_markers
+from workdash.backend import IncludeResult, compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 
@@ -93,6 +93,7 @@ def run_app(
     launch_callback=None,
     worktree_callback=None,
     terminal_callback=None,
+    include_callback=None,
     busy_messages: list[str] | None = None,
 ) -> None:
     """Drive ``WorkdashApp`` through an async pilot routine for BDD tests.
@@ -120,6 +121,7 @@ def run_app(
         launch_callback=launch_callback,
         worktree_callback=worktree_callback,
         terminal_callback=terminal_callback,
+        include_callback=include_callback,
         now_utc=now_utc,
     )
     if busy_messages is not None:
@@ -153,10 +155,16 @@ def _open_dashboard(
 
     Some scenarios (e.g. the review-filter case) set ``_subprocess_patch`` +
     ``_github_client`` so we actually run the real github_client and filter
-    out the team-only review requests. Others simply compute suggestion
-    markers over the pre-populated ``work_items`` list.
+    out the team-only review requests. Include-store scenarios wire an
+    ``_open_dashboard_hook`` that drives the real ``WorkdashBackend``
+    through a patched ``gh`` subprocess boundary. Others simply compute
+    suggestion markers over the pre-populated ``work_items`` list.
     """
 
+    hook = scenario_state.get("_open_dashboard_hook")
+    if hook is not None:
+        hook(scenario_state, work_items, monkeypatch)
+        return
     if "_subprocess_patch" in scenario_state:
         import workdash.github_client as gc
 
@@ -234,6 +242,9 @@ def mock_backend(monkeypatch: pytest.MonkeyPatch, *, items: list[WorkItem]) -> N
 
         def analyze_item(self, _item, tool="codex"):
             return None
+
+        def include_item_by_url(self, _url, _existing_identities):
+            return IncludeResult(invalid=True)
 
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
 

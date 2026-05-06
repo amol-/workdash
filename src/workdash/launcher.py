@@ -13,6 +13,7 @@ import markdown
 from .models import WorkItem, WorkItemKind, WorkItemType
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
+_BROWSER_OPEN_COMMANDS = ("xdg-open", "open")
 
 
 def _load_prompt_template(name: str) -> str:
@@ -28,22 +29,34 @@ _PR_CONTEXT_JSON_FIELDS = (
 )
 
 
-def open_in_browser(url: str) -> None:
-    if not isinstance(url, str) or not url.strip():
-        raise ValueError("URL must be a non-empty string.")
+def _resolve_browser_open_command() -> str:
+    for command in _BROWSER_OPEN_COMMANDS:
+        if shutil.which(command) is not None:
+            return command
+    raise RuntimeError("Neither xdg-open nor open is installed or on PATH.")
+
+
+def _run_browser_open(target: str, *, kind: str) -> None:
+    command_name = _resolve_browser_open_command()
     try:
         subprocess.run(
-            ["xdg-open", url],
+            [command_name, target],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
     except FileNotFoundError as error:
-        raise RuntimeError("xdg-open is not installed or not on PATH.") from error
+        raise RuntimeError(f"{command_name} is not installed or not on PATH.") from error
     except subprocess.CalledProcessError as error:
         raise RuntimeError(
-            f"Failed to open URL via xdg-open: exit code {error.returncode}"
+            f"Failed to open {kind} via {command_name}: exit code {error.returncode}"
         ) from error
+
+
+def open_in_browser(url: str) -> None:
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("URL must be a non-empty string.")
+    _run_browser_open(url, kind="URL")
 
 
 _HTML_TEMPLATE = """\
@@ -74,19 +87,7 @@ def open_markdown(path: str) -> None:
     html = _HTML_TEMPLATE.format(title=md_path.stem, body=html_body)
     html_path = md_path.with_suffix(".html")
     html_path.write_text(html, encoding="utf-8")
-    try:
-        subprocess.run(
-            ["xdg-open", str(html_path)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except FileNotFoundError as error:
-        raise RuntimeError("xdg-open is not installed or not on PATH.") from error
-    except subprocess.CalledProcessError as error:
-        raise RuntimeError(
-            f"Failed to open file via xdg-open: exit code {error.returncode}"
-        ) from error
+    _run_browser_open(str(html_path), kind="file")
 
 
 def _run_launch_command(command: list[str], *, context: str) -> None:
@@ -259,7 +260,9 @@ def launch_agent_context(
     ):
         raise ValueError("Agent command tokens must be a non-empty list of non-empty strings.")
     if shutil.which("zellij") is None:
-        raise RuntimeError("zellij is not installed or not on PATH.")
+        raise RuntimeError(
+            "zellij is not installed or not on PATH. Download it from https://zellij.dev"
+        )
 
     user_shell = os.environ.get("SHELL", "/bin/sh")
     agent_command = [user_shell, "-ic", shlex.join([*command_tokens, prompt])]
@@ -316,7 +319,9 @@ def launch_terminal_context(repo_path: str) -> None:
     if not isinstance(repo_path, str) or not repo_path.strip():
         raise ValueError("Repository path must be a non-empty string.")
     if shutil.which("zellij") is None:
-        raise RuntimeError("zellij is not installed or not on PATH.")
+        raise RuntimeError(
+            "zellij is not installed or not on PATH. Download it from https://zellij.dev"
+        )
 
     user_shell = os.environ.get("SHELL", "/bin/sh")
     shell_command = [user_shell, "-i"]

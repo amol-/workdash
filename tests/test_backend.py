@@ -1,11 +1,14 @@
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 import workdash.backend as backend_module
-from workdash.backend import WorkdashBackend, compute_suggestion_markers
+from workdash.backend import IncludeResult, WorkdashBackend, compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
+from workdash.github_client import GitHubClient, TransientFetchError
+from workdash.included_items import IncludedItemsStore
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 
 
@@ -53,8 +56,9 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
                 }
             ]
 
-        def list_open_review_requested_prs(self, login):
+        def list_open_review_requested_prs(self, login, progress_callback=None):
             captured["review_requested_called"] = True
+            captured["review_requested_progress_callback"] = progress_callback is not None
             return [
                 {
                     "id": "REVIEW-DUPLICATE-PR",
@@ -185,6 +189,7 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
     assert captured["repositories_selectors"] == ["owner/*"]
     assert captured["authored_called"] is True
     assert captured["review_requested_called"] is True
+    assert captured["review_requested_progress_callback"] is True
     assert captured["reviewed_called"] is True
     assert captured["assigned_called"] is True
     assert captured["tracked_repositories"] == ["owner/repo", "owner/other-repo"]
@@ -386,3 +391,103 @@ def test_analyze_item_tool_claude_bypasses_cache() -> None:
     assert analysis_path == "/tmp/analyses/owner_repo_PR55.md"
     assert cache.saved == [(55, "## Summary\nfresh analysis 55")]
     assert analyzer.analyze_calls == [(55, ["claude", "-p"])]
+
+
+# ---------------------------------------------------------------------------
+# include entry points
+# ---------------------------------------------------------------------------
+
+
+def _make_include_backend(
+    tmp_path: Path, github_client: GitHubClient
+) -> tuple[WorkdashBackend, IncludedItemsStore]:
+    store = IncludedItemsStore(tmp_path / "included.json")
+    backend = WorkdashBackend(
+        github_client=github_client,
+        included_items_store=store,
+        cache_root=tmp_path / "cache",
+    )
+    return backend, store
+
+
+def _make_fetched_item(number: int = 1) -> WorkItem:
+    return WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=number,
+        title="fetched",
+        created_at=datetime(2026, 4, 1, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 4, 2, 0, 0, 0, tzinfo=UTC),
+        url=f"https://github.com/owner/repo/pull/{number}",
+        included=True,
+    )
+
+
+def test_include_item_by_url_persists_canonical_url_on_success(tmp_path: Path) -> None:
+    # URL with noisy path/query/fragment must collapse to the canonical form
+    # when saved so subsequent refreshes match by identity.
+    github_client = MagicMock(spec=GitHubClient)
+    github_client.fetch_item_by_url.return_value = _make_fetched_item(1)
+    backend, store = _make_include_backend(tmp_path, github_client)
+
+    result = backend.include_item_by_url(
+        "https://github.com/owner/repo/pull/1/files?diff=1#diff-abc",
+        existing_identities=set(),
+    )
+
+    assert result.fetched_item is not None
+    assert store.load() == ["https://github.com/owner/repo/pull/1"]
+
+
+def test_include_item_by_url_marks_invalid_and_does_not_persist_for_invalid_url(
+    tmp_path: Path,
+) -> None:
+    github_client = MagicMock(spec=GitHubClient)
+    backend, store = _make_include_backend(tmp_path, github_client)
+
+    result = backend.include_item_by_url(
+        "https://example.com/not-github", existing_identities=set()
+    )
+
+    assert result == IncludeResult(invalid=True)
+    github_client.fetch_item_by_url.assert_not_called()
+    assert store.load() == []
+
+
+def test_include_item_by_url_reports_transient_without_persisting(tmp_path: Path) -> None:
+    github_client = MagicMock(spec=GitHubClient)
+    github_client.fetch_item_by_url.side_effect = TransientFetchError("HTTP 503")
+    backend, store = _make_include_backend(tmp_path, github_client)
+
+    result = backend.include_item_by_url(
+        "https://github.com/owner/repo/pull/1", existing_identities=set()
+    )
+
+    assert result == IncludeResult(transient_failure=True)
+    assert store.load() == []
+
+
+def test_include_item_by_url_duplicate_identity_persists_canonical_without_fetch(
+    tmp_path: Path,
+) -> None:
+    # An identity already visible on-screen must short-circuit the fetch, persist
+    # the canonical URL idempotently, and surface ``duplicate_identity`` so the
+    # TUI can move the cursor without mutating its item list.
+    github_client = MagicMock(spec=GitHubClient)
+    backend, store = _make_include_backend(tmp_path, github_client)
+    identity = (WorkItemType.PR, "owner/repo", 1)
+
+    first = backend.include_item_by_url(
+        "https://github.com/owner/repo/pull/1/files",
+        existing_identities={identity},
+    )
+    second = backend.include_item_by_url(
+        "https://github.com/owner/repo/pull/1?diff=1",
+        existing_identities={identity},
+    )
+
+    assert first == IncludeResult(duplicate_identity=identity)
+    assert second == IncludeResult(duplicate_identity=identity)
+    github_client.fetch_item_by_url.assert_not_called()
+    assert store.load() == ["https://github.com/owner/repo/pull/1"]

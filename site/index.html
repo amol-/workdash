@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>workdash — text-based GitHub work triage dashboard</title>
+    <meta
+      name="description"
+      content="workdash pulls together the GitHub issues and pull requests that matter to you, suggests what to pick up next, and launches reviews, AI analyses, or full coding sessions from a terminal TUI."
+    />
+    <meta property="og:title" content="workdash" />
+    <meta
+      property="og:description"
+      content="Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
+    />
+    <meta property="og:image" content="workdash.png" />
+    <meta property="og:type" content="website" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
+    <style>
+      :root {
+        --bg: #0d1117;
+        --bg-elev: #161b22;
+        --border: #30363d;
+        --text: #e6edf3;
+        --muted: #8b949e;
+        --accent: #7ee787;
+        --accent-soft: rgba(126, 231, 135, 0.12);
+        --link: #58a6ff;
+        --code-bg: #1b2129;
+      }
+
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #ffffff;
+          --bg-elev: #f6f8fa;
+          --border: #d0d7de;
+          --text: #1f2328;
+          --muted: #59636e;
+          --accent: #1a7f37;
+          --accent-soft: rgba(26, 127, 55, 0.1);
+          --link: #0969da;
+          --code-bg: #f6f8fa;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
+          Helvetica, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      a {
+        color: var(--link);
+        text-decoration: none;
+      }
+
+      a:hover {
+        text-decoration: underline;
+      }
+
+      code,
+      pre {
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+          "Liberation Mono", monospace;
+        font-size: 0.92em;
+      }
+
+      code {
+        background: var(--code-bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.1em 0.4em;
+      }
+
+      pre {
+        background: var(--code-bg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1rem 1.2rem;
+        overflow-x: auto;
+        line-height: 1.5;
+      }
+
+      pre code {
+        background: none;
+        border: 0;
+        padding: 0;
+      }
+
+      .container {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 0 1.5rem;
+      }
+
+      header {
+        padding: 3rem 0 1rem;
+        text-align: center;
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 2.5rem;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+
+      .brand .mark {
+        color: var(--accent);
+      }
+
+      .tagline {
+        color: var(--muted);
+        font-size: 1.15rem;
+        margin: 0.5rem auto 1.5rem;
+        max-width: 36rem;
+      }
+
+      .cta {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.6rem 1.1rem;
+        margin: 0.25rem;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-weight: 600;
+        background: var(--bg-elev);
+        color: var(--text);
+      }
+
+      .cta.primary {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: var(--text);
+      }
+
+      .cta:hover {
+        text-decoration: none;
+        border-color: var(--accent);
+      }
+
+      .hero-shot {
+        margin: 2rem auto 0;
+        max-width: 100%;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        display: block;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+      }
+
+      section {
+        padding: 3rem 0;
+        border-top: 1px solid var(--border);
+      }
+
+      section h2 {
+        font-size: 1.6rem;
+        margin: 0 0 1rem;
+        letter-spacing: -0.01em;
+      }
+
+      section p.lead {
+        color: var(--muted);
+        max-width: 42rem;
+        margin-top: 0;
+      }
+
+      .features {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 1rem;
+        margin-top: 1.5rem;
+      }
+
+      .feature {
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.1rem 1.2rem;
+      }
+
+      .feature h3 {
+        font-size: 1rem;
+        margin: 0 0 0.4rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .feature h3 .kbd {
+        display: inline-block;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.75rem;
+        padding: 0.1rem 0.5rem;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--bg);
+        color: var(--accent);
+      }
+
+      .feature p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+
+      .tour {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 1.5rem;
+        margin-top: 1.5rem;
+      }
+
+      .tour figure {
+        margin: 0;
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+      }
+
+      .tour img {
+        width: 100%;
+        height: auto;
+        display: block;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .tour figcaption {
+        padding: 0.8rem 1rem;
+      }
+
+      .tour figcaption strong {
+        display: block;
+        margin-bottom: 0.15rem;
+      }
+
+      .tour figcaption span {
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .requirements ul {
+        margin: 0;
+        padding-left: 1.2rem;
+        color: var(--muted);
+      }
+
+      .requirements li {
+        margin-bottom: 0.3rem;
+      }
+
+      .requirements li strong {
+        color: var(--text);
+      }
+
+      footer {
+        padding: 2.5rem 0 3rem;
+        border-top: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 0.9rem;
+        text-align: center;
+      }
+
+      @media (max-width: 600px) {
+        header {
+          padding-top: 2rem;
+        }
+
+        .brand {
+          font-size: 2rem;
+        }
+
+        section {
+          padding: 2.25rem 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="container">
+        <div class="brand">
+          <span class="mark">&#9889;</span>
+          <span>workdash</span>
+        </div>
+        <p class="tagline">
+          Text-based GitHub work triage dashboard. Pick what to work on next,
+          then jump straight into a review, an AI analysis, or a full coding
+          session in a dedicated worktree.
+        </p>
+        <div>
+          <a
+            class="cta primary"
+            href="https://github.com/amol-/workdash"
+            >View on GitHub &rarr;</a
+          >
+          <a class="cta" href="#install">Install</a>
+        </div>
+        <img
+          class="hero-shot"
+          src="workdash.png"
+          alt="workdash TUI showing issues and pull requests pulled from GitHub, with one entry highlighted as the suggested next work item"
+        />
+      </div>
+    </header>
+
+    <section id="what">
+      <div class="container">
+        <h2>What it does</h2>
+        <p class="lead">
+          <code>workdash</code> pulls together the issues and pull requests
+          that matter to you across your GitHub repositories, merges and
+          deduplicates them, sorts by last update, and marks one entry as the
+          <em>suggested</em> next thing to pick up. From there, one keystroke
+          opens the item in your browser, runs a cached AI analysis, or starts
+          a coding session in a git worktree prepared for that exact item.
+        </p>
+      </div>
+    </section>
+
+    <section id="features">
+      <div class="container">
+        <h2>One key, one action</h2>
+        <div class="features">
+          <div class="feature">
+            <h3><span class="kbd">o</span>Open in browser</h3>
+            <p>Jump straight to the issue or pull request on GitHub.</p>
+          </div>
+          <div class="feature">
+            <h3><span class="kbd">r</span>Refresh</h3>
+            <p>Re-pull authored PRs, review requests, assignments, and tracked items.</p>
+          </div>
+          <div class="feature">
+            <h3><span class="kbd">a</span>Analyze</h3>
+            <p>
+              Run Claude or Codex against the item, render the result as HTML,
+              and cache it — keyed by the GitHub <code>updated_at</code> so
+              stale entries invalidate themselves.
+            </p>
+          </div>
+          <div class="feature">
+            <h3><span class="kbd">c</span>Code</h3>
+            <p>
+              Prepare a dedicated git worktree and launch Claude, Codex, or
+              VSCode Copilot inside it, preloaded with the item's context.
+            </p>
+          </div>
+          <div class="feature">
+            <h3><span class="kbd">t</span>Terminal</h3>
+            <p>Drop into a terminal in the item's worktree, no agent attached.</p>
+          </div>
+          <div class="feature">
+            <h3><span class="kbd">--print</span>Print mode</h3>
+            <p>
+              Same triage, emitted as plain text for scripts, pipes, and agents
+              that want the dashboard without the TUI.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tour">
+      <div class="container">
+        <h2>A quick tour</h2>
+        <div class="tour">
+          <figure>
+            <img
+              src="analyze_item.png"
+              alt="analyze dialog letting the user open a cached analysis or run a fresh one with Claude or Codex"
+            />
+            <figcaption>
+              <strong>Analyze dialog</strong>
+              <span>Open the cached analysis, or re-run with Claude or Codex.</span>
+            </figcaption>
+          </figure>
+          <figure>
+            <img
+              src="analysis_result.png"
+              alt="rendered HTML analysis of a work item opened in a browser"
+            />
+            <figcaption>
+              <strong>Analysis result</strong>
+              <span>Cached, rendered as HTML, invalidated automatically on GitHub updates.</span>
+            </figcaption>
+          </figure>
+          <figure>
+            <img
+              src="coding_session.png"
+              alt="coding agent running inside the per-item git worktree, preloaded with issue context"
+            />
+            <figcaption>
+              <strong>Coding session</strong>
+              <span>Dedicated worktree, agent preloaded with the item's context.</span>
+            </figcaption>
+          </figure>
+          <figure>
+            <img
+              src="full_experience.png"
+              alt="workdash TUI next to a running coding session inside a zellij layout"
+            />
+            <figcaption>
+              <strong>Full experience</strong>
+              <span>Triage, analysis, and coding sessions side by side in zellij.</span>
+            </figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section id="install">
+      <div class="container">
+        <h2>Install</h2>
+        <p class="lead">
+          With <a href="https://docs.astral.sh/uv/">uv</a> — one isolated
+          install, <code>workdash</code> on your <code>PATH</code>:
+        </p>
+        <pre><code>uv tool install workdash</code></pre>
+        <p class="lead">Then generate the configuration interactively:</p>
+        <pre><code>workdash --configure</code></pre>
+        <p class="lead">Launch the TUI:</p>
+        <pre><code>workdash</code></pre>
+      </div>
+    </section>
+
+    <section id="requirements" class="requirements">
+      <div class="container">
+        <h2>Requirements</h2>
+        <ul>
+          <li><strong>Python 3.12+</strong></li>
+          <li>
+            <strong><a href="https://cli.github.com/">gh</a></strong> installed
+            and authenticated (<code>gh auth status</code> must succeed).
+          </li>
+          <li><strong>zellij</strong> for terminal and agent sessions.</li>
+          <li>A supported terminal emulator: <code>ptyxis</code> or <code>konsole</code>.</li>
+          <li><code>xdg-open</code> or <code>open</code> for links and rendered analyses.</li>
+          <li>
+            Optional, per action: <code>claude</code>, <code>codex</code>,
+            <code>code</code>.
+          </li>
+        </ul>
+        <p class="lead" style="margin-top: 1rem">
+          Linux and macOS. Not tested on Windows.
+        </p>
+      </div>
+    </section>
+
+    <footer>
+      <div class="container">
+        <p>
+          <a href="https://github.com/amol-/workdash">Source</a>
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/features/"
+            >Product spec (BDD)</a
+          >
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/LICENSE">GPL-3.0</a>
+        </p>
+        <p>&copy; Alessandro Molina</p>
+      </div>
+    </footer>
+  </body>
+</html>

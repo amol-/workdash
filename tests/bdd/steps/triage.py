@@ -1,13 +1,14 @@
 """Step definitions for the triage domain feature files.
 
-Covers list-work-items, print-mode, recent-activity, refresh and
-suggested-item feature scenarios. Each step exercises real
+Covers list-work-items, print-mode, recent-activity, refresh, suggested-item,
+and include-item scenarios. Each step exercises real
 ``WorkdashApp``/``WorkdashBackend`` code — only the external GitHub and
-xdg-open boundaries are faked.
+browser-open boundaries are faked.
 """
 
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import timedelta
 from pathlib import Path
@@ -16,11 +17,14 @@ from typing import Any
 import pytest
 from pytest_bdd import given, parsers, then, when
 from rich.text import Text
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Input, Static
 
-from workdash.backend import compute_suggestion_markers
-from workdash.config import WorkdashConfig
+from workdash.backend import WorkdashBackend, compute_suggestion_markers
+from workdash.config import AgentConfig, WorkdashConfig
+from workdash.github_client import GitHubClient
+from workdash.included_items import IncludedItemsStore
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
+from workdash.tui import IncludeDialog
 
 from .common import (
     NOW_UTC,
@@ -377,6 +381,227 @@ def _system_reports_empty_from_open(scenario_state: dict[str, Any], capsys) -> N
 
     _print_work_items(list(scenario_state.get("work_items", [])), {})
     assert "No work items found." in capsys.readouterr().out
+
+
+# -- S006: repository auth failures ---------------------------------------
+
+
+@given("one tracked repository requires additional GitHub authorization")
+def _one_tracked_repository_requires_authorization(scenario_state: dict[str, Any]) -> None:
+    scenario_state["unauthorized_repository"] = "owner/private"
+
+
+@given("another tracked repository has open work")
+def _another_tracked_repository_has_open_work(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    unauthorized_repository = scenario_state["unauthorized_repository"]
+    accessible_repository = "owner/public"
+    scenario_state["accessible_repository"] = accessible_repository
+    saml_error = (
+        "GraphQL: Resource protected by organization SAML enforcement. "
+        "You must grant your OAuth token access to this organization."
+    )
+
+    monkeypatch.setattr(GitHubClient, "list_open_authored_prs", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_open_review_requested_prs",
+        lambda self, login, progress_callback=None: [],
+    )
+    monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
+    monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
+
+    def fake_run(command, **kwargs):
+        repositories = [
+            command[index + 1] for index, token in enumerate(command) if token == "--repo"
+        ]
+        if repositories == [unauthorized_repository, accessible_repository]:
+            raise subprocess.CalledProcessError(1, command, stderr=saml_error)
+        if repositories == [unauthorized_repository]:
+            raise subprocess.CalledProcessError(1, command, stderr=saml_error)
+        if repositories == [accessible_repository]:
+            payload = [
+                {
+                    "id": "TRACKED-ISSUE-42",
+                    "number": 42,
+                    "title": "Accessible issue",
+                    "url": "https://github.com/owner/public/issues/42",
+                    "createdAt": "2026-04-20T00:00:00Z",
+                    "updatedAt": "2026-04-21T00:00:00Z",
+                    "state": "OPEN",
+                    "isPullRequest": False,
+                    "repository": {"nameWithOwner": accessible_repository},
+                }
+            ]
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+        raise AssertionError(f"Unexpected gh command in auth scenario: {command}")
+
+    monkeypatch.setattr("workdash.github_client.subprocess.run", fake_run)
+
+    def hook(state: dict[str, Any], items: list[WorkItem], _mp: pytest.MonkeyPatch) -> None:
+        progress_messages: list[str] = []
+        config = WorkdashConfig(
+            github_username="testuser",
+            claude=AgentConfig(analyze="claude -p", launch="claude"),
+            codex=AgentConfig(analyze="codex exec", launch="codex"),
+            repositories=(unauthorized_repository, accessible_repository),
+            workdir=str(tmp_path / "wrk"),
+        )
+        backend = WorkdashBackend(
+            cache_root=tmp_path / "cache",
+            config=config,
+            included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+        )
+        fetched, markers = backend.load_items(progress_callback=progress_messages.append)
+        items[:] = list(fetched)
+        state["work_items"] = list(fetched)
+        state["suggestion_markers"] = dict(markers)
+        state["progress_messages"] = progress_messages
+
+    scenario_state["_open_dashboard_hook"] = hook
+
+
+@then("the accessible repository's work items appear")
+def _accessible_repository_items_appear(scenario_state: dict[str, Any]) -> None:
+    accessible_repository = scenario_state["accessible_repository"]
+    assert any(
+        item.repo == accessible_repository
+        and item.number == 42
+        and item.kind == WorkItemKind.TRACKED_ISSUE
+        for item in scenario_state["work_items"]
+    )
+
+
+@then("the system warns that the unauthorized repository was skipped")
+def _warns_unauthorized_repository_skipped(scenario_state: dict[str, Any]) -> None:
+    unauthorized_repository = scenario_state["unauthorized_repository"]
+    assert any(
+        "Warning: skipped repository" in message
+        and unauthorized_repository in message
+        and "SAML enforcement" in message
+        for message in scenario_state["progress_messages"]
+    )
+
+
+# -- S007: review-request metadata auth failures --------------------------
+
+
+@given("one review-requested pull request requires additional GitHub authorization")
+def _one_review_requested_pr_requires_authorization(scenario_state: dict[str, Any]) -> None:
+    scenario_state["unauthorized_review_repo"] = "protected-org/protected-repo"
+    scenario_state["unauthorized_review_number"] = 860
+
+
+@given("another review-requested pull request has requested the user directly")
+def _another_review_requested_pr_has_direct_request(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    unauthorized_repo = scenario_state["unauthorized_review_repo"]
+    unauthorized_number = scenario_state["unauthorized_review_number"]
+    authorized_repo = "owner/repo"
+    authorized_number = 42
+    scenario_state["authorized_review_repo"] = authorized_repo
+    scenario_state["authorized_review_number"] = authorized_number
+    saml_error = (
+        "GraphQL: Resource protected by organization SAML enforcement. "
+        "You must grant your OAuth token access to this organization."
+    )
+
+    monkeypatch.setattr(GitHubClient, "list_open_authored_prs", lambda self, login: [])
+    monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
+    monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_recent_tracked_items",
+        lambda self, repositories, progress_callback=None: [],
+    )
+
+    def fake_run(command, **kwargs):
+        if command[:3] == ["gh", "search", "prs"] and "--review-requested" in command:
+            payload = [
+                {
+                    "id": "UNAUTHORIZED-REVIEW",
+                    "number": unauthorized_number,
+                    "title": "Unauthorized review request",
+                    "url": f"https://github.com/{unauthorized_repo}/pull/{unauthorized_number}",
+                    "createdAt": "2026-04-20T00:00:00Z",
+                    "updatedAt": "2026-04-21T00:00:00Z",
+                    "isDraft": False,
+                    "repository": {"nameWithOwner": unauthorized_repo},
+                },
+                {
+                    "id": "AUTHORIZED-REVIEW",
+                    "number": authorized_number,
+                    "title": "Authorized review request",
+                    "url": f"https://github.com/{authorized_repo}/pull/{authorized_number}",
+                    "createdAt": "2026-04-22T00:00:00Z",
+                    "updatedAt": "2026-04-23T00:00:00Z",
+                    "isDraft": False,
+                    "repository": {"nameWithOwner": authorized_repo},
+                },
+            ]
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+        if command[:3] == ["gh", "pr", "view"] and command[3] == str(unauthorized_number):
+            raise subprocess.CalledProcessError(1, command, stderr=saml_error)
+        if command[:3] == ["gh", "pr", "view"] and command[3] == str(authorized_number):
+            payload = {"reviewRequests": [{"__typename": "User", "login": "testuser"}]}
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+        raise AssertionError(f"Unexpected gh command in review auth scenario: {command}")
+
+    monkeypatch.setattr("workdash.github_client.subprocess.run", fake_run)
+
+    def hook(state: dict[str, Any], items: list[WorkItem], _mp: pytest.MonkeyPatch) -> None:
+        progress_messages: list[str] = []
+        config = WorkdashConfig(
+            github_username="testuser",
+            claude=AgentConfig(analyze="claude -p", launch="claude"),
+            codex=AgentConfig(analyze="codex exec", launch="codex"),
+            repositories=("owner/repo",),
+            workdir=str(tmp_path / "wrk"),
+        )
+        backend = WorkdashBackend(
+            cache_root=tmp_path / "cache",
+            config=config,
+            included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+        )
+        fetched, markers = backend.load_items(progress_callback=progress_messages.append)
+        items[:] = list(fetched)
+        state["work_items"] = list(fetched)
+        state["suggestion_markers"] = dict(markers)
+        state["progress_messages"] = progress_messages
+
+    scenario_state["_open_dashboard_hook"] = hook
+
+
+@then("the authorized review-requested pull request appears")
+def _authorized_review_requested_pr_appears(scenario_state: dict[str, Any]) -> None:
+    assert any(
+        item.repo == scenario_state["authorized_review_repo"]
+        and item.number == scenario_state["authorized_review_number"]
+        and item.kind == WorkItemKind.REVIEW_REQUESTED_PR
+        for item in scenario_state["work_items"]
+    )
+
+
+@then("the system warns that the unauthorized review-requested pull request was skipped")
+def _warns_unauthorized_review_requested_pr_skipped(
+    scenario_state: dict[str, Any],
+) -> None:
+    item_label = (
+        f"{scenario_state['unauthorized_review_repo']}"
+        f"#{scenario_state['unauthorized_review_number']}"
+    )
+    assert any(
+        "Warning: skipped review-requested pull request" in message
+        and item_label in message
+        and "SAML enforcement" in message
+        for message in scenario_state["progress_messages"]
+    )
 
 
 # --------------------------------------------------------------------------
@@ -792,3 +1017,595 @@ def _pr_wins_suggestion(scenario_state: dict[str, Any], work_items: list[WorkIte
 @then("no item is marked as suggested")
 def _no_suggestion(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["suggestion_markers"] == {}
+
+
+# --------------------------------------------------------------------------
+# F-TRIAGE-INCLUDE
+# --------------------------------------------------------------------------
+
+_INCLUDE_PR_URL = "https://github.com/owner/repo/pull/111"
+_INCLUDE_ISSUE_URL = "https://github.com/owner/repo/issues/222"
+
+
+def _fake_gh_view_response(item_type: str, number: int, state: str = "OPEN") -> str:
+    kind_segment = "pull" if item_type == "pr" else "issues"
+    return json.dumps(
+        {
+            "number": number,
+            "title": f"Fetched {item_type} {number}",
+            "url": f"https://github.com/owner/repo/{kind_segment}/{number}",
+            "createdAt": "2026-04-20T10:00:00Z",
+            "updatedAt": "2026-04-28T10:00:00Z",
+            "state": state,
+        }
+    )
+
+
+def _install_gh_fetch_fake(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    responses: dict[tuple[str, str], subprocess.CompletedProcess | Exception],
+) -> list[list[str]]:
+    """Patch ``subprocess.run`` so ``gh pr/issue view`` returns canned data."""
+
+    calls: list[list[str]] = []
+    import workdash.github_client as gc
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        # gh {pr|issue} view N --repo owner/repo --json ...
+        if (
+            len(command) >= 6
+            and command[:3] in (["gh", "pr", "view"], ["gh", "issue", "view"])
+            and command[4] == "--repo"
+        ):
+            key = (command[1], command[3])
+            result = responses.get(key)
+            if isinstance(result, Exception):
+                raise result
+            if result is not None:
+                return result
+        raise AssertionError(f"Unexpected gh command in include scenario: {command}")
+
+    monkeypatch.setattr(gc.subprocess, "run", fake_run)
+    monkeypatch.setattr(gc.time, "sleep", lambda _: None)
+    return calls
+
+
+def _install_empty_github_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub every non-include GitHub client method to return empty lists."""
+
+    monkeypatch.setattr(GitHubClient, "list_open_authored_prs", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_open_review_requested_prs",
+        lambda self, login, progress_callback=None: [],
+    )
+    monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
+    monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_recent_tracked_items",
+        lambda self, repositories, progress_callback=None: [],
+    )
+
+
+def _make_tmp_store(scenario_state: dict[str, Any], tmp_path: Path) -> IncludedItemsStore:
+    store_path = scenario_state.get("included_store_path")
+    if store_path is None:
+        store_path = tmp_path / "included.json"
+        scenario_state["included_store_path"] = store_path
+    return IncludedItemsStore(store_path)
+
+
+def _make_backend(
+    scenario_state: dict[str, Any],
+    tmp_path: Path,
+) -> WorkdashBackend:
+    store = _make_tmp_store(scenario_state, tmp_path)
+    scenario_state["included_store"] = store
+    config = WorkdashConfig(
+        github_username="testuser",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        codex=AgentConfig(analyze="codex exec", launch="codex"),
+        repositories=("owner/repo",),
+        workdir=str(tmp_path / "wrk"),
+    )
+    return WorkdashBackend(
+        cache_root=tmp_path / "cache",
+        config=config,
+        included_items_store=store,
+    )
+
+
+def _make_open_dashboard_hook(tmp_path: Path):
+    """Build the `_open_dashboard_hook` that drives a real WorkdashBackend.
+
+    The hook is invoked by the shared "When the user opens the dashboard"
+    step and captures items + markers into the scenario state for Then-step
+    assertions. Extracted because the Given steps that seed the store share
+    this exact wiring.
+    """
+
+    def hook(state: dict[str, Any], items: list[WorkItem], _mp: pytest.MonkeyPatch) -> None:
+        backend = _make_backend(state, tmp_path)
+        fetched, markers = backend.load_items()
+        items[:] = list(fetched)
+        state["work_items"] = list(fetched)
+        state["suggestion_markers"] = dict(markers)
+
+    return hook
+
+
+# ----- F-TRIAGE-INCLUDE: Given steps -----
+
+
+@given("the TUI is open")
+def _tui_is_open(scenario_state: dict[str, Any]) -> None:
+    scenario_state.setdefault("_tui_open", True)
+
+
+@given("the user pastes a pull request URL into the include dialog")
+def _paste_pr_url(scenario_state: dict[str, Any]) -> None:
+    scenario_state["include_url"] = _INCLUDE_PR_URL
+    scenario_state["_include_kind"] = "pr"
+
+
+@given("the user pastes an issue URL into the include dialog")
+def _paste_issue_url(scenario_state: dict[str, Any]) -> None:
+    scenario_state["include_url"] = _INCLUDE_ISSUE_URL
+    scenario_state["_include_kind"] = "issue"
+
+
+@given("the TUI is open with a work item already visible")
+def _tui_open_with_visible_item(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
+    if not work_items:
+        work_items.append(
+            make_work_item(
+                item_type=WorkItemType.PR,
+                kind=WorkItemKind.AUTHORED_PR,
+                repo="owner/repo",
+                number=111,
+                title="Visible PR",
+                updated_at=NOW_UTC - timedelta(days=2),
+                created_at=NOW_UTC - timedelta(days=5),
+                url=_INCLUDE_PR_URL,
+            )
+        )
+    scenario_state["_visible_item"] = work_items[0]
+
+
+@given("the user pastes that same work item's URL into the include dialog")
+def _paste_existing_url(scenario_state: dict[str, Any]) -> None:
+    scenario_state["include_url"] = scenario_state["_visible_item"].url
+    scenario_state["_include_kind"] = "duplicate"
+
+
+@given(
+    "the user pastes a URL that is not a GitHub issue or pull request URL into the include dialog"
+)
+def _paste_invalid_url(scenario_state: dict[str, Any]) -> None:
+    scenario_state["include_url"] = "https://example.com/not-a-github-url"
+    scenario_state["_include_kind"] = "invalid"
+
+
+@given(
+    "the user has an included pull request, an included issue, and an included review-requested pull request"
+)
+def _seed_three_included_items(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = _make_tmp_store(scenario_state, tmp_path)
+    store.save(
+        [
+            "https://github.com/owner/repo/pull/111",
+            "https://github.com/owner/repo/issues/222",
+            "https://github.com/owner/repo/pull/333",
+        ]
+    )
+    # PR #333 is surfaced by the review-requested source too; the backend
+    # merges the included payload into the existing REVIEW row, keeping the
+    # REVIEW classification while flipping `included` to True.
+    monkeypatch.setattr(GitHubClient, "list_open_authored_prs", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_open_review_requested_prs",
+        lambda self, login, progress_callback=None: [
+            {
+                "id": "REVIEW-333",
+                "repo": "owner/repo",
+                "number": 333,
+                "title": "Fetched pr 333",
+                "url": "https://github.com/owner/repo/pull/333",
+                "created_at": "2026-04-20T10:00:00Z",
+                "updated_at": "2026-04-28T10:00:00Z",
+                "is_draft": False,
+            }
+        ],
+    )
+    monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
+    monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
+    # Seed one non-included tracked PR so the print-mode assertion can verify
+    # that format_type_label does not spuriously append "+" to regular rows.
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_recent_tracked_items",
+        lambda self, repositories, progress_callback=None: [
+            {
+                "id": "TRACKED-444",
+                "repo": "owner/repo",
+                "number": 444,
+                "title": "Tracked non-included PR",
+                "url": "https://github.com/owner/repo/pull/444",
+                "created_at": "2026-04-20T10:00:00Z",
+                "updated_at": "2026-04-27T10:00:00Z",
+                "is_pull_request": True,
+            }
+        ],
+    )
+    _install_gh_fetch_fake(
+        monkeypatch,
+        responses={
+            ("pr", "111"): subprocess.CompletedProcess(
+                [], 0, stdout=_fake_gh_view_response("pr", 111), stderr=""
+            ),
+            ("issue", "222"): subprocess.CompletedProcess(
+                [], 0, stdout=_fake_gh_view_response("issue", 222), stderr=""
+            ),
+            ("pr", "333"): subprocess.CompletedProcess(
+                [], 0, stdout=_fake_gh_view_response("pr", 333), stderr=""
+            ),
+        },
+    )
+    scenario_state["_open_dashboard_hook"] = _make_open_dashboard_hook(tmp_path)
+
+
+@given("the included-items store contains a URL from a previous session")
+def _store_has_prior_url(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = _make_tmp_store(scenario_state, tmp_path)
+    store.save([_INCLUDE_PR_URL])
+    _install_empty_github_fakes(monkeypatch)
+    _install_gh_fetch_fake(
+        monkeypatch,
+        responses={
+            ("pr", "111"): subprocess.CompletedProcess(
+                [], 0, stdout=_fake_gh_view_response("pr", 111), stderr=""
+            ),
+        },
+    )
+    scenario_state["_open_dashboard_hook"] = _make_open_dashboard_hook(tmp_path)
+
+
+@given("the included-items store contains a URL for an item that has since closed")
+def _store_has_closed_url(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = _make_tmp_store(scenario_state, tmp_path)
+    store.save([_INCLUDE_PR_URL])
+    _install_empty_github_fakes(monkeypatch)
+    _install_gh_fetch_fake(
+        monkeypatch,
+        responses={
+            ("pr", "111"): subprocess.CompletedProcess(
+                [], 0, stdout=_fake_gh_view_response("pr", 111, state="CLOSED"), stderr=""
+            ),
+        },
+    )
+    scenario_state["_open_dashboard_hook"] = _make_open_dashboard_hook(tmp_path)
+
+
+@given("the included-items store contains a URL")
+def _store_has_url(
+    scenario_state: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    store = _make_tmp_store(scenario_state, tmp_path)
+    store.save([_INCLUDE_PR_URL])
+
+
+@given("the next fetch for that URL will fail transiently")
+def _next_fetch_transient(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_empty_github_fakes(monkeypatch)
+    _install_gh_fetch_fake(
+        monkeypatch,
+        responses={
+            ("pr", "111"): subprocess.CalledProcessError(
+                returncode=1,
+                cmd=["gh", "pr", "view", "111"],
+                stderr="HTTP 503: Service Unavailable",
+            ),
+        },
+    )
+    scenario_state["_open_dashboard_hook"] = _make_open_dashboard_hook(tmp_path)
+
+
+@given("the included-items store does not exist")
+def _store_missing(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    scenario_state["included_store_path"] = tmp_path / "does-not-exist" / "included.json"
+    scenario_state["included_store"] = IncludedItemsStore(scenario_state["included_store_path"])
+    _install_empty_github_fakes(monkeypatch)
+    scenario_state["_open_dashboard_hook"] = _make_open_dashboard_hook(tmp_path)
+
+
+# ----- F-TRIAGE-INCLUDE: When steps -----
+
+
+@when("the user confirms the include dialog")
+def _confirm_include_dialog(
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    url = scenario_state["include_url"]
+    kind = scenario_state["_include_kind"]
+
+    if kind == "pr":
+        _install_gh_fetch_fake(
+            monkeypatch,
+            responses={
+                ("pr", "111"): subprocess.CompletedProcess(
+                    [], 0, stdout=_fake_gh_view_response("pr", 111), stderr=""
+                ),
+            },
+        )
+    elif kind == "issue":
+        _install_gh_fetch_fake(
+            monkeypatch,
+            responses={
+                ("issue", "222"): subprocess.CompletedProcess(
+                    [], 0, stdout=_fake_gh_view_response("issue", 222), stderr=""
+                ),
+            },
+        )
+    # For "duplicate" and "invalid" we do not expect any gh call; omit the patch.
+
+    # Drive the real WorkdashBackend entry points so the TUI exercises
+    # production code (URL parsing, fetch, canonical persistence, duplicate
+    # handling) rather than a hand-rolled mirror.
+    backend = _make_backend(scenario_state, tmp_path)
+    captured: dict[str, Any] = {}
+
+    async def interactions(app, pilot) -> None:
+        await pilot.press("i")
+        for _ in range(20):
+            await pilot.pause()
+            for screen in app.screen_stack:
+                if isinstance(screen, IncludeDialog):
+                    screen.query_one("#include-url", Input).value = url
+                    await pilot.press("enter")
+                    break
+            else:
+                continue
+            break
+        for _ in range(40):
+            await pilot.pause()
+            if not any(isinstance(screen, IncludeDialog) for screen in app.screen_stack):
+                break
+        table = app.query_one("#work-items", DataTable)
+        captured["rows"] = [
+            [str(cell) for cell in table.get_row_at(index)] for index in range(table.row_count)
+        ]
+        captured["cursor_row"] = table.cursor_row
+        captured["status"] = app.query_one("#status-footer", Static).render().plain
+        captured["sorted_items"] = list(app._sorted_work_items)
+
+    run_app(
+        work_items=list(work_items),
+        include_callback=backend.include_item_by_url,
+        interactions=interactions,
+    )
+    scenario_state["include_rows"] = captured["rows"]
+    scenario_state["include_cursor_row"] = captured["cursor_row"]
+    scenario_state["include_status"] = captured["status"]
+    scenario_state["include_sorted_items"] = captured["sorted_items"]
+
+
+# ----- F-TRIAGE-INCLUDE: Then steps -----
+
+
+def _cursor_item(scenario_state: dict[str, Any]) -> WorkItem:
+    index = scenario_state["include_cursor_row"]
+    assert index is not None, scenario_state
+    return scenario_state["include_sorted_items"][index]
+
+
+@then("the pull request appears on the dashboard as an included item")
+def _pr_appears_included(scenario_state: dict[str, Any]) -> None:
+    sorted_items = scenario_state["include_sorted_items"]
+    match = next(
+        (item for item in sorted_items if item.url == scenario_state["include_url"]),
+        None,
+    )
+    assert match is not None, sorted_items
+    assert match.item_type == WorkItemType.PR
+    assert match.included is True
+
+
+@then("the issue appears on the dashboard as an included item")
+def _issue_appears_included(scenario_state: dict[str, Any]) -> None:
+    sorted_items = scenario_state["include_sorted_items"]
+    match = next(
+        (item for item in sorted_items if item.url == scenario_state["include_url"]),
+        None,
+    )
+    assert match is not None, sorted_items
+    assert match.item_type == WorkItemType.ISSUE
+    assert match.included is True
+
+
+@then("the cursor is positioned on that pull request")
+def _cursor_on_pr(scenario_state: dict[str, Any]) -> None:
+    item = _cursor_item(scenario_state)
+    assert item.url == scenario_state["include_url"], (item, scenario_state)
+
+
+@then("the cursor is positioned on that issue")
+def _cursor_on_issue(scenario_state: dict[str, Any]) -> None:
+    item = _cursor_item(scenario_state)
+    assert item.url == scenario_state["include_url"], (item, scenario_state)
+
+
+@then("the cursor is positioned on that work item")
+def _cursor_on_work_item(scenario_state: dict[str, Any]) -> None:
+    item = _cursor_item(scenario_state)
+    assert item.url == scenario_state["include_url"], (item, scenario_state)
+
+
+@then("the URL is persisted in the included-items store")
+def _url_persisted(scenario_state: dict[str, Any]) -> None:
+    store: IncludedItemsStore = scenario_state["included_store"]
+    urls = store.load()
+    assert scenario_state["include_url"] in urls, urls
+
+
+@then("the work item appears exactly once on the dashboard")
+def _work_item_appears_once(scenario_state: dict[str, Any]) -> None:
+    sorted_items = scenario_state["include_sorted_items"]
+    matches = [item for item in sorted_items if item.url == scenario_state["include_url"]]
+    assert len(matches) == 1, matches
+
+
+@then('the included pull request\'s type column reads "PR+"')
+def _pr_plus_label(scenario_state: dict[str, Any]) -> None:
+    _assert_type_column(scenario_state, number=111, expected="PR+")
+
+
+@then('the included issue\'s type column reads "ISSUE+"')
+def _issue_plus_label(scenario_state: dict[str, Any]) -> None:
+    _assert_type_column(scenario_state, number=222, expected="ISSUE+")
+
+
+@then('the included review-requested pull request\'s type column reads "REVIEW+"')
+def _review_plus_label(scenario_state: dict[str, Any]) -> None:
+    _assert_type_column(scenario_state, number=333, expected="REVIEW+")
+    # The merged row must keep the REVIEW_REQUESTED_PR kind so the "+" suffix
+    # genuinely comes from the `included` flag layered onto a REVIEW row,
+    # not a fallback that infers "REVIEW" from some other signal.
+    merged = next(
+        (item for item in scenario_state["work_items"] if item.number == 333),
+        None,
+    )
+    assert merged is not None, scenario_state["work_items"]
+    assert merged.kind == WorkItemKind.REVIEW_REQUESTED_PR
+    assert merged.included is True
+
+
+def _assert_type_column(scenario_state: dict[str, Any], *, number: int, expected: str) -> None:
+    work_items = scenario_state["work_items"]
+    captured: dict[str, Any] = {}
+
+    async def interactions(app, pilot) -> None:
+        table = app.query_one("#work-items", DataTable)
+        captured["rows"] = [
+            [str(cell) for cell in table.get_row_at(i)] for i in range(table.row_count)
+        ]
+        captured["sorted_items"] = list(app._sorted_work_items)
+
+    run_app(
+        work_items=list(work_items),
+        suggestion_markers=compute_suggestion_markers(list(work_items)),
+        interactions=interactions,
+    )
+    for row, item in zip(captured["rows"], captured["sorted_items"], strict=True):
+        if item.number == number:
+            assert row[0] == expected, (row, item)
+            return
+    raise AssertionError(f"No row for number {number}: {captured['rows']}")
+
+
+@then('the same suffixes appear when the user runs the system with "--print"')
+def _print_mode_suffixes(scenario_state: dict[str, Any]) -> None:
+    import contextlib
+    import io
+
+    from workdash.workdash import _print_work_items
+
+    work_items = scenario_state["work_items"]
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        _print_work_items(work_items, compute_suggestion_markers(work_items))
+    lines = [line for line in buffer.getvalue().splitlines() if line.strip()]
+    # Each seeded item's row identity is repo#number; per-row assertions
+    # guarantee the "+" suffix is anchored to the type column of the
+    # correct row rather than appearing somewhere else in the output.
+    expected_by_number = {
+        111: "PR+",
+        222: "ISSUE+",
+        333: "REVIEW+",
+        # The tracked non-included PR must NOT carry the "+" suffix; this
+        # guards against a regression where format_type_label always
+        # appends "+".
+        444: "PR",
+    }
+    found: dict[int, str] = {}
+    for line in lines:
+        for number, expected_label in expected_by_number.items():
+            if f"owner/repo#{number}" in line:
+                assert line.startswith(f"{expected_label:7} "), (line, expected_label)
+                found[number] = expected_label
+                break
+    assert set(found) == set(expected_by_number), (found, lines)
+
+
+@then("the included item appears on the dashboard")
+def _included_item_appears(scenario_state: dict[str, Any]) -> None:
+    items = scenario_state["work_items"]
+    assert any(item.included for item in items), items
+
+
+@then("the item does not appear on the dashboard")
+def _item_does_not_appear(scenario_state: dict[str, Any]) -> None:
+    items = scenario_state["work_items"]
+    assert not any(item.url == _INCLUDE_PR_URL for item in items), items
+
+
+@then("the URL is no longer persisted in the included-items store")
+def _url_no_longer_persisted(scenario_state: dict[str, Any]) -> None:
+    store: IncludedItemsStore = scenario_state["included_store"]
+    assert _INCLUDE_PR_URL not in store.load()
+
+
+@then("the system reports that the URL is not valid")
+def _reports_invalid(scenario_state: dict[str, Any]) -> None:
+    status = scenario_state["include_status"]
+    assert "Invalid" in status or "not valid" in status.lower(), status
+
+
+@then("no URL is persisted in the included-items store")
+def _no_url_persisted(scenario_state: dict[str, Any]) -> None:
+    store: IncludedItemsStore = scenario_state["included_store"]
+    assert store.load() == []
+
+
+@then("the URL remains persisted in the included-items store")
+def _url_remains_persisted(scenario_state: dict[str, Any]) -> None:
+    store: IncludedItemsStore = scenario_state["included_store"]
+    assert _INCLUDE_PR_URL in store.load()
+
+
+@then("the dashboard loads without error")
+def _dashboard_loads(scenario_state: dict[str, Any]) -> None:
+    assert "work_items" in scenario_state
+
+
+@then("no included items appear on the dashboard")
+def _no_included_items(scenario_state: dict[str, Any]) -> None:
+    items = scenario_state["work_items"]
+    assert not any(item.included for item in items), items

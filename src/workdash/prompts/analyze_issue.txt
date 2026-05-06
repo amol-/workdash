@@ -58,7 +58,12 @@ Markdown link that points to the definition on GitHub using the default branch.
   mention it in backticks without a link, but prefer linked references when
   the information is available.
 
-```
+Output the Markdown document directly. Your response must begin with the `# `
+heading shown below and end with the last line of the template. Do not wrap
+your response in code fences, do not include the `<template>` tags themselves,
+and do not add any preamble or trailing commentary.
+
+<template>
 # {title}
 
 > [{repo}#{number}]({url})
@@ -99,7 +104,7 @@ Do not propose a specific implementation here.
 Anything unclear, needing author clarification, or requiring further
 investigation before design work can begin. Omit this section entirely if there
 are none.
-```
+</template>
 
 ---
 

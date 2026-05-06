@@ -65,7 +65,12 @@ Markdown link that points to the exact definition line on GitHub.
 - If you cannot determine the exact file or line for a symbol, you may still
   mention it in backticks without a link, but prefer linked references.
 
-```
+Output the Markdown document directly. Your response must begin with the `# `
+heading shown below and end with the last line of the template. Do not wrap
+your response in code fences, do not include the `<template>` tags themselves,
+and do not add any preamble or trailing commentary.
+
+<template>
 # {title}
 
 > [{repo}#{number}]({url})
@@ -126,7 +131,7 @@ see the full flow at a glance without reading every step.
 
 Clear recommendation: approve, request changes, or needs discussion. List specific
 items that must be addressed versus items that are suggestions.
-```
+</template>
 
 ---
 

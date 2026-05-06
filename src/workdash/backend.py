@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from .analysis_cache import AnalysisCache
@@ -11,23 +12,40 @@ from .analyzer import Analyzer
 from .config import WorkdashConfig
 from .github_client import (
     GitHubClient,
+    TransientFetchError,
+    _noop_progress_callback,
     merge_normalized_work_items,
     normalize_assigned_issues,
     normalize_authored_pull_requests,
     normalize_recent_tracked_items,
     normalize_review_requested_pull_requests,
+    parse_github_item_url,
 )
+from .included_items import IncludedItemsStore
 from .models import WorkItem, WorkItemType
 from .repo_resolver import resolve_repositories
 
 SuggestionMarkers = dict[tuple[WorkItemType, str, int], str]
+ItemIdentity = tuple[WorkItemType, str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class IncludeResult:
+    """Outcome of including a URL into the dashboard.
+
+    Exactly one of ``invalid``, ``transient_failure``, ``duplicate_identity``,
+    or ``fetched_item`` is truthy.
+    """
+
+    invalid: bool = False
+    transient_failure: bool = False
+    duplicate_identity: ItemIdentity | None = None
+    fetched_item: WorkItem | None = None
+
 
 _SUGGESTION_MARKER = "*"
 _DEFAULT_CACHE_ROOT = Path.home() / ".config" / "workdash" / "cache"
-
-
-def _noop_progress_callback(_message: str) -> None:
-    """Ignore progress updates when no reporting target is configured."""
+_DEFAULT_INCLUDED_STORE_PATH = Path.home() / ".config" / "workdash" / "included.json"
 
 
 def _suggestion_sort_key(item: WorkItem) -> tuple[object, int, str, int]:
@@ -61,6 +79,7 @@ class WorkdashBackend:
         analysis_cache: AnalysisCache | None = None,
         analyzer: Analyzer | None = None,
         config: WorkdashConfig | None = None,
+        included_items_store: IncludedItemsStore | None = None,
     ) -> None:
         self.github_client = github_client if github_client is not None else GitHubClient()
         self.analysis_cache = (
@@ -68,6 +87,11 @@ class WorkdashBackend:
         )
         self.analyzer = analyzer if analyzer is not None else Analyzer()
         self.config = config if config is not None else WorkdashConfig()
+        self.included_items_store = (
+            included_items_store
+            if included_items_store is not None
+            else IncludedItemsStore(_DEFAULT_INCLUDED_STORE_PATH)
+        )
 
     def load_items(
         self, progress_callback: Callable[[str], None] | None = None
@@ -87,7 +111,8 @@ class WorkdashBackend:
         report_progress(f"Fetched {len(authored_pull_requests)} open authored pull request(s).")
         report_progress("Fetching open review-requested pull requests...")
         review_requested_pull_requests = self.github_client.list_open_review_requested_prs(
-            github_username
+            github_username,
+            progress_callback=report_progress,
         )
         report_progress(
             f"Fetched {len(review_requested_pull_requests)} open review-requested pull request(s)."
@@ -119,6 +144,9 @@ class WorkdashBackend:
             merged_items,
             normalize_recent_tracked_items(recent_tracked_items),
         )
+        included_work_items = self._load_included_items(report_progress)
+        if included_work_items:
+            merged_items = merge_normalized_work_items(merged_items, included_work_items)
         report_progress(
             f"Merged {len(merged_items)} unique work item(s); loading cached analyses..."
         )
@@ -127,6 +155,70 @@ class WorkdashBackend:
             item.analyzed_at = self.analysis_cache.load_analysis_date(item)
         report_progress("Done loading work items.")
         return merged_items, compute_suggestion_markers(merged_items)
+
+    def _load_included_items(self, report_progress: Callable[[str], None]) -> list[WorkItem]:
+        """Fetch each persisted included URL, pruning gone or invalid entries.
+
+        Transient failures keep the URL in the store so the next refresh
+        can retry. Only permanent drops (state != OPEN, 404-style errors)
+        remove the URL.
+        """
+
+        stored_urls = self.included_items_store.load()
+        if not stored_urls:
+            return []
+        report_progress(f"Fetching {len(stored_urls)} included item(s)...")
+        survivors: list[str] = []
+        fetched: list[WorkItem] = []
+        for url in stored_urls:
+            parsed = parse_github_item_url(url)
+            if parsed is None:
+                continue
+            try:
+                item = self.github_client.fetch_item_by_url(parsed)
+            except TransientFetchError:
+                survivors.append(parsed.canonical_url)
+                continue
+            if item is None:
+                continue
+            survivors.append(parsed.canonical_url)
+            fetched.append(item)
+        if survivors != stored_urls:
+            self.included_items_store.save(survivors)
+        return fetched
+
+    def include_item_by_url(
+        self, url: str, existing_identities: set[ItemIdentity]
+    ) -> IncludeResult:
+        """Resolve a pasted URL to an ``IncludeResult`` for the TUI.
+
+        The backend owns URL parsing, duplicate detection, fetching, and
+        persistence so the TUI only has to consume the result. ``url`` is
+        parsed; a known identity short-circuits with ``duplicate_identity``
+        after idempotently persisting the canonical URL; an unknown
+        identity is fetched and persisted on success. Transient fetch
+        failures surface via ``transient_failure`` and do NOT persist so
+        the URL is not retained for a URL that may never resolve.
+        """
+
+        parsed = parse_github_item_url(url)
+        if parsed is None:
+            return IncludeResult(invalid=True)
+        identity: ItemIdentity = (parsed.item_type, parsed.repo, parsed.number)
+        if identity in existing_identities:
+            # Persist canonical URL idempotently so a URL pasted in a
+            # non-canonical form (e.g. ``/pull/7/files``) is still saved
+            # under its canonical shape for future sessions.
+            self.included_items_store.add(parsed.canonical_url)
+            return IncludeResult(duplicate_identity=identity)
+        try:
+            item = self.github_client.fetch_item_by_url(parsed)
+        except TransientFetchError:
+            return IncludeResult(transient_failure=True)
+        if item is None:
+            return IncludeResult(invalid=True)
+        self.included_items_store.add(parsed.canonical_url)
+        return IncludeResult(fetched_item=item)
 
     def _resolve_command_tokens(self, tool: str) -> list[str]:
         if tool == "claude":
