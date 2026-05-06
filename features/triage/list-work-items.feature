@@ -6,7 +6,7 @@ Feature: List work items
   most relevant item to pick up next is easy to spot.
 
   Rules:
-    - The list includes open pull requests the user authored, open pull requests where the user is a REVIEW item, open issues assigned to the user, and open issues and pull requests across tracked repositories.
+    - The list includes open pull requests the user authored, open pull requests where the user is a REVIEW item, open issues assigned to the user, open issues and pull requests across tracked repositories, and items the user has explicitly included by URL.
     - A pull request is a REVIEW item when the user is directly requested as a reviewer, or when the user has already reviewed it.
     - Review requests addressed only to a team the user belongs to do not make the pull request a REVIEW item; only direct user review requests do.
     - Each entry shows its item type (ISSUE, PR, or REVIEW), the owning repository, the item number, the last update date, the item's age, and the title.

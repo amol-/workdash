@@ -13,6 +13,7 @@ Canonical product vocabulary used by the feature files.
 - Assigned issue: An open issue where the user is an assignee.
 - Tracked item: An open issue or pull request that appears in a tracked repository regardless of the user's direct involvement.
 - Tracked repository: A repository listed in the user's configuration, either as `owner/repo` or expanded from an `owner/*` selector.
+- Included item: A work item the user has explicitly added by pasting its GitHub URL. Persisted across sessions, participates in every list source alongside authored pull requests, review-requested pull requests, assigned issues, and tracked items, and removed automatically when it closes, merges, or is resolved.
 - Repository selector: An entry in the `repositories` configuration list. Either `owner/repo` or `owner/*`.
 - Suggested item: The single work item the system highlights as the recommended next thing to pick up.
 - Work directory: The local directory where the system keeps per-repository clones and per-item worktrees.
