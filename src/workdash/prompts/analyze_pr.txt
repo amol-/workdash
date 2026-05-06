@@ -1,8 +1,13 @@
 You are reviewing a GitHub pull request to assess whether it is a good, solid,
 robust, and simple approach to the problem it addresses.
 
-Use only the provided metadata, discussion, and diff context. Do not invent facts
-not present in the input.
+Use the provided metadata and discussion as your starting context. The full
+unified diff for this pull request has been saved to a local file — read it
+before assessing code quality, test design, or code flow:
+
+    {diff_path}
+
+Do not invent facts not present in the metadata, discussion, or diff file.
 
 If you have access to specialized agents or tools for code review, bug hunting,
 quality assurance, or test design, delegate the relevant parts of this review to
@@ -133,5 +138,5 @@ WORK ITEM:
 - title: {title}
 - url: {url}
 
-GITHUB CONTEXT (includes PR metadata, discussion, and diff):
+GITHUB CONTEXT (PR metadata and discussion; diff is available at the path above):
 {github_context_json}

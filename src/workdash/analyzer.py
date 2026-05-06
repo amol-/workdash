@@ -7,6 +7,7 @@ import logging
 import os
 import shlex
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,6 @@ _PR_CONTEXT_JSON_FIELDS = (
     "isDraft,reviewDecision,additions,deletions,changedFiles,headRefName,baseRefName,"
     "comments,reviews,latestReviews"
 )
-_REVIEW_DIFF_MAX_CHARS = 120_000
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 
@@ -93,7 +93,7 @@ class Analyzer:
             ]
             return self._run_gh_context_command(item=item, command=command)
 
-        github_context = self._run_gh_context_command(
+        return self._run_gh_context_command(
             item=item,
             command=[
                 "gh",
@@ -107,24 +107,21 @@ class Analyzer:
             ],
         )
 
-        diff_command = [
-            "gh",
-            "pr",
-            "diff",
-            str(item.number),
-            "--repo",
-            item.repo,
-        ]
+    def _fetch_pr_diff(self, item: WorkItem) -> str:
+        """Fetch the unified diff for a pull request via ``gh pr diff``."""
+
+        command = ["gh", "pr", "diff", str(item.number), "--repo", item.repo]
         try:
             completed = subprocess.run(
-                diff_command,
+                command,
                 check=True,
                 capture_output=True,
                 text=True,
             )
         except FileNotFoundError as error:
             raise RuntimeError(
-                "Failed to gather GitHub diff context with gh: gh CLI is not installed or not on PATH."
+                "Failed to gather GitHub diff context with gh: "
+                "gh CLI is not installed or not on PATH."
             ) from error
         except subprocess.CalledProcessError as error:
             stderr = (error.stderr or "").strip()
@@ -133,33 +130,33 @@ class Analyzer:
                 f"{item.repo}#{item.number}: "
                 f"{stderr or f'process exited with code {error.returncode}'}"
             ) from error
+        return completed.stdout
 
-        github_context["diff"] = (
-            completed.stdout
-            if len(completed.stdout) <= _REVIEW_DIFF_MAX_CHARS
-            else (
-                f"{completed.stdout[:_REVIEW_DIFF_MAX_CHARS]}\n"
-                "[truncated: diff too large for prompt context]"
-            )
-        )
-        return github_context
-
-    def _build_agent_prompt(self, item: WorkItem, github_context: dict[str, Any]) -> str:
+    def _build_agent_prompt(
+        self,
+        item: WorkItem,
+        github_context: dict[str, Any],
+        *,
+        diff_path: str | None = None,
+    ) -> str:
         template_name = (
             "analyze_issue.txt" if item.item_type == WorkItemType.ISSUE else "analyze_pr.txt"
         )
         template = _load_prompt_template(template_name)
-        return template.format(
-            item_type=item.item_type.value,
-            kind=item.kind.value,
-            repo=item.repo,
-            number=item.number,
-            title=item.title,
-            url=item.url,
-            github_context_json=json.dumps(
+        format_kwargs: dict[str, Any] = {
+            "item_type": item.item_type.value,
+            "kind": item.kind.value,
+            "repo": item.repo,
+            "number": item.number,
+            "title": item.title,
+            "url": item.url,
+            "github_context_json": json.dumps(
                 github_context, ensure_ascii=True, indent=2, sort_keys=True
             ),
-        )
+        }
+        if item.item_type != WorkItemType.ISSUE:
+            format_kwargs["diff_path"] = diff_path or ""
+        return template.format(**format_kwargs)
 
     def _run_analysis_command(
         self, *, item: WorkItem, prompt: str, command_tokens: list[str]
@@ -191,14 +188,41 @@ class Analyzer:
     def analyze(self, item: WorkItem, command_tokens: list[str] | None = None) -> str | None:
         """Collect GitHub context, build the prompt, and run analysis.
 
+        For pull requests, the full unified diff is fetched via ``gh pr diff``
+        and written to a temp file whose path is injected into the prompt, so
+        the agent can read it without its own ``gh`` access and without
+        pushing the argv above the kernel's per-string limit.
+
         :param list[str] | None command_tokens: Override the default command
             tokens used to invoke the analysis backend.
         """
 
         github_context = self._collect_github_context(item)
-        prompt = self._build_agent_prompt(item, github_context)
         tokens = command_tokens if command_tokens is not None else self.agent_command_tokens
-        output = self._run_analysis_command(item=item, prompt=prompt, command_tokens=tokens)
+
+        diff_file_path: str | None = None
+        if item.item_type != WorkItemType.ISSUE:
+            diff_text = self._fetch_pr_diff(item)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=".diff",
+                prefix=f"workdash-{item.repo.replace('/', '-')}-{item.number}-",
+                delete=False,
+            ) as diff_file:
+                diff_file.write(diff_text)
+                diff_file_path = diff_file.name
+
+        try:
+            prompt = self._build_agent_prompt(item, github_context, diff_path=diff_file_path)
+            output = self._run_analysis_command(item=item, prompt=prompt, command_tokens=tokens)
+        finally:
+            if diff_file_path is not None:
+                try:
+                    os.unlink(diff_file_path)
+                except OSError:
+                    logger.warning("Failed to remove temporary diff file %s", diff_file_path)
+
         content = output.strip()
         if not content:
             return None

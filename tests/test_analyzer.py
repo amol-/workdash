@@ -1,5 +1,7 @@
+import re
 import subprocess
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -32,10 +34,13 @@ def make_work_item(
     )
 
 
-def test_analyze_for_pr_fetches_metadata_and_diff_then_runs_agent(
+def test_analyze_for_pr_writes_diff_to_tempfile_and_injects_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[list[str], dict[str, object]]] = []
+    captured: dict[str, str] = {}
+
+    diff_text = "diff --git a/foo.py b/foo.py\n+print('hello')\n"
 
     def fake_run(*args, **kwargs):
         command = args[0]
@@ -54,7 +59,7 @@ def test_analyze_for_pr_fetches_metadata_and_diff_then_runs_agent(
             return subprocess.CompletedProcess(
                 args=command,
                 returncode=0,
-                stdout="diff --git a/foo.py b/foo.py\n+print('hello')\n",
+                stdout=diff_text,
                 stderr="",
             )
         # Analysis runs through $SHELL -ic "codex exec '<prompt>'"
@@ -65,7 +70,17 @@ def test_analyze_for_pr_fetches_metadata_and_diff_then_runs_agent(
         assert "well-formed CommonMark Markdown" in shell_cmd
         assert "Markdown link that points to the exact definition line on GitHub" in shell_cmd
         assert "headRefName" in shell_cmd
-        assert "diff --git a/foo.py b/foo.py" in shell_cmd
+        # The diff content must NOT be embedded in the argv — that's what blew
+        # past the kernel's per-argv-string limit. Only the temp file path is.
+        assert "+print('hello')" not in shell_cmd
+        # The prompt must mention the temp file, and that file must exist with
+        # the full diff in it while the agent is running.
+        assert "workdash-owner-repo-42-" in shell_cmd
+        match = re.search(r"/tmp/workdash-owner-repo-42-[^\s\"']+\.diff", shell_cmd)
+        assert match is not None, shell_cmd
+        diff_path = match.group(0)
+        captured["diff_path"] = diff_path
+        assert Path(diff_path).read_text(encoding="utf-8") == diff_text
         return subprocess.CompletedProcess(
             args=command,
             returncode=0,
@@ -83,6 +98,8 @@ def test_analyze_for_pr_fetches_metadata_and_diff_then_runs_agent(
     assert calls[0][0][:3] == ["gh", "pr", "view"]
     assert calls[1][0][:3] == ["gh", "pr", "diff"]
     assert calls[2][0][:2] == ["/bin/sh", "-ic"]
+    # Temp file is cleaned up after the agent returns.
+    assert not Path(captured["diff_path"]).exists()
 
 
 def test_analyze_for_issue_uses_issue_template_and_no_diff(
@@ -148,7 +165,9 @@ def test_analyze_for_review_requested_pr_also_fetches_diff(
         assert command[1] == "-ic"
         shell_cmd = command[2]
         assert "reviewing a GitHub pull request" in shell_cmd
-        assert "diff --git a/foo.py b/foo.py" in shell_cmd
+        # Diff is passed via a temp file path, not embedded in the prompt.
+        assert "+print('hello')" not in shell_cmd
+        assert "workdash-owner-repo-42-" in shell_cmd
         return subprocess.CompletedProcess(
             args=command,
             returncode=0,
