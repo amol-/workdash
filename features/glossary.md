@@ -23,6 +23,9 @@ Canonical product vocabulary used by the feature files.
 - Analysis cache: The local store of previously generated analyses, keyed so that GitHub updates invalidate stale entries.
 - Coding session: An interactive session with a supported coding agent, launched in the item's worktree and preloaded with work item context.
 - Supported coding agent: One of Claude, ChatGPT Codex, or VSCode Copilot.
+- Terminal-backed work action: A work action that opens a shell or terminal-hosted coding agent for a work item.
+- Zellij session: A terminal multiplexer session used by the system to host terminal-backed work actions.
+- Workdash Zellij session: A fresh Zellij session with a `workdash-` name prefix that the system creates at interactive startup when the user was not already inside Zellij.
 - Configuration: The user settings stored at `~/.config/workdash/config.json`.
 - Configuration wizard: The interactive flow started by `--configure` that fills in any missing configuration fields.
 - TUI: The interactive terminal interface shown by default when the system starts.

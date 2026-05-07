@@ -196,6 +196,24 @@ def _tui_has_work_item_selected(scenario_state: dict[str, Any], work_items: list
     scenario_state.setdefault("selected_item", work_items[0])
 
 
+@given("the system is running inside a Zellij session")
+def _system_running_inside_zellij(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZELLIJ", "0")
+    scenario_state["outside_zellij"] = False
+
+
+@given("the system is not running inside a Zellij session")
+def _system_not_running_inside_zellij(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    scenario_state["outside_zellij"] = True
+
+
 # -- Exit-code assertions ----------------------------------------------------
 
 

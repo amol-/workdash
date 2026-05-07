@@ -2,11 +2,15 @@
 
 import json
 import os
+import secrets
 import shlex
 import shutil
 import subprocess
+import sys
+import tempfile
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import markdown
 
@@ -100,11 +104,107 @@ def _run_launch_command(command: list[str], *, context: str) -> None:
         raise RuntimeError(f"{context}: {message}") from error
 
 
-def _resolve_terminal_emulator() -> str | None:
-    for terminal in ("ptyxis", "konsole"):
-        if shutil.which(terminal) is not None:
-            return terminal
-    return None
+def exec_zellij_wrapped_workdash(argv: Sequence[str] | None) -> NoReturn:
+    zellij = shutil.which("zellij")
+    if zellij is None:
+        raise RuntimeError(
+            "zellij is not installed or not on PATH. "
+            "Install it from https://zellij.dev/ or run 'workdash --direct'."
+        )
+
+    original_args = list(argv) if argv is not None else sys.argv[1:]
+    session_name = f"workdash-{secrets.token_hex(4)}"
+    workdash_command = _build_direct_workdash_command(original_args)
+    wrapped_command = _build_session_scoped_workdash_command(
+        workdash_command,
+        session_name=session_name,
+        zellij=zellij,
+    )
+    layout_path = _write_zellij_startup_layout(wrapped_command, session_name=session_name)
+    command = [zellij, "--layout", layout_path]
+    try:
+        os.execvp(zellij, command)
+    except OSError as error:
+        raise RuntimeError(f"failed to start zellij: {error}") from error
+    raise AssertionError("os.execvp returned unexpectedly")
+
+
+def _build_direct_workdash_command(original_args: Sequence[str]) -> list[str]:
+    current_entrypoint = Path(sys.argv[0])
+    if current_entrypoint.name in {"__main__.py", "workdash.py"} and (
+        current_entrypoint.parent.name == "workdash"
+    ):
+        return [sys.executable, "-m", "workdash", "--direct", *original_args]
+    return [sys.argv[0] or "workdash", "--direct", *original_args]
+
+
+def _build_session_scoped_workdash_command(
+    workdash_command: Sequence[str],
+    *,
+    session_name: str,
+    zellij: str,
+) -> list[str]:
+    command = shlex.join(workdash_command)
+    zellij_command = shlex.join([zellij, "kill-session", session_name])
+    shell_script = (
+        f"trap '{zellij_command} >/dev/null 2>&1 || true' EXIT; "
+        f"{command}; exit_code=$?; exit $exit_code"
+    )
+    return ["/bin/sh", "-lc", shell_script]
+
+
+def _quote_kdl_string(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _write_zellij_startup_layout(workdash_command: Sequence[str], *, session_name: str) -> str:
+    if not workdash_command:
+        raise ValueError("Workdash command must not be empty.")
+    if not session_name:
+        raise ValueError("Zellij session name must not be empty.")
+
+    command = _quote_kdl_string(workdash_command[0])
+    args = " ".join(_quote_kdl_string(argument) for argument in workdash_command[1:])
+    layout = (
+        f"session_name {_quote_kdl_string(session_name)}\n"
+        'on_force_close "quit"\n'
+        "session_serialization false\n"
+        "disable_session_metadata true\n"
+        "show_startup_tips false\n"
+        "attach_to_session false\n"
+        "layout {\n"
+        '    tab name="workdash" {\n'
+        f"        pane command={command} close_on_exit=true {{\n"
+        f"            args {args}\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    )
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        prefix="workdash-zellij-",
+        suffix=".kdl",
+        delete=False,
+    ) as layout_file:
+        layout_file.write(layout)
+        return layout_file.name
+
+
+def _launch_zellij_command(repo_path: str, command: list[str], *, context: str) -> None:
+    if not os.getenv("ZELLIJ"):
+        raise RuntimeError(
+            f"{context}: terminal-backed work actions require an active Zellij session. "
+            "Start workdash normally, or run it inside Zellij."
+        )
+    if shutil.which("zellij") is None:
+        raise RuntimeError(
+            "zellij is not installed or not on PATH. Download it from https://zellij.dev"
+        )
+    _run_launch_command(
+        ["zellij", "action", "new-pane", "--cwd", repo_path, "--", *command],
+        context=context,
+    )
 
 
 def _run_gh_context_command(*, item: WorkItem, command: list[str]) -> dict[str, Any]:
@@ -259,41 +359,12 @@ def launch_agent_context(
         not isinstance(token, str) or not token.strip() for token in command_tokens
     ):
         raise ValueError("Agent command tokens must be a non-empty list of non-empty strings.")
-    if shutil.which("zellij") is None:
-        raise RuntimeError(
-            "zellij is not installed or not on PATH. Download it from https://zellij.dev"
-        )
-
     user_shell = os.environ.get("SHELL", "/bin/sh")
     agent_command = [user_shell, "-ic", shlex.join([*command_tokens, prompt])]
-    if os.getenv("ZELLIJ"):
-        _run_launch_command(
-            ["zellij", "action", "new-pane", "--cwd", repo_path, "--", *agent_command],
-            context="Failed to launch coding agent in zellij",
-        )
-        return
-
-    terminal = _resolve_terminal_emulator()
-    if terminal is None:
-        raise RuntimeError("No supported terminal emulator found. Install ptyxis or konsole.")
-
-    zellij_command = [
-        "zellij",
-        "--session",
-        "workdash-agent",
-        "run",
-        "--cwd",
+    _launch_zellij_command(
         repo_path,
-        "--",
-        *agent_command,
-    ]
-    terminal_commands = {
-        "ptyxis": ["ptyxis", "--new-window", "-d", repo_path, "--", *zellij_command],
-        "konsole": ["konsole", "--new-window", "--workdir", repo_path, "-e", *zellij_command],
-    }
-    _run_launch_command(
-        terminal_commands[terminal],
-        context=f"Failed to launch coding agent via {terminal}",
+        agent_command,
+        context="Failed to launch coding agent in zellij",
     )
 
 
@@ -318,39 +389,10 @@ def launch_terminal_context(repo_path: str) -> None:
 
     if not isinstance(repo_path, str) or not repo_path.strip():
         raise ValueError("Repository path must be a non-empty string.")
-    if shutil.which("zellij") is None:
-        raise RuntimeError(
-            "zellij is not installed or not on PATH. Download it from https://zellij.dev"
-        )
-
     user_shell = os.environ.get("SHELL", "/bin/sh")
     shell_command = [user_shell, "-i"]
-    if os.getenv("ZELLIJ"):
-        _run_launch_command(
-            ["zellij", "action", "new-pane", "--cwd", repo_path, "--", *shell_command],
-            context="Failed to launch terminal in zellij",
-        )
-        return
-
-    terminal = _resolve_terminal_emulator()
-    if terminal is None:
-        raise RuntimeError("No supported terminal emulator found. Install ptyxis or konsole.")
-
-    zellij_command = [
-        "zellij",
-        "--session",
-        "workdash-terminal",
-        "run",
-        "--cwd",
+    _launch_zellij_command(
         repo_path,
-        "--",
-        *shell_command,
-    ]
-    terminal_commands = {
-        "ptyxis": ["ptyxis", "--new-window", "-d", repo_path, "--", *zellij_command],
-        "konsole": ["konsole", "--new-window", "--workdir", repo_path, "-e", *zellij_command],
-    }
-    _run_launch_command(
-        terminal_commands[terminal],
-        context=f"Failed to launch terminal via {terminal}",
+        shell_command,
+        context="Failed to launch terminal in zellij",
     )

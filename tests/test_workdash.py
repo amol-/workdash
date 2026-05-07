@@ -1,7 +1,9 @@
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import pytest
 
+import workdash.launcher as launcher_module
 import workdash.workdash as workdash_module
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
@@ -48,6 +50,7 @@ def test_main_prints_loading_message_before_tui_start(
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
+    monkeypatch.setenv("ZELLIJ", "0")
 
     exit_code = workdash_module.main([])
 
@@ -95,6 +98,7 @@ def test_main_exits_with_error_when_gh_is_not_installed(
 ) -> None:
     monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setenv("ZELLIJ", "0")
 
     exit_code = workdash_module.main([])
 
@@ -108,6 +112,7 @@ def test_main_exits_with_error_when_config_incomplete(
 ) -> None:
     monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     monkeypatch.setattr(workdash_module, "load_config", lambda: WorkdashConfig())
+    monkeypatch.setenv("ZELLIJ", "0")
 
     exit_code = workdash_module.main([])
 
@@ -133,6 +138,80 @@ def test_main_configure_runs_setup_and_exits(
 
     assert exit_code == 0
     assert configure_called
+
+
+def test_main_outside_zellij_replaces_process_with_zellij(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapper_calls: list[Sequence[str] | None] = []
+
+    def fake_wrapper(argv):
+        wrapper_calls.append(argv)
+        raise SystemExit(0)
+
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setattr(workdash_module, "exec_zellij_wrapped_workdash", fake_wrapper)
+
+    with pytest.raises(SystemExit):
+        workdash_module.main(["--refresh"])
+    assert wrapper_calls == [["--refresh"]]
+
+
+def test_main_direct_mode_bypasses_zellij_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(
+        workdash_module.os,
+        "execvp",
+        lambda _file, _args: (_ for _ in ()).throw(AssertionError("unexpected exec")),
+    )
+
+    exit_code = workdash_module.main(["--direct"])
+
+    assert exit_code == 1
+    assert "gh CLI is not installed" in capsys.readouterr().err
+
+
+def test_main_print_mode_bypasses_zellij_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exec_called = False
+
+    def fake_execvp(_file: str, _args: list[str]) -> None:
+        nonlocal exec_called
+        exec_called = True
+
+    class FakeBackend:
+        def __init__(self, config=None, **kwargs) -> None:
+            pass
+
+        def load_items(self, progress_callback=None):
+            return [], {}
+
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    monkeypatch.setattr(workdash_module.os, "execvp", fake_execvp)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+
+    assert workdash_module.main(["--print"]) == 0
+    assert exec_called is False
+
+
+def test_main_outside_zellij_reports_missing_zellij(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setattr(launcher_module.shutil, "which", lambda cmd: None)
+
+    exit_code = workdash_module.main([])
+
+    assert exit_code == 1
+    assert "zellij is not installed" in capsys.readouterr().err
 
 
 def test_print_work_items_prefixes_suggested_title_with_marker(

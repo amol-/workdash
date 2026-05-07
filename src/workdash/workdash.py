@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import shlex
 import shutil
 import sys
@@ -14,6 +15,7 @@ from . import __version__
 from .backend import SuggestionMarkers, WorkdashBackend
 from .config import configure, load_config, validate_config
 from .launcher import (
+    exec_zellij_wrapped_workdash,
     launch_agent_context,
     launch_terminal_context,
     launch_vscode_context,
@@ -33,6 +35,7 @@ class CLIOptions:
     print_mode: bool
     refresh: bool
     configure: bool
+    direct: bool
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
@@ -68,12 +71,27 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         action="store_true",
         help="Interactively set up or update the configuration file.",
     )
+    parser.add_argument(
+        "--direct",
+        action="store_true",
+        help="Start directly without wrapping the interactive dashboard in Zellij.",
+    )
     namespace = parser.parse_args(argv) if argv is not None else parser.parse_args()
     return CLIOptions(
         debug=namespace.debug,
         print_mode=namespace.print_mode,
         refresh=namespace.refresh,
         configure=namespace.configure,
+        direct=namespace.direct,
+    )
+
+
+def _should_wrap_interactive_start(options: CLIOptions) -> bool:
+    return (
+        not options.direct
+        and not options.print_mode
+        and not options.configure
+        and not os.getenv("ZELLIJ")
     )
 
 
@@ -99,6 +117,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     options = _parse_args(argv)
     if options.debug:
         logging.basicConfig(level=logging.DEBUG)
+
+    if _should_wrap_interactive_start(options):
+        try:
+            exec_zellij_wrapped_workdash(argv)
+        except RuntimeError as error:
+            print(f"Error: {error}", file=sys.stderr, flush=True)
+            return 1
 
     if options.configure:
         configure()

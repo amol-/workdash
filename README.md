@@ -11,9 +11,9 @@ analysis, or a full coding session in a dedicated worktree.
 
 ## Platform
 
-Linux and macOS. `workdash` relies on `xdg-open` or `open` and expects a terminal
-emulator from a small hard-coded list (`ptyxis` or `konsole`). It has not been
-tested on Windows.
+Linux and macOS. `workdash` relies on `xdg-open` or `open` and expects `zellij`
+for the interactive dashboard and terminal-backed work actions. It has not
+been tested on Windows.
 
 ## Requirements
 
@@ -24,8 +24,10 @@ tested on Windows.
   repository while loading a specific work source, `workdash` warns, skips that
   inaccessible repository or item, and still loads the others.
 - `xdg-open` or `open` for opening links and rendered analyses in your browser.
-- `zellij` for launching terminal and agent sessions.
-- A supported terminal emulator: `ptyxis` or `konsole`.
+- `zellij` for the interactive dashboard, terminal panes, and agent sessions.
+  When `workdash` starts outside Zellij, it replaces itself with a Zellij
+  process that starts a fresh `workdash-<random>` session and runs the
+  dashboard inside it.
 - Optional, depending on which actions you use from the TUI:
   - `claude` — to analyze or launch a Claude coding session.
   - `codex` — to analyze or launch a ChatGPT Codex session.
@@ -81,6 +83,7 @@ workdash --print       # list items as plain text, no TUI
 workdash --refresh     # force a refresh from GitHub
 workdash --debug       # verbose logging
 workdash --configure   # run the interactive setup wizard
+workdash --direct      # start without the automatic Zellij wrapper
 workdash --version     # print version and exit
 ```
 
