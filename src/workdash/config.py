@@ -11,6 +11,11 @@ from pathlib import Path
 CONFIG_PATH = Path.home() / ".config" / "workdash" / "config.json"
 
 _REQUIRED_FIELDS = ("github_username", "repositories", "workdir")
+_DEFAULT_CLAUDE_ANALYZE = "claude -p"
+_DEFAULT_CLAUDE_LAUNCH = "claude"
+_DEFAULT_CODEX_ANALYZE = "codex exec"
+_DEFAULT_CODEX_LAUNCH = "codex"
+_DEFAULT_WORKDIR = "~/wrk"
 
 
 @dataclass(frozen=True)
@@ -131,6 +136,19 @@ def validate_config(config: WorkdashConfig) -> list[str]:
     return missing
 
 
+def _prompt_with_default(input_fn: Callable[[str], str], label: str, default: str) -> str:
+    response = input_fn(f"{label} [{default}]: ").strip()
+    return response or default
+
+
+def _prompt_required(input_fn: Callable[[str], str], label: str) -> str:
+    while True:
+        response = input_fn(f"{label}: ").strip()
+        if response:
+            return response
+        print(f"{label} is required.")
+
+
 def configure(
     path: Path = CONFIG_PATH,
     *,
@@ -150,45 +168,49 @@ def configure(
     if not claude.analyze or not claude.launch:
         if which_fn("claude"):
             if not claude.analyze:
-                print("Detected 'claude' on PATH, using analyze: claude -p")
+                print(f"Detected 'claude' on PATH, using analyze: {_DEFAULT_CLAUDE_ANALYZE}")
             if not claude.launch:
-                print("Detected 'claude' on PATH, using launch: claude")
+                print(f"Detected 'claude' on PATH, using launch: {_DEFAULT_CLAUDE_LAUNCH}")
             claude = AgentConfig(
-                analyze=claude.analyze or "claude -p",
-                launch=claude.launch or "claude",
+                analyze=claude.analyze or _DEFAULT_CLAUDE_ANALYZE,
+                launch=claude.launch or _DEFAULT_CLAUDE_LAUNCH,
             )
         else:
             claude = AgentConfig(
                 analyze=claude.analyze
-                or input_fn("Claude analyze command (e.g. 'claude -p'): ").strip(),
-                launch=claude.launch or input_fn("Claude launch command (e.g. 'claude'): ").strip(),
+                or _prompt_with_default(
+                    input_fn, "Claude analyze command", _DEFAULT_CLAUDE_ANALYZE
+                ),
+                launch=claude.launch
+                or _prompt_with_default(input_fn, "Claude launch command", _DEFAULT_CLAUDE_LAUNCH),
             )
 
     codex = config.codex
     if not codex.analyze or not codex.launch:
         if which_fn("codex"):
             if not codex.analyze:
-                print("Detected 'codex' on PATH, using analyze: codex exec")
+                print(f"Detected 'codex' on PATH, using analyze: {_DEFAULT_CODEX_ANALYZE}")
             if not codex.launch:
-                print("Detected 'codex' on PATH, using launch: codex")
+                print(f"Detected 'codex' on PATH, using launch: {_DEFAULT_CODEX_LAUNCH}")
             codex = AgentConfig(
-                analyze=codex.analyze or "codex exec",
-                launch=codex.launch or "codex",
+                analyze=codex.analyze or _DEFAULT_CODEX_ANALYZE,
+                launch=codex.launch or _DEFAULT_CODEX_LAUNCH,
             )
         else:
             codex = AgentConfig(
                 analyze=codex.analyze
-                or input_fn("Codex analyze command (e.g. 'codex exec'): ").strip(),
-                launch=codex.launch or input_fn("Codex launch command (e.g. 'codex'): ").strip(),
+                or _prompt_with_default(input_fn, "Codex analyze command", _DEFAULT_CODEX_ANALYZE),
+                launch=codex.launch
+                or _prompt_with_default(input_fn, "Codex launch command", _DEFAULT_CODEX_LAUNCH),
             )
 
     github_username = config.github_username
     if not github_username:
-        github_username = input_fn("GitHub username: ").strip()
+        github_username = _prompt_required(input_fn, "GitHub username")
 
     workdir = config.workdir
     if not workdir:
-        workdir = input_fn("Work directory (e.g. '~/wrk'): ").strip()
+        workdir = _prompt_with_default(input_fn, "Work directory", _DEFAULT_WORKDIR)
 
     repositories = config.repositories
     if not repositories and github_username:

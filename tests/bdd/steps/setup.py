@@ -88,6 +88,20 @@ def _partial_configuration(scenario_state: dict[str, Any], config_path: Path) ->
     scenario_state["prior_config"] = load_config(config_path)
 
 
+@given("the user submits empty answers for defaults and then provides a username")
+def _empty_defaults_then_username(scenario_state: dict[str, Any]) -> None:
+    scenario_state["on_path_tools"] = set()
+    scenario_state["input_responses"] = [
+        "",  # claude analyze default
+        "",  # claude launch default
+        "",  # codex analyze default
+        "",  # codex launch default
+        "",  # username has no default, prompt again
+        "octocat",
+        "",  # workdir default
+    ]
+
+
 def _run_configure_with_fakes(
     scenario_state: dict[str, Any],
     config_path: Path,
@@ -217,3 +231,19 @@ def _preserves_prior_fields(scenario_state: dict[str, Any]) -> None:
     assert written.github_username == prior.github_username
     assert written.claude == prior.claude
     assert written.codex == prior.codex
+
+
+@then("the system writes default values for configurable fields")
+def _writes_default_values(scenario_state: dict[str, Any]) -> None:
+    written = scenario_state["written_config"]
+    assert written.claude.analyze == "claude -p"
+    assert written.claude.launch == "claude"
+    assert written.codex.analyze == "codex exec"
+    assert written.codex.launch == "codex"
+    assert written.workdir == "~/wrk"
+
+
+@then("the system prompts again for the GitHub username")
+def _prompts_again_for_username(scenario_state: dict[str, Any]) -> None:
+    prompts = scenario_state["prompts"]
+    assert sum("GitHub username" in prompt for prompt in prompts) == 2, prompts

@@ -195,6 +195,50 @@ def test_configure_asks_interactively_when_commands_not_on_path(tmp_path):
     assert config.repositories == ("octocat/*",)
 
 
+def test_configure_accepts_defaults_for_empty_optional_responses(tmp_path):
+    config_path = tmp_path / "config.json"
+    inputs = iter(
+        [
+            "",  # claude analyze default
+            "",  # claude launch default
+            "",  # codex analyze default
+            "",  # codex launch default
+            "octocat",
+            "",  # workdir default
+        ]
+    )
+
+    config = configure(
+        config_path,
+        input_fn=lambda prompt: next(inputs),
+        which_fn=lambda cmd: None,
+    )
+
+    assert config.claude.analyze == "claude -p"
+    assert config.claude.launch == "claude"
+    assert config.codex.analyze == "codex exec"
+    assert config.codex.launch == "codex"
+    assert config.github_username == "octocat"
+    assert config.workdir == "~/wrk"
+    assert config.repositories == ("octocat/*",)
+
+
+def test_configure_reprompts_for_required_fields_without_defaults(tmp_path):
+    config_path = tmp_path / "config.json"
+    prompts: list[str] = []
+    inputs = iter(["", "octocat", ""])  # username retry, workdir default
+
+    config = configure(
+        config_path,
+        input_fn=lambda prompt: (prompts.append(prompt), next(inputs))[1],
+        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("claude", "codex") else None,
+    )
+
+    assert config.github_username == "octocat"
+    assert config.workdir == "~/wrk"
+    assert sum("GitHub username" in prompt for prompt in prompts) == 2
+
+
 def test_configure_fills_only_missing_fields(tmp_path):
     config_path = tmp_path / "config.json"
     config_path.write_text(

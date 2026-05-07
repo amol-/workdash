@@ -11,6 +11,8 @@ Feature: First-time configuration
     - Required configuration fields are the GitHub username, at least one repository selector, the work directory, and the analyze and launch commands for each supported coding agent.
     - The wizard only prompts for fields that are currently empty; previously filled fields are left untouched.
     - When a supported coding agent's command-line tool is detected on PATH, the wizard fills in its analyze and launch commands automatically and tells the user what was detected.
+    - When a missing field has a default value, submitting an empty response accepts the default.
+    - When a missing field has no default value, the wizard keeps prompting until the user provides a value.
     - When the repositories list is empty and a GitHub username is known, the wizard defaults the repositories to "<username>/*" and tells the user what was set.
     - The wizard writes the resulting configuration to the configuration file and reports where it was saved.
 
@@ -44,3 +46,11 @@ Feature: First-time configuration
     When the user runs the system with "--configure"
     Then the system only prompts for fields that were empty
     And previously set fields are preserved in the saved configuration
+
+  @id:F-SETUP-CONFIGURE-S005
+  Scenario: Empty answers accept defaults but required fields keep prompting
+    Given the user has no configuration file
+    And the user submits empty answers for defaults and then provides a username
+    When the user runs the system with "--configure"
+    Then the system writes default values for configurable fields
+    And the system prompts again for the GitHub username
