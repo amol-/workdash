@@ -220,39 +220,284 @@
       }
 
       .tour {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-        gap: 1.5rem;
-        margin-top: 1.5rem;
+        display: flex;
+        flex-direction: column;
+        gap: 2.5rem;
+        margin-top: 2rem;
       }
 
-      .tour figure {
+      .workflow {
+        border-top: 1px solid var(--border);
+        padding-top: 2rem;
+      }
+
+      .workflow:first-child {
+        border-top: 0;
+        padding-top: 0;
+      }
+
+      .workflow-header {
+        display: flex;
+        align-items: baseline;
+        gap: 0.8rem;
+        margin-bottom: 1.5rem;
+        flex-wrap: wrap;
+      }
+
+      .workflow-header h3 {
+        font-size: 1.35rem;
         margin: 0;
-        background: var(--bg-elev);
+        letter-spacing: -0.01em;
+      }
+
+      .workflow-header .workflow-lead {
+        color: var(--muted);
+        font-size: 0.95rem;
+        margin: 0;
+      }
+
+      .workflow-steps {
+        display: flex;
+        flex-direction: column;
+        gap: 2rem;
+      }
+
+      .tour-step {
+        display: grid;
+        grid-template-columns: 3fr 2fr;
+        gap: 2rem;
+        align-items: center;
+      }
+
+      .tour-step:nth-child(even) {
+        grid-template-columns: 2fr 3fr;
+      }
+
+      .tour-step:nth-child(even) .tour-shot {
+        order: 2;
+      }
+
+      .tour-shot {
+        margin: 0;
+        background: #0b0f14;
         border: 1px solid var(--border);
         border-radius: 10px;
         overflow: hidden;
+        aspect-ratio: 16 / 10;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: zoom-in;
+        position: relative;
+        transition: border-color 0.15s ease, transform 0.15s ease;
       }
 
-      .tour img {
+      .tour-shot:hover {
+        border-color: var(--accent);
+      }
+
+      .tour-shot img {
         width: 100%;
-        height: auto;
+        height: 100%;
+        object-fit: contain;
         display: block;
-        border-bottom: 1px solid var(--border);
       }
 
-      .tour figcaption {
-        padding: 0.8rem 1rem;
+      .tour-shot.fit-top img {
+        object-fit: cover;
+        object-position: top center;
       }
 
-      .tour figcaption strong {
+      .tour-shots {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
+
+      .tour-shots .tour-shot {
+        aspect-ratio: 16 / 8;
+      }
+
+      .tour-shot::after {
+        content: "⤢";
+        position: absolute;
+        top: 0.5rem;
+        right: 0.6rem;
+        width: 1.8rem;
+        height: 1.8rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.55);
+        color: #fff;
+        font-size: 0.95rem;
+        opacity: 0;
+        transition: opacity 0.15s ease;
+      }
+
+      .tour-shot:hover::after {
+        opacity: 1;
+      }
+
+      .tour-text h4 {
+        font-size: 1.05rem;
+        margin: 0 0 0.75rem;
+        letter-spacing: -0.01em;
+        color: var(--muted);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-size: 0.8rem;
+      }
+
+      .workflow-list {
+        list-style: none;
+        counter-reset: step;
+        margin: 0;
+        padding: 0;
+      }
+
+      .workflow-list li {
+        counter-increment: step;
+        position: relative;
+        padding: 0 0 1rem 2.4rem;
+        color: var(--muted);
+      }
+
+      .workflow-list li:last-child {
+        padding-bottom: 0;
+      }
+
+      .workflow-list li::before {
+        content: counter(step);
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 1.7rem;
+        height: 1.7rem;
+        border-radius: 50%;
+        background: var(--accent-soft);
+        color: var(--accent);
+        border: 1px solid var(--accent);
+        font-weight: 700;
+        font-size: 0.85rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+
+      .workflow-list li strong {
+        color: var(--text);
         display: block;
         margin-bottom: 0.15rem;
+        font-weight: 600;
       }
 
-      .tour figcaption span {
+      .workflow-list li::after {
+        content: "";
+        position: absolute;
+        left: 0.85rem;
+        top: 1.9rem;
+        bottom: 0.2rem;
+        width: 1px;
+        background: var(--border);
+      }
+
+      .workflow-list li:last-child::after {
+        display: none;
+      }
+
+      .benefit-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      .benefit-list li {
+        position: relative;
+        padding: 0 0 0.9rem 1.6rem;
         color: var(--muted);
-        font-size: 0.9rem;
+      }
+
+      .benefit-list li:last-child {
+        padding-bottom: 0;
+      }
+
+      .benefit-list li::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0.55rem;
+        width: 0.5rem;
+        height: 0.5rem;
+        border-radius: 50%;
+        background: var(--accent);
+        opacity: 0.9;
+      }
+
+      .benefit-list li strong {
+        color: var(--text);
+        display: block;
+        margin-bottom: 0.15rem;
+        font-weight: 600;
+      }
+
+      .lightbox {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.88);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem;
+        z-index: 1000;
+        cursor: zoom-out;
+        opacity: 0;
+        transition: opacity 0.15s ease;
+      }
+
+      .lightbox.open {
+        display: flex;
+        opacity: 1;
+      }
+
+      .lightbox img {
+        max-width: 100%;
+        max-height: 100%;
+        border-radius: 8px;
+        box-shadow: 0 20px 80px rgba(0, 0, 0, 0.6);
+      }
+
+      .lightbox-close {
+        position: absolute;
+        top: 1rem;
+        right: 1.25rem;
+        background: none;
+        border: none;
+        color: #fff;
+        font-size: 2rem;
+        line-height: 1;
+        cursor: pointer;
+        padding: 0.25rem 0.5rem;
+        opacity: 0.8;
+      }
+
+      .lightbox-close:hover {
+        opacity: 1;
+      }
+
+      @media (max-width: 720px) {
+        .tour-step,
+        .tour-step:nth-child(even) {
+          grid-template-columns: 1fr;
+          gap: 1rem;
+        }
+
+        .tour-step:nth-child(even) .tour-shot {
+          order: 0;
+        }
       }
 
       .requirements ul {
@@ -322,14 +567,19 @@
 
     <section id="what">
       <div class="container">
-        <h2>What it does</h2>
+        <h2>Your GitHub work, with less friction</h2>
         <p class="lead">
-          <code>workdash</code> pulls together the issues and pull requests
-          that matter to you across your GitHub repositories, merges and
-          deduplicates them, sorts by last update, and marks one entry as the
-          <em>suggested</em> next thing to pick up. From there, one keystroke
-          opens the item in your browser, runs a cached AI analysis, or starts
-          a coding session in a git worktree prepared for that exact item.
+          GitHub tells you what is waiting. Getting from there to an open
+          editor with the right branch, the right context, and a summary of
+          the thing you are about to touch is the part that eats the morning.
+          <code>workdash</code> compresses that into a single keystroke.
+        </p>
+        <p class="lead">
+          It pulls your authored PRs, review requests, assignments, and
+          tracked issues into one list, suggests what to pick up next, and
+          lets you launch an AI analysis or a full coding session in a
+          dedicated git worktree — each keyed to the GitHub item so context
+          never gets lost between sessions.
         </p>
       </div>
     </section>
@@ -378,51 +628,156 @@
 
     <section id="tour">
       <div class="container">
-        <h2>A quick tour</h2>
-        <div class="tour">
-          <figure>
-            <img
-              src="analyze_item.png"
-              alt="analyze dialog letting the user open a cached analysis or run a fresh one with Claude or Codex"
-            />
-            <figcaption>
-              <strong>Analyze dialog</strong>
-              <span>Open the cached analysis, or re-run with Claude or Codex.</span>
-            </figcaption>
-          </figure>
-          <figure>
-            <img
-              src="analysis_result.png"
-              alt="rendered HTML analysis of a work item opened in a browser"
-            />
-            <figcaption>
-              <strong>Analysis result</strong>
-              <span>Cached, rendered as HTML, invalidated automatically on GitHub updates.</span>
-            </figcaption>
-          </figure>
-          <figure>
-            <img
-              src="coding_session.png"
-              alt="coding agent running inside the per-item git worktree, preloaded with issue context"
-            />
-            <figcaption>
-              <strong>Coding session</strong>
-              <span>Dedicated worktree, agent preloaded with the item's context.</span>
-            </figcaption>
-          </figure>
-          <figure>
-            <img
-              src="full_experience.png"
-              alt="workdash TUI next to a running coding session inside a zellij layout"
-            />
-            <figcaption>
-              <strong>Full experience</strong>
-              <span>Triage, analysis, and coding sessions side by side in zellij.</span>
-            </figcaption>
-          </figure>
+        <h2>From inbox to code, in three keystrokes</h2>
+        <p class="lead">
+          <code>workdash</code> collapses the gap between
+          <em>knowing what to work on</em> and <em>actually working on it</em>.
+          Here is what that looks like for the three things you spend most of
+          your GitHub day on. Click any screenshot to zoom in.
+        </p>
+
+        <div class="workflow">
+          <div class="workflow-header">
+            <h3>Review a pull request</h3>
+            <p class="workflow-lead">
+              Skip the "what is this PR even doing?" step and dive into a
+              grounded review.
+            </p>
+          </div>
+          <div class="tour-step">
+            <div class="tour-shots">
+              <figure class="tour-shot" data-full="analyze_item.png">
+                <img
+                  src="analyze_item.png"
+                  alt="analyze dialog offering to open a cached analysis or run a fresh one with Claude or Codex against the selected pull request"
+                />
+              </figure>
+              <figure class="tour-shot fit-top" data-full="analysis_result.png">
+                <img
+                  src="analysis_result.png"
+                  alt="rendered HTML analysis of a pull request opened in a browser"
+                />
+              </figure>
+            </div>
+            <div class="tour-text">
+              <h4>Workflow</h4>
+              <ol class="workflow-list">
+                <li>
+                  <strong>Spot the review requests.</strong>
+                  PRs waiting on your review are surfaced in the same list
+                  as everything else, so they do not get lost in a GitHub
+                  notifications tab.
+                </li>
+                <li>
+                  <strong>Pick an analysis — <code>a</code>.</strong>
+                  The analyze dialog offers the cached result or a fresh
+                  run with Claude or Codex.
+                </li>
+                <li>
+                  <strong>Read the briefing.</strong>
+                  The analysis is rendered as HTML summarising the change,
+                  the intent, and the risky parts. Cached until the PR is
+                  updated, so re-opening is free.
+                </li>
+                <li>
+                  <strong>Open it in context — <code>o</code> or <code>c</code>.</strong>
+                  Jump to GitHub to leave comments, or drop into a worktree
+                  with the PR checked out to actually run the code.
+                </li>
+              </ol>
+            </div>
+          </div>
+        </div>
+
+        <div class="workflow">
+          <div class="workflow-header">
+            <h3>Tackle an issue</h3>
+            <p class="workflow-lead">
+              From a fresh bug report to an agent writing the fix — without
+              leaving the terminal.
+            </p>
+          </div>
+          <div class="tour-step">
+            <figure class="tour-shot" data-full="coding_session.png">
+              <img
+                src="coding_session.png"
+                alt="coding agent running inside the per-item git worktree, preloaded with the issue's context"
+              />
+            </figure>
+            <div class="tour-text">
+              <h4>Workflow</h4>
+              <ol class="workflow-list">
+                <li>
+                  <strong>See what's waiting.</strong>
+                  Authored PRs, review requests, assignments and tracked
+                  issues are merged into one list, sorted by last update,
+                  with a suggested next item highlighted.
+                </li>
+                <li>
+                  <strong>Get a read on it — <code>a</code>.</strong>
+                  Run Claude or Codex against the issue. The analysis is
+                  rendered as HTML and cached so you can revisit it
+                  instantly later.
+                </li>
+                <li>
+                  <strong>Start coding — <code>c</code>.</strong>
+                  A git worktree is prepared for the issue and your agent
+                  launches inside it, already primed with the cached
+                  analysis as context.
+                </li>
+              </ol>
+            </div>
+          </div>
+        </div>
+
+        <div class="workflow">
+          <div class="workflow-header">
+            <h3>Keep up with feedback on your own PRs</h3>
+            <p class="workflow-lead">
+              Notice which of your open PRs actually need attention today,
+              without scrolling through a GitHub notifications list.
+            </p>
+          </div>
+          <div class="tour-step">
+            <figure class="tour-shot" data-full="workdash.png">
+              <img
+                src="workdash.png"
+                alt="workdash TUI showing authored pull requests alongside other work items, with recently-updated entries in bold and the suggested next item marked with an asterisk"
+              />
+            </figure>
+            <div class="tour-text">
+              <h4>Why it helps</h4>
+              <ul class="benefit-list">
+                <li>
+                  <strong>Suggested next item.</strong>
+                  One entry is marked with a <code>*</code>, so you don't
+                  re-decide every time.
+                </li>
+                <li>
+                  <strong>Recent activity in bold.</strong>
+                  Anything touched in the last 24 hours stands out — fresh
+                  review feedback is impossible to miss.
+                </li>
+                <li>
+                  <strong>Sorted by last update.</strong>
+                  PRs with new activity float up; quiet ones drop down.
+                </li>
+                <li>
+                  <strong>Authored, review-requested, assigned — one list.</strong>
+                  No switching between GitHub filters to see the whole
+                  picture.
+                </li>
+              </ul>
+            </div>
+          </div>
         </div>
       </div>
     </section>
+
+    <div class="lightbox" id="lightbox" aria-hidden="true">
+      <button class="lightbox-close" aria-label="Close">&times;</button>
+      <img alt="" />
+    </div>
 
     <section id="install">
       <div class="container">
@@ -476,5 +831,44 @@
         <p>&copy; Alessandro Molina</p>
       </div>
     </footer>
+
+    <script>
+      (function () {
+        var lightbox = document.getElementById("lightbox");
+        var lightboxImg = lightbox.querySelector("img");
+        var closeBtn = lightbox.querySelector(".lightbox-close");
+
+        function open(src, alt) {
+          lightboxImg.src = src;
+          lightboxImg.alt = alt || "";
+          lightbox.classList.add("open");
+          lightbox.setAttribute("aria-hidden", "false");
+          document.body.style.overflow = "hidden";
+        }
+
+        function close() {
+          lightbox.classList.remove("open");
+          lightbox.setAttribute("aria-hidden", "true");
+          lightboxImg.src = "";
+          document.body.style.overflow = "";
+        }
+
+        document.querySelectorAll(".tour-shot").forEach(function (el) {
+          el.addEventListener("click", function () {
+            var full = el.getAttribute("data-full");
+            var img = el.querySelector("img");
+            open(full, img ? img.alt : "");
+          });
+        });
+
+        lightbox.addEventListener("click", function (e) {
+          if (e.target === lightbox || e.target === closeBtn) close();
+        });
+
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape" && lightbox.classList.contains("open")) close();
+        });
+      })();
+    </script>
   </body>
 </html>
