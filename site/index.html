@@ -444,6 +444,18 @@
         font-weight: 600;
       }
 
+      .remote-access {
+        display: grid;
+        grid-template-columns: 2fr 3fr;
+        gap: 2rem;
+        align-items: center;
+        margin-top: 2rem;
+      }
+
+      .remote-access .tour-shot {
+        aspect-ratio: 11 / 12;
+      }
+
       .lightbox {
         position: fixed;
         inset: 0;
@@ -490,7 +502,8 @@
 
       @media (max-width: 720px) {
         .tour-step,
-        .tour-step:nth-child(even) {
+        .tour-step:nth-child(even),
+        .remote-access {
           grid-template-columns: 1fr;
           gap: 1rem;
         }
@@ -769,6 +782,46 @@
                 </li>
               </ul>
             </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="remote">
+      <div class="container">
+        <h2>Access everywhere</h2>
+        <p class="lead">
+          <code>workdash</code> runs where your development machine runs. Attach
+          through <code>zellij</code> remote or plain <code>ssh</code>, then keep
+          the same dashboard, worktrees, cached analyses, and agent launch
+          commands available from a laptop, tablet, or phone.
+        </p>
+        <div class="remote-access">
+          <figure class="tour-shot" data-full="workdash_remote.jpg">
+            <img
+              src="workdash_remote.jpg"
+              alt="workdash running in a zellij terminal session from a mobile device over a remote connection"
+            />
+          </figure>
+          <div class="tour-text">
+            <h4>Remote workflow</h4>
+            <ul class="benefit-list">
+              <li>
+                <strong>Resume the same terminal session.</strong>
+                Use <code>zellij</code> remote to reconnect to the dashboard
+                without recreating tabs, panes, or in-progress coding sessions.
+              </li>
+              <li>
+                <strong>Fallback to ordinary SSH.</strong>
+                When all you have is a shell, start <code>workdash</code> over
+                <code>ssh</code> and keep the full triage loop close at hand.
+              </li>
+              <li>
+                <strong>Keep state on the workstation.</strong>
+                Worktrees, GitHub credentials, caches, and agent tooling stay
+                on the machine that already has your development environment.
+              </li>
+            </ul>
           </div>
         </div>
       </div>
