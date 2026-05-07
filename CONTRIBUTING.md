@@ -12,6 +12,18 @@
 - **Keep changes focused.** One logical change per pull request.
 - **No unrelated cleanup.** Don't mix refactors with feature or bug fix PRs.
 
+## Releases
+
+Releases are cut by pushing a version tag in `N.N.N` format. The tag must match
+the `version` field in `pyproject.toml`.
+
+The release workflow validates the tag, runs lint and tests, builds the wheel
+and source distribution, attaches both artifacts to a generated GitHub Release,
+and publishes the distribution to PyPI through PyPI Trusted Publishing.
+
+PyPI must be configured with a trusted publisher for this repository and the
+`.github/workflows/release.yml` workflow before the first publish can succeed.
+
 ## Reporting bugs
 
 Open an issue at <https://github.com/amol-/workdash/issues> with:
