@@ -7,6 +7,8 @@ Feature: Start the interactive dashboard inside Zellij
 
   Rules:
     - If the user starts the interactive dashboard outside Zellij, the system replaces the current process with Zellij.
+    - Before locating Zellij at startup, the system appends the workdash-local bin directory to PATH so a global Zellij wins when present and the local downloaded binary is a fallback.
+    - If no Zellij binary can be found after extending PATH, startup exits with a clear message telling the user to run the configuration wizard.
     - The replacement Zellij process starts a new `workdash-<random>` session and runs the dashboard with `--direct`.
     - If the user starts the interactive dashboard inside Zellij, the system starts directly.
     - If the user passes `--direct`, the system starts directly even when Zellij is not detected.
@@ -53,3 +55,11 @@ Feature: Start the interactive dashboard inside Zellij
     And the Zellij process disables session resurrection state
     And the dashboard pane closes when the dashboard exits
     And the dashboard command does not install a manual session cleanup trap
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S006
+  Scenario: Missing Zellij binary aborts interactive startup
+    Given the system is not running inside a Zellij session
+    And Zellij is not installed on PATH
+    When the user starts the interactive dashboard
+    Then the system tells the user to run the configuration wizard
+    And the system exits with a non-zero status

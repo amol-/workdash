@@ -89,7 +89,8 @@ def _work_action_opens_current_zellij_session(scenario_state: dict[str, Any]) ->
     repo_path = scenario_state["zellij_routing_repo_path"]
     assert scenario_state["zellij_routing_terminal_calls"]
     assert len(commands) == 1
-    assert commands[0][:6] == ["zellij", "action", "new-pane", "--cwd", repo_path, "--"]
+    assert Path(commands[0][0]).name == "zellij"
+    assert commands[0][1:6] == ["action", "new-pane", "--cwd", repo_path, "--"]
 
 
 @then("the system does not target the shared `workdash` Zellij session")

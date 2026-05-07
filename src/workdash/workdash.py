@@ -118,16 +118,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.debug:
         logging.basicConfig(level=logging.DEBUG)
 
+    if options.configure:
+        configure()
+        return 0
+
     if _should_wrap_interactive_start(options):
         try:
             exec_zellij_wrapped_workdash(argv)
         except RuntimeError as error:
             print(f"Error: {error}", file=sys.stderr, flush=True)
             return 1
-
-    if options.configure:
-        configure()
-        return 0
 
     if shutil.which("gh") is None:
         print(

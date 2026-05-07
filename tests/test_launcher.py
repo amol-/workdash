@@ -142,6 +142,16 @@ def test_open_markdown_uses_open_when_xdg_open_is_unavailable(
     assert captured["command"] == ["open", str(markdown_path.with_suffix(".html"))]
 
 
+def test_workdash_local_bin_is_appended_to_path_without_displacing_global_bins() -> None:
+    existing_path = f"/usr/local/bin{launcher_module.os.pathsep}/usr/bin"
+
+    updated_path = launcher_module._path_with_workdash_local_bin(existing_path)
+
+    assert updated_path.startswith(existing_path)
+    assert updated_path.endswith(str(launcher_module._WORKDASH_LOCAL_BIN))
+    assert launcher_module._path_with_workdash_local_bin(updated_path) == updated_path
+
+
 def test_launch_agent_context_uses_new_zellij_pane_when_in_zellij(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -164,7 +174,7 @@ def test_launch_agent_context_uses_new_zellij_pane_when_in_zellij(
     launch_agent_context("/tmp/repo", "review this change")
 
     assert captured["command"] == [
-        "zellij",
+        "/usr/bin/zellij",
         "action",
         "new-pane",
         "--cwd",
@@ -220,7 +230,7 @@ def test_launch_terminal_context_uses_new_zellij_pane_when_in_zellij(
     launch_terminal_context("/tmp/repo")
 
     assert captured["command"] == [
-        "zellij",
+        "/usr/bin/zellij",
         "action",
         "new-pane",
         "--cwd",
@@ -237,7 +247,7 @@ def test_launch_terminal_context_raises_clear_error_when_zellij_missing(
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setattr(shutil, "which", lambda name: None)
 
-    with pytest.raises(RuntimeError, match="zellij is not installed or not on PATH"):
+    with pytest.raises(RuntimeError, match="zellij is not installed or not configured"):
         launch_terminal_context("/tmp/repo")
 
 
@@ -399,7 +409,7 @@ def test_exec_zellij_wrapped_workdash_reports_missing_zellij(
 ) -> None:
     monkeypatch.setattr(shutil, "which", lambda cmd: None)
 
-    with pytest.raises(RuntimeError, match="zellij is not installed"):
+    with pytest.raises(RuntimeError, match="zellij is not installed or not configured"):
         exec_zellij_wrapped_workdash([])
 
 

@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import json
+import platform
 import shutil
+import stat
+import tarfile
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from io import BytesIO
 from pathlib import Path
 
 CONFIG_PATH = Path.home() / ".config" / "workdash" / "config.json"
+ZELLIJ_INSTALL_PATH = CONFIG_PATH.parent / "bin" / "zellij"
 
 _REQUIRED_FIELDS = ("github_username", "repositories", "workdir")
 _DEFAULT_CLAUDE_ANALYZE = "claude -p"
@@ -149,11 +155,81 @@ def _prompt_required(input_fn: Callable[[str], str], label: str) -> str:
         print(f"{label} is required.")
 
 
+def _zellij_release_target() -> str:
+    machine = platform.machine()
+    if machine == "arm64":
+        arch = "aarch64"
+    elif machine in {"x86_64", "aarch64"}:
+        arch = machine
+    else:
+        raise RuntimeError(f"Unsupported CPU architecture for Zellij: {machine}")
+
+    system_name = platform.system()
+    if system_name == "Linux":
+        system = "unknown-linux-musl"
+    elif system_name == "Darwin":
+        system = "apple-darwin"
+    else:
+        raise RuntimeError(f"Unsupported operating system for Zellij: {system_name}")
+    return f"{arch}-{system}"
+
+
+def _zellij_release_url() -> str:
+    target = _zellij_release_target()
+    return f"https://github.com/zellij-org/zellij/releases/latest/download/zellij-{target}.tar.gz"
+
+
+def install_zellij_binary(
+    destination: Path = ZELLIJ_INSTALL_PATH,
+    *,
+    urlopen_fn: Callable[[str], object] = urllib.request.urlopen,
+) -> str:
+    """Download and install the latest Zellij release binary.
+
+    :param Path destination: Path where the executable should be installed.
+    :param urlopen_fn: Callable used to download the release archive.
+    """
+
+    url = _zellij_release_url()
+    print(f"Downloading Zellij from {url}")
+    try:
+        with urlopen_fn(url) as response:
+            archive_bytes = response.read()
+    except OSError as error:
+        raise RuntimeError(f"Failed to download Zellij: {error}") from error
+
+    try:
+        with tarfile.open(fileobj=BytesIO(archive_bytes), mode="r:gz") as archive:
+            member = next(
+                (
+                    entry
+                    for entry in archive.getmembers()
+                    if Path(entry.name).name == "zellij" and entry.isfile()
+                ),
+                None,
+            )
+            if member is None:
+                raise RuntimeError("Downloaded Zellij archive did not contain a zellij binary.")
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                raise RuntimeError("Failed to extract the Zellij binary from the archive.")
+            binary = extracted.read()
+    except tarfile.TarError as error:
+        raise RuntimeError(f"Failed to extract Zellij archive: {error}") from error
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(binary)
+    current_mode = destination.stat().st_mode
+    destination.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return str(destination)
+
+
 def configure(
     path: Path = CONFIG_PATH,
     *,
     input_fn: Callable[[str], str] = input,
     which_fn: Callable[[str], str | None] = shutil.which,
+    install_zellij_fn: Callable[[], str] | None = None,
 ) -> WorkdashConfig:
     """Interactive configuration that fills in missing fields.
 
@@ -163,6 +239,23 @@ def configure(
     """
 
     config = load_config(path)
+    install_zellij = install_zellij_fn or (
+        lambda: install_zellij_binary(path.parent / "bin" / "zellij")
+    )
+
+    detected_zellij = which_fn("zellij")
+    if detected_zellij:
+        print(f"Detected 'zellij' on PATH: {detected_zellij}")
+    else:
+        print(
+            f"Zellij is not on PATH. Installing a local Zellij binary from {_zellij_release_url()}."
+        )
+        print(
+            "To use a global Zellij instead, install it separately and make sure it appears "
+            "on PATH before ~/.config/workdash/bin."
+        )
+        installed_zellij = install_zellij()
+        print(f"Installed Zellij to: {installed_zellij}")
 
     claude = config.claude
     if not claude.analyze or not claude.launch:

@@ -25,9 +25,11 @@ been tested on Windows.
   inaccessible repository or item, and still loads the others.
 - `xdg-open` or `open` for opening links and rendered analyses in your browser.
 - `zellij` for the interactive dashboard, terminal panes, and agent sessions.
-  When `workdash` starts outside Zellij, it replaces itself with a Zellij
-  process that starts a fresh `workdash-<random>` session and runs the
-  dashboard inside it.
+  The `workdash --configure` wizard detects a `zellij` binary on `PATH`; when
+  none is available, it can install a local copy under `~/.config/workdash/`.
+  When `workdash` starts outside Zellij, it appends `~/.config/workdash/bin`
+  to `PATH`, uses the first `zellij` found, starts a fresh
+  `workdash-<random>` session, and runs the dashboard inside it.
 - Optional, depending on which actions you use from the TUI:
   - `claude` — to analyze or launch a Claude coding session.
   - `codex` — to analyze or launch a ChatGPT Codex session.
@@ -60,13 +62,17 @@ workdash --configure
 The wizard fills in:
 
 - Your GitHub username.
+- Zellij availability. If `zellij` is not on `PATH`, the wizard downloads the
+  latest release binary into the workdash configuration directory.
 - The list of repositories to track (see *Repository selectors* below).
 - A working directory where per-item git worktrees will live.
 - The analyze and launch commands for Claude and Codex (auto-detected when the
   tools are on your `PATH`).
 
 You can edit `~/.config/workdash/config.json` by hand at any time. Re-running
-`--configure` only prompts for fields that are still empty.
+`--configure` only prompts for fields that are still empty, except for Zellij:
+the wizard always checks for a global `zellij` first and downloads a fresh
+local binary when no global binary exists.
 
 ## Usage
 

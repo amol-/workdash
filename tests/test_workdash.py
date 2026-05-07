@@ -1,9 +1,7 @@
-from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import pytest
 
-import workdash.launcher as launcher_module
 import workdash.workdash as workdash_module
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
@@ -143,13 +141,14 @@ def test_main_configure_runs_setup_and_exits(
 def test_main_outside_zellij_replaces_process_with_zellij(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    wrapper_calls: list[Sequence[str] | None] = []
+    wrapper_calls: list[object] = []
 
     def fake_wrapper(argv):
         wrapper_calls.append(argv)
         raise SystemExit(0)
 
     monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "exec_zellij_wrapped_workdash", fake_wrapper)
 
     with pytest.raises(SystemExit):
@@ -163,6 +162,7 @@ def test_main_direct_mode_bypasses_zellij_wrapper(
 ) -> None:
     monkeypatch.delenv("ZELLIJ", raising=False)
     monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(
         workdash_module.os,
         "execvp",
@@ -206,12 +206,14 @@ def test_main_outside_zellij_reports_missing_zellij(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.delenv("ZELLIJ", raising=False)
-    monkeypatch.setattr(launcher_module.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr("workdash.launcher.shutil.which", lambda cmd: None)
 
     exit_code = workdash_module.main([])
 
     assert exit_code == 1
-    assert "zellij is not installed" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "zellij is not installed or not configured" in captured.err
+    assert "--configure" in captured.err
 
 
 def test_print_work_items_prefixes_suggested_title_with_marker(

@@ -23,7 +23,7 @@ def config_path(tmp_path: Path) -> Path:
 def _no_config(scenario_state: dict[str, Any], config_path: Path) -> None:
     assert not config_path.exists()
     scenario_state["config_path"] = config_path
-    scenario_state.setdefault("on_path_tools", set())
+    scenario_state.setdefault("on_path_tools", {"zellij"})
     # Fresh-config scenario (S001): no agents on PATH so every prompt fires.
     scenario_state.setdefault(
         "input_responses",
@@ -83,14 +83,14 @@ def _partial_configuration(scenario_state: dict[str, Any], config_path: Path) ->
         encoding="utf-8",
     )
     scenario_state["config_path"] = config_path
-    scenario_state["on_path_tools"] = set()
+    scenario_state["on_path_tools"] = {"zellij"}
     scenario_state["input_responses"] = ["~/src"]  # only workdir will be prompted
     scenario_state["prior_config"] = load_config(config_path)
 
 
 @given("the user submits empty answers for defaults and then provides a username")
 def _empty_defaults_then_username(scenario_state: dict[str, Any]) -> None:
-    scenario_state["on_path_tools"] = set()
+    scenario_state["on_path_tools"] = {"zellij"}
     scenario_state["input_responses"] = [
         "",  # claude analyze default
         "",  # claude launch default
@@ -100,6 +100,11 @@ def _empty_defaults_then_username(scenario_state: dict[str, Any]) -> None:
         "octocat",
         "",  # workdir default
     ]
+
+
+@given("Zellij is not installed on PATH")
+def _zellij_not_on_path(scenario_state: dict[str, Any]) -> None:
+    scenario_state.setdefault("on_path_tools", set()).discard("zellij")
 
 
 def _run_configure_with_fakes(
@@ -122,11 +127,19 @@ def _run_configure_with_fakes(
     def which_fn(cmd: str) -> str | None:
         return f"/usr/bin/{cmd}" if cmd in on_path_tools else None
 
+    def install_zellij_fn() -> str:
+        return scenario_state.get("installed_zellij_binary", "/tmp/workdash-config/bin/zellij")
+
     # Route configure() through our fakes without altering production code.
     monkeypatch.setattr(
         workdash_module,
         "configure",
-        lambda: config_module.configure(config_path, input_fn=input_fn, which_fn=which_fn),
+        lambda: config_module.configure(
+            config_path,
+            input_fn=input_fn,
+            which_fn=which_fn,
+            install_zellij_fn=install_zellij_fn,
+        ),
     )
     exit_code = workdash_module.main(["--configure"])
     scenario_state["exit_code"] = exit_code
@@ -150,7 +163,7 @@ def _wizard_completes(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Scenario S003: username is provided and repositories list is empty.
-    scenario_state.setdefault("on_path_tools", set())
+    scenario_state.setdefault("on_path_tools", {"zellij"})
     scenario_state["input_responses"] = [
         "my-claude -p",  # claude analyze
         "my-claude",  # claude launch
@@ -196,6 +209,19 @@ def _auto_fill_agent_commands(scenario_state: dict[str, Any]) -> None:
     written = scenario_state["written_config"]
     assert written.claude.analyze == "claude -p"
     assert written.claude.launch == "claude"
+
+
+@then("the system tells the user which Zellij binary was detected")
+def _tells_detected_zellij_binary(scenario_state: dict[str, Any]) -> None:
+    assert "Detected 'zellij' on PATH: /usr/bin/zellij" in scenario_state["output"]
+
+
+@then("the system installs Zellij under the workdash configuration directory")
+def _installs_zellij_under_config_dir(scenario_state: dict[str, Any]) -> None:
+    output = scenario_state["output"]
+    assert "Zellij is not on PATH. Installing a local Zellij binary from" in output
+    assert "To use a global Zellij instead" in output
+    assert "Installed Zellij to: /tmp/workdash-config/bin/zellij" in output
 
 
 @then("the system tells the user which commands were detected")

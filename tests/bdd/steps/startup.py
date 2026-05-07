@@ -20,6 +20,7 @@ def _gh_missing(scenario_state: dict[str, Any]) -> None:
 @given("Zellij is installed on PATH")
 def _zellij_installed(scenario_state: dict[str, Any]) -> None:
     scenario_state["_zellij_installed"] = True
+    scenario_state.setdefault("on_path_tools", set()).add("zellij")
 
 
 @given("the configuration file is missing a required field")

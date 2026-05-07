@@ -18,6 +18,7 @@ from .models import WorkItem, WorkItemKind, WorkItemType
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _BROWSER_OPEN_COMMANDS = ("xdg-open", "open")
+_WORKDASH_LOCAL_BIN = Path.home() / ".config" / "workdash" / "bin"
 
 
 def _load_prompt_template(name: str) -> str:
@@ -104,13 +105,33 @@ def _run_launch_command(command: list[str], *, context: str) -> None:
         raise RuntimeError(f"{context}: {message}") from error
 
 
-def exec_zellij_wrapped_workdash(argv: Sequence[str] | None) -> NoReturn:
+def _path_with_workdash_local_bin(env_path: str | None = None) -> str:
+    path = env_path if env_path is not None else os.environ.get("PATH", "")
+    local_bin = str(_WORKDASH_LOCAL_BIN)
+    if not path:
+        return local_bin
+    parts = path.split(os.pathsep)
+    if local_bin in parts:
+        return path
+    return os.pathsep.join([path, local_bin])
+
+
+def _inject_workdash_local_bin_into_path() -> None:
+    os.environ["PATH"] = _path_with_workdash_local_bin()
+
+
+def _resolve_zellij_binary() -> str:
+    _inject_workdash_local_bin_into_path()
     zellij = shutil.which("zellij")
     if zellij is None:
         raise RuntimeError(
-            "zellij is not installed or not on PATH. "
-            "Install it from https://zellij.dev/ or run 'workdash --direct'."
+            "zellij is not installed or not configured. Run 'workdash --configure' to set it up."
         )
+    return zellij
+
+
+def exec_zellij_wrapped_workdash(argv: Sequence[str] | None) -> NoReturn:
+    zellij = _resolve_zellij_binary()
 
     original_args = list(argv) if argv is not None else sys.argv[1:]
     session_name = f"workdash-{secrets.token_hex(4)}"
@@ -171,18 +192,20 @@ def _write_zellij_startup_layout(workdash_command: Sequence[str], *, session_nam
         return layout_file.name
 
 
-def _launch_zellij_command(repo_path: str, command: list[str], *, context: str) -> None:
+def _launch_zellij_command(
+    repo_path: str,
+    command: list[str],
+    *,
+    context: str,
+) -> None:
     if not os.getenv("ZELLIJ"):
         raise RuntimeError(
             f"{context}: terminal-backed work actions require an active Zellij session. "
             "Start workdash normally, or run it inside Zellij."
         )
-    if shutil.which("zellij") is None:
-        raise RuntimeError(
-            "zellij is not installed or not on PATH. Download it from https://zellij.dev"
-        )
+    zellij = _resolve_zellij_binary()
     _run_launch_command(
-        ["zellij", "action", "new-pane", "--cwd", repo_path, "--", *command],
+        [zellij, "action", "new-pane", "--cwd", repo_path, "--", *command],
         context=context,
     )
 
