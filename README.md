@@ -18,23 +18,13 @@ been tested on Windows.
 ## Requirements
 
 - Python `>=3.12`.
-- [`gh`](https://cli.github.com/) authenticated (`gh auth status` must
-  succeed). The `workdash --configure` wizard detects a `gh` binary on `PATH`;
-  when none is available, it installs a local copy under
-  `~/.config/workdash/` from <https://github.com/cli/cli/releases/latest>.
-  The authenticated account should have access to the repositories you want to
-  track; if GitHub requires additional repository authorization for a repository
-  while loading a specific work source, `workdash` warns, skips that inaccessible
-  repository or item, and still loads the others.
+- Authenticated [`gh`](https://cli.github.com/) for GitHub access.
+  `workdash --configure` installs a local copy when `gh` is not available.
 - `xdg-open` or `open` for opening links and rendered analyses in your browser.
 - `zellij` for the interactive dashboard, terminal panes, and agent sessions.
-  The `workdash --configure` wizard detects a `zellij` binary on `PATH`; when
-  none is available, it can install a local copy under `~/.config/workdash/`.
-  When `workdash` starts outside Zellij, it prefers your global `zellij` when
-  one is available, otherwise uses the local configured copy, starts a fresh
-  `workdash-<random>` session, and runs the dashboard inside it.
-- On every startup, `workdash` prefers your global GitHub CLI when one is
-  available, otherwise uses the local configured copy.
+  `workdash --configure` installs a local copy when `zellij` is not available.
+- Global `gh` and `zellij` binaries are preferred; configured local copies are
+  used as fallbacks.
 - Optional, depending on which actions you use from the TUI:
   - `claude` — to analyze or launch a Claude coding session.
   - `codex` — to analyze or launch a ChatGPT Codex session.
