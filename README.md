@@ -1,13 +1,11 @@
 # workdash
 
-Text-based GitHub work triage dashboard.
+Text-based GitHub work triage dashboard ( <https://alessandro.molina.fyi/workdash/> )
 
 `workdash` pulls together the issues and pull requests that matter to you across
 your GitHub repositories, suggests what to pick up next, and makes it easy to
 jump into a work item — either for a quick review, a deeper AI-assisted
 analysis, or a full coding session in a dedicated worktree.
-
-Website: <https://alessandro.molina.fyi/workdash/>
 
 ![workdash screenshot](site/workdash.png)
 
