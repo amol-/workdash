@@ -73,7 +73,9 @@ def test_expand_repository_selectors_raises_clear_error_when_gh_fails(
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    with pytest.raises(RuntimeError, match="Failed to list repositories for owner 'testuser' via gh"):
+    with pytest.raises(
+        RuntimeError, match="Failed to list repositories for owner 'testuser' via gh"
+    ):
         expand_repository_selectors(["testuser/*"])
 
 
