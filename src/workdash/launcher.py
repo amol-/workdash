@@ -115,12 +115,7 @@ def exec_zellij_wrapped_workdash(argv: Sequence[str] | None) -> NoReturn:
     original_args = list(argv) if argv is not None else sys.argv[1:]
     session_name = f"workdash-{secrets.token_hex(4)}"
     workdash_command = _build_direct_workdash_command(original_args)
-    wrapped_command = _build_session_scoped_workdash_command(
-        workdash_command,
-        session_name=session_name,
-        zellij=zellij,
-    )
-    layout_path = _write_zellij_startup_layout(wrapped_command, session_name=session_name)
+    layout_path = _write_zellij_startup_layout(workdash_command, session_name=session_name)
     command = [zellij, "--layout", layout_path]
     try:
         os.execvp(zellij, command)
@@ -136,21 +131,6 @@ def _build_direct_workdash_command(original_args: Sequence[str]) -> list[str]:
     ):
         return [sys.executable, "-m", "workdash", "--direct", *original_args]
     return [sys.argv[0] or "workdash", "--direct", *original_args]
-
-
-def _build_session_scoped_workdash_command(
-    workdash_command: Sequence[str],
-    *,
-    session_name: str,
-    zellij: str,
-) -> list[str]:
-    command = shlex.join(workdash_command)
-    zellij_command = shlex.join([zellij, "kill-session", session_name])
-    shell_script = (
-        f"trap '{zellij_command} >/dev/null 2>&1 || true' EXIT; "
-        f"{command}; exit_code=$?; exit $exit_code"
-    )
-    return ["/bin/sh", "-lc", shell_script]
 
 
 def _quote_kdl_string(value: str) -> str:

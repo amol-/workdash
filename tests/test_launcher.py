@@ -301,11 +301,10 @@ def test_exec_zellij_wrapped_workdash_replaces_process_with_layout(
     assert "show_startup_tips false" in layout
     assert "attach_to_session false" in layout
     assert 'tab name="workdash"' in layout
-    assert 'pane command="/bin/sh" close_on_exit=true' in layout
-    assert 'args "-lc"' in layout
-    assert "/usr/local/bin/workdash --direct --refresh" in layout
-    assert "exit_code=$?; exit $exit_code" in layout
-    assert "/usr/bin/zellij kill-session workdash-abc123ef" in layout
+    assert 'pane command="/usr/local/bin/workdash" close_on_exit=true' in layout
+    assert 'args "--direct" "--refresh"' in layout
+    assert "kill-session" not in layout
+    assert "trap " not in layout
     assert "compact-bar" not in layout
 
 
@@ -339,9 +338,9 @@ def test_exec_zellij_wrapped_workdash_preserves_module_invocation(
     with open(exec_calls[0][1][2], encoding="utf-8") as layout_file:
         layout = layout_file.read()
     assert 'tab name="workdash"' in layout
-    assert 'pane command="/bin/sh" close_on_exit=true' in layout
-    assert "/usr/bin/python3.12 -m workdash --direct --refresh" in layout
-    assert "/usr/bin/zellij kill-session workdash-abc123ef" in layout
+    assert 'pane command="/usr/bin/python3.12" close_on_exit=true' in layout
+    assert 'args "-m" "workdash" "--direct" "--refresh"' in layout
+    assert "kill-session" not in layout
 
 
 def test_exec_zellij_wrapped_workdash_preserves_workdash_module_invocation(
@@ -373,7 +372,8 @@ def test_exec_zellij_wrapped_workdash_preserves_workdash_module_invocation(
 
     with open(exec_calls[0][1][2], encoding="utf-8") as layout_file:
         layout = layout_file.read()
-    assert "/usr/bin/python3.12 -m workdash --direct --refresh" in layout
+    assert 'pane command="/usr/bin/python3.12" close_on_exit=true' in layout
+    assert 'args "-m" "workdash" "--direct" "--refresh"' in layout
 
 
 def test_exec_zellij_wrapped_workdash_reports_exec_failure(

@@ -278,10 +278,11 @@ def _dashboard_pane_closes_when_dashboard_exits(scenario_state: dict[str, Any]) 
     assert "close_on_exit=true" in layout
 
 
-@then("the dashboard exit terminates the replacement Zellij session")
-def _dashboard_exit_terminates_replacement_session(scenario_state: dict[str, Any]) -> None:
+@then("the dashboard command does not install a manual session cleanup trap")
+def _dashboard_command_does_not_install_cleanup_trap(scenario_state: dict[str, Any]) -> None:
     layout = _read_startup_layout(scenario_state)
-    assert "/usr/bin/zellij kill-session workdash-abc123ef" in layout
+    assert "kill-session" not in layout
+    assert "trap " not in layout
 
 
 @then("the system starts the dashboard directly")

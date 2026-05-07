@@ -14,7 +14,6 @@ Feature: Start the interactive dashboard inside Zellij
     - The replacement Zellij process uses Zellij's documented force-close behavior to quit the session when its terminal closes.
     - The replacement Zellij process disables session serialization and session metadata so closed generated sessions do not become resurrection targets.
     - When the dashboard command exits, its Zellij pane closes instead of leaving an exited command pane behind.
-    - When the dashboard command exits normally, the replacement Zellij session is terminated.
     - Direct mode is only for bypassing the startup wrapper.
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S001
@@ -53,4 +52,4 @@ Feature: Start the interactive dashboard inside Zellij
     Then the Zellij process is configured to quit on force close
     And the Zellij process disables session resurrection state
     And the dashboard pane closes when the dashboard exits
-    And the dashboard exit terminates the replacement Zellij session
+    And the dashboard command does not install a manual session cleanup trap
