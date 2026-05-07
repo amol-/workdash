@@ -16,6 +16,10 @@ _VALID_CONFIG = WorkdashConfig(
 )
 
 
+def _auth_status_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
+
+
 def test_main_prints_loading_message_before_tui_start(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -45,6 +49,7 @@ def test_main_prints_loading_message_before_tui_start(
             calls["run"] = True
 
     monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
@@ -80,6 +85,7 @@ def test_main_does_not_print_loading_message_in_print_mode(
             raise AssertionError("TUI app should not run in --print mode")
 
     monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
@@ -109,6 +115,7 @@ def test_main_exits_with_error_when_config_incomplete(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: WorkdashConfig())
     monkeypatch.setenv("ZELLIJ", "0")
 
@@ -148,6 +155,8 @@ def test_main_outside_zellij_replaces_process_with_zellij(
         raise SystemExit(0)
 
     monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "exec_zellij_wrapped_workdash", fake_wrapper)
 
@@ -193,6 +202,7 @@ def test_main_print_mode_bypasses_zellij_wrapper(
 
     monkeypatch.delenv("ZELLIJ", raising=False)
     monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module.os, "execvp", fake_execvp)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
@@ -201,11 +211,50 @@ def test_main_print_mode_bypasses_zellij_wrapper(
     assert exec_called is False
 
 
+def test_main_exits_with_error_when_gh_is_not_authenticated(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fake_run(*args, **kwargs):
+        raise workdash_module.subprocess.CalledProcessError(1, ["gh", "auth", "status"])
+
+    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    monkeypatch.setattr(workdash_module.subprocess, "run", fake_run)
+    monkeypatch.setenv("ZELLIJ", "0")
+
+    exit_code = workdash_module.main([])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "gh CLI is not authenticated" in captured.err
+    assert (
+        "Run this command to authenticate the GitHub CLI used by workdash:\n"
+        "  /usr/bin/gh auth login\n"
+    ) in captured.err
+
+
+def test_main_outside_zellij_checks_gh_before_replacing_process(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    wrapper_calls: list[object] = []
+
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(workdash_module, "exec_zellij_wrapped_workdash", wrapper_calls.append)
+
+    exit_code = workdash_module.main([])
+
+    assert exit_code == 1
+    assert wrapper_calls == []
+    assert "gh CLI is not installed" in capsys.readouterr().err
+
+
 def test_main_outside_zellij_reports_missing_zellij(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
     monkeypatch.setattr("workdash.launcher.shutil.which", lambda cmd: None)
 
     exit_code = workdash_module.main([])

@@ -7,6 +7,7 @@ import logging
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from .backend import SuggestionMarkers, WorkdashBackend
 from .config import configure, load_config, validate_config
 from .launcher import (
     exec_zellij_wrapped_workdash,
+    inject_workdash_local_bin_into_path,
     launch_agent_context,
     launch_terminal_context,
     launch_vscode_context,
@@ -111,6 +113,33 @@ def _print_work_items(
         )
 
 
+def _check_gh_preflight() -> str | None:
+    inject_workdash_local_bin_into_path()
+    gh = shutil.which("gh")
+    if gh is None:
+        return (
+            "gh CLI is not installed or not configured. Run 'workdash --configure' "
+            "to install a local copy, or install gh globally from https://cli.github.com/."
+        )
+    try:
+        subprocess.run(
+            [gh, "auth", "status"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError:
+        auth_command = shlex.join([gh, "auth", "login"])
+        return (
+            "gh CLI is not authenticated.\n"
+            "Run this command to authenticate the GitHub CLI used by workdash:\n"
+            f"  {auth_command}"
+        )
+    except OSError as error:
+        return f"failed to run gh auth status: {error}"
+    return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the app entrypoint with backend data orchestration."""
 
@@ -122,20 +151,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         configure()
         return 0
 
+    gh_error = _check_gh_preflight()
+    if gh_error:
+        print(f"Error: {gh_error}", file=sys.stderr, flush=True)
+        return 1
+
     if _should_wrap_interactive_start(options):
         try:
             exec_zellij_wrapped_workdash(argv)
         except RuntimeError as error:
             print(f"Error: {error}", file=sys.stderr, flush=True)
             return 1
-
-    if shutil.which("gh") is None:
-        print(
-            "Error: gh CLI is not installed or not on PATH. Install it from https://cli.github.com/",
-            file=sys.stderr,
-            flush=True,
-        )
-        return 1
 
     config = load_config()
     missing = validate_config(config)

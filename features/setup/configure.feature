@@ -5,7 +5,8 @@ Feature: First-time configuration
   that identifies them on GitHub, lists the repositories to track, points at
   a local work directory, and names the coding agent commands to use. The
   system ships an interactive wizard that fills in whatever is missing and
-  can install a local Zellij binary for the dashboard.
+  can install local Zellij and GitHub CLI binaries when global binaries are
+  not available.
 
   Rules:
     - The configuration lives at ~/.config/workdash/config.json.
@@ -13,9 +14,13 @@ Feature: First-time configuration
     - The wizard only prompts for fields that are currently empty; previously filled fields are left untouched.
     - When a supported coding agent's command-line tool is detected on PATH, the wizard fills in its analyze and launch commands automatically and tells the user what was detected.
     - When Zellij is detected on PATH, the wizard tells the user what was detected.
-    - When Zellij is not detected on PATH, the wizard tells the user it will install a local Zellij binary from the latest release URL and that a global Zellij install can be used instead by putting it on PATH.
+    - When Zellij is not detected on PATH, the wizard tells the user it will install a local Zellij binary from the latest release URL and that a global Zellij install can be used instead when it is on PATH.
     - When Zellij is not detected on PATH, the wizard downloads the latest release binary for the current operating system and architecture under the workdash configuration directory and tells the user where it was installed.
     - Re-running the wizard always checks PATH for Zellij first; if no PATH binary is available, it downloads a fresh local binary even when a previous local binary exists.
+    - When GitHub CLI is detected on PATH, the wizard tells the user what was detected.
+    - When GitHub CLI is not detected on PATH, the wizard tells the user it will install a local GitHub CLI binary from the latest release URL and that a global GitHub CLI install can be used instead when it is on PATH.
+    - When GitHub CLI is not detected on PATH, the wizard downloads the latest release binary for the current operating system and architecture under the workdash configuration directory and tells the user where it was installed.
+    - Re-running the wizard always checks PATH for GitHub CLI first; if no PATH binary is available, it downloads a fresh local binary even when a previous local binary exists.
     - When a missing field has a default value, submitting an empty response accepts the default.
     - When a missing field has no default value, the wizard keeps prompting until the user provides a value.
     - When the repositories list is empty and a GitHub username is known, the wizard defaults the repositories to "<username>/*" and tells the user what was set.
@@ -50,6 +55,13 @@ Feature: First-time configuration
     And Zellij is not installed on PATH
     When the user runs the system with "--configure"
     Then the system installs Zellij under the workdash configuration directory
+
+  @id:F-SETUP-CONFIGURE-S008
+  Scenario: Missing GitHub CLI binary can be installed locally
+    Given the user has no configuration file
+    And GitHub CLI is not installed on PATH
+    When the user runs the system with "--configure"
+    Then the system installs the GitHub CLI under the workdash configuration directory
 
   @id:F-SETUP-CONFIGURE-S003
   Scenario: Missing repositories default to the user's own namespace

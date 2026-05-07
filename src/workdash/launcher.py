@@ -14,11 +14,12 @@ from typing import Any, NoReturn
 
 import markdown
 
+from .config import LOCAL_BIN_PATH
 from .models import WorkItem, WorkItemKind, WorkItemType
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _BROWSER_OPEN_COMMANDS = ("xdg-open", "open")
-_WORKDASH_LOCAL_BIN = Path.home() / ".config" / "workdash" / "bin"
+_WORKDASH_LOCAL_BIN = LOCAL_BIN_PATH
 
 
 def _load_prompt_template(name: str) -> str:
@@ -116,12 +117,14 @@ def _path_with_workdash_local_bin(env_path: str | None = None) -> str:
     return os.pathsep.join([path, local_bin])
 
 
-def _inject_workdash_local_bin_into_path() -> None:
+def inject_workdash_local_bin_into_path() -> None:
+    """Add workdash's local bin directory to PATH without displacing global tools."""
+
     os.environ["PATH"] = _path_with_workdash_local_bin()
 
 
 def _resolve_zellij_binary() -> str:
-    _inject_workdash_local_bin_into_path()
+    inject_workdash_local_bin_into_path()
     zellij = shutil.which("zellij")
     if zellij is None:
         raise RuntimeError(

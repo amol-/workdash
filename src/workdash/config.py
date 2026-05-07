@@ -8,13 +8,18 @@ import shutil
 import stat
 import tarfile
 import urllib.request
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 
 CONFIG_PATH = Path.home() / ".config" / "workdash" / "config.json"
-ZELLIJ_INSTALL_PATH = CONFIG_PATH.parent / "bin" / "zellij"
+LOCAL_BIN_PATH = CONFIG_PATH.parent / "bin"
+ZELLIJ_INSTALL_PATH = LOCAL_BIN_PATH / "zellij"
+GH_INSTALL_PATH = LOCAL_BIN_PATH / "gh"
+GH_LATEST_RELEASE_API_URL = "https://api.github.com/repos/cli/cli/releases/latest"
+GH_LATEST_RELEASE_PAGE_URL = "https://github.com/cli/cli/releases/latest"
 
 _REQUIRED_FIELDS = ("github_username", "repositories", "workdir")
 _DEFAULT_CLAUDE_ANALYZE = "claude -p"
@@ -179,6 +184,22 @@ def _zellij_release_url() -> str:
     return f"https://github.com/zellij-org/zellij/releases/latest/download/zellij-{target}.tar.gz"
 
 
+def _download_bytes(url: str, *, urlopen_fn: Callable[[str], object]) -> bytes:
+    try:
+        with urlopen_fn(url) as response:
+            return response.read()
+    except OSError as error:
+        raise RuntimeError(f"Failed to download {url}: {error}") from error
+
+
+def _write_executable(destination: Path, binary: bytes) -> str:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(binary)
+    current_mode = destination.stat().st_mode
+    destination.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return str(destination)
+
+
 def install_zellij_binary(
     destination: Path = ZELLIJ_INSTALL_PATH,
     *,
@@ -192,11 +213,7 @@ def install_zellij_binary(
 
     url = _zellij_release_url()
     print(f"Downloading Zellij from {url}")
-    try:
-        with urlopen_fn(url) as response:
-            archive_bytes = response.read()
-    except OSError as error:
-        raise RuntimeError(f"Failed to download Zellij: {error}") from error
+    archive_bytes = _download_bytes(url, urlopen_fn=urlopen_fn)
 
     try:
         with tarfile.open(fileobj=BytesIO(archive_bytes), mode="r:gz") as archive:
@@ -217,11 +234,109 @@ def install_zellij_binary(
     except tarfile.TarError as error:
         raise RuntimeError(f"Failed to extract Zellij archive: {error}") from error
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(binary)
-    current_mode = destination.stat().st_mode
-    destination.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    return str(destination)
+    return _write_executable(destination, binary)
+
+
+def _gh_release_asset_patterns() -> tuple[str, str]:
+    machine = platform.machine()
+    if machine in {"x86_64", "amd64"}:
+        arch = "amd64"
+    elif machine in {"arm64", "aarch64"}:
+        arch = "arm64"
+    else:
+        raise RuntimeError(f"Unsupported CPU architecture for GitHub CLI: {machine}")
+
+    system_name = platform.system()
+    if system_name == "Linux":
+        os_name = "linux"
+        extension = ".tar.gz"
+    elif system_name == "Darwin":
+        os_name = "macOS"
+        extension = ".zip"
+    else:
+        raise RuntimeError(f"Unsupported operating system for GitHub CLI: {system_name}")
+    return f"_{os_name}_{arch}{extension}", extension
+
+
+def _gh_release_download_url(
+    *,
+    urlopen_fn: Callable[[str], object] = urllib.request.urlopen,
+) -> str:
+    archive_suffix, _extension = _gh_release_asset_patterns()
+    release_bytes = _download_bytes(GH_LATEST_RELEASE_API_URL, urlopen_fn=urlopen_fn)
+    try:
+        release = json.loads(release_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Failed to parse GitHub CLI release metadata: {error}") from error
+    assets = release.get("assets") if isinstance(release, dict) else None
+    if not isinstance(assets, list):
+        raise RuntimeError("GitHub CLI release metadata did not contain an assets list.")
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        name = asset.get("name")
+        download_url = asset.get("browser_download_url")
+        if (
+            isinstance(name, str)
+            and name.endswith(archive_suffix)
+            and isinstance(download_url, str)
+        ):
+            return download_url
+    raise RuntimeError(
+        f"GitHub CLI latest release did not contain an asset ending with {archive_suffix!r}."
+    )
+
+
+def install_gh_binary(
+    destination: Path = GH_INSTALL_PATH,
+    *,
+    urlopen_fn: Callable[[str], object] = urllib.request.urlopen,
+) -> str:
+    """Download and install the latest GitHub CLI release binary.
+
+    :param Path destination: Path where the executable should be installed.
+    :param urlopen_fn: Callable used to download release metadata and archive bytes.
+    """
+
+    download_url = _gh_release_download_url(urlopen_fn=urlopen_fn)
+    print(f"Downloading GitHub CLI from {download_url}")
+    archive_bytes = _download_bytes(download_url, urlopen_fn=urlopen_fn)
+    _archive_suffix, extension = _gh_release_asset_patterns()
+
+    try:
+        if extension == ".zip":
+            with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
+                member_name = next(
+                    (
+                        name
+                        for name in archive.namelist()
+                        if Path(name).name == "gh" and not name.endswith("/")
+                    ),
+                    None,
+                )
+                if member_name is None:
+                    raise RuntimeError("Downloaded GitHub CLI archive did not contain gh.")
+                binary = archive.read(member_name)
+        else:
+            with tarfile.open(fileobj=BytesIO(archive_bytes), mode="r:gz") as archive:
+                member = next(
+                    (
+                        entry
+                        for entry in archive.getmembers()
+                        if Path(entry.name).name == "gh" and entry.isfile()
+                    ),
+                    None,
+                )
+                if member is None:
+                    raise RuntimeError("Downloaded GitHub CLI archive did not contain gh.")
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise RuntimeError("Failed to extract the GitHub CLI binary.")
+                binary = extracted.read()
+    except (tarfile.TarError, zipfile.BadZipFile) as error:
+        raise RuntimeError(f"Failed to extract GitHub CLI archive: {error}") from error
+
+    return _write_executable(destination, binary)
 
 
 def configure(
@@ -230,6 +345,7 @@ def configure(
     input_fn: Callable[[str], str] = input,
     which_fn: Callable[[str], str | None] = shutil.which,
     install_zellij_fn: Callable[[], str] | None = None,
+    install_gh_fn: Callable[[], str] | None = None,
 ) -> WorkdashConfig:
     """Interactive configuration that fills in missing fields.
 
@@ -242,6 +358,7 @@ def configure(
     install_zellij = install_zellij_fn or (
         lambda: install_zellij_binary(path.parent / "bin" / "zellij")
     )
+    install_gh = install_gh_fn or (lambda: install_gh_binary(path.parent / "bin" / "gh"))
 
     detected_zellij = which_fn("zellij")
     if detected_zellij:
@@ -250,12 +367,23 @@ def configure(
         print(
             f"Zellij is not on PATH. Installing a local Zellij binary from {_zellij_release_url()}."
         )
-        print(
-            "To use a global Zellij instead, install it separately and make sure it appears "
-            "on PATH before ~/.config/workdash/bin."
-        )
+        print("To use a global Zellij instead, install it separately and make sure it is on PATH.")
         installed_zellij = install_zellij()
         print(f"Installed Zellij to: {installed_zellij}")
+
+    detected_gh = which_fn("gh")
+    if detected_gh:
+        print(f"Detected 'gh' on PATH: {detected_gh}")
+    else:
+        print(
+            f"GitHub CLI is not on PATH. Installing a local GitHub CLI binary from "
+            f"{GH_LATEST_RELEASE_PAGE_URL}."
+        )
+        print(
+            "To use a global GitHub CLI instead, install it separately and make sure it is on PATH."
+        )
+        installed_gh = install_gh()
+        print(f"Installed GitHub CLI to: {installed_gh}")
 
     claude = config.claude
     if not claude.analyze or not claude.launch:

@@ -17,6 +17,11 @@ def _gh_missing(scenario_state: dict[str, Any]) -> None:
     scenario_state["_gh_missing"] = True
 
 
+@given("the GitHub CLI is installed but not authenticated")
+def _gh_unauthenticated(scenario_state: dict[str, Any]) -> None:
+    scenario_state["_gh_unauthenticated"] = True
+
+
 @given("Zellij is installed on PATH")
 def _zellij_installed(scenario_state: dict[str, Any]) -> None:
     scenario_state["_zellij_installed"] = True
@@ -43,6 +48,12 @@ def _user_runs_system(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("ZELLIJ", "0")
+    exec_calls: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(
+        launcher_module.os,
+        "execvp",
+        lambda file, args: exec_calls.append((file, args)),
+    )
     if scenario_state.get("_gh_missing"):
         monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: None)
         monkeypatch.setattr(
@@ -56,8 +67,29 @@ def _user_runs_system(
                 workdir="~/wrk",
             ),
         )
+    elif scenario_state.get("_gh_unauthenticated"):
+        monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+        monkeypatch.setattr(
+            workdash_module.subprocess,
+            "run",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                workdash_module.subprocess.CalledProcessError(1, ["gh", "auth", "status"])
+            ),
+        )
+        monkeypatch.setattr(
+            workdash_module,
+            "load_config",
+            lambda: WorkdashConfig(
+                github_username="testuser",
+                claude=AgentConfig(analyze="claude -p", launch="claude"),
+                codex=AgentConfig(analyze="codex exec", launch="codex"),
+                repositories=("owner/repo",),
+                workdir="~/wrk",
+            ),
+        )
     elif "_incomplete_config" in scenario_state:
         monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+        monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
         monkeypatch.setattr(
             workdash_module, "load_config", lambda: scenario_state["_incomplete_config"]
         )
@@ -68,6 +100,7 @@ def _user_runs_system(
     captured = capsys.readouterr()
     scenario_state["exit_code"] = exit_code
     scenario_state["output"] = captured.out + captured.err
+    scenario_state["exec_calls"] = exec_calls
 
 
 def _install_direct_start_fakes(
@@ -139,6 +172,7 @@ def _user_starts_interactive_dashboard(
         raise SystemExit(0)
 
     _install_direct_start_fakes(scenario_state, monkeypatch)
+    monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
     _install_startup_which(
         monkeypatch,
         zellij=bool(scenario_state.get("_zellij_installed")),
@@ -167,7 +201,9 @@ def _user_starts_interactive_dashboard_direct(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _install_direct_start_fakes(scenario_state, monkeypatch)
+    monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
     _install_startup_which(monkeypatch, zellij=False)
+    monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         workdash_module.os,
         "execvp",
@@ -197,6 +233,7 @@ def _user_starts_print_mode(
             return [], {}
 
     _install_startup_which(monkeypatch, zellij=False)
+    monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         workdash_module,
         "load_config",
@@ -229,6 +266,15 @@ def _user_starts_print_mode(
 @then("the system reports that the GitHub CLI is required")
 def _reports_gh_required(scenario_state: dict[str, Any]) -> None:
     assert "gh CLI" in scenario_state["output"]
+
+
+@then("the system tells the user to authenticate GitHub CLI")
+def _reports_gh_auth_required(scenario_state: dict[str, Any]) -> None:
+    assert "gh CLI is not authenticated" in scenario_state["output"]
+    assert (
+        "Run this command to authenticate the GitHub CLI used by workdash:\n"
+        "  /usr/bin/gh auth login\n"
+    ) in scenario_state["output"]
 
 
 @then("the system replaces itself with a Zellij process")

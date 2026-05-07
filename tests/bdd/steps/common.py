@@ -240,6 +240,8 @@ def install_valid_env(monkeypatch: pytest.MonkeyPatch, *, which_succeeds: bool =
         "which",
         lambda cmd: "/usr/bin/gh" if which_succeeds and cmd == "gh" else None,
     )
+    if which_succeeds:
+        monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
 
 
 def mock_backend(monkeypatch: pytest.MonkeyPatch, *, items: list[WorkItem]) -> None:

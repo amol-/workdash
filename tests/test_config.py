@@ -1,5 +1,6 @@
 import json
 import tarfile
+import zipfile
 from io import BytesIO
 
 import pytest
@@ -8,6 +9,7 @@ from workdash.config import (
     AgentConfig,
     WorkdashConfig,
     configure,
+    install_gh_binary,
     install_zellij_binary,
     load_config,
     save_config,
@@ -153,7 +155,9 @@ def test_configure_fresh_auto_detects_and_asks_username(tmp_path, capsys):
     config = configure(
         config_path,
         input_fn=lambda prompt: next(inputs),
-        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "claude", "codex") else None,
+        which_fn=lambda cmd: (
+            f"/usr/bin/{cmd}" if cmd in ("zellij", "gh", "claude", "codex") else None
+        ),
     )
 
     assert config.github_username == "octocat"
@@ -186,7 +190,7 @@ def test_configure_asks_interactively_when_commands_not_on_path(tmp_path):
     config = configure(
         config_path,
         input_fn=lambda prompt: next(inputs),
-        which_fn=lambda cmd: "/usr/local/bin/zellij" if cmd == "zellij" else None,
+        which_fn=lambda cmd: f"/usr/local/bin/{cmd}" if cmd in ("zellij", "gh") else None,
     )
     assert config.claude.analyze == "my-claude -p"
     assert config.claude.launch == "my-claude"
@@ -213,7 +217,7 @@ def test_configure_accepts_defaults_for_empty_optional_responses(tmp_path):
     config = configure(
         config_path,
         input_fn=lambda prompt: next(inputs),
-        which_fn=lambda cmd: "/usr/bin/zellij" if cmd == "zellij" else None,
+        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "gh") else None,
     )
     assert config.claude.analyze == "claude -p"
     assert config.claude.launch == "claude"
@@ -232,7 +236,9 @@ def test_configure_reprompts_for_required_fields_without_defaults(tmp_path):
     config = configure(
         config_path,
         input_fn=lambda prompt: (prompts.append(prompt), next(inputs))[1],
-        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "claude", "codex") else None,
+        which_fn=lambda cmd: (
+            f"/usr/bin/{cmd}" if cmd in ("zellij", "gh", "claude", "codex") else None
+        ),
     )
 
     assert config.github_username == "octocat"
@@ -265,7 +271,7 @@ def test_configure_fills_only_missing_fields(tmp_path):
     config = configure(
         config_path,
         input_fn=lambda prompt: next(inputs),
-        which_fn=lambda cmd: "/opt/homebrew/bin/zellij" if cmd == "zellij" else None,
+        which_fn=lambda cmd: f"/opt/homebrew/bin/{cmd}" if cmd in ("zellij", "gh") else None,
     )
     assert config.github_username == "existing-user"
     assert config.claude.analyze == "existing-claude-analyze"
@@ -296,7 +302,7 @@ def test_configure_preserves_existing_repositories(tmp_path):
     config = configure(
         config_path,
         input_fn=lambda prompt: (_ for _ in ()).throw(AssertionError("should not prompt")),
-        which_fn=lambda cmd: "/usr/bin/zellij" if cmd == "zellij" else None,
+        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "gh") else None,
     )
 
     assert config.repositories == ("specific/repo",)
@@ -324,7 +330,7 @@ def test_configure_installs_zellij_when_not_on_path(tmp_path, capsys):
     configure(
         config_path,
         input_fn=lambda prompt: next(inputs),
-        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("claude", "codex") else None,
+        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("gh", "claude", "codex") else None,
         install_zellij_fn=fake_install,
     )
 
@@ -364,6 +370,74 @@ def test_configure_redownloads_zellij_when_no_global_binary_exists(tmp_path):
         ),
         which_fn=lambda cmd: None,
         install_zellij_fn=fake_install,
+        install_gh_fn=lambda: "/new/local/gh",
+    )
+    assert install_calls == ["install"]
+    assert config.repositories == ("specific/repo",)
+
+
+def test_configure_installs_gh_when_not_on_path(tmp_path, capsys):
+    config_path = tmp_path / "config.json"
+    inputs = iter(
+        [
+            "",  # claude analyze default
+            "",  # claude launch default
+            "",  # codex analyze default
+            "",  # codex launch default
+            "octocat",
+            "",  # workdir default
+        ]
+    )
+    install_calls: list[str] = []
+
+    def fake_install() -> str:
+        install_calls.append("install")
+        return str(tmp_path / "bin" / "gh")
+
+    configure(
+        config_path,
+        input_fn=lambda prompt: next(inputs),
+        which_fn=lambda cmd: "/usr/bin/zellij" if cmd == "zellij" else None,
+        install_gh_fn=fake_install,
+    )
+
+    assert install_calls == ["install"]
+    output = capsys.readouterr().out
+    assert "GitHub CLI is not on PATH. Installing a local GitHub CLI binary from" in output
+    assert "To use a global GitHub CLI instead" in output
+    assert "Installed GitHub CLI to:" in output
+
+
+def test_configure_redownloads_gh_when_no_global_binary_exists(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "github_username": "octocat",
+                "agents": {
+                    "claude": {"analyze": "claude -p", "launch": "claude"},
+                    "codex": {"analyze": "codex exec", "launch": "codex"},
+                },
+                "repositories": ["specific/repo"],
+                "workdir": "~/src",
+            }
+        ),
+        encoding="utf-8",
+    )
+    install_calls: list[str] = []
+
+    def fake_install() -> str:
+        install_calls.append("install")
+        return "/new/local/gh"
+
+    config = configure(
+        config_path,
+        input_fn=lambda prompt: (_ for _ in ()).throw(
+            AssertionError(f"Unexpected prompt {prompt}")
+        ),
+        which_fn=lambda cmd: None,
+        install_zellij_fn=lambda: "/new/local/zellij",
+        install_gh_fn=fake_install,
     )
     assert install_calls == ["install"]
     assert config.repositories == ("specific/repo",)
@@ -406,4 +480,56 @@ def test_install_zellij_binary_downloads_latest_platform_archive(
     assert urls == [
         "https://github.com/zellij-org/zellij/releases/latest/download/"
         "zellij-aarch64-apple-darwin.tar.gz"
+    ]
+
+
+def test_install_gh_binary_downloads_latest_platform_archive(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    release_payload = json.dumps(
+        {
+            "assets": [
+                {
+                    "name": "gh_2.90.0_macOS_arm64.zip",
+                    "browser_download_url": "https://example.test/gh_2.90.0_macOS_arm64.zip",
+                }
+            ]
+        }
+    ).encode("utf-8")
+    archive_bytes = BytesIO()
+    with zipfile.ZipFile(archive_bytes, mode="w") as archive:
+        archive.writestr("gh_2.90.0_macOS_arm64/bin/gh", b"fake-gh")
+    urls: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _traceback):
+            return None
+
+        def read(self) -> bytes:
+            return self._payload
+
+    def fake_urlopen(url: str):
+        urls.append(url)
+        if url.endswith("/releases/latest"):
+            return FakeResponse(release_payload)
+        return FakeResponse(archive_bytes.getvalue())
+
+    monkeypatch.setattr("workdash.config.platform.machine", lambda: "arm64")
+    monkeypatch.setattr("workdash.config.platform.system", lambda: "Darwin")
+    destination = tmp_path / "config" / "workdash" / "bin" / "gh"
+
+    installed = install_gh_binary(destination, urlopen_fn=fake_urlopen)
+
+    assert installed == str(destination)
+    assert destination.read_bytes() == b"fake-gh"
+    assert destination.stat().st_mode & 0o111
+    assert urls == [
+        "https://api.github.com/repos/cli/cli/releases/latest",
+        "https://example.test/gh_2.90.0_macOS_arm64.zip",
     ]
