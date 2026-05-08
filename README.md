@@ -160,7 +160,8 @@ Canonical product behavior is described in [`features/`](features/).
 
 The `.feature` files are the source of truth for what the software does. They are product specifications first and executable BDD scenarios second.
 
-Implementation progress can be tracked separately, for example in `PROJECT_PLAN.md`, by referencing stable feature and scenario IDs.
+Implementation progress can be tracked separately.
+BDD is the integration point between humans and agents collaborating on the project as Workdash relied hevily on agents during its initial development cycle.
 
 ### BDD-first development (mandatory)
 
