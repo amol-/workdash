@@ -11,6 +11,7 @@ _VALID_CONFIG = WorkdashConfig(
     github_username="testuser",
     claude=AgentConfig(analyze="claude -p", launch="claude"),
     codex=AgentConfig(analyze="codex exec", launch="codex"),
+    pi=AgentConfig(launch="pi --no-tips"),
     repositories=("owner/*",),
     workdir="~/wrk",
 )
@@ -263,6 +264,164 @@ def test_main_outside_zellij_reports_missing_zellij(
     captured = capsys.readouterr()
     assert "zellij is not installed or not configured" in captured.err
     assert "--configure" in captured.err
+
+
+@pytest.mark.parametrize(
+    "tool, expected_tokens",
+    [
+        ("claude", ["claude"]),
+        ("codex", ["codex"]),
+        ("pi", ["pi", "--no-tips"]),
+    ],
+)
+def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
+    monkeypatch: pytest.MonkeyPatch, tool: str, expected_tokens: list[str]
+) -> None:
+    """_launch must hand the right launch tokens to launch_agent_context for each tool.
+
+    The dispatch table inside main()._launch is the only place where the tool
+    string is mapped to the configured launch command, so we capture the
+    closure via a FakeApp and exercise it directly.
+    """
+
+    captured_callback: dict[str, object] = {}
+    agent_calls: list[tuple[str, str, list[str] | None]] = []
+    vscode_calls: list[tuple[str, str]] = []
+
+    class FakeBackend:
+        def __init__(self, config=None, **kwargs) -> None:
+            self.analysis_cache = type(
+                "_C", (), {"build_analysis_path": staticmethod(lambda _i: "/x")}
+            )()
+
+        def load_items(self, progress_callback=None):
+            return [], {}
+
+        def analyze_item(self, _item, tool="codex"):
+            return None
+
+        def include_item_by_url(self, _url, _existing):
+            return None
+
+    class FakeApp:
+        def __init__(self, **kwargs) -> None:
+            captured_callback["launch"] = kwargs["launch_callback"]
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+    monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
+    monkeypatch.setattr(workdash_module, "ensure_worktree", lambda _wd, _item: "/tmp/wt")
+    monkeypatch.setattr(workdash_module, "get_merge_base", lambda _path: None)
+    monkeypatch.setattr(
+        workdash_module,
+        "prepare_launch_agent_prompt",
+        lambda *args, **kwargs: "PROMPT",
+    )
+    monkeypatch.setattr(
+        workdash_module,
+        "launch_agent_context",
+        lambda repo, prompt, agent_command_tokens=None: agent_calls.append(
+            (repo, prompt, agent_command_tokens)
+        ),
+    )
+    monkeypatch.setattr(
+        workdash_module,
+        "launch_vscode_context",
+        lambda repo, prompt: vscode_calls.append((repo, prompt)),
+    )
+    monkeypatch.setenv("ZELLIJ", "0")
+
+    assert workdash_module.main([]) == 0
+
+    item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=1,
+        title="t",
+        created_at=datetime(2026, 2, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 1, tzinfo=UTC),
+        url="https://example.com/1",
+    )
+    captured_callback["launch"](item, tool)
+
+    assert agent_calls == [("/tmp/wt", "PROMPT", expected_tokens)]
+    assert vscode_calls == []
+
+
+def test_main_launch_callback_raises_on_unknown_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_launch must surface an explicit error for unrecognized tool strings.
+
+    A silent fallback to codex would mask wiring bugs in the TUI; the
+    explicit ValueError ensures the failure is visible via the launch
+    error path instead.
+    """
+
+    captured_callback: dict[str, object] = {}
+
+    class FakeBackend:
+        def __init__(self, config=None, **kwargs) -> None:
+            self.analysis_cache = type(
+                "_C", (), {"build_analysis_path": staticmethod(lambda _i: "/x")}
+            )()
+
+        def load_items(self, progress_callback=None):
+            return [], {}
+
+        def analyze_item(self, _item, tool="codex"):
+            return None
+
+        def include_item_by_url(self, _url, _existing):
+            return None
+
+    class FakeApp:
+        def __init__(self, **kwargs) -> None:
+            captured_callback["launch"] = kwargs["launch_callback"]
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+    monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
+    monkeypatch.setattr(workdash_module, "ensure_worktree", lambda _wd, _item: "/tmp/wt")
+    monkeypatch.setattr(workdash_module, "get_merge_base", lambda _path: None)
+    monkeypatch.setattr(
+        workdash_module,
+        "prepare_launch_agent_prompt",
+        lambda *args, **kwargs: "PROMPT",
+    )
+    monkeypatch.setattr(
+        workdash_module,
+        "launch_agent_context",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setenv("ZELLIJ", "0")
+
+    assert workdash_module.main([]) == 0
+
+    item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=1,
+        title="t",
+        created_at=datetime(2026, 2, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 1, tzinfo=UTC),
+        url="https://example.com/1",
+    )
+
+    with pytest.raises(ValueError, match="Unsupported coding agent"):
+        captured_callback["launch"](item, "bogus")
 
 
 def test_print_work_items_prefixes_suggested_title_with_marker(

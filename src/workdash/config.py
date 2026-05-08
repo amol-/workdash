@@ -26,6 +26,7 @@ _DEFAULT_CLAUDE_ANALYZE = "claude -p"
 _DEFAULT_CLAUDE_LAUNCH = "claude"
 _DEFAULT_CODEX_ANALYZE = "codex exec"
 _DEFAULT_CODEX_LAUNCH = "codex"
+_DEFAULT_PI_LAUNCH = "pi"
 _DEFAULT_WORKDIR = "~/wrk"
 
 
@@ -44,6 +45,7 @@ class WorkdashConfig:
     github_username: str = ""
     claude: AgentConfig = field(default_factory=AgentConfig)
     codex: AgentConfig = field(default_factory=AgentConfig)
+    pi: AgentConfig = field(default_factory=AgentConfig)
     repositories: tuple[str, ...] = ()
     workdir: str = ""
 
@@ -56,6 +58,7 @@ def _config_to_json(config: WorkdashConfig) -> str:
                 "agents": {
                     "claude": {"analyze": config.claude.analyze, "launch": config.claude.launch},
                     "codex": {"analyze": config.codex.analyze, "launch": config.codex.launch},
+                    "pi": {"launch": config.pi.launch},
                 },
                 "repositories": list(config.repositories),
                 "workdir": config.workdir,
@@ -97,6 +100,7 @@ def load_config(path: Path = CONFIG_PATH) -> WorkdashConfig:
     agents_raw = raw.get("agents")
     claude_config = AgentConfig()
     codex_config = AgentConfig()
+    pi_config = AgentConfig()
     if isinstance(agents_raw, dict):
         claude_raw = agents_raw.get("claude")
         if isinstance(claude_raw, dict):
@@ -110,10 +114,14 @@ def load_config(path: Path = CONFIG_PATH) -> WorkdashConfig:
                 analyze=codex_raw.get("analyze", ""),
                 launch=codex_raw.get("launch", ""),
             )
+        pi_raw = agents_raw.get("pi")
+        if isinstance(pi_raw, dict):
+            pi_config = AgentConfig(launch=pi_raw.get("launch", ""))
     return WorkdashConfig(
         github_username=raw.get("github_username", ""),
         claude=claude_config,
         codex=codex_config,
+        pi=pi_config,
         repositories=repositories,
         workdir=raw.get("workdir", "") or raw.get("source_directory", ""),
     )
@@ -144,6 +152,8 @@ def validate_config(config: WorkdashConfig) -> list[str]:
         missing.append("agents.codex.analyze")
     if not config.codex.launch:
         missing.append("agents.codex.launch")
+    if not config.pi.launch:
+        missing.append("agents.pi.launch")
     return missing
 
 
@@ -425,6 +435,16 @@ def configure(
                 or _prompt_with_default(input_fn, "Codex launch command", _DEFAULT_CODEX_LAUNCH),
             )
 
+    pi = config.pi
+    if not pi.launch:
+        if which_fn("pi"):
+            print(f"Detected 'pi' on PATH, using launch: {_DEFAULT_PI_LAUNCH}")
+            pi = AgentConfig(launch=_DEFAULT_PI_LAUNCH)
+        else:
+            pi = AgentConfig(
+                launch=_prompt_with_default(input_fn, "pi launch command", _DEFAULT_PI_LAUNCH),
+            )
+
     github_username = config.github_username
     if not github_username:
         github_username = _prompt_required(input_fn, "GitHub username")
@@ -442,6 +462,7 @@ def configure(
         github_username=github_username,
         claude=claude,
         codex=codex,
+        pi=pi,
         repositories=repositories,
         workdir=workdir,
     )

@@ -10,9 +10,9 @@ Feature: First-time configuration
 
   Rules:
     - The configuration lives at ~/.config/workdash/config.json.
-    - Required configuration fields are the GitHub username, at least one repository selector, the work directory, and the analyze and launch commands for each supported coding agent.
+    - Required configuration fields are the GitHub username, at least one repository selector, the work directory, and the command-line commands needed to drive each supported coding agent that requires configuration — the launch command, and the analyze command for agents that support cached analysis.
     - The wizard only prompts for fields that are currently empty; previously filled fields are left untouched.
-    - When a supported coding agent's command-line tool is detected on PATH, the wizard fills in its analyze and launch commands automatically and tells the user what was detected.
+    - When a supported coding agent's command-line tool is detected on PATH, the wizard fills in its commands automatically and tells the user what was detected.
     - When Zellij is detected on PATH, the wizard tells the user what was detected.
     - When Zellij is not detected on PATH, the wizard tells the user it will install a local Zellij binary from the latest release URL and that a global Zellij install can be used instead when it is on PATH.
     - When Zellij is not detected on PATH, the wizard downloads the latest release binary for the current operating system and architecture under the workdash configuration directory and tells the user where it was installed.
@@ -39,7 +39,7 @@ Feature: First-time configuration
     Given the user has no configuration file
     And a supported coding agent's command-line tool is on PATH
     When the user runs the system with "--configure"
-    Then the system fills in that agent's analyze and launch commands automatically
+    Then the system fills in that agent's commands automatically
     And the system tells the user which commands were detected
 
   @id:F-SETUP-CONFIGURE-S006

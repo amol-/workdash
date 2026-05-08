@@ -286,6 +286,7 @@ def test_analyze_item_uses_cache_then_falls_back_to_analyzer_and_saves() -> None
         github_username="testuser",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze="codex exec", launch="codex"),
+        pi=AgentConfig(launch="pi"),
         repositories=("owner/*",),
         workdir="~/src",
     )
@@ -370,6 +371,7 @@ def test_analyze_item_tool_claude_bypasses_cache() -> None:
         github_username="testuser",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze="codex exec", launch="codex"),
+        pi=AgentConfig(launch="pi"),
         repositories=("owner/*",),
         workdir="~/src",
     )

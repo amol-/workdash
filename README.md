@@ -29,6 +29,7 @@ been tested on Windows.
   - `claude` — to analyze or launch a Claude coding session.
   - `codex` — to analyze or launch a ChatGPT Codex session.
   - `code` — to launch a VSCode + Copilot coding session.
+  - `pi` — to launch a pi coding agent session.
 
 ## Installation
 
@@ -122,7 +123,7 @@ The `repositories` list in `config.json` accepts:
   (if any), or run a fresh analysis with Claude or Codex. Fresh analyses are
   cached and rendered as HTML in your browser.
 - `c` — launch a coding session on the selected item. Opens a dialog to pick
-  Claude, Codex, or VSCode Copilot. `workdash` prepares a dedicated git
+  Claude, Codex, VSCode Copilot, or pi. `workdash` prepares a dedicated git
   worktree for the item and starts the chosen tool in it, preloaded with
   context about the issue or PR.
 - `t` — open a terminal in the selected item's worktree (no agent launched).

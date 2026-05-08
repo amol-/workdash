@@ -30,12 +30,13 @@ def _zellij_installed(scenario_state: dict[str, Any]) -> None:
 
 @given("the configuration file is missing a required field")
 def _config_missing_fields(scenario_state: dict[str, Any]) -> None:
-    # Construct a config that passes validation only for claude/codex but
+    # Construct a config that passes validation only for the agents but
     # leaves required fields empty — matches the "missing fields" spec.
     scenario_state["_incomplete_config"] = WorkdashConfig(
         github_username="",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze="codex exec", launch="codex"),
+        pi=AgentConfig(launch="pi"),
         repositories=(),
         workdir="",
     )
@@ -63,6 +64,7 @@ def _user_runs_system(
                 github_username="testuser",
                 claude=AgentConfig(analyze="claude -p", launch="claude"),
                 codex=AgentConfig(analyze="codex exec", launch="codex"),
+                pi=AgentConfig(launch="pi"),
                 repositories=("owner/repo",),
                 workdir="~/wrk",
             ),
@@ -83,6 +85,7 @@ def _user_runs_system(
                 github_username="testuser",
                 claude=AgentConfig(analyze="claude -p", launch="claude"),
                 codex=AgentConfig(analyze="codex exec", launch="codex"),
+                pi=AgentConfig(launch="pi"),
                 repositories=("owner/repo",),
                 workdir="~/wrk",
             ),
@@ -136,6 +139,7 @@ def _install_direct_start_fakes(
             github_username="testuser",
             claude=AgentConfig(analyze="claude -p", launch="claude"),
             codex=AgentConfig(analyze="codex exec", launch="codex"),
+            pi=AgentConfig(launch="pi"),
             repositories=("owner/repo",),
             workdir="~/wrk",
         ),
@@ -241,6 +245,7 @@ def _user_starts_print_mode(
             github_username="testuser",
             claude=AgentConfig(analyze="claude -p", launch="claude"),
             codex=AgentConfig(analyze="codex exec", launch="codex"),
+            pi=AgentConfig(launch="pi"),
             repositories=("owner/repo",),
             workdir="~/wrk",
         ),

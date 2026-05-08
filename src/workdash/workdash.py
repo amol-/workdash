@@ -208,12 +208,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if tool == "vscode":
             launch_vscode_context(repo_path, prompt)
         else:
+            launch_commands = {
+                "claude": config.claude.launch,
+                "codex": config.codex.launch,
+                "pi": config.pi.launch,
+            }
+            if tool not in launch_commands:
+                raise ValueError(f"Unsupported coding agent: {tool!r}")
             launch_agent_context(
                 repo_path,
                 prompt,
-                agent_command_tokens=shlex.split(
-                    config.claude.launch if tool == "claude" else config.codex.launch
-                ),
+                agent_command_tokens=shlex.split(launch_commands[tool]),
             )
 
     app = WorkdashApp(

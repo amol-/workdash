@@ -376,6 +376,7 @@ def _run_generate_fresh(
         github_username="testuser",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze="codex exec", launch="codex"),
+        pi=AgentConfig(launch="pi"),
         repositories=("owner/repo",),
         workdir=str(tmp_path / "wrk"),
     )

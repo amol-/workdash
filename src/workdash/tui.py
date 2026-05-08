@@ -156,7 +156,7 @@ else:
             align: center middle;
             width: 50;
             height: auto;
-            max-height: 10;
+            max-height: 12;
             border: solid $accent;
             background: $surface;
             padding: 1 2;
@@ -169,6 +169,7 @@ else:
             ("c", "launch_claude", "Claude"),
             ("g", "launch_codex", "Codex"),
             ("v", "launch_vscode", "VSCode"),
+            ("p", "launch_pi", "pi"),
             ("escape", "cancel", "Cancel"),
         ]
 
@@ -179,6 +180,7 @@ else:
                 yield Static("(c) Claude", classes="code-line")
                 yield Static("(g) ChatGPT Codex", classes="code-line")
                 yield Static("(v) VSCode Copilot", classes="code-line")
+                yield Static("(p) pi", classes="code-line")
                 yield Static("")
                 yield Static("(Esc) Cancel", classes="code-line")
 
@@ -190,6 +192,9 @@ else:
 
         def action_launch_vscode(self) -> None:
             self.dismiss("vscode")
+
+        def action_launch_pi(self) -> None:
+            self.dismiss("pi")
 
         def action_cancel(self) -> None:
             self.dismiss(None)
@@ -492,9 +497,12 @@ else:
                     self._update_status(f"Worktree setup failed: {error}")
                     self.notify(f"Worktree setup failed: {error}", severity="error", timeout=10)
                     return
-            tool_label = {"claude": "Claude", "codex": "Codex", "vscode": "VSCode"}.get(
-                choice, choice
-            )
+            tool_label = {
+                "claude": "Claude",
+                "codex": "Codex",
+                "vscode": "VSCode",
+                "pi": "pi",
+            }.get(choice, choice)
             try:
                 await self._run_with_busy_screen(
                     message=f"Launching {tool_label}...",

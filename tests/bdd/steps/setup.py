@@ -32,6 +32,7 @@ def _no_config(scenario_state: dict[str, Any], config_path: Path) -> None:
             "claude",  # claude launch
             "codex exec",  # codex analyze
             "codex",  # codex launch
+            "pi",  # pi launch
             "octocat",  # github username
             "~/projects",  # workdir
         ],
@@ -42,10 +43,11 @@ def _no_config(scenario_state: dict[str, Any], config_path: Path) -> None:
 def _agent_on_path(scenario_state: dict[str, Any]) -> None:
     # Expose 'claude' only; codex will be prompted interactively.
     scenario_state.setdefault("on_path_tools", set()).add("claude")
-    # Interactive inputs: codex analyze, codex launch, username, workdir.
+    # Interactive inputs: codex analyze, codex launch, pi launch, username, workdir.
     scenario_state["input_responses"] = [
         "codex exec",
         "codex",
+        "pi",
         "octocat",
         "~/projects",
     ]
@@ -77,6 +79,7 @@ def _partial_configuration(scenario_state: dict[str, Any], config_path: Path) ->
                         "analyze": "existing-codex-analyze",
                         "launch": "existing-codex-launch",
                     },
+                    "pi": {"launch": "existing-pi-launch"},
                 },
             }
         ),
@@ -96,6 +99,7 @@ def _empty_defaults_then_username(scenario_state: dict[str, Any]) -> None:
         "",  # claude launch default
         "",  # codex analyze default
         "",  # codex launch default
+        "",  # pi launch default
         "",  # username has no default, prompt again
         "octocat",
         "",  # workdir default
@@ -178,6 +182,7 @@ def _wizard_completes(
         "my-claude",  # claude launch
         "my-codex",  # codex analyze
         "my-codex",  # codex launch
+        "my-pi",  # pi launch
         scenario_state["provided_username"],
         "~/projects",
     ]
@@ -213,7 +218,7 @@ def _reports_saved_path(scenario_state: dict[str, Any], config_path: Path) -> No
     assert f"Configuration saved to {config_path}" in scenario_state["output"]
 
 
-@then("the system fills in that agent's analyze and launch commands automatically")
+@then("the system fills in that agent's commands automatically")
 def _auto_fill_agent_commands(scenario_state: dict[str, Any]) -> None:
     written = scenario_state["written_config"]
     assert written.claude.analyze == "claude -p"

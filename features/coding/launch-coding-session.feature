@@ -8,7 +8,7 @@ Feature: Launch a coding session
 
   Rules:
     - Pressing "c" in the TUI opens a dialog to pick a supported coding agent.
-    - The supported coding agents are Claude, ChatGPT Codex, and VSCode Copilot.
+    - The supported coding agents are Claude, ChatGPT Codex, VSCode Copilot, and pi.
     - Before launching a session, the system prepares the worktree for the selected work item.
     - The launched coding agent is started inside the work item's worktree.
     - The launched coding agent is preloaded with the work item's GitHub context and, when available, the cached analysis for that item.

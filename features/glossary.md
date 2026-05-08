@@ -22,7 +22,7 @@ Canonical product vocabulary used by the feature files.
 - Analysis: A cached AI-generated summary and recommendation for a work item, viewable as rendered HTML.
 - Analysis cache: The local store of previously generated analyses, keyed so that GitHub updates invalidate stale entries.
 - Coding session: An interactive session with a supported coding agent, launched in the item's worktree and preloaded with work item context.
-- Supported coding agent: One of Claude, ChatGPT Codex, or VSCode Copilot.
+- Supported coding agent: One of Claude, ChatGPT Codex, VSCode Copilot, or pi.
 - Terminal-backed work action: A work action that opens a shell or terminal-hosted coding agent for a work item.
 - Zellij session: A terminal multiplexer session used by the system to host terminal-backed work actions.
 - Workdash Zellij session: A fresh Zellij session with a `workdash-` name prefix that the system creates at interactive startup when the user was not already inside Zellij.

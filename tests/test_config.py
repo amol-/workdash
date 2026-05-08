@@ -40,6 +40,7 @@ def test_load_config_reads_existing_config(tmp_path):
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},
                     "codex": {"analyze": "codex exec", "launch": "codex"},
+                    "pi": {"launch": "pi"},
                 },
                 "repositories": ["owner/repo"],
             }
@@ -54,6 +55,7 @@ def test_load_config_reads_existing_config(tmp_path):
     assert config.claude.launch == "claude"
     assert config.codex.analyze == "codex exec"
     assert config.codex.launch == "codex"
+    assert config.pi.launch == "pi"
     assert config.repositories == ("owner/repo",)
     assert config.workdir == ""
 
@@ -92,6 +94,7 @@ def test_save_config_creates_parent_dirs_and_writes_json(tmp_path):
         github_username="octocat",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze="codex exec", launch="codex"),
+        pi=AgentConfig(launch="pi"),
         repositories=("owner/repo",),
         workdir="~/src",
     )
@@ -104,6 +107,7 @@ def test_save_config_creates_parent_dirs_and_writes_json(tmp_path):
         "agents": {
             "claude": {"analyze": "claude -p", "launch": "claude"},
             "codex": {"analyze": "codex exec", "launch": "codex"},
+            "pi": {"launch": "pi"},
         },
         "repositories": ["owner/repo"],
         "workdir": "~/src",
@@ -115,6 +119,7 @@ def test_validate_config_returns_empty_for_complete_config():
         github_username="octocat",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze="codex exec", launch="codex"),
+        pi=AgentConfig(launch="pi"),
         repositories=("owner/repo",),
         workdir="~/src",
     )
@@ -131,6 +136,7 @@ def test_validate_config_returns_all_missing_fields():
         "agents.claude.launch",
         "agents.codex.analyze",
         "agents.codex.launch",
+        "agents.pi.launch",
     ]
 
 
@@ -145,6 +151,7 @@ def test_validate_config_returns_subset_of_missing_fields():
         "workdir",
         "agents.codex.analyze",
         "agents.codex.launch",
+        "agents.pi.launch",
     ]
 
 
@@ -156,7 +163,7 @@ def test_configure_fresh_auto_detects_and_asks_username(tmp_path, capsys):
         config_path,
         input_fn=lambda prompt: next(inputs),
         which_fn=lambda cmd: (
-            f"/usr/bin/{cmd}" if cmd in ("zellij", "gh", "claude", "codex") else None
+            f"/usr/bin/{cmd}" if cmd in ("zellij", "gh", "claude", "codex", "pi") else None
         ),
     )
 
@@ -171,6 +178,8 @@ def test_configure_fresh_auto_detects_and_asks_username(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "Detected 'claude'" in output
     assert "Detected 'codex'" in output
+    assert "Detected 'pi' on PATH, using launch: pi" in output
+    assert config.pi.launch == "pi"
     assert "octocat/*" in output
 
 
@@ -182,6 +191,7 @@ def test_configure_asks_interactively_when_commands_not_on_path(tmp_path):
             "my-claude",  # claude launch
             "my-codex run",  # codex analyze
             "my-codex",  # codex launch
+            "my-pi",  # pi launch
             "octocat",  # username
             "~/code",  # source_directory
         ]
@@ -196,6 +206,7 @@ def test_configure_asks_interactively_when_commands_not_on_path(tmp_path):
     assert config.claude.launch == "my-claude"
     assert config.codex.analyze == "my-codex run"
     assert config.codex.launch == "my-codex"
+    assert config.pi.launch == "my-pi"
     assert config.workdir == "~/code"
     assert config.github_username == "octocat"
     assert config.repositories == ("octocat/*",)
@@ -209,6 +220,7 @@ def test_configure_accepts_defaults_for_empty_optional_responses(tmp_path):
             "",  # claude launch default
             "",  # codex analyze default
             "",  # codex launch default
+            "",  # pi launch default
             "octocat",
             "",  # workdir default
         ]
@@ -223,6 +235,7 @@ def test_configure_accepts_defaults_for_empty_optional_responses(tmp_path):
     assert config.claude.launch == "claude"
     assert config.codex.analyze == "codex exec"
     assert config.codex.launch == "codex"
+    assert config.pi.launch == "pi"
     assert config.github_username == "octocat"
     assert config.workdir == "~/wrk"
     assert config.repositories == ("octocat/*",)
@@ -237,7 +250,7 @@ def test_configure_reprompts_for_required_fields_without_defaults(tmp_path):
         config_path,
         input_fn=lambda prompt: (prompts.append(prompt), next(inputs))[1],
         which_fn=lambda cmd: (
-            f"/usr/bin/{cmd}" if cmd in ("zellij", "gh", "claude", "codex") else None
+            f"/usr/bin/{cmd}" if cmd in ("zellij", "gh", "claude", "codex", "pi") else None
         ),
     )
 
@@ -261,6 +274,7 @@ def test_configure_fills_only_missing_fields(tmp_path):
                         "analyze": "existing-codex-analyze",
                         "launch": "existing-codex-launch",
                     },
+                    "pi": {"launch": "existing-pi-launch"},
                 },
             }
         ),
@@ -278,6 +292,7 @@ def test_configure_fills_only_missing_fields(tmp_path):
     assert config.claude.launch == "existing-claude-launch"
     assert config.codex.analyze == "existing-codex-analyze"
     assert config.codex.launch == "existing-codex-launch"
+    assert config.pi.launch == "existing-pi-launch"
     assert config.workdir == "~/src"
     assert config.repositories == ("existing-user/*",)
 
@@ -291,6 +306,7 @@ def test_configure_preserves_existing_repositories(tmp_path):
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},
                     "codex": {"analyze": "codex exec", "launch": "codex"},
+                    "pi": {"launch": "pi"},
                 },
                 "repositories": ["specific/repo"],
                 "workdir": "~/src",
@@ -317,6 +333,7 @@ def test_configure_installs_zellij_when_not_on_path(tmp_path, capsys):
             "",  # claude launch default
             "",  # codex analyze default
             "",  # codex launch default
+            "",  # pi launch default
             "octocat",
             "",  # workdir default
         ]
@@ -350,6 +367,7 @@ def test_configure_redownloads_zellij_when_no_global_binary_exists(tmp_path):
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},
                     "codex": {"analyze": "codex exec", "launch": "codex"},
+                    "pi": {"launch": "pi"},
                 },
                 "repositories": ["specific/repo"],
                 "workdir": "~/src",
@@ -384,6 +402,7 @@ def test_configure_installs_gh_when_not_on_path(tmp_path, capsys):
             "",  # claude launch default
             "",  # codex analyze default
             "",  # codex launch default
+            "",  # pi launch default
             "octocat",
             "",  # workdir default
         ]
@@ -417,6 +436,7 @@ def test_configure_redownloads_gh_when_no_global_binary_exists(tmp_path):
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},
                     "codex": {"analyze": "codex exec", "launch": "codex"},
+                    "pi": {"launch": "pi"},
                 },
                 "repositories": ["specific/repo"],
                 "workdir": "~/src",

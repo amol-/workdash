@@ -447,6 +447,7 @@ def _another_tracked_repository_has_open_work(
             github_username="testuser",
             claude=AgentConfig(analyze="claude -p", launch="claude"),
             codex=AgentConfig(analyze="codex exec", launch="codex"),
+            pi=AgentConfig(launch="pi"),
             repositories=(unauthorized_repository, accessible_repository),
             workdir=str(tmp_path / "wrk"),
         )
@@ -561,6 +562,7 @@ def _another_review_requested_pr_has_direct_request(
             github_username="testuser",
             claude=AgentConfig(analyze="claude -p", launch="claude"),
             codex=AgentConfig(analyze="codex exec", launch="codex"),
+            pi=AgentConfig(launch="pi"),
             repositories=("owner/repo",),
             workdir=str(tmp_path / "wrk"),
         )
@@ -1108,6 +1110,7 @@ def _make_backend(
         github_username="testuser",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze="codex exec", launch="codex"),
+        pi=AgentConfig(launch="pi"),
         repositories=("owner/repo",),
         workdir=str(tmp_path / "wrk"),
     )

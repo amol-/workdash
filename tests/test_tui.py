@@ -189,6 +189,12 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
             await pilot.press("v")
             await pilot.pause()
 
+            # Press "c" to open CodeDialog, then "p" to choose pi
+            await pilot.press("c")
+            await pilot.pause()
+            await pilot.press("p")
+            await pilot.pause()
+
             await pilot.press("t")
             await pilot.pause()
 
@@ -196,7 +202,11 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
 
             assert open_calls == [(WorkItemType.PR, 22)]
             assert analyze_calls == [(WorkItemType.PR, 22, "claude")]
-            assert launch_calls == [(WorkItemType.PR, 22, "codex"), (WorkItemType.PR, 22, "vscode")]
+            assert launch_calls == [
+                (WorkItemType.PR, 22, "codex"),
+                (WorkItemType.PR, 22, "vscode"),
+                (WorkItemType.PR, 22, "pi"),
+            ]
             assert terminal_calls == [(WorkItemType.PR, 22)]
             assert [str(c) for c in table.get_row_at(0)] == [
                 "PR",
@@ -325,6 +335,13 @@ def test_workdash_app_footer_shows_success_status_for_actions(
             await pilot.press("v")
             await pilot.pause()
             assert footer.render().plain == "Launched VSCode for pr owner/repo#22."
+
+            # Press "c" to open CodeDialog, then "p" to choose pi
+            await pilot.press("c")
+            await pilot.pause()
+            await pilot.press("p")
+            await pilot.pause()
+            assert footer.render().plain == "Launched pi for pr owner/repo#22."
 
             await pilot.press("t")
             await pilot.pause()
