@@ -171,14 +171,16 @@ def test_launch_agent_context_uses_new_zellij_pane_when_in_zellij(
     )
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    launch_agent_context("/tmp/repo", "review this change")
+    launch_agent_context("/tmp/amol-_repoze.who_52", "review this change")
 
     assert captured["command"] == [
         "/usr/bin/zellij",
         "action",
         "new-pane",
+        "--name",
+        "code_amol-_repoze.who_52",
         "--cwd",
-        "/tmp/repo",
+        "/tmp/amol-_repoze.who_52",
         "--",
         "/bin/bash",
         "-ic",
@@ -227,14 +229,16 @@ def test_launch_terminal_context_uses_new_zellij_pane_when_in_zellij(
     )
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    launch_terminal_context("/tmp/repo")
+    launch_terminal_context("/tmp/amol-_repoze.who_52")
 
     assert captured["command"] == [
         "/usr/bin/zellij",
         "action",
         "new-pane",
+        "--name",
+        "terminal_amol-_repoze.who_52",
         "--cwd",
-        "/tmp/repo",
+        "/tmp/amol-_repoze.who_52",
         "--",
         "/bin/bash",
         "-i",

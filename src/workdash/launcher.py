@@ -239,12 +239,7 @@ def _build_zellij_new_pane_command(
 
 
 def _zellij_pane_name_argument(work_action: str, repo_path: str) -> list[str]:
-    _ = _zellij_pane_name_for_work_action(work_action, repo_path)
-    # TODO(EVO-001): Pass the computed work-action pane name to Zellij.
-    # The probe preserves today's executable command shape. Graduation should
-    # return ["--name", _zellij_pane_name_for_work_action(work_action, repo_path)]
-    # so Zellij titles the new pane as "<action>_<worktree>" before --cwd.
-    return []
+    return ["--name", _zellij_pane_name_for_work_action(work_action, repo_path)]
 
 
 def _zellij_pane_name_for_work_action(work_action: str, repo_path: str) -> str:
