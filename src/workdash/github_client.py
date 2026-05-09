@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TypedDict
+from typing import TypedDict, cast
 from urllib.parse import urlsplit
 
 from .models import WorkItem, WorkItemKind, WorkItemType
@@ -842,104 +842,74 @@ class GitHubClient:
                         "Failed to parse gh recent tracked item JSON for repository batch "
                         f"{payload_repositories!r}: {error.msg}"
                     ) from error
-                if not isinstance(payload, list):
-                    raise RuntimeError(
-                        "Invalid gh recent tracked item payload for repository batch "
-                        f"{payload_repositories!r}: expected a JSON array."
-                    )
 
-                # TODO(EVO-011): recent tracked item payload validation is repetitive;
-                # consider a structured parser/helper that preserves these precise
-                # error messages while reducing the long sequence of type checks.
-                for index, entry in enumerate(payload):
-                    if not isinstance(entry, dict):
-                        raise RuntimeError(
-                            "Invalid gh recent tracked item payload for repository batch "
-                            f"{payload_repositories!r}: entry {index} is not an object."
-                        )
-                    record_id = entry.get("id")
-                    if not isinstance(record_id, (str, int)):
-                        raise RuntimeError(
-                            "Invalid gh recent tracked item payload for repository batch "
-                            f"{payload_repositories!r}: entry {index} has missing or invalid id."
-                        )
-                    number = entry.get("number")
-                    if not isinstance(number, int):
-                        raise RuntimeError(
-                            "Invalid gh recent tracked item payload for repository batch "
-                            f"{payload_repositories!r}: entry {index} has missing or invalid number."
-                        )
-                    title = entry.get("title")
-                    if not isinstance(title, str):
-                        raise RuntimeError(
-                            "Invalid gh recent tracked item payload for repository batch "
-                            f"{payload_repositories!r}: entry {index} has missing or invalid title."
-                        )
-                    url = entry.get("url")
-                    if not isinstance(url, str):
-                        raise RuntimeError(
-                            "Invalid gh recent tracked item payload for repository batch "
-                            f"{payload_repositories!r}: entry {index} has missing or invalid url."
-                        )
-                    created_at = entry.get("createdAt")
-                    if not isinstance(created_at, str):
-                        raise RuntimeError(
-                            "Invalid gh recent tracked item payload for repository batch "
-                            f"{payload_repositories!r}: entry {index} has missing or invalid createdAt."
-                        )
-                    updated_at = entry.get("updatedAt")
-                    if not isinstance(updated_at, str):
-                        raise RuntimeError(
-                            "Invalid gh recent tracked item payload for repository batch "
-                            f"{payload_repositories!r}: entry {index} has missing or invalid updatedAt."
-                        )
-                    state = entry.get("state")
-                    if not isinstance(state, str):
-                        raise RuntimeError(
-                            "Invalid gh recent tracked item payload for repository batch "
-                            f"{payload_repositories!r}: entry {index} has missing or invalid state."
-                        )
-                    is_pull_request = entry.get("isPullRequest")
-                    if not isinstance(is_pull_request, bool):
-                        raise RuntimeError(
-                            "Invalid gh recent tracked item payload for repository batch "
-                            f"{payload_repositories!r}: entry {index} has missing or invalid isPullRequest."
-                        )
-                    repository = entry.get("repository")
-                    if not isinstance(repository, dict):
-                        raise RuntimeError(
-                            "Invalid gh recent tracked item payload for repository batch "
-                            f"{payload_repositories!r}: entry {index} has missing or invalid repository."
-                        )
-                    repository_name_with_owner = repository.get("nameWithOwner")
-                    if (
-                        not isinstance(repository_name_with_owner, str)
-                        or not repository_name_with_owner
-                    ):
-                        raise RuntimeError(
-                            "Invalid gh recent tracked item payload for repository batch "
-                            f"{payload_repositories!r}: entry {index} has missing or invalid repository.nameWithOwner."
-                        )
-                    if state.upper() != "OPEN":
-                        continue
-                    dedupe_key = (repository_name_with_owner, number, is_pull_request)
+                for item in self._parse_recent_tracked_item_payload(
+                    payload,
+                    repositories=payload_repositories,
+                ):
+                    dedupe_key = (item["repo"], item["number"], item["is_pull_request"])
                     if dedupe_key in seen_keys:
                         continue
                     seen_keys.add(dedupe_key)
-                    items.append(
-                        RecentTrackedItem(
-                            id=record_id,
-                            repo=repository_name_with_owner,
-                            number=number,
-                            title=title,
-                            url=url,
-                            created_at=created_at,
-                            updated_at=updated_at,
-                            is_pull_request=is_pull_request,
-                        )
-                    )
+                    items.append(item)
             report_progress(
                 f"Processed batch {batch_number}/{batch_count}; accumulated {len(items)} unique item(s)."
+            )
+        return items
+
+    @staticmethod
+    def _parse_recent_tracked_item_payload(
+        payload: object,
+        *,
+        repositories: list[str],
+    ) -> list[RecentTrackedItem]:
+        context = f"Invalid gh recent tracked item payload for repository batch {repositories!r}"
+        if not isinstance(payload, list):
+            raise RuntimeError(f"{context}: expected a JSON array.")
+
+        required_fields = (
+            ("id", (str, int)),
+            ("number", (int,)),
+            ("title", (str,)),
+            ("url", (str,)),
+            ("createdAt", (str,)),
+            ("updatedAt", (str,)),
+            ("state", (str,)),
+            ("isPullRequest", (bool,)),
+        )
+        items: list[RecentTrackedItem] = []
+        for index, entry in enumerate(payload):
+            if not isinstance(entry, dict):
+                raise RuntimeError(f"{context}: entry {index} is not an object.")
+
+            values: dict[str, object] = {}
+            for key, expected_types in required_fields:
+                value = entry.get(key)
+                if not isinstance(value, expected_types):
+                    raise RuntimeError(f"{context}: entry {index} has missing or invalid {key}.")
+                values[key] = value
+
+            repository = entry.get("repository")
+            if not isinstance(repository, dict):
+                raise RuntimeError(f"{context}: entry {index} has missing or invalid repository.")
+            repository_name_with_owner = repository.get("nameWithOwner")
+            if not isinstance(repository_name_with_owner, str) or not repository_name_with_owner:
+                raise RuntimeError(
+                    f"{context}: entry {index} has missing or invalid repository.nameWithOwner."
+                )
+            if cast(str, values["state"]).upper() != "OPEN":
+                continue
+            items.append(
+                RecentTrackedItem(
+                    id=cast(str | int, values["id"]),
+                    repo=repository_name_with_owner,
+                    number=cast(int, values["number"]),
+                    title=cast(str, values["title"]),
+                    url=cast(str, values["url"]),
+                    created_at=cast(str, values["createdAt"]),
+                    updated_at=cast(str, values["updatedAt"]),
+                    is_pull_request=cast(bool, values["isPullRequest"]),
+                )
             )
         return items
 

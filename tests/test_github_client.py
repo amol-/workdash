@@ -686,6 +686,63 @@ def test_list_recent_tracked_items_returns_issue_and_pr_results(
     ]
 
 
+def test_list_recent_tracked_items_deduplicates_by_repo_number_and_item_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "id": "ISSUE-1",
+                        "number": 1,
+                        "title": "first issue",
+                        "url": "https://example.com/issues/1",
+                        "createdAt": "2026-02-20T00:00:00Z",
+                        "updatedAt": "2026-02-21T00:00:00Z",
+                        "state": "OPEN",
+                        "isPullRequest": False,
+                        "repository": {"nameWithOwner": "owner/repo"},
+                    },
+                    {
+                        "id": "ISSUE-1-DUPLICATE",
+                        "number": 1,
+                        "title": "duplicate issue",
+                        "url": "https://example.com/issues/1-duplicate",
+                        "createdAt": "2026-02-22T00:00:00Z",
+                        "updatedAt": "2026-02-23T00:00:00Z",
+                        "state": "OPEN",
+                        "isPullRequest": False,
+                        "repository": {"nameWithOwner": "owner/repo"},
+                    },
+                    {
+                        "id": "PR-1",
+                        "number": 1,
+                        "title": "same-number pr",
+                        "url": "https://example.com/pull/1",
+                        "createdAt": "2026-02-24T00:00:00Z",
+                        "updatedAt": "2026-02-25T00:00:00Z",
+                        "state": "OPEN",
+                        "isPullRequest": True,
+                        "repository": {"nameWithOwner": "owner/repo"},
+                    },
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = GitHubClient().list_recent_tracked_items(["owner/repo"])
+
+    assert [(item["id"], item["number"], item["is_pull_request"]) for item in result] == [
+        ("ISSUE-1", 1, False),
+        ("PR-1", 1, True),
+    ]
+
+
 def test_list_recent_tracked_items_raises_clear_error_when_gh_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
