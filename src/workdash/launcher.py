@@ -200,6 +200,7 @@ def _launch_zellij_command(
     command: list[str],
     *,
     context: str,
+    work_action: str,
 ) -> None:
     if not os.getenv("ZELLIJ"):
         raise RuntimeError(
@@ -208,9 +209,46 @@ def _launch_zellij_command(
         )
     zellij = _resolve_zellij_binary()
     _run_launch_command(
-        [zellij, "action", "new-pane", "--cwd", repo_path, "--", *command],
+        _build_zellij_new_pane_command(
+            zellij,
+            repo_path,
+            command,
+            work_action=work_action,
+        ),
         context=context,
     )
+
+
+def _build_zellij_new_pane_command(
+    zellij: str,
+    repo_path: str,
+    command: list[str],
+    *,
+    work_action: str,
+) -> list[str]:
+    return [
+        zellij,
+        "action",
+        "new-pane",
+        *_zellij_pane_name_argument(work_action, repo_path),
+        "--cwd",
+        repo_path,
+        "--",
+        *command,
+    ]
+
+
+def _zellij_pane_name_argument(work_action: str, repo_path: str) -> list[str]:
+    _ = _zellij_pane_name_for_work_action(work_action, repo_path)
+    # TODO(EVO-001): Pass the computed work-action pane name to Zellij.
+    # The probe preserves today's executable command shape. Graduation should
+    # return ["--name", _zellij_pane_name_for_work_action(work_action, repo_path)]
+    # so Zellij titles the new pane as "<action>_<worktree>" before --cwd.
+    return []
+
+
+def _zellij_pane_name_for_work_action(work_action: str, repo_path: str) -> str:
+    return f"{work_action}_{Path(repo_path).name}"
 
 
 def _run_gh_context_command(*, item: WorkItem, command: list[str]) -> dict[str, Any]:
@@ -371,6 +409,7 @@ def launch_agent_context(
         repo_path,
         agent_command,
         context="Failed to launch coding agent in zellij",
+        work_action="code",
     )
 
 
@@ -401,4 +440,5 @@ def launch_terminal_context(repo_path: str) -> None:
         repo_path,
         shell_command,
         context="Failed to launch terminal in zellij",
+        work_action="terminal",
     )

@@ -16,6 +16,11 @@ from workdash.models import WorkItem
 
 from .common import make_work_item, run_app
 
+# TODO(EVO-002): Bind the Zellij pane-title BDD scenario through public launch paths.
+# Add step definitions for F-TERMINAL-PANE-TITLE-S001 that drive both the code
+# and terminal actions, capture the zellij new-pane command, and prove the
+# command includes --name "<action>_<worktree>" without testing private helpers.
+
 
 @given("the dashboard was started with `--direct`")
 def _dashboard_started_direct(scenario_state: dict[str, Any]) -> None:
