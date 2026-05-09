@@ -8,18 +8,70 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pytest_bdd import given, then, when
+from pytest_bdd import given, parsers, then, when
 from textual.widgets import Static
 
-from workdash.launcher import launch_terminal_context
+from workdash.launcher import launch_agent_context, launch_terminal_context
 from workdash.models import WorkItem
 
 from .common import make_work_item, run_app
 
-# TODO(EVO-002): Bind the Zellij pane-title BDD scenario through public launch paths.
-# Add step definitions for F-TERMINAL-PANE-TITLE-S001 that drive both the code
-# and terminal actions, capture the zellij new-pane command, and prove the
-# command includes --name "<action>_<worktree>" without testing private helpers.
+
+@given(parsers.parse('the selected work item uses the worktree directory "{worktree_dir}"'))
+def _selected_work_item_uses_worktree_directory(
+    worktree_dir: str,
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / worktree_dir
+    worktree_path.mkdir()
+    if not work_items:
+        work_items.append(make_work_item())
+    scenario_state["selected_item"] = work_items[0]
+    scenario_state["pane_title_worktree_path"] = str(worktree_path)
+
+
+@when(parsers.parse('the user launches the "{action}" terminal-backed work action'))
+def _launch_named_terminal_backed_work_action(
+    action: str,
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_which(name: str) -> str | None:
+        if name == "zellij":
+            return f"/usr/bin/{name}"
+        return None
+
+    def fake_run(*args, **kwargs):
+        commands.append(args[0])
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    repo_path = scenario_state["pane_title_worktree_path"]
+    if action == "code":
+        launch_agent_context(repo_path, "work on this item", agent_command_tokens=["claude"])
+    elif action == "terminal":
+        launch_terminal_context(repo_path)
+    else:
+        raise AssertionError(f"Unsupported terminal-backed work action: {action}")
+    scenario_state["zellij_pane_title_commands"] = commands
+
+
+@then(parsers.parse('the new Zellij pane is named "{pane_name}"'))
+def _new_zellij_pane_named(pane_name: str, scenario_state: dict[str, Any]) -> None:
+    commands = scenario_state["zellij_pane_title_commands"]
+    assert len(commands) == 1
+    command = commands[0]
+    assert Path(command[0]).name == "zellij"
+    assert command[1:3] == ["action", "new-pane"]
+    name_index = command.index("--name")
+    assert command[name_index + 1] == pane_name
 
 
 @given("the dashboard was started with `--direct`")
@@ -94,8 +146,11 @@ def _work_action_opens_current_zellij_session(scenario_state: dict[str, Any]) ->
     repo_path = scenario_state["zellij_routing_repo_path"]
     assert scenario_state["zellij_routing_terminal_calls"]
     assert len(commands) == 1
-    assert Path(commands[0][0]).name == "zellij"
-    assert commands[0][1:6] == ["action", "new-pane", "--cwd", repo_path, "--"]
+    command = commands[0]
+    assert Path(command[0]).name == "zellij"
+    assert command[1:3] == ["action", "new-pane"]
+    cwd_index = command.index("--cwd")
+    assert command[cwd_index : cwd_index + 3] == ["--cwd", repo_path, "--"]
 
 
 @then("the system does not target the shared `workdash` Zellij session")
