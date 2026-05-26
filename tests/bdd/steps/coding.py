@@ -13,7 +13,7 @@ from workdash.analysis_cache import AnalysisCache
 from workdash.models import WorkItem
 from workdash.tui import CodeDialog
 
-from .common import make_work_item
+from .common import make_work_item, modal_screen_names
 
 
 async def _open_code_dialog(app, pilot) -> CodeDialog:
@@ -24,6 +24,11 @@ async def _open_code_dialog(app, pilot) -> CodeDialog:
             if isinstance(screen, CodeDialog):
                 return screen
     raise AssertionError("CodeDialog did not appear after pressing 'c'")
+
+
+@given("the next coding session launch will fail")
+def _next_coding_session_launch_will_fail(scenario_state: dict[str, Any]) -> None:
+    scenario_state["coding_launch_fails"] = True
 
 
 @given("the coding dialog is open")
@@ -59,6 +64,8 @@ def run_code_dialog_scenario(
     worktree_path.mkdir(parents=True, exist_ok=True)
 
     def worktree_callback(item: WorkItem) -> str:
+        if scenario_state.get("worktree_fails"):
+            raise RuntimeError("worktree failed")
         worktree_calls.append(item)
         return str(worktree_path)
 
@@ -98,6 +105,8 @@ def run_code_dialog_scenario(
 
     def launch_callback(item: WorkItem, tool: str = "codex") -> None:
         launch_calls.append((item, tool))
+        if scenario_state.get("coding_launch_fails"):
+            raise RuntimeError("coding launch failed")
         analysis_path = (
             str(cache.build_analysis_path(item))
             if cache is not None and item.analysis is not None
@@ -117,13 +126,18 @@ def run_code_dialog_scenario(
                 agent_command_tokens=[tool],
             )
 
+    captured: dict[str, Any] = {}
+
     async def interactions(app, pilot) -> None:
         dialog = await _open_code_dialog(app, pilot)
         dialog.action_launch_claude()
         for _ in range(40):
             await pilot.pause()
-            if launch_calls:
+            status = app.query_one("#status-footer", Static).render().plain
+            if launch_calls or "Worktree setup failed" in status or "Launch failed" in status:
                 break
+        captured["status"] = app.query_one("#status-footer", Static).render().plain
+        captured["modal_screen_names"] = modal_screen_names(app)
 
     from .common import run_app
 
@@ -138,12 +152,17 @@ def run_code_dialog_scenario(
     scenario_state["launched_prompts"] = launched_prompts
     scenario_state["launched_tools"] = launched_tools
     scenario_state["github_context"] = fake_github_context
+    scenario_state["coding_status"] = captured["status"]
+    scenario_state["modal_screen_names"] = captured["modal_screen_names"]
 
 
 @when("the user picks a supported coding agent from the dialog")
 def _picks_coding_agent(scenario_state: dict[str, Any]) -> None:
     # Already performed inside run_code_dialog_scenario when the user pressed 'c'.
-    assert scenario_state["launch_calls"], "Expected the launch callback to have fired"
+    if scenario_state.get("worktree_fails"):
+        assert "Worktree setup failed" in scenario_state["coding_status"]
+    else:
+        assert scenario_state["launch_calls"], "Expected the launch callback to have fired"
 
 
 @then("the system prepares the worktree for the selected work item")
@@ -239,6 +258,11 @@ def _preloaded_with_cache(scenario_state: dict[str, Any]) -> None:
     assert str(expected_analysis_path) in prompt
     assert item.url in prompt
     assert scenario_state["github_context"]["body"] in prompt
+
+
+@then("the system reports the coding launch error details to the user")
+def _reports_coding_launch_error_details(scenario_state: dict[str, Any]) -> None:
+    assert "Launch failed: coding launch failed" in scenario_state["coding_status"]
 
 
 @then("no coding session is launched")

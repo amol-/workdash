@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+import inspect
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TypeVar
 
@@ -309,8 +310,14 @@ else:
             table = self.query_one("#work-items", DataTable)
             table.cursor_type = "row"
             previous_row = table.cursor_row if table.cursor_row is not None else 0
-            table.clear(columns=True)
-            table.add_columns("Type", "Repo", "Title", "Age", "Last Update")
+            if table.columns:
+                table.clear()
+            else:
+                table.add_column("Type", key="type")
+                table.add_column("Repo", key="repo")
+                table.add_column("Title", key="title")
+                table.add_column("Age", key="age")
+                table.add_column("Last Update", key="last_update")
             self._sorted_work_items = sorted(
                 self._work_items,
                 key=lambda entry: entry.updated_at,
@@ -322,6 +329,7 @@ else:
                 update_days = max(0, (self._now_utc - _to_utc(item.updated_at)).days)
                 type_label = format_type_label(item)
                 title = self._title_with_suggestion_marker(item)
+                row_key = f"{item.item_type.value}:{item.repo}#{item.number}"
                 if _to_utc(item.updated_at) >= cutoff:
                     table.add_row(
                         Text(type_label, style="bold"),
@@ -329,9 +337,17 @@ else:
                         Text(title, style="bold"),
                         Text(f"{age_days}d", style="bold"),
                         Text(f"{update_days}d", style="bold"),
+                        key=row_key,
                     )
                 else:
-                    table.add_row(type_label, item.repo, title, f"{age_days}d", f"{update_days}d")
+                    table.add_row(
+                        type_label,
+                        item.repo,
+                        title,
+                        f"{age_days}d",
+                        f"{update_days}d",
+                        key=row_key,
+                    )
             if self._sorted_work_items:
                 target_row = previous_row
                 if focus_item is not None:
@@ -355,6 +371,17 @@ else:
                 return None
             return self._sorted_work_items[table.cursor_row]
 
+        def _run_after_dialog(self, callback: Callable[[], Awaitable[None]]) -> None:
+            async def _runner() -> None:
+                # Let Textual finish removing the choice/input modal before
+                # starting the next progress/error flow. Without this handoff
+                # a fast subprocess failure can report behind the still-visible
+                # dialog the user just acted on.
+                await asyncio.sleep(0)
+                await callback()
+
+            asyncio.create_task(_runner())
+
         async def _run_with_busy_screen(
             self,
             *,
@@ -367,7 +394,11 @@ else:
                 return await asyncio.to_thread(callback)
             finally:
                 if self.screen is busy_screen:
-                    self.pop_screen()
+                    removal = self.pop_screen()
+                    if inspect.isawaitable(removal):
+                        await removal
+                    else:
+                        await asyncio.sleep(0)
 
         async def action_open_link(self) -> None:
             selected_item = self._selected_item()
@@ -420,12 +451,10 @@ else:
             dialog = AnalyzeDialog(item=selected_item, now_utc=self._now_utc)
 
             def _on_dialog_result(choice: str | None) -> None:
-                if choice is None:
-                    return
-                # Schedule the follow-up work as a coroutine on the event loop
-                self.call_later(lambda: self._perform_analysis(selected_item, choice))
+                if choice is not None:
+                    self._run_after_dialog(lambda: self._perform_analysis(selected_item, choice))
 
-            self.push_screen(dialog, callback=_on_dialog_result)
+            await self.push_screen(dialog, callback=_on_dialog_result)
 
         async def _perform_analysis(self, item: WorkItem, choice: str) -> None:
             """Execute analysis after the user picks a tool from the dialog."""
@@ -478,11 +507,10 @@ else:
             dialog = CodeDialog()
 
             def _on_dialog_result(choice: str | None) -> None:
-                if choice is None:
-                    return
-                self.call_later(lambda: self._perform_launch(selected_item, choice))
+                if choice is not None:
+                    self._run_after_dialog(lambda: self._perform_launch(selected_item, choice))
 
-            self.push_screen(dialog, callback=_on_dialog_result)
+            await self.push_screen(dialog, callback=_on_dialog_result)
 
         async def _perform_launch(self, item: WorkItem, choice: str) -> None:
             """Execute coding tool launch after the user picks from the dialog."""
@@ -551,11 +579,10 @@ else:
             dialog = IncludeDialog()
 
             def _on_dialog_result(normalized_url: str | None) -> None:
-                if normalized_url is None:
-                    return
-                self.call_later(lambda: self._perform_include(normalized_url))
+                if normalized_url is not None:
+                    self._run_after_dialog(lambda: self._perform_include(normalized_url))
 
-            self.push_screen(dialog, callback=_on_dialog_result)
+            await self.push_screen(dialog, callback=_on_dialog_result)
 
         async def _perform_include(self, url: str) -> None:
             """Fetch the pasted URL and fold the item into the visible list."""

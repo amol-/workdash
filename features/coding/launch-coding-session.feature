@@ -14,6 +14,7 @@ Feature: Launch a coding session
     - The launched coding agent is preloaded with the work item's GitHub context and, when available, the cached analysis for that item.
     - The user can cancel the dialog without launching a session.
     - The system reports the outcome of the launch to the user.
+    - If preparing the worktree or launching the subprocess fails, the system closes the dialog/progress overlay and reports the error details to the user.
 
   @id:F-CODING-LAUNCH-S001
   Scenario: User picks a coding agent and a session opens on the worktree
@@ -37,3 +38,22 @@ Feature: Launch a coding session
     When the user cancels the dialog
     Then no coding session is launched
     And no worktree is prepared
+
+  @id:F-CODING-LAUNCH-S004
+  Scenario: Worktree preparation failure reports the error details
+    Given the TUI has a work item selected
+    And the next worktree preparation will fail
+    When the user presses "c"
+    And the user picks a supported coding agent from the dialog
+    Then the system reports the worktree error details to the user
+    And no coding session is launched
+    And no dialog or progress overlay remains
+
+  @id:F-CODING-LAUNCH-S005
+  Scenario: Coding agent launch failure reports the error details
+    Given the TUI has a work item selected
+    And the next coding session launch will fail
+    When the user presses "c"
+    And the user picks a supported coding agent from the dialog
+    Then the system reports the coding launch error details to the user
+    And no dialog or progress overlay remains

@@ -22,7 +22,7 @@ from workdash.config import WorkdashConfig
 from workdash.models import WorkItem
 from workdash.tui import AnalyzeDialog, WorkdashApp
 
-from .common import NOW_UTC, make_work_item
+from .common import NOW_UTC, make_work_item, modal_screen_names
 
 # --------------------------------------------------------------------------
 # Shared helpers for analysis scenarios
@@ -403,9 +403,11 @@ def _run_generate_fresh(
         dialog.action_analyze_codex()
         for _ in range(40):
             await pilot.pause()
-            if analyze_calls and (opened_paths or scenario_state.get("_fresh_fails")):
+            status = app.query_one("#status-footer", Static).render().plain
+            if opened_paths or "Analyze failed" in status:
                 break
         scenario_state["analyze_status"] = app.query_one("#status-footer", Static).render().plain
+        scenario_state["modal_screen_names"] = modal_screen_names(app)
 
     from .common import run_app
 

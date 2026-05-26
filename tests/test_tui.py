@@ -6,6 +6,7 @@ import pytest
 
 pytest.importorskip("textual")
 
+from textual.screen import ModalScreen
 from textual.widgets import DataTable, Static
 
 from workdash.backend import IncludeResult
@@ -70,6 +71,49 @@ def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_colum
                 "6d",
                 "6d",
             ]
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label() -> None:
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+    )
+    app = WorkdashApp(work_items=[work_item], now_utc=now_utc)
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            table = app.query_one("#work-items", DataTable)
+            row_key = "pr:owner/repo#22"
+            assert [key.value for key in table.rows] == [row_key]
+            assert [str(c) for c in table.get_row(row_key)] == [
+                "PR",
+                "owner/repo",
+                "Implement renderer",
+                "6d",
+                "6d",
+            ]
+
+            work_item.included = True
+            app._render_table()
+
+            assert [key.value for key in table.rows] == [row_key]
+            assert [str(c) for c in table.get_row(row_key)] == [
+                "PR+",
+                "owner/repo",
+                "Implement renderer",
+                "6d",
+                "6d",
+            ]
+            await pilot.press("q")
 
     asyncio.run(run_smoke())
 
@@ -463,6 +507,21 @@ def test_workdash_app_shows_command_hint_bar() -> None:
     asyncio.run(run_smoke())
 
 
+def _assert_no_modal_screens(app: WorkdashApp) -> None:
+    lingering = [
+        screen.__class__.__name__ for screen in app.screen_stack if isinstance(screen, ModalScreen)
+    ]
+    assert lingering == []
+
+
+async def _wait_for_footer(footer: Static, expected: str, pilot) -> None:
+    for _ in range(20):
+        await pilot.pause()
+        if footer.render().plain == expected:
+            return
+    assert footer.render().plain == expected
+
+
 def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
     now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
     work_item = WorkItem(
@@ -506,30 +565,99 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
             footer = app.query_one("#status-footer", Static)
 
             await pilot.press("o")
-            await pilot.pause()
-            assert footer.render().plain == "Open failed: xdg-open failed"
+            await _wait_for_footer(footer, "Open failed: xdg-open failed", pilot)
+            _assert_no_modal_screens(app)
 
             await pilot.press("r")
-            await pilot.pause()
-            assert footer.render().plain == "Refresh failed: gh refresh failed"
+            await _wait_for_footer(footer, "Refresh failed: gh refresh failed", pilot)
+            _assert_no_modal_screens(app)
 
             # Press "a" to open AnalyzeDialog, then "c" to choose Claude
             await pilot.press("a")
             await pilot.pause()
             await pilot.press("c")
-            await pilot.pause()
-            assert footer.render().plain == "Analyze failed: codex analyze failed"
+            await _wait_for_footer(footer, "Analyze failed: codex analyze failed", pilot)
+            _assert_no_modal_screens(app)
 
             # Press "c" to open CodeDialog, then "g" to choose Codex
             await pilot.press("c")
             await pilot.pause()
             await pilot.press("g")
-            await pilot.pause()
-            assert footer.render().plain == "Launch failed: codex launch failed"
+            await _wait_for_footer(footer, "Launch failed: codex launch failed", pilot)
+            _assert_no_modal_screens(app)
 
             await pilot.press("t")
+            await _wait_for_footer(footer, "Terminal failed: zellij pane failed", pilot)
+            _assert_no_modal_screens(app)
+
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_worktree_failure_closes_dialogs_and_skips_actions() -> None:
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+    )
+    analyze_calls: list[tuple[WorkItem, str]] = []
+    launch_calls: list[tuple[WorkItem, str]] = []
+    terminal_calls: list[WorkItem] = []
+    worktree_attempts: list[WorkItem] = []
+
+    def failing_worktree_callback(item: WorkItem) -> str:
+        worktree_attempts.append(item)
+        raise RuntimeError(f"worktree failed {len(worktree_attempts)}")
+
+    def analyze_callback(item: WorkItem, tool: str = "codex") -> str | None:
+        analyze_calls.append((item, tool))
+        return None
+
+    def launch_callback(item: WorkItem, tool: str = "codex") -> None:
+        launch_calls.append((item, tool))
+
+    def terminal_callback(item: WorkItem) -> None:
+        terminal_calls.append(item)
+
+    app = WorkdashApp(
+        work_items=[work_item],
+        worktree_callback=failing_worktree_callback,
+        analyze_callback=analyze_callback,
+        launch_callback=launch_callback,
+        terminal_callback=terminal_callback,
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+
+            await pilot.press("a")
             await pilot.pause()
-            assert footer.render().plain == "Terminal failed: zellij pane failed"
+            await pilot.press("c")
+            await _wait_for_footer(footer, "Worktree setup failed: worktree failed 1", pilot)
+            _assert_no_modal_screens(app)
+            assert analyze_calls == []
+
+            await pilot.press("c")
+            await pilot.pause()
+            await pilot.press("g")
+            await _wait_for_footer(footer, "Worktree setup failed: worktree failed 2", pilot)
+            _assert_no_modal_screens(app)
+            assert launch_calls == []
+
+            await pilot.press("t")
+            await _wait_for_footer(footer, "Worktree setup failed: worktree failed 3", pilot)
+            _assert_no_modal_screens(app)
+            assert terminal_calls == []
+            assert len(worktree_attempts) == 3
 
             await pilot.press("q")
 

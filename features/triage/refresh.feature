@@ -10,7 +10,7 @@ Feature: Refresh work items
     - Running the system with "--refresh" re-fetches the work item list at startup.
     - During a refresh, the system shows the user that work is in progress and prevents further actions until the refresh completes.
     - After a successful refresh, the TUI reports how many work items are now shown.
-    - If a refresh fails, the TUI reports the failure and keeps the previous list visible.
+    - If a refresh fails, the TUI closes the progress overlay, reports the failure details, and keeps the previous list visible.
 
   @id:F-TRIAGE-REFRESH-S001
   Scenario: Interactive refresh updates the dashboard in place
@@ -26,4 +26,5 @@ Feature: Refresh work items
     And the next refresh will fail
     When the user presses "r"
     Then the system reports the failure to the user
+    And no dialog or progress overlay remains
     And the previously shown list remains visible

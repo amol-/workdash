@@ -32,6 +32,7 @@ from .common import (
     install_valid_env,
     make_work_item,
     mock_backend,
+    modal_screen_names,
     run_app,
 )
 
@@ -876,10 +877,15 @@ def _run_refresh_scenario(scenario_state: dict[str, Any], work_items: list[WorkI
 
     async def interactions(app, pilot) -> None:
         await pilot.press("r")
-        await pilot.pause()
+        for _ in range(20):
+            await pilot.pause()
+            status = app.query_one("#status-footer", Static).render().plain
+            if status.startswith("Refreshed") or "failed" in status.lower():
+                break
         footer = app.query_one("#status-footer", Static)
         table = app.query_one("#work-items", DataTable)
         captured["status"] = footer.render().plain
+        captured["modal_screen_names"] = modal_screen_names(app)
         captured["rows"] = [
             [str(cell) for cell in table.get_row_at(i)] for i in range(table.row_count)
         ]
@@ -895,6 +901,7 @@ def _run_refresh_scenario(scenario_state: dict[str, Any], work_items: list[WorkI
     scenario_state["initial_items"] = list(work_items)
     scenario_state["refreshed_items"] = refreshed_items
     scenario_state["busy_messages"] = busy_messages
+    scenario_state["modal_screen_names"] = captured["modal_screen_names"]
 
 
 @then("the system shows that a refresh is in progress")
@@ -928,6 +935,10 @@ def _reports_failure(scenario_state: dict[str, Any]) -> None:
     status = scenario_state.get("refresh_status") or scenario_state.get("analyze_status")
     assert status is not None, "Expected either refresh_status or analyze_status to be recorded"
     assert "failed" in status.lower(), status
+    if "refresh_status" in scenario_state:
+        assert "simulated refresh failure" in status
+    if "analyze_status" in scenario_state:
+        assert "analysis failed" in status
 
 
 @then("the previously shown list remains visible")

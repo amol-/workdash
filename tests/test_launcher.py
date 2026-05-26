@@ -51,6 +51,7 @@ def test_open_in_browser_runs_xdg_open_for_valid_url(monkeypatch: pytest.MonkeyP
         captured["check"] = kwargs.get("check")
         captured["capture_output"] = kwargs.get("capture_output")
         captured["text"] = kwargs.get("text")
+        captured["timeout"] = kwargs.get("timeout")
         return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -62,6 +63,7 @@ def test_open_in_browser_runs_xdg_open_for_valid_url(monkeypatch: pytest.MonkeyP
 
     assert captured["command"] == ["xdg-open", "https://example.com/issues/11"]
     assert captured["check"] is True
+    assert captured["timeout"] == 4
 
 
 def test_open_in_browser_uses_open_when_xdg_open_is_unavailable(
@@ -114,7 +116,22 @@ def test_open_in_browser_raises_clear_error_when_xdg_open_fails(
         shutil, "which", lambda name: f"/usr/bin/{name}" if name == "xdg-open" else None
     )
 
-    with pytest.raises(RuntimeError, match="Failed to open URL via xdg-open: exit code 1"):
+    with pytest.raises(RuntimeError, match="Failed to open URL via xdg-open: cannot open display"):
+        open_in_browser("https://example.com/issues/11")
+
+
+def test_open_in_browser_times_out_when_browser_command_hangs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        shutil, "which", lambda name: f"/usr/bin/{name}" if name == "xdg-open" else None
+    )
+
+    with pytest.raises(RuntimeError, match="Opening a browser may not be supported"):
         open_in_browser("https://example.com/issues/11")
 
 

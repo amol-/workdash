@@ -14,7 +14,12 @@ from textual.widgets import Static
 from workdash.launcher import launch_agent_context, launch_terminal_context
 from workdash.models import WorkItem
 
-from .common import make_work_item, run_app
+from .common import make_work_item, modal_screen_names, run_app
+
+
+@given("the next terminal launch will fail")
+def _next_terminal_launch_will_fail(scenario_state: dict[str, Any]) -> None:
+    scenario_state["terminal_launch_fails"] = True
 
 
 @given(parsers.parse('the selected work item uses the worktree directory "{worktree_dir}"'))
@@ -186,12 +191,16 @@ def run_terminal_scenario(
     captured: dict[str, Any] = {}
 
     def worktree_callback(item: WorkItem) -> str:
+        if scenario_state.get("worktree_fails"):
+            raise RuntimeError("worktree failed")
         wt_path = tmp_path / "wt"
         wt_path.mkdir(exist_ok=True)
         worktree_calls.append(item)
         return str(wt_path)
 
     def terminal_callback(item: WorkItem) -> None:
+        if scenario_state.get("terminal_launch_fails"):
+            raise RuntimeError("terminal launch failed")
         terminal_calls.append(item.repo)
 
     def launch_callback(item: WorkItem, tool: str = "codex") -> None:
@@ -201,9 +210,11 @@ def run_terminal_scenario(
         await pilot.press("t")
         for _ in range(40):
             await pilot.pause()
-            if terminal_calls:
+            status = app.query_one("#status-footer", Static).render().plain
+            if terminal_calls or "Worktree setup failed" in status or "Terminal failed" in status:
                 break
         captured["status"] = app.query_one("#status-footer", Static).render().plain
+        captured["modal_screen_names"] = modal_screen_names(app)
 
     run_app(
         work_items=list(work_items),
@@ -216,6 +227,7 @@ def run_terminal_scenario(
     scenario_state["terminal_calls"] = terminal_calls
     scenario_state["launch_calls"] = launch_calls
     scenario_state["terminal_status"] = captured["status"]
+    scenario_state["modal_screen_names"] = captured["modal_screen_names"]
 
 
 @then("the system ensures the worktree for that work item exists")
@@ -240,3 +252,13 @@ def _no_coding_agent_started(scenario_state: dict[str, Any]) -> None:
 @then("the TUI reports that a terminal was opened")
 def _tui_reports_terminal(scenario_state: dict[str, Any]) -> None:
     assert "terminal" in scenario_state["terminal_status"].lower(), scenario_state
+
+
+@then("the system reports the terminal launch error details to the user")
+def _reports_terminal_launch_error_details(scenario_state: dict[str, Any]) -> None:
+    assert "Terminal failed: terminal launch failed" in scenario_state["terminal_status"]
+
+
+@then("no terminal is opened")
+def _no_terminal_opened(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["terminal_calls"] == []

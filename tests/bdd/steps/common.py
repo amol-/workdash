@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 from pytest_bdd import given, then, when
+from textual.screen import ModalScreen
 
 from workdash.backend import IncludeResult, compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
@@ -80,6 +81,12 @@ def valid_config() -> WorkdashConfig:
 
 
 # -- Reusable TUI harness ---------------------------------------------------
+
+
+def modal_screen_names(app) -> list[str]:
+    return [
+        screen.__class__.__name__ for screen in app.screen_stack if isinstance(screen, ModalScreen)
+    ]
 
 
 def run_app(
@@ -195,6 +202,27 @@ def _tui_has_work_item_selected(scenario_state: dict[str, Any], work_items: list
             )
         )
     scenario_state.setdefault("selected_item", work_items[0])
+
+
+@given("the next worktree preparation will fail")
+def _next_worktree_preparation_will_fail(scenario_state: dict[str, Any]) -> None:
+    scenario_state["worktree_fails"] = True
+
+
+@then("no dialog or progress overlay remains")
+def _no_dialog_or_progress_overlay_remains(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("modal_screen_names") == []
+
+
+@then("the system reports the worktree error details to the user")
+def _reports_worktree_error_details(scenario_state: dict[str, Any]) -> None:
+    status = (
+        scenario_state.get("coding_status")
+        or scenario_state.get("terminal_status")
+        or scenario_state.get("analyze_status")
+    )
+    assert status is not None, scenario_state
+    assert "Worktree setup failed: worktree failed" in status
 
 
 @given("the system is running inside a Zellij session")

@@ -19,6 +19,7 @@ from .models import WorkItem, WorkItemKind, WorkItemType
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _BROWSER_OPEN_COMMANDS = ("xdg-open", "open")
+_BROWSER_OPEN_TIMEOUT_SECONDS = 4
 _WORKDASH_LOCAL_BIN = LOCAL_BIN_PATH
 
 
@@ -48,15 +49,23 @@ def _run_browser_open(target: str, *, kind: str) -> None:
         subprocess.run(
             [command_name, target],
             check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_BROWSER_OPEN_TIMEOUT_SECONDS,
         )
     except FileNotFoundError as error:
         raise RuntimeError(f"{command_name} is not installed or not on PATH.") from error
-    except subprocess.CalledProcessError as error:
+    except subprocess.TimeoutExpired as error:
         raise RuntimeError(
-            f"Failed to open {kind} via {command_name}: exit code {error.returncode}"
+            f"Failed to open {kind} via {command_name}: command did not finish within "
+            f"{_BROWSER_OPEN_TIMEOUT_SECONDS} seconds. Opening a browser may not be "
+            "supported from this session."
         ) from error
+    except subprocess.CalledProcessError as error:
+        details = (error.stderr or "").strip() or (error.stdout or "").strip()
+        if not details:
+            details = f"exit code {error.returncode}"
+        raise RuntimeError(f"Failed to open {kind} via {command_name}: {details}") from error
 
 
 def open_in_browser(url: str) -> None:
