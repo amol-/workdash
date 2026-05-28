@@ -19,6 +19,9 @@ from .steps import (
     browse as _browse,
 )
 from .steps import (
+    cli_orchestration as _cli_orchestration,
+)
+from .steps import (
     coding as _coding,
 )
 from .steps import (
@@ -42,6 +45,7 @@ from .steps import (
 
 for _step_module in (
     _common,
+    _cli_orchestration,
     _triage,
     _worktrees,
     _setup,

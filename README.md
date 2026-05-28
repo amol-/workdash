@@ -87,12 +87,14 @@ workdash
 Useful flags:
 
 ```bash
-workdash --print       # list items as plain text, no TUI
-workdash --refresh     # force a refresh from GitHub
-workdash --debug       # verbose logging
-workdash --configure   # run the interactive setup wizard
-workdash --direct      # start without the automatic Zellij wrapper
-workdash --version     # print version and exit
+workdash --print             # list items as plain text, no TUI
+workdash --print --json      # list items as machine-readable JSON
+workdash info [--session NAME] [--json]  # report live Workdash-owned Zellij panes
+workdash --refresh           # force a refresh from GitHub
+workdash --debug             # verbose logging
+workdash --configure         # run the interactive setup wizard
+workdash --direct            # start without the automatic Zellij wrapper
+workdash --version           # print version and exit
 ```
 
 ## What gets shown
@@ -141,12 +143,24 @@ disturbing other in-progress work.
 `--print` emits one row per item, sorted by last update (most recent first):
 
 ```
-TYPE   repo#number   YYYY-MM-DD   title
+TYPE   repo#TYPE-N   YYYY-MM-DD   title
 ```
 
-`TYPE` is `ISSUE`, `PR`, or `REVIEW` (for review-requested PRs). The suggested
+`TYPE` is `ISSUE`, `PR`, or `REVIEW` (for review-requested PRs). The row ID is
+copy/paste-friendly: `repo#ISSUE-N`, `repo#PR-N`, or `repo#REVIEW-N`. The suggested
 item's title is prefixed with `* `. If nothing matches, the output is
 `No work items found.`.
+
+Use `workdash --print --json` to emit the same list as JSON records with item ID,
+type, kind, repository, number, title, URL, timestamps, and suggested status.
+
+## Info command
+
+`workdash info [--session NAME] [--json]` reports live Workdash-owned Zellij panes
+for terminal-backed work actions, including pane title, cwd, command, tab, state,
+and mapped Workdash item. It maps each live pane's current working directory to
+the matching Workdash item ID when the pane is inside a known worktree, or reports
+`unknown` when no mapping is known.
 
 ## Analysis cache
 

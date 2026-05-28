@@ -7,6 +7,7 @@ Canonical product vocabulary used by the feature files.
 - User: The developer using `workdash` to triage their GitHub work.
 - System: `workdash`, the text-based GitHub work triage dashboard.
 - Work item: An issue or pull request surfaced by the system for triage.
+- Workdash item ID: A copy/paste identifier for a work item, formatted as `<repo>#ISSUE-<number>`, `<repo>#PR-<number>`, or `<repo>#REVIEW-<number>`.
 - Item type: The category of a work item. One of `ISSUE`, `PR`, or `REVIEW`.
 - REVIEW item: A pull request where the user is directly requested as a reviewer, or has already reviewed.
 - Authored PR: A pull request whose author is the user.
@@ -24,8 +25,11 @@ Canonical product vocabulary used by the feature files.
 - Coding session: An interactive session with a supported coding agent, launched in the item's worktree and preloaded with work item context.
 - Supported coding agent: One of Claude, ChatGPT Codex, VSCode Copilot, or pi.
 - Terminal-backed work action: A work action that opens a shell or terminal-hosted coding agent for a work item.
+- CLI orchestration command: A non-interactive command that lets a user or automation client inspect or launch Workdash-owned Zellij panes.
 - Zellij session: A terminal multiplexer session used by the system to host terminal-backed work actions.
-- Workdash Zellij session: A fresh Zellij session with a `workdash-` name prefix that the system creates at interactive startup when the user was not already inside Zellij.
+- Workdash Zellij session: A Zellij session whose name starts with `workdash`, used by the system as the live terminal surface for orchestration commands and terminal-backed work actions.
+- Agent pane: A Zellij pane opened by the system for a terminal-hosted coding agent.
+- Terminal pane: A Zellij pane opened by the system for a plain terminal in a work item's worktree.
 - Configuration: The user settings stored at `~/.config/workdash/config.json`.
 - Configuration wizard: The interactive flow started by `--configure` that fills in any missing configuration fields.
 - TUI: The interactive terminal interface shown by default when the system starts.

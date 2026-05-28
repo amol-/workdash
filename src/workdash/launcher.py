@@ -157,6 +157,67 @@ def exec_zellij_wrapped_workdash(argv: Sequence[str] | None) -> NoReturn:
     raise AssertionError("os.execvp returned unexpectedly")
 
 
+def list_workdash_sessions() -> list[str]:
+    zellij = _resolve_zellij_binary()
+    try:
+        completed = subprocess.run(
+            [zellij, "list-sessions", "--no-formatting"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        details = (error.stderr or "").strip() or (error.stdout or "").strip()
+        if "no active zellij sessions found" in details.lower():
+            return []
+        raise RuntimeError(
+            f"Failed to list Zellij sessions: {details or error.returncode}"
+        ) from error
+
+    sessions = []
+    for line in completed.stdout.splitlines():
+        if "(EXITED" in line:
+            continue
+        session_name = line.split(" [Created ", maxsplit=1)[0].strip()
+        if session_name.startswith("workdash"):
+            sessions.append(session_name)
+    return sessions
+
+
+def load_zellij_panes(session: str) -> list[dict[str, object]]:
+    zellij = _resolve_zellij_binary()
+    try:
+        completed = subprocess.run(
+            [
+                zellij,
+                "--session",
+                session,
+                "action",
+                "list-panes",
+                "--json",
+                "--all",
+                "--command",
+                "--state",
+                "--tab",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        details = (error.stderr or "").strip() or (error.stdout or "").strip()
+        raise RuntimeError(
+            f"Failed to list Zellij panes for {session}: {details or error.returncode}"
+        ) from error
+    try:
+        panes = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"Failed to parse Zellij pane JSON: {error.msg}") from error
+    if not isinstance(panes, list):
+        raise RuntimeError("Zellij pane JSON must be a list.")
+    return [pane for pane in panes if isinstance(pane, dict)]
+
+
 def _build_direct_workdash_command(original_args: Sequence[str]) -> list[str]:
     current_entrypoint = Path(sys.argv[0])
     if current_entrypoint.name in {"__main__.py", "workdash.py"} and (

@@ -351,6 +351,10 @@ def _work_item_has_worktree(
     def fake_run(*args, **kwargs):
         cmd = args[0]
         recorded.append(list(cmd))
+        if cmd == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
         if cmd[:2] == ["git", "pull"]:
             if pull_behavior["fail"]:
                 raise subprocess.CalledProcessError(1, cmd, stderr="diverged")
