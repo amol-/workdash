@@ -7,6 +7,7 @@ Feature: Reuse existing worktrees
 
   Rules:
     - When a worktree for a work item already exists, the system reuses it rather than creating a new one.
+    - A directory is reused only when repository-local git metadata proves it belongs to the work item; inherited global git configuration is ignored.
     - Before handing the worktree back to the user, the system makes a best-effort fast-forward pull so the worktree reflects the latest remote state.
     - Local work that cannot be fast-forwarded is left untouched; the system never discards uncommitted or divergent local work on the user's behalf.
 

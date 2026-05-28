@@ -351,7 +351,11 @@ def _work_item_has_worktree(
     def fake_run(*args, **kwargs):
         cmd = args[0]
         recorded.append(list(cmd))
-        if cmd == ["git", "config", "--get", "remote.origin.url"]:
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=f"{Path(kwargs['cwd']).resolve()}\n", stderr=""
+            )
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
             )

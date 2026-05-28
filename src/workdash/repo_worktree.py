@@ -32,59 +32,17 @@ def worktree_path(workdir: str, repo: str, number: int) -> Path:
 
 
 def existing_worktree_path(workdir: str, item: WorkItem) -> Path | None:
-    """Find an existing worktree without creating, fetching, or querying GitHub.
-
-    Checks the item.repo-based path first when origin proves the item repo,
-    then scans unambiguous PR worktree directories by suffix.
-    """
-    # TODO(EVO-011): Simplify git-backed worktree proof.
-    #                  Why: The current lookup grew multiple path-shape scans while
-    #                  hardening `workdash info`; the durable rule should be simpler:
-    #                  collect plausible Workdash-created candidates, then let local
-    #                  git metadata prove whether a path belongs to the item.
-    #                  Done: A small GitHelpers class owns local git metadata reads
-    #                  such as remote URL parsing and item/worktree proof;
-    #                  `existing_worktree_path` uses one candidate collection path
-    #                  and returns only a git-proven match, or None. TUI worktree
-    #                  creation still goes through `ensure_worktree`, and arbitrary
-    #                  user-renamed worktrees are not rediscovered by convention.
-    #                  Non-Goals: Do not add network calls, persist worktree state,
-    #                  support every manually renamed directory, or change how new
-    #                  worktrees are created when no proven local match exists.
+    """Find a locally proven worktree without creating, fetching, or querying GitHub."""
     base = Path(workdir).expanduser()
-    if not base.exists():
+    if not base.is_dir():
         return None
-    direct = worktree_path(workdir, item.repo, item.number)
-    if direct.is_dir() and _candidate_origin_matches_repo(direct, item.repo):
-        return direct
-    if item.item_type == WorkItemType.PR:
-        _, _, repo_name = item.repo.partition("/")
-        suffix = f"_{repo_name}_{item.number}"
-        matches = [
-            candidate
-            for candidate in base.iterdir()
-            if candidate.is_dir()
-            and candidate != direct
-            and candidate.name.endswith(suffix)
-            and _candidate_origin_matches_base_repo(candidate, item.repo)
-        ]
-        if len(matches) == 1:
-            return matches[0]
-        if matches:
-            return None
-
-        suffix = f"_{item.number}"
-        matches = [
-            candidate
-            for candidate in base.iterdir()
-            if candidate.is_dir()
-            and candidate != direct
-            and candidate.name.endswith(suffix)
-            and _candidate_origin_matches_base_repo(candidate, item.repo)
-        ]
-        if len(matches) == 1:
-            return matches[0]
-    return None
+    git = GitHelpers()
+    matches = [
+        candidate
+        for candidate in _worktree_candidates(base, item)
+        if git.worktree_proves_item(candidate, item)
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def ensure_worktree(workdir: str, item: WorkItem) -> str:
@@ -116,8 +74,7 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
     wt = worktree_path(workdir, repo, item.number)
     main = main_repo_path(workdir, repo)
     branch = head_ref if item.item_type == WorkItemType.PR else f"issue-{item.number}"
-    # Check if git already tracks a worktree for this branch (covers cases
-    # where the directory-name scan missed, e.g. fork repo name mismatch).
+    # Check if git already tracks a worktree for this branch before creating another one.
     git_existing = _find_worktree_for_branch(main, branch)
     if git_existing is not None:
         with contextlib.suppress(subprocess.CalledProcessError, OSError):
@@ -168,44 +125,83 @@ def get_merge_base(worktree: str) -> str | None:
     return commit if commit else None
 
 
-def _candidate_origin_matches_repo(candidate: Path, repo: str) -> bool:
-    origin_url = _remote_url(candidate, "origin")
-    return origin_url is not None and _repo_from_remote_url(origin_url) == repo
+class GitHelpers:
+    """Local git metadata helpers used to prove Workdash worktrees."""
 
-
-def _candidate_origin_matches_base_repo(candidate: Path, base_repo: str) -> bool:
-    origin_url = _remote_url(candidate, "origin")
-    if origin_url is None:
+    def worktree_proves_item(self, candidate: Path, item: WorkItem) -> bool:
+        if not self.is_worktree_root(candidate):
+            return False
+        origin_repo = self.remote_repo(candidate, "origin")
+        if origin_repo == item.repo:
+            return candidate.name == self.worktree_name(origin_repo, item.number)
+        if item.item_type == WorkItemType.PR and origin_repo is not None:
+            if self.remote_repo(candidate, "upstream") != item.repo:
+                return False
+            return candidate.name == self.worktree_name(origin_repo, item.number)
         return False
-    if _repo_from_remote_url(origin_url) == base_repo:
-        return True
-    upstream_url = _remote_url(candidate, "upstream")
-    return upstream_url is not None and _repo_from_remote_url(upstream_url) == base_repo
+
+    def is_worktree_root(self, candidate: Path) -> bool:
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=candidate,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return False
+        if result.returncode != 0:
+            return False
+        root = result.stdout.strip()
+        return bool(root) and Path(root).resolve() == candidate.resolve()
+
+    def remote_repo(self, candidate: Path, remote_name: str) -> str | None:
+        remote_url = self.remote_url(candidate, remote_name)
+        if remote_url is None:
+            return None
+        return self.repo_from_remote_url(remote_url) or None
+
+    def worktree_name(self, repo: str, number: int) -> str:
+        owner, _, name = repo.partition("/")
+        if not owner or not name:
+            return ""
+        return f"{owner}_{name}_{number}"
+
+    def remote_url(self, candidate: Path, remote_name: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", "config", "--local", "--get", f"remote.{remote_name}.url"],
+                cwd=candidate,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+    @staticmethod
+    def repo_from_remote_url(remote_url: str) -> str:
+        normalized = remote_url.strip().rstrip("/").removesuffix(".git")
+        if "://" not in normalized and ":" in normalized:
+            normalized = normalized.replace(":", "/", 1)
+        parts = normalized.rsplit("/", 2)
+        if len(parts) < 2:
+            return ""
+        return f"{parts[-2]}/{parts[-1]}"
 
 
-def _remote_url(candidate: Path, remote_name: str) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "config", "--get", f"remote.{remote_name}.url"],
-            cwd=candidate,
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
-
-
-def _repo_from_remote_url(remote_url: str) -> str:
-    normalized = remote_url.strip().rstrip("/").removesuffix(".git")
-    if "://" not in normalized and ":" in normalized:
-        normalized = normalized.replace(":", "/", 1)
-    parts = normalized.rsplit("/", 2)
-    if len(parts) < 2:
-        return ""
-    return f"{parts[-2]}/{parts[-1]}"
+def _worktree_candidates(base: Path, item: WorkItem) -> list[Path]:
+    suffix = f"_{item.number}"
+    return sorted(
+        (
+            candidate
+            for candidate in base.iterdir()
+            if candidate.is_dir() and candidate.name.endswith(suffix)
+        ),
+        key=lambda candidate: candidate.name,
+    )
 
 
 def _clone_repo(repo: str, target: Path) -> None:

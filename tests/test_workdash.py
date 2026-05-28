@@ -27,7 +27,11 @@ def _auth_status_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
 def _git_origin_proves(monkeypatch: pytest.MonkeyPatch, worktree: object, repo: str) -> None:
     def fake_run(*args, **kwargs):
         cmd = args[0]
-        if cmd == ["git", "config", "--get", "remote.origin.url"]:
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            if str(kwargs.get("cwd")) == str(worktree):
+                return subprocess.CompletedProcess(cmd, 0, stdout=f"{worktree}\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
             if str(kwargs.get("cwd")) == str(worktree):
                 return subprocess.CompletedProcess(
                     cmd, 0, stdout=f"https://github.com/{repo}.git\n", stderr=""
@@ -319,7 +323,9 @@ def test_main_info_json_does_not_map_unproven_planned_worktree_path(
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
-        if cmd == ["git", "config", "--get", "remote.origin.url"]:
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
         raise AssertionError(f"Unexpected command: {cmd}")
 
@@ -450,11 +456,15 @@ def test_main_info_json_rejects_unrelated_same_name_pr_origin(
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
-        if cmd == ["git", "config", "--get", "remote.origin.url"]:
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            if str(kwargs.get("cwd")) == str(unrelated_cwd):
+                return subprocess.CompletedProcess(cmd, 0, stdout=f"{unrelated_cwd}\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="https://github.com/other/repo.git\n", stderr=""
             )
-        if cmd == ["git", "config", "--get", "remote.upstream.url"]:
+        if cmd == ["git", "config", "--local", "--get", "remote.upstream.url"]:
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
         raise AssertionError(f"Unexpected command: {cmd}")
 
@@ -518,11 +528,15 @@ def test_main_info_json_maps_fork_pr_worktree_cwd_to_current_work_item(
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
-        if cmd == ["git", "config", "--get", "remote.origin.url"]:
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            if str(kwargs.get("cwd")) == str(fork_cwd):
+                return subprocess.CompletedProcess(cmd, 0, stdout=f"{fork_cwd}\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="https://github.com/contributor/repo-fork.git\n", stderr=""
             )
-        if cmd == ["git", "config", "--get", "remote.upstream.url"]:
+        if cmd == ["git", "config", "--local", "--get", "remote.upstream.url"]:
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
             )

@@ -13,9 +13,10 @@ Feature: CLI orchestration commands
     - Pane item mappings are based on `pane_cwd`, not pane title.
     - A pane whose cwd is a known worktree or a descendant of one maps to that Workdash item; the most specific matching worktree wins.
     - Planned worktree path names are not known worktrees by name alone; local git metadata must prove the repository relationship.
-    - A directory whose name only ends with the item number is not a known worktree unless local git metadata plausibly relates it to the item's repository.
+    - Known worktrees are discovered from Workdash-style per-item directory candidates, then local git metadata must prove the candidate is the repository root and has the expected repository relationship.
     - Scanned PR worktree candidates with a same-name origin under another owner are not known worktrees.
     - A fork or renamed fork directory must have local upstream metadata matching the base repository before it maps to that repository's item.
+    - Manually renamed worktrees outside Workdash-style per-item candidates are unknown; Workdash may prepare its own worktree later.
 
   @id:F-CLI-ORCHESTRATION-S003
   Scenario: Info inspects the only active Workdash-owned session

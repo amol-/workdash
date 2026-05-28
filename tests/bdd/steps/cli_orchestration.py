@@ -51,7 +51,12 @@ def _run_workdash(
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
-        if cmd == ["git", "config", "--get", "remote.origin.url"]:
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            cwd = Path(kwargs["cwd"]).resolve()
+            if str(kwargs["cwd"]) in scenario_state.get("git_origins", {}):
+                return subprocess.CompletedProcess(cmd, 0, stdout=f"{cwd}\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
             repo = scenario_state.get("git_origins", {}).get(str(kwargs.get("cwd")))
             if repo is not None:
                 return subprocess.CompletedProcess(
