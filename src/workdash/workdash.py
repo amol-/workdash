@@ -55,6 +55,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             json_output=options.json_output,
         )
 
+    # TODO(EVO-021): Rename print mode to the list command.
+    #                  Why: `workdash --print` lists current Workdash items, while
+    #                  `workdash info` reports live Zellij panes. The flag name
+    #                  makes the two capabilities feel duplicated even though they
+    #                  answer different questions.
+    #                  Done: `workdash list [--json]` is the documented item-list
+    #                  command, README/features/tests prefer `list`, and `--print`
+    #                  remains only as a backwards-compatible alias if keeping it
+    #                  is still useful.
+    #                  Non-Goals: Do not change `workdash info`, item ID format,
+    #                  GitHub loading behavior, or Zellij session requirements.
+    # TODO(EVO-022): Add optional all-pane info output.
+    #                  Why: `workdash info` currently shows only panes whose titles
+    #                  prove Workdash launched them (`code_`/`terminal_`). Users may
+    #                  also keep useful project panes in the Workdash Zellij session
+    #                  with ordinary shell or agent titles, especially on other tabs.
+    #                  Done: `workdash info` keeps the current strict default, while
+    #                  `workdash info --all` also reports live non-plugin panes in the
+    #                  selected Workdash session. Extra panes use `kind=unknown` unless
+    #                  title/cwd evidence identifies a stronger kind, and JSON exposes
+    #                  enough fields for callers to skip them safely.
+    #                  Non-Goals: Do not persist pane ownership, infer work items from
+    #                  arbitrary source checkouts, change item ID mapping rules, or
+    #                  include exited/plugin panes by default.
     # TODO(EVO-030): Add CLI code through the shared launch action.
     #                  Why: The shared launch action exists so TUI Code and CLI
     #                  code do not drift, but the probe does not yet expose the
