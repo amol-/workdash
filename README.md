@@ -90,6 +90,7 @@ Useful flags:
 workdash --print             # list items as plain text, no TUI
 workdash --print --json      # list items as machine-readable JSON
 workdash info [--session NAME] [--json]  # report live Workdash-owned Zellij panes
+workdash analyze ITEM [--agent NAME] [--session NAME] [--json]  # analyze a current item
 workdash --refresh           # force a refresh from GitHub
 workdash --debug             # verbose logging
 workdash --configure         # run the interactive setup wizard
@@ -162,12 +163,26 @@ and mapped Workdash item. It maps each live pane's current working directory to
 the matching Workdash item ID when the pane is inside a known worktree, or reports
 `unknown` when no mapping is known.
 
+## Analyze command
+
+`workdash analyze ITEM [--agent NAME] [--session NAME] [--json]` analyzes a
+current Workdash item from the CLI. `ITEM` can be a row ID from `workdash --print`
+(such as `owner/repo#ISSUE-123`) or a GitHub issue/PR URL that is already in the
+current dashboard data. The command requires an active Workdash-owned Zellij
+session; pass `--session` when more than one exists. It reuses a fresh cached
+analysis when available, otherwise prepares the item's worktree and runs the
+selected configured analysis agent.
+
+Human output reports the item, agent, cache status, and analysis path. `--json`
+emits the same result as machine-readable JSON.
+
 ## Analysis cache
 
-Analyses produced with `a` are cached under `~/.config/workdash/cache/` so that
-re-opening an item is instant. The cache is keyed by the item's GitHub
+Analyses produced with `a` or `workdash analyze` are cached under
+`~/.config/workdash/cache/` so that re-opening an item is instant. The cache is
+keyed by the item's GitHub
 `updated_at` timestamp, so any change on GitHub automatically invalidates the
-cached analysis and the next `a` will re-run it.
+cached analysis and the next analyze action will re-run it.
 
 ## Product behavior
 

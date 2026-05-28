@@ -70,9 +70,27 @@ Feature: CLI orchestration commands
     Then the system returns JSON pane records
     And each record includes the session, tab, pane identifier, title, cwd, command, pane kind, state, and mapped item when known
 
+  @id:F-CLI-ORCHESTRATION-S009
+  Scenario: Analyze resolves a current work item from the CLI
+    Given exactly one active Workdash-owned Zellij session exists
+    And the current Workdash items include an assigned issue without cached analysis
+    When the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`
+    Then the system analyzes the current item with the selected configured agent
+    And the system returns JSON with the item id, selected agent, analysis path, and cache status
+
   @id:F-CLI-ORCHESTRATION-S010
   Scenario: Orchestration commands require a Workdash-owned Zellij session
     Given no active Workdash-owned Zellij session exists
     When the user runs an orchestration command
     Then the system reports that an active Workdash-owned Zellij session is required
+    And the system exits with a non-zero status
+
+  @id:F-CLI-ORCHESTRATION-S011
+  Scenario: Analyze reports a malformed configured agent command
+    Given exactly one active Workdash-owned Zellij session exists
+    And the current Workdash items include an assigned issue without cached analysis
+    And the configured Codex analyze command is malformed
+    When the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`
+    Then the system reports the malformed agent command with config context
+    And the system does not prepare a worktree
     And the system exits with a non-zero status

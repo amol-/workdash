@@ -18,11 +18,11 @@ from workdash.repo_worktree import worktree_path
 from .common import NOW_UTC, make_work_item
 
 
-def _cli_config(workdir: str) -> WorkdashConfig:
+def _cli_config(workdir: str, *, codex_analyze: str = "codex exec") -> WorkdashConfig:
     return WorkdashConfig(
         github_username="testuser",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze="codex exec", launch="codex"),
+        codex=AgentConfig(analyze=codex_analyze, launch="codex"),
         pi=AgentConfig(launch="pi"),
         repositories=("owner/repo",),
         workdir=workdir,
@@ -37,17 +37,36 @@ def _run_workdash(
 ) -> None:
     import workdash.workdash as workdash_module
 
-    config = _cli_config(scenario_state.get("workdir", "/tmp/workdash-bdd"))
+    config = _cli_config(
+        scenario_state.get("workdir", "/tmp/workdash-bdd"),
+        codex_analyze=scenario_state.get("codex_analyze", "codex exec"),
+    )
     items = list(scenario_state.get("work_items", []))
     markers = compute_suggestion_markers(items)
+    real_backend_class = workdash_module.WorkdashBackend
+
+    class FakeAnalyzer:
+        def analyze(self, _item, command_tokens=None):  # pragma: no cover - should not run
+            raise AssertionError("analyzer should not run with malformed command")
 
     class FakeBackend:
         def __init__(self, config=None, **kwargs) -> None:
-            pass
+            self.real = real_backend_class(config=config, analyzer=FakeAnalyzer())
 
         def load_items(self, progress_callback=None):
             assert progress_callback is None
             return list(items), dict(markers)
+
+        def resolve_analyze_command_tokens(self, tool="codex"):
+            return self.real.resolve_analyze_command_tokens(tool)
+
+        def analyze_item(self, item, tool="codex"):
+            scenario_state.setdefault("analyze_calls", []).append((item, tool))
+            if tool == "cached":
+                return scenario_state.get("cached_analysis_path") if item.analysis else None
+            if scenario_state.get("use_real_analyze_item"):
+                return self.real.analyze_item(item, tool=tool)
+            return scenario_state.get("analysis_path", "/tmp/workdash-analysis.md")
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
@@ -69,6 +88,14 @@ def _run_workdash(
     monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: config)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+    monkeypatch.setattr(
+        workdash_module,
+        "ensure_worktree",
+        lambda workdir, item: (
+            scenario_state.setdefault("ensure_calls", []).append((workdir, item))
+            or str(Path(workdir) / "owner_repo_1")
+        ),
+    )
     monkeypatch.setattr(
         workdash_module,
         "list_workdash_sessions",
@@ -245,6 +272,30 @@ def _session_has_live_and_exited_panes(
     ]
 
 
+@given("the current Workdash items include an assigned issue without cached analysis")
+def _current_items_include_uncached_issue(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    scenario_state.setdefault("workdir", str(tmp_path / "wrk"))
+    item = make_work_item(
+        item_type=WorkItemType.ISSUE,
+        kind=WorkItemKind.ASSIGNED_ISSUE,
+        number=1,
+        title="Fix the issue",
+        created_at=NOW_UTC,
+        updated_at=NOW_UTC,
+    )
+    work_items[:] = [item]
+    scenario_state["work_items"] = list(work_items)
+    scenario_state["analysis_path"] = str(tmp_path / "analysis.md")
+
+
+@given("the configured Codex analyze command is malformed")
+def _configured_codex_analyze_command_is_malformed(scenario_state: dict[str, Any]) -> None:
+    scenario_state["codex_analyze"] = "codex 'broken"
+    scenario_state["use_real_analyze_item"] = True
+
+
 @when("the user runs `workdash info`")
 def _run_info(
     scenario_state: dict[str, Any],
@@ -270,6 +321,20 @@ def _run_top_level_json_info(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _run_workdash(["--json", "info"], scenario_state, monkeypatch, capsys)
+
+
+@when("the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`")
+def _run_analyze_json(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(
+        ["analyze", "owner/repo#ISSUE-1", "--agent", "codex", "--json"],
+        scenario_state,
+        monkeypatch,
+        capsys,
+    )
 
 
 @when("the user runs an orchestration command")
@@ -395,7 +460,41 @@ def _does_not_report_exited_panes(scenario_state: dict[str, Any]) -> None:
     assert [pane["title"] for pane in payload["panes"]] == ["code_owner_repo_1"]
 
 
+@then("the system analyzes the current item with the selected configured agent")
+def _analyzes_with_selected_agent(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state
+    item = scenario_state["work_items"][0]
+    assert scenario_state["analyze_calls"] == [(item, "cached"), (item, "codex")]
+    assert scenario_state["ensure_calls"] == [(scenario_state["workdir"], item)]
+
+
+@then("the system returns JSON with the item id, selected agent, analysis path, and cache status")
+def _returns_analyze_json(scenario_state: dict[str, Any]) -> None:
+    payload = json.loads(scenario_state["stdout"])
+    assert payload == {
+        "item_id": "owner/repo#ISSUE-1",
+        "path": scenario_state["analysis_path"],
+        "agent": "codex",
+        "cache_used": False,
+        "status": "generated",
+    }
+
+
 @then("the system reports that an active Workdash-owned Zellij session is required")
 def _reports_session_required(scenario_state: dict[str, Any]) -> None:
     assert "active Workdash-owned Zellij session" in scenario_state["output"]
     assert "required" in scenario_state["output"]
+
+
+@then("the system reports the malformed agent command with config context")
+def _reports_malformed_agent_command_with_context(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["stdout"] == ""
+    assert scenario_state["stderr"].startswith("Error: Invalid configured analysis command")
+    assert "agents.codex.analyze" in scenario_state["stderr"]
+    assert "No closing quotation" in scenario_state["stderr"]
+    assert "Traceback" not in scenario_state["output"]
+
+
+@then("the system does not prepare a worktree")
+def _does_not_prepare_worktree(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("ensure_calls", []) == []

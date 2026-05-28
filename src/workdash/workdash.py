@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from . import __version__
 from .backend import SuggestionMarkers, WorkdashBackend
 from .config import WorkdashConfig, configure, load_config, validate_config
+from .github_client import parse_github_item_url
 from .launcher import (
     exec_zellij_wrapped_workdash,
     inject_workdash_local_bin_into_path,
@@ -46,19 +47,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands = WorkdashCommands()
     if options.command == "info":
         return commands.info(session=options.session, json_output=options.json_output)
+    if options.command == "analyze":
+        return commands.analyze_cli(
+            target=options.target or "",
+            agent=options.agent,
+            session=options.session,
+            json_output=options.json_output,
+        )
 
-    # TODO(EVO-020): Add CLI analyze through the shared analysis action.
-    #                  Why: The shared action exists so TUI Analyze and CLI
-    #                  analyze do not drift, but the probe only wires the live
-    #                  Zellij `info` command and print JSON path through the CLI.
-    #                  Done: `workdash analyze ITEM [--agent NAME] [--json]`
-    #                  resolves Workdash item IDs and GitHub URLs, requires an
-    #                  active Workdash-owned Zellij session, reuses a fresh cache
-    #                  when available, runs the selected configured analysis
-    #                  agent when needed, and renders human or JSON output.
-    #                  Non-Goals: Do not add a second analysis workflow, bypass
-    #                  the existing analysis cache, or implement broad target
-    #                  syntaxes beyond Workdash item IDs and GitHub URLs.
     # TODO(EVO-030): Add CLI code through the shared launch action.
     #                  Why: The shared launch action exists so TUI Code and CLI
     #                  code do not drift, but the probe does not yet expose the
@@ -99,6 +95,8 @@ class CLIOptions:
     json_output: bool
     command: str | None = None
     session: str | None = None
+    target: str | None = None
+    agent: str | None = None
 
 
 class WorkdashCommands:
@@ -146,6 +144,71 @@ class WorkdashCommands:
             _print_work_items(work_items, suggestion_markers)
         return 0
 
+    def analyze_cli(
+        self,
+        *,
+        target: str,
+        agent: str | None,
+        session: str | None,
+        json_output: bool,
+    ) -> int:
+        """Analyze a current work item from the CLI."""
+
+        try:
+            _select_workdash_session(session)
+            gh_error = _check_gh_preflight()
+            if gh_error:
+                print(f"Error: {gh_error}", file=sys.stderr, flush=True)
+                return 1
+            loaded = self._load_config_and_backend(validate=False)
+            if loaded is None:
+                return 1
+            config, backend = loaded
+            missing = _missing_analyze_load_fields(config)
+            if missing:
+                _print_missing_config(missing)
+                return 1
+            work_items, _suggestion_markers = backend.load_items()
+            item = _resolve_work_item_target(target, work_items)
+            if item is None:
+                raise RuntimeError(
+                    f"{target!r} is not a current Workdash item ID or GitHub issue/PR URL."
+                )
+            item_id = format_work_item_id(item)
+            cache_used = item.analysis is not None
+            agents = _configured_analyze_agents(config)
+            selected_agent = agent or (agents[0] if agents else None)
+            if not cache_used:
+                if selected_agent is None:
+                    raise RuntimeError("No analysis agents are configured.")
+                if selected_agent not in agents:
+                    raise RuntimeError(
+                        f"Analysis agent {selected_agent!r} is not configured. "
+                        f"Configured agents: {', '.join(agents) if agents else '(none)'}"
+                    )
+                if not config.workdir:
+                    _print_missing_config(["workdir"])
+                    return 1
+            path = self.analyze(item, tool=selected_agent or "cached", prefer_cache=True)
+            if path is None:
+                raise RuntimeError(f"Analysis failed for {item_id} with agent {selected_agent}.")
+        except RuntimeError as error:
+            print(f"Error: {error}", file=sys.stderr, flush=True)
+            return 1
+
+        result = {
+            "item_id": item_id,
+            "path": path,
+            "agent": selected_agent,
+            "cache_used": cache_used,
+            "status": "cached" if cache_used else "generated",
+        }
+        if json_output:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        else:
+            _print_analysis_result(result)
+        return 0
+
     def interactive(self) -> int:
         """Start the interactive dashboard."""
 
@@ -191,6 +254,7 @@ class WorkdashCommands:
             if cached_path is not None:
                 return cached_path
         if tool != "cached":
+            backend.resolve_analyze_command_tokens(tool)
             ensure_worktree(config.workdir, item)
         return backend.analyze_item(item, tool=tool)
 
@@ -248,23 +312,17 @@ class WorkdashCommands:
         #                  change how closed panes are discovered by `workdash info`.
         return {"agent": tool, "cwd": repo_path, "pane_title": pane_title, "pane_id": None}
 
-    def _load_config_and_backend(self) -> tuple[WorkdashConfig, WorkdashBackend] | None:
+    def _load_config_and_backend(
+        self, *, validate: bool = True
+    ) -> tuple[WorkdashConfig, WorkdashBackend] | None:
         if self._config is not None and self._backend is not None:
             return self._config, self._backend
         config = load_config()
-        missing = validate_config(config)
-        if missing:
-            print(
-                f"Error: missing configuration fields: {', '.join(missing)}",
-                file=sys.stderr,
-                flush=True,
-            )
-            print(
-                "Run 'workdash --configure' to set up your configuration.",
-                file=sys.stderr,
-                flush=True,
-            )
-            return None
+        if validate:
+            missing = validate_config(config)
+            if missing:
+                _print_missing_config(missing)
+                return None
         backend = WorkdashBackend(config=config)
         self._config = config
         self._backend = backend
@@ -276,6 +334,54 @@ def format_work_item_id(item: WorkItem) -> str:
 
     item_type = format_type_label(item).removesuffix("+")
     return f"{item.repo}#{item_type}-{item.number}"
+
+
+def _resolve_work_item_target(target: str, work_items: Sequence[WorkItem]) -> WorkItem | None:
+    for item in work_items:
+        if target == format_work_item_id(item):
+            return item
+    parsed = parse_github_item_url(target)
+    if parsed is None:
+        return None
+    for item in work_items:
+        if (
+            item.repo == parsed.repo
+            and item.item_type == parsed.item_type
+            and item.number == parsed.number
+        ):
+            return item
+    return None
+
+
+def _configured_analyze_agents(config: WorkdashConfig) -> list[str]:
+    agents = []
+    if config.codex.analyze:
+        agents.append("codex")
+    if config.claude.analyze:
+        agents.append("claude")
+    return agents
+
+
+def _missing_analyze_load_fields(config: WorkdashConfig) -> list[str]:
+    missing = []
+    if not config.github_username:
+        missing.append("github_username")
+    if not config.repositories:
+        missing.append("repositories")
+    return missing
+
+
+def _print_missing_config(missing: Sequence[str]) -> None:
+    print(
+        f"Error: missing configuration fields: {', '.join(missing)}",
+        file=sys.stderr,
+        flush=True,
+    )
+    print(
+        "Run 'workdash --configure' to set up your configuration.",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
@@ -338,6 +444,26 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         default=argparse.SUPPRESS,
         help="Emit machine-readable JSON.",
     )
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        help="Analyze a current Workdash item.",
+    )
+    analyze_parser.add_argument("target", metavar="ITEM", help="Workdash item ID or GitHub URL.")
+    analyze_parser.add_argument(
+        "--agent",
+        help="Configured analysis agent to run when no fresh cache exists.",
+    )
+    analyze_parser.add_argument(
+        "--session",
+        help="Validate against a specific Workdash-owned Zellij session.",
+    )
+    analyze_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Emit machine-readable JSON.",
+    )
     namespace = parser.parse_args(argv) if argv is not None else parser.parse_args()
     return CLIOptions(
         debug=namespace.debug,
@@ -348,6 +474,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         json_output=namespace.json_output,
         command=namespace.command,
         session=getattr(namespace, "session", None),
+        target=getattr(namespace, "target", None),
+        agent=getattr(namespace, "agent", None),
     )
 
 
@@ -399,6 +527,13 @@ def _print_work_items_json(
             }
         )
     print(json.dumps({"items": items}, ensure_ascii=True, indent=2))
+
+
+def _print_analysis_result(result: dict[str, object]) -> None:
+    print(f"Item: {result['item_id']}")
+    print(f"Agent: {result['agent']}")
+    print(f"Status: {result['status']}")
+    print(f"Path: {result['path']}")
 
 
 def _print_pane_info(info: dict[str, object]) -> None:

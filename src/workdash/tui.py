@@ -459,16 +459,6 @@ else:
         async def _perform_analysis(self, item: WorkItem, choice: str) -> None:
             """Execute analysis after the user picks a tool from the dialog."""
 
-            if self._worktree_callback is not None and choice != "cached":
-                try:
-                    await self._run_with_busy_screen(
-                        message=f"Preparing worktree for {item.repo}#{item.number}...",
-                        callback=lambda: self._worktree_callback(item),
-                    )
-                except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
-                    self._update_status(f"Worktree setup failed: {error}")
-                    self.notify(f"Worktree setup failed: {error}", severity="error", timeout=10)
-                    return
             tool_label = {"cached": "cached", "claude": "Claude", "codex": "Codex"}.get(
                 choice, choice
             )

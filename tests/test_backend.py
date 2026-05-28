@@ -395,6 +395,66 @@ def test_analyze_item_tool_claude_bypasses_cache() -> None:
     assert analyzer.analyze_calls == [(55, ["claude", "-p"])]
 
 
+def test_analyze_item_reports_malformed_agent_command_with_config_context() -> None:
+    analyzer = MagicMock()
+    config = WorkdashConfig(
+        github_username="testuser",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        codex=AgentConfig(analyze="codex 'broken", launch="codex"),
+        repositories=("owner/*",),
+        workdir="~/src",
+    )
+    backend = WorkdashBackend(
+        github_client=MagicMock(),
+        analyzer=analyzer,
+        config=config,
+    )
+    item = make_work_item(
+        item_type=WorkItemType.ISSUE,
+        kind=WorkItemKind.TRACKED_ISSUE,
+        number=101,
+        created_at=datetime(2026, 2, 2, 0, 0, 0, tzinfo=UTC),
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        backend.analyze_item(item, tool="codex")
+
+    assert "Invalid configured analysis command for agent 'codex'" in str(error.value)
+    assert "agents.codex.analyze" in str(error.value)
+    assert "No closing quotation" in str(error.value)
+    analyzer.analyze.assert_not_called()
+
+
+def test_analyze_item_reports_non_string_agent_command_with_config_context() -> None:
+    analyzer = MagicMock()
+    config = WorkdashConfig(
+        github_username="testuser",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        codex=AgentConfig(analyze=["codex", "exec"], launch="codex"),
+        repositories=("owner/*",),
+        workdir="~/src",
+    )
+    backend = WorkdashBackend(
+        github_client=MagicMock(),
+        analyzer=analyzer,
+        config=config,
+    )
+    item = make_work_item(
+        item_type=WorkItemType.ISSUE,
+        kind=WorkItemKind.TRACKED_ISSUE,
+        number=101,
+        created_at=datetime(2026, 2, 2, 0, 0, 0, tzinfo=UTC),
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        backend.analyze_item(item, tool="codex")
+
+    assert "Invalid configured analysis command for agent 'codex'" in str(error.value)
+    assert "agents.codex.analyze" in str(error.value)
+    assert "expected a non-empty string" in str(error.value)
+    analyzer.analyze.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # include entry points
 # ---------------------------------------------------------------------------

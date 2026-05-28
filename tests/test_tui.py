@@ -522,6 +522,57 @@ async def _wait_for_footer(footer: Static, expected: str, pilot) -> None:
     assert footer.render().plain == expected
 
 
+def test_workdash_app_analyze_uses_shared_callback_without_tui_worktree_prep() -> None:
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+    )
+    analyze_calls: list[tuple[WorkItem, str]] = []
+    worktree_attempts: list[WorkItem] = []
+
+    def worktree_callback(item: WorkItem) -> str:
+        worktree_attempts.append(item)
+        raise RuntimeError("unexpected TUI worktree prep")
+
+    def analyze_callback(item: WorkItem, tool: str = "codex") -> str:
+        analyze_calls.append((item, tool))
+        raise RuntimeError("Invalid configured analysis command for agent 'claude'")
+
+    app = WorkdashApp(
+        work_items=[work_item],
+        worktree_callback=worktree_callback,
+        analyze_callback=analyze_callback,
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+
+            await pilot.press("a")
+            await pilot.pause()
+            await pilot.press("c")
+            await _wait_for_footer(
+                footer,
+                "Analyze failed: Invalid configured analysis command for agent 'claude'",
+                pilot,
+            )
+            _assert_no_modal_screens(app)
+            assert analyze_calls == [(work_item, "claude")]
+            assert worktree_attempts == []
+
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
 def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
     now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
     work_item = WorkItem(
@@ -607,7 +658,6 @@ def test_workdash_app_worktree_failure_closes_dialogs_and_skips_actions() -> Non
         updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
         url="https://example.com/pull/22",
     )
-    analyze_calls: list[tuple[WorkItem, str]] = []
     launch_calls: list[tuple[WorkItem, str]] = []
     terminal_calls: list[WorkItem] = []
     worktree_attempts: list[WorkItem] = []
@@ -615,10 +665,6 @@ def test_workdash_app_worktree_failure_closes_dialogs_and_skips_actions() -> Non
     def failing_worktree_callback(item: WorkItem) -> str:
         worktree_attempts.append(item)
         raise RuntimeError(f"worktree failed {len(worktree_attempts)}")
-
-    def analyze_callback(item: WorkItem, tool: str = "codex") -> str | None:
-        analyze_calls.append((item, tool))
-        return None
 
     def launch_callback(item: WorkItem, tool: str = "codex") -> None:
         launch_calls.append((item, tool))
@@ -629,7 +675,6 @@ def test_workdash_app_worktree_failure_closes_dialogs_and_skips_actions() -> Non
     app = WorkdashApp(
         work_items=[work_item],
         worktree_callback=failing_worktree_callback,
-        analyze_callback=analyze_callback,
         launch_callback=launch_callback,
         terminal_callback=terminal_callback,
         now_utc=now_utc,
@@ -639,25 +684,18 @@ def test_workdash_app_worktree_failure_closes_dialogs_and_skips_actions() -> Non
         async with app.run_test() as pilot:
             footer = app.query_one("#status-footer", Static)
 
-            await pilot.press("a")
-            await pilot.pause()
-            await pilot.press("c")
-            await _wait_for_footer(footer, "Worktree setup failed: worktree failed 1", pilot)
-            _assert_no_modal_screens(app)
-            assert analyze_calls == []
-
             await pilot.press("c")
             await pilot.pause()
             await pilot.press("g")
-            await _wait_for_footer(footer, "Worktree setup failed: worktree failed 2", pilot)
+            await _wait_for_footer(footer, "Worktree setup failed: worktree failed 1", pilot)
             _assert_no_modal_screens(app)
             assert launch_calls == []
 
             await pilot.press("t")
-            await _wait_for_footer(footer, "Worktree setup failed: worktree failed 3", pilot)
+            await _wait_for_footer(footer, "Worktree setup failed: worktree failed 2", pilot)
             _assert_no_modal_screens(app)
             assert terminal_calls == []
-            assert len(worktree_attempts) == 3
+            assert len(worktree_attempts) == 2
 
             await pilot.press("q")
 

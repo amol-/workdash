@@ -220,10 +220,24 @@ class WorkdashBackend:
         self.included_items_store.add(parsed.canonical_url)
         return IncludeResult(fetched_item=item)
 
-    def _resolve_command_tokens(self, tool: str) -> list[str]:
+    def resolve_analyze_command_tokens(self, tool: str) -> list[str]:
         if tool == "claude":
-            return shlex.split(self.config.claude.analyze)
-        return shlex.split(self.config.codex.analyze)
+            command = self.config.claude.analyze
+            field = "agents.claude.analyze"
+        else:
+            command = self.config.codex.analyze
+            field = "agents.codex.analyze"
+        if not isinstance(command, str) or not command.strip():
+            raise RuntimeError(
+                f"Invalid configured analysis command for agent {tool!r} ({field}): "
+                "expected a non-empty string"
+            )
+        try:
+            return shlex.split(command)
+        except ValueError as error:
+            raise RuntimeError(
+                f"Invalid configured analysis command for agent {tool!r} ({field}): {error}"
+            ) from error
 
     def analyze_item(self, item: WorkItem, tool: str = "codex") -> str | None:
         """Generate or retrieve analysis, returning the markdown file path.
@@ -238,7 +252,7 @@ class WorkdashBackend:
                 item.analysis = cached_analysis
                 return str(self.analysis_cache.build_analysis_path(item))
             return None
-        command_tokens = self._resolve_command_tokens(tool)
+        command_tokens = self.resolve_analyze_command_tokens(tool)
         analysis_content = self.analyzer.analyze(item, command_tokens=command_tokens)
         if analysis_content is None:
             return None

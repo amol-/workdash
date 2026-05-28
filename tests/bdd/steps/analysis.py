@@ -392,6 +392,9 @@ def _run_generate_fresh(
 
     def analyze_callback(item: WorkItem, tool: str = "codex") -> str | None:
         analyze_calls.append((item, tool))
+        if tool != "cached":
+            backend.resolve_analyze_command_tokens(tool)
+            worktree_callback(item)
         return backend.analyze_item(item, tool=tool)
 
     monkeypatch.setattr("workdash.tui.open_markdown", lambda path: opened_paths.append(path))
@@ -465,9 +468,7 @@ def _choose_open_cached(
 
 @then("the system prepares the work item's worktree")
 def _system_prepares_worktree_analysis(scenario_state: dict[str, Any]) -> None:
-    calls = scenario_state["worktree_calls"]
-    assert calls, "Expected the worktree callback to be invoked"
-    assert calls[0] == scenario_state["selected_item"]
+    assert scenario_state["worktree_calls"] == [scenario_state["selected_item"]]
 
 
 @then("the system shows that the analysis is in progress")
