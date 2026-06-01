@@ -1,6 +1,6 @@
 """Step definitions for the triage domain feature files.
 
-Covers list-work-items, print-mode, recent-activity, refresh, suggested-item,
+Covers list-work-items, list-command, recent-activity, refresh, suggested-item,
 and include-item scenarios. Each step exercises real
 ``WorkdashApp``/``WorkdashBackend`` code — only the external GitHub and
 browser-open boundaries are faked.
@@ -136,7 +136,7 @@ def _review_prs_render_as_review(scenario_state: dict[str, Any]) -> None:
     items = scenario_state["work_items"]
     review_items = [i for i in items if i.kind == WorkItemKind.REVIEW_REQUESTED_PR]
     assert review_items, "No review-requested PR items present"
-    # The REVIEW label is applied by the TUI/print-mode layer — verify both.
+    # The REVIEW label is applied by the TUI/list-command layer — verify both.
     import contextlib
     import io
 
@@ -373,9 +373,9 @@ def _no_work_items(work_items: list[WorkItem]) -> None:
 
 @then("the system reports that no work items were found")
 def _system_reports_empty_from_open(scenario_state: dict[str, Any], capsys) -> None:
-    # When invoked via the triage S005 flow we run the CLI --print path once
+    # When invoked via the triage S005 flow we run the CLI list path once
     # here so the assertion can consume stdout. If we already captured output
-    # via a prior print-mode step we reuse it.
+    # via a prior list-command step we reuse it.
     if "print_output" in scenario_state:
         assert "No work items found." in scenario_state["print_output"]
         return
@@ -609,7 +609,7 @@ def _warns_unauthorized_review_requested_pr_skipped(
 
 
 # --------------------------------------------------------------------------
-# F-TRIAGE-PRINT
+# F-TRIAGE-LIST-COMMAND
 # --------------------------------------------------------------------------
 
 
@@ -714,34 +714,35 @@ def _run_system_with_flag(
         setup_mod._run_configure_with_fakes(scenario_state, config_path, monkeypatch, capsys)
         return
 
-    _run_print_mode([flag], scenario_state, work_items, monkeypatch, capsys, valid_config)
+    _run_list_command([flag], scenario_state, work_items, monkeypatch, capsys, valid_config)
 
 
-@when("the user lists work items with `workdash --print`")
-def _list_print(
+@when("the user runs `workdash list`")
+@when("the user lists work items with `workdash list`")
+def _list_work_items(
     scenario_state: dict[str, Any],
     work_items: list[WorkItem],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     valid_config: WorkdashConfig,
 ) -> None:
-    _run_print_mode(["--print"], scenario_state, work_items, monkeypatch, capsys, valid_config)
+    _run_list_command(["list"], scenario_state, work_items, monkeypatch, capsys, valid_config)
 
 
-@when("the user lists work items with `workdash --print --json`")
-def _list_print_json(
+@when("the user lists work items with `workdash list --json`")
+def _list_work_items_json(
     scenario_state: dict[str, Any],
     work_items: list[WorkItem],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     valid_config: WorkdashConfig,
 ) -> None:
-    _run_print_mode(
-        ["--print", "--json"], scenario_state, work_items, monkeypatch, capsys, valid_config
+    _run_list_command(
+        ["list", "--json"], scenario_state, work_items, monkeypatch, capsys, valid_config
     )
 
 
-def _run_print_mode(
+def _run_list_command(
     argv: list[str],
     scenario_state: dict[str, Any],
     work_items: list[WorkItem],
@@ -757,10 +758,10 @@ def _run_print_mode(
 
     class UnreachableApp:
         def __init__(self, **kwargs) -> None:  # pragma: no cover - sanity
-            raise AssertionError("TUI should not be constructed for print mode")
+            raise AssertionError("TUI should not be constructed for list command")
 
         def run(self) -> None:  # pragma: no cover - sanity
-            raise AssertionError("TUI should not run for print mode")
+            raise AssertionError("TUI should not run for list command")
 
     monkeypatch.setattr(workdash_module, "WorkdashApp", UnreachableApp)
     scenario_state["exit_code"] = workdash_module.main(argv)
@@ -1367,7 +1368,7 @@ def _seed_three_included_items(
     )
     monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
     monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
-    # Seed one non-included tracked PR so the print-mode assertion can verify
+    # Seed one non-included tracked PR so the list-command assertion can verify
     # that format_type_label does not spuriously append "+" to regular rows.
     monkeypatch.setattr(
         GitHubClient,
@@ -1670,8 +1671,8 @@ def _assert_type_column(scenario_state: dict[str, Any], *, number: int, expected
     raise AssertionError(f"No row for number {number}: {captured['rows']}")
 
 
-@then('the same suffixes appear when the user runs the system with "--print"')
-def _print_mode_suffixes(scenario_state: dict[str, Any]) -> None:
+@then("the same suffixes appear when the user runs `workdash list`")
+def _list_command_suffixes(scenario_state: dict[str, Any]) -> None:
     import contextlib
     import io
 

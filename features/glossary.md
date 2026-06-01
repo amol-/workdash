@@ -33,5 +33,5 @@ Canonical product vocabulary used by the feature files.
 - Configuration: The user settings stored at `~/.config/workdash/config.json`.
 - Configuration wizard: The interactive flow started by `--configure` that fills in any missing configuration fields.
 - TUI: The interactive terminal interface shown by default when the system starts.
-- Print mode: The non-interactive listing emitted when the system is started with `--print`, intended for automation and for agents that need to read the dashboard without driving the TUI.
+- List command: The non-interactive listing emitted by `workdash list`, intended for automation and for agents that need to read the dashboard without driving the TUI.
 - Recent activity: A work item whose last update is within the last 24 hours.

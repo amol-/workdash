@@ -9,7 +9,7 @@ Feature: Suggested next item
     - Exactly one work item is marked as suggested when the list is non-empty.
     - The suggested item is the oldest open work item by creation date.
     - When several items share the oldest creation date, pull requests are preferred over issues.
-    - The suggested item's title is prefixed with "* " in both the TUI and print mode.
+    - The suggested item's title is prefixed with "* " in both the TUI and list command.
 
   @id:F-TRIAGE-SUGGESTED-S001
   Scenario: The oldest item is suggested

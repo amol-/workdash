@@ -84,11 +84,11 @@ Launch the TUI:
 workdash
 ```
 
-Useful flags:
+Useful commands and flags:
 
 ```bash
-workdash --print             # list items as plain text, no TUI
-workdash --print --json      # list items as machine-readable JSON
+workdash list                # list items as plain text, no TUI
+workdash list --json         # list items as machine-readable JSON
 workdash info [--session NAME] [--json]  # report live Workdash-owned Zellij panes
 workdash analyze ITEM [--agent NAME] [--session NAME] [--json]  # analyze a current item
 workdash --refresh           # force a refresh from GitHub
@@ -139,9 +139,9 @@ configured `workdir`. Each tracked repository gets a local clone, and each work
 item gets its own worktree alongside it, so you can hop between items without
 disturbing other in-progress work.
 
-## Print mode
+## List command
 
-`--print` emits one row per item, sorted by last update (most recent first):
+`workdash list` emits one row per item, sorted by last update (most recent first):
 
 ```
 TYPE   repo#TYPE-N   YYYY-MM-DD   title
@@ -152,7 +152,7 @@ copy/paste-friendly: `repo#ISSUE-N`, `repo#PR-N`, or `repo#REVIEW-N`. The sugges
 item's title is prefixed with `* `. If nothing matches, the output is
 `No work items found.`.
 
-Use `workdash --print --json` to emit the same list as JSON records with item ID,
+Use `workdash list --json` to emit the same list as JSON records with item ID,
 type, kind, repository, number, title, URL, timestamps, and suggested status.
 
 ## Info command
@@ -166,7 +166,7 @@ the matching Workdash item ID when the pane is inside a known worktree, or repor
 ## Analyze command
 
 `workdash analyze ITEM [--agent NAME] [--session NAME] [--json]` analyzes a
-current Workdash item from the CLI. `ITEM` can be a row ID from `workdash --print`
+current Workdash item from the CLI. `ITEM` can be a row ID from `workdash list`
 (such as `owner/repo#ISSUE-123`) or a GitHub issue/PR URL that is already in the
 current dashboard data. The command requires an active Workdash-owned Zellij
 session; pass `--session` when more than one exists. It reuses a fresh cached

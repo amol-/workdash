@@ -12,7 +12,7 @@ Feature: Include a work item by URL
     - Pressing "i" in the TUI opens a modal dialog with a text field that accepts a pasted GitHub URL.
     - Valid URLs point to a GitHub issue or pull request on github.com; trailing path, query, and fragment components are ignored.
     - On successful include the item is fetched, added to the dashboard, persisted to the included-items store, and the cursor moves to it.
-    - An included item shows a "+" suffix on its type column in both the TUI and print mode (for example "PR+", "ISSUE+", or "REVIEW+").
+    - An included item shows a "+" suffix on its type column in both the TUI and list command (for example "PR+", "ISSUE+", or "REVIEW+").
     - Including a URL that is already shown on the dashboard moves the cursor to that item without duplicating it.
     - Included items are a fetch-time source; downstream sorting, suggestion, and recent-activity rules treat them like any other item.
     - On every refresh the included-items store is re-read and its URLs are re-fetched; items that are no longer open are removed from the store.
@@ -47,13 +47,13 @@ Feature: Include a work item by URL
     And the cursor is positioned on that work item
 
   @id:F-TRIAGE-INCLUDE-S004
-  Scenario: Included items are distinguished by a "+" type suffix in TUI and print mode
+  Scenario: Included items are distinguished by a "+" type suffix in TUI and list command
     Given the user has an included pull request, an included issue, and an included review-requested pull request
     When the user opens the dashboard
     Then the included pull request's type column reads "PR+"
     And the included issue's type column reads "ISSUE+"
     And the included review-requested pull request's type column reads "REVIEW+"
-    And the same suffixes appear when the user runs the system with "--print"
+    And the same suffixes appear when the user runs `workdash list`
 
   @id:F-TRIAGE-INCLUDE-S005
   Scenario: Included items persist across restarts

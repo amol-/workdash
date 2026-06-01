@@ -55,17 +55,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             json_output=options.json_output,
         )
 
-    # TODO(EVO-021): Rename print mode to the list command.
-    #                  Why: `workdash --print` lists current Workdash items, while
-    #                  `workdash info` reports live Zellij panes. The flag name
-    #                  makes the two capabilities feel duplicated even though they
-    #                  answer different questions.
-    #                  Done: `workdash list [--json]` is the documented item-list
-    #                  command, README/features/tests prefer `list`, and `--print`
-    #                  remains only as a backwards-compatible alias if keeping it
-    #                  is still useful.
-    #                  Non-Goals: Do not change `workdash info`, item ID format,
-    #                  GitHub loading behavior, or Zellij session requirements.
     # TODO(EVO-022): Add optional all-pane info output.
     #                  Why: `workdash info` currently shows only panes whose titles
     #                  prove Workdash launched them (`code_`/`terminal_`). Users may
@@ -73,9 +62,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     #                  with ordinary shell or agent titles, especially on other tabs.
     #                  Done: `workdash info` keeps the current strict default, while
     #                  `workdash info --all` also reports live non-plugin panes in the
-    #                  selected Workdash session. Extra panes use `kind=unknown` unless
-    #                  title/cwd evidence identifies a stronger kind, and JSON exposes
-    #                  enough fields for callers to skip them safely.
+    #                  selected Workdash session. Extra panes use `kind=unknown`, and
+    #                  JSON exposes enough fields for callers to skip them safely.
     #                  Non-Goals: Do not persist pane ownership, infer work items from
     #                  arbitrary source checkouts, change item ID mapping rules, or
     #                  include exited/plugin panes by default.
@@ -102,8 +90,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Error: {error}", file=sys.stderr, flush=True)
             return 1
 
-    if options.print_mode:
-        return commands.print_items(json_output=options.json_output)
+    if options.command == "list":
+        return commands.list_items(json_output=options.json_output)
     return commands.interactive()
 
 
@@ -112,7 +100,6 @@ class CLIOptions:
     """CLI configuration available during plumbing phases."""
 
     debug: bool
-    print_mode: bool
     refresh: bool
     configure: bool
     direct: bool
@@ -154,8 +141,8 @@ class WorkdashCommands:
             _print_pane_info(pane_info)
         return 0
 
-    def print_items(self, *, json_output: bool) -> int:
-        """Print work items without starting the TUI."""
+    def list_items(self, *, json_output: bool) -> int:
+        """List work items without starting the TUI."""
 
         loaded = self._load_config_and_backend()
         if loaded is None:
@@ -426,12 +413,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         help="Enable verbose logging.",
     )
     parser.add_argument(
-        "--print",
-        dest="print_mode",
-        action="store_true",
-        help="Emit flattened data listing without launching the TUI.",
-    )
-    parser.add_argument(
         "--refresh",
         action="store_true",
         help="Force a data refresh from GitHub sources.",
@@ -453,6 +434,17 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         help="Emit machine-readable JSON for commands that return information.",
     )
     subparsers = parser.add_subparsers(dest="command")
+    list_parser = subparsers.add_parser(
+        "list",
+        help="List current Workdash items without launching the TUI.",
+    )
+    list_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Emit machine-readable JSON.",
+    )
     info_parser = subparsers.add_parser(
         "info",
         help="Report live Workdash-owned Zellij panes.",
@@ -491,7 +483,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     namespace = parser.parse_args(argv) if argv is not None else parser.parse_args()
     return CLIOptions(
         debug=namespace.debug,
-        print_mode=namespace.print_mode,
         refresh=namespace.refresh,
         configure=namespace.configure,
         direct=namespace.direct,
@@ -506,7 +497,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
 def _should_wrap_interactive_start(options: CLIOptions) -> bool:
     return (
         not options.direct
-        and not options.print_mode
         and not options.configure
         and options.command is None
         and not os.getenv("ZELLIJ")

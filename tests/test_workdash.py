@@ -153,7 +153,7 @@ def test_main_tui_analyze_callback_uses_worktree_and_backend(
     assert result == "/tmp/analysis.md"
 
 
-def test_main_does_not_print_loading_message_in_print_mode(
+def test_main_list_command_does_not_print_loading_message(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     class FakeBackend:
@@ -169,10 +169,10 @@ def test_main_does_not_print_loading_message_in_print_mode(
 
     class FakeApp:
         def __init__(self, **kwargs) -> None:  # pragma: no cover - should not be reached
-            raise AssertionError("TUI app should not be constructed in --print mode")
+            raise AssertionError("TUI app should not be constructed for list command")
 
         def run(self) -> None:  # pragma: no cover - should not be reached
-            raise AssertionError("TUI app should not run in --print mode")
+            raise AssertionError("TUI app should not run for list command")
 
     monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
@@ -180,7 +180,7 @@ def test_main_does_not_print_loading_message_in_print_mode(
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
 
-    exit_code = workdash_module.main(["--print"])
+    exit_code = workdash_module.main(["list"])
 
     assert exit_code == 0
     captured = capsys.readouterr()
@@ -975,33 +975,6 @@ def test_main_direct_mode_bypasses_zellij_wrapper(
 
     assert exit_code == 1
     assert "gh CLI is not installed" in capsys.readouterr().err
-
-
-def test_main_print_mode_bypasses_zellij_wrapper(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    exec_called = False
-
-    def fake_execvp(_file: str, _args: list[str]) -> None:
-        nonlocal exec_called
-        exec_called = True
-
-    class FakeBackend:
-        def __init__(self, config=None, **kwargs) -> None:
-            pass
-
-        def load_items(self, progress_callback=None):
-            return [], {}
-
-    monkeypatch.delenv("ZELLIJ", raising=False)
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
-    _auth_status_succeeds(monkeypatch)
-    monkeypatch.setattr(workdash_module.os, "execvp", fake_execvp)
-    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
-    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
-
-    assert workdash_module.main(["--print"]) == 0
-    assert exec_called is False
 
 
 def test_main_exits_with_error_when_gh_is_not_authenticated(

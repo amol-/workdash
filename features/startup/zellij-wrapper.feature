@@ -40,9 +40,9 @@ Feature: Start the interactive dashboard inside Zellij
     Then the system starts the dashboard directly
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S004
-  Scenario: Print mode outside Zellij does not wrap itself
+  Scenario: List command outside Zellij does not wrap itself
     Given the system is not running inside a Zellij session
-    When the user starts the non-interactive print mode
+    When the user starts the non-interactive list command
     Then the system does not replace itself with Zellij
     And the system prints work items directly
 
