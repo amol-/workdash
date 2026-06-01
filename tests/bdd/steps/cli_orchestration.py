@@ -215,6 +215,49 @@ def _session_has_terminal_backed_panes(
     ]
 
 
+@given("that session has ordinary live, exited, held, and plugin panes")
+def _session_has_ordinary_live_exited_held_and_plugin_panes(
+    scenario_state: dict[str, Any],
+) -> None:
+    cwd = scenario_state["panes"][0]["pane_cwd"]
+    scenario_state["panes"].extend(
+        [
+            {
+                "id": 11,
+                "title": "shell",
+                "pane_cwd": cwd,
+                "pane_command": "bash",
+                "tab_id": 11,
+                "tab_name": "scratch",
+                "state": "Running",
+                "exited": False,
+                "is_plugin": False,
+            },
+            {
+                "id": 12,
+                "title": "old-shell",
+                "pane_cwd": cwd,
+                "state": "Exited",
+                "exited": True,
+            },
+            {
+                "id": 13,
+                "title": "held-shell",
+                "pane_cwd": cwd,
+                "state": "Exited",
+                "exited": False,
+                "is_held": True,
+            },
+            {
+                "id": 14,
+                "title": "status",
+                "pane_cwd": cwd,
+                "is_plugin": True,
+            },
+        ]
+    )
+
+
 @given("that session has a Workdash-named pane whose cwd does not match a known worktree")
 def _session_has_unmapped_pane(
     scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
@@ -233,8 +276,8 @@ def _session_has_unmapped_pane(
     ]
 
 
-@given("that session has live and exited Workdash terminal-backed panes")
-def _session_has_live_and_exited_panes(
+@given("that session has live, exited, and held Workdash terminal-backed panes")
+def _session_has_live_exited_and_held_panes(
     scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
 ) -> None:
     _item, cwd = _seed_info_item(scenario_state, work_items, tmp_path)
@@ -268,6 +311,17 @@ def _session_has_live_and_exited_panes(
             "tab_name": "agents",
             "state": "Exited",
             "exited": True,
+        },
+        {
+            "id": 9,
+            "title": "terminal_owner_repo_4",
+            "pane_cwd": cwd,
+            "terminal_command": "bash",
+            "tab_id": 10,
+            "tab_name": "agents",
+            "state": "Exited",
+            "exited": False,
+            "is_held": True,
         },
     ]
 
@@ -321,6 +375,15 @@ def _run_top_level_json_info(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _run_workdash(["--json", "info"], scenario_state, monkeypatch, capsys)
+
+
+@when("the user runs `workdash info --all --json`")
+def _run_info_all_json(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(["info", "--all", "--json"], scenario_state, monkeypatch, capsys)
 
 
 @when("the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`")
@@ -454,10 +517,30 @@ def _pane_mapping_unknown(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["json_payload"]["panes"][0]["item"] == "unknown"
 
 
-@then("the system does not report exited panes")
-def _does_not_report_exited_panes(scenario_state: dict[str, Any]) -> None:
+@then("the system does not report exited or held panes")
+def _does_not_report_exited_or_held_panes(scenario_state: dict[str, Any]) -> None:
     payload = scenario_state["json_payload"]
     assert [pane["title"] for pane in payload["panes"]] == ["code_owner_repo_1"]
+
+
+@then("the system reports the ordinary live pane as unknown kind with raw pane information")
+def _reports_ordinary_live_pane_as_unknown(scenario_state: dict[str, Any]) -> None:
+    payload = scenario_state["json_payload"]
+    shell = next(pane for pane in payload["panes"] if pane["title"] == "shell")
+    assert shell["pane_id"] == "terminal_11"
+    assert shell["kind"] == "unknown"
+    assert shell["item"] == "unknown"
+    assert shell["cwd"] == scenario_state["panes"][0]["pane_cwd"]
+    assert shell["command"] == "bash"
+    assert shell["tab_name"] == "scratch"
+
+
+@then("the system does not report exited, held, or plugin panes")
+def _does_not_report_exited_held_or_plugin_panes(scenario_state: dict[str, Any]) -> None:
+    titles = [pane["title"] for pane in scenario_state["json_payload"]["panes"]]
+    assert "old-shell" not in titles
+    assert "held-shell" not in titles
+    assert "status" not in titles
 
 
 @then("the system analyzes the current item with the selected configured agent")

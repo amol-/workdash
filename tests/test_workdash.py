@@ -838,7 +838,122 @@ def test_main_info_human_output_shows_mapped_and_unknown_items(
     assert "item=unknown" in output
 
 
-def test_main_info_json_excludes_exited_workdash_panes(
+def test_main_info_json_default_excludes_ordinary_panes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path,
+) -> None:
+    item = _issue()
+    config = WorkdashConfig(
+        github_username="testuser",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        codex=AgentConfig(analyze="codex exec", launch="codex"),
+        pi=AgentConfig(launch="pi --no-tips"),
+        repositories=("owner/repo",),
+        workdir=str(tmp_path),
+    )
+
+    class FakeBackend:
+        def __init__(self, config=None, **kwargs) -> None:
+            pass
+
+        def load_items(self, progress_callback=None):
+            return [item], {}
+
+    known_cwd = str(worktree_path(config.workdir, item.repo, item.number))
+    worktree_path(config.workdir, item.repo, item.number).mkdir(parents=True)
+    _git_origin_proves(monkeypatch, known_cwd, item.repo)
+    monkeypatch.setattr(workdash_module, "_select_workdash_session", lambda _session: "workdash")
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+    monkeypatch.setattr(
+        workdash_module,
+        "load_zellij_panes",
+        lambda _session: [
+            {"id": 1, "title": "code_owner_repo_1", "pane_cwd": known_cwd},
+            {"id": 2, "title": "shell", "pane_cwd": known_cwd},
+        ],
+    )
+
+    assert workdash_module.main(["info", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert [pane["title"] for pane in payload["panes"]] == ["code_owner_repo_1"]
+    assert payload["panes"][0]["kind"] == "agent"
+    assert payload["panes"][0]["item"] == "owner/repo#ISSUE-1"
+
+
+def test_main_info_all_json_includes_ordinary_live_non_plugin_panes_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path,
+) -> None:
+    item = _issue()
+    config = WorkdashConfig(
+        github_username="testuser",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        codex=AgentConfig(analyze="codex exec", launch="codex"),
+        pi=AgentConfig(launch="pi --no-tips"),
+        repositories=("owner/repo",),
+        workdir=str(tmp_path),
+    )
+
+    class FakeBackend:
+        def __init__(self, config=None, **kwargs) -> None:
+            pass
+
+        def load_items(self, progress_callback=None):
+            return [item], {}
+
+    known_cwd = str(worktree_path(config.workdir, item.repo, item.number))
+    worktree_path(config.workdir, item.repo, item.number).mkdir(parents=True)
+    _git_origin_proves(monkeypatch, known_cwd, item.repo)
+    monkeypatch.setattr(workdash_module, "_select_workdash_session", lambda _session: "workdash")
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+    monkeypatch.setattr(
+        workdash_module,
+        "load_zellij_panes",
+        lambda _session: [
+            {"id": 1, "title": "code_owner_repo_1", "pane_cwd": known_cwd},
+            {
+                "id": 2,
+                "title": "shell",
+                "pane_cwd": known_cwd,
+                "pane_command": "bash",
+                "tab_id": 7,
+                "tab_name": "scratch",
+                "exited": False,
+                "is_plugin": False,
+            },
+            {"id": 3, "title": "old-shell", "pane_cwd": known_cwd, "exited": True},
+            {
+                "id": 4,
+                "title": "held-shell",
+                "pane_cwd": known_cwd,
+                "is_held": True,
+                "exited": False,
+            },
+            {"id": 5, "title": "status", "pane_cwd": known_cwd, "is_plugin": True},
+        ],
+    )
+
+    assert workdash_module.main(["info", "--all", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert [pane["title"] for pane in payload["panes"]] == ["code_owner_repo_1", "shell"]
+    assert payload["panes"][0]["kind"] == "agent"
+    assert payload["panes"][0]["item"] == "owner/repo#ISSUE-1"
+    assert payload["panes"][1]["kind"] == "unknown"
+    assert payload["panes"][1]["item"] == "unknown"
+    assert payload["panes"][1]["cwd"] == known_cwd
+    assert payload["panes"][1]["command"] == "bash"
+    assert payload["panes"][1]["tab_name"] == "scratch"
+
+
+def test_main_info_json_excludes_exited_or_held_workdash_panes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path,
@@ -878,6 +993,13 @@ def test_main_info_json_excludes_exited_workdash_panes(
                 "title": "terminal_owner_repo_3",
                 "pane_cwd": known_cwd,
                 "exited": True,
+            },
+            {
+                "id": 4,
+                "title": "terminal_owner_repo_4",
+                "pane_cwd": known_cwd,
+                "is_held": True,
+                "exited": False,
             },
         ],
     )

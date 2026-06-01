@@ -46,7 +46,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     commands = WorkdashCommands()
     if options.command == "info":
-        return commands.info(session=options.session, json_output=options.json_output)
+        return commands.info(
+            session=options.session,
+            json_output=options.json_output,
+            include_all_panes=options.include_all_panes,
+        )
     if options.command == "analyze":
         return commands.analyze_cli(
             target=options.target or "",
@@ -55,18 +59,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             json_output=options.json_output,
         )
 
-    # TODO(EVO-022): Add optional all-pane info output.
-    #                  Why: `workdash info` currently shows only panes whose titles
-    #                  prove Workdash launched them (`code_`/`terminal_`). Users may
-    #                  also keep useful project panes in the Workdash Zellij session
-    #                  with ordinary shell or agent titles, especially on other tabs.
-    #                  Done: `workdash info` keeps the current strict default, while
-    #                  `workdash info --all` also reports live non-plugin panes in the
-    #                  selected Workdash session. Extra panes use `kind=unknown`, and
-    #                  JSON exposes enough fields for callers to skip them safely.
-    #                  Non-Goals: Do not persist pane ownership, infer work items from
-    #                  arbitrary source checkouts, change item ID mapping rules, or
-    #                  include exited/plugin panes by default.
     # TODO(EVO-030): Add CLI code through the shared launch action.
     #                  Why: The shared launch action exists so TUI Code and CLI
     #                  code do not drift, but the probe does not yet expose the
@@ -108,6 +100,7 @@ class CLIOptions:
     session: str | None = None
     target: str | None = None
     agent: str | None = None
+    include_all_panes: bool = False
 
 
 class WorkdashCommands:
@@ -117,7 +110,7 @@ class WorkdashCommands:
         self._config: WorkdashConfig | None = None
         self._backend: WorkdashBackend | None = None
 
-    def info(self, *, session: str | None, json_output: bool) -> int:
+    def info(self, *, session: str | None, json_output: bool, include_all_panes: bool) -> int:
         """Report live Workdash-owned Zellij panes."""
 
         try:
@@ -131,7 +124,12 @@ class WorkdashCommands:
                 return 1
             config, backend = loaded
             work_items, _suggestion_markers = backend.load_items()
-            pane_info = _workdash_pane_info(selected_session, config.workdir, work_items)
+            pane_info = _workdash_pane_info(
+                selected_session,
+                config.workdir,
+                work_items,
+                include_all_panes=include_all_panes,
+            )
         except RuntimeError as error:
             print(f"Error: {error}", file=sys.stderr, flush=True)
             return 1
@@ -460,6 +458,13 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         default=argparse.SUPPRESS,
         help="Emit machine-readable JSON.",
     )
+    info_parser.add_argument(
+        "--all",
+        dest="include_all_panes",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Include live non-plugin panes whose titles do not prove Workdash launched them.",
+    )
     analyze_parser = subparsers.add_parser(
         "analyze",
         help="Analyze a current Workdash item.",
@@ -491,6 +496,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         session=getattr(namespace, "session", None),
         target=getattr(namespace, "target", None),
         agent=getattr(namespace, "agent", None),
+        include_all_panes=getattr(namespace, "include_all_panes", False),
     )
 
 
@@ -584,8 +590,16 @@ def _select_workdash_session(requested_session: str | None) -> str:
     return sessions[0]
 
 
+def _is_live_non_plugin_pane(pane: dict[str, object]) -> bool:
+    return (
+        pane.get("is_plugin") is not True
+        and pane.get("exited") is not True
+        and pane.get("is_held") is not True
+    )
+
+
 def _is_workdash_work_pane(pane: dict[str, object]) -> bool:
-    if pane.get("is_plugin") is True or pane.get("exited") is True:
+    if not _is_live_non_plugin_pane(pane):
         return False
     title = pane.get("title")
     return isinstance(title, str) and (title.startswith("code_") or title.startswith("terminal_"))
@@ -595,6 +609,8 @@ def _workdash_pane_info(
     session: str,
     workdir: str | None,
     work_items: Sequence[WorkItem],
+    *,
+    include_all_panes: bool = False,
 ) -> dict[str, object]:
     item_by_cwd = {}
     if workdir is not None:
@@ -602,11 +618,19 @@ def _workdash_pane_info(
             item_path = existing_worktree_path(workdir, item)
             if item_path is not None:
                 item_by_cwd[_normalized_path(item_path)] = format_work_item_id(item)
-    panes = [
-        _pane_info(selected_session=session, pane=pane, item_by_cwd=item_by_cwd)
-        for pane in load_zellij_panes(session)
-        if _is_workdash_work_pane(pane)
-    ]
+    panes = []
+    for pane in load_zellij_panes(session):
+        if _is_workdash_work_pane(pane):
+            panes.append(_pane_info(selected_session=session, pane=pane, item_by_cwd=item_by_cwd))
+        elif include_all_panes and _is_live_non_plugin_pane(pane):
+            panes.append(
+                _pane_info(
+                    selected_session=session,
+                    pane=pane,
+                    item_by_cwd={},
+                    kind="unknown",
+                )
+            )
     return {"session": session, "panes": panes}
 
 
@@ -614,10 +638,12 @@ def _pane_info(
     selected_session: str,
     pane: dict[str, object],
     item_by_cwd: dict[str, str],
+    *,
+    kind: str | None = None,
 ) -> dict[str, object]:
     title = str(pane.get("title") or "")
     pane_id = pane.get("id")
-    kind = "agent" if title.startswith("code_") else "terminal"
+    kind = kind or ("agent" if title.startswith("code_") else "terminal")
     cwd = pane.get("pane_cwd")
     mapped_item = None
     if isinstance(cwd, str) and cwd:

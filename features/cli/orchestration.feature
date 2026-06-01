@@ -17,6 +17,9 @@ Feature: CLI orchestration commands
     - Scanned PR worktree candidates with a same-name origin under another owner are not known worktrees.
     - A fork or renamed fork directory must have local upstream metadata matching the base repository before it maps to that repository's item.
     - Manually renamed worktrees outside Workdash-style per-item candidates are unknown; Workdash may prepare its own worktree later.
+    - `workdash info` reports only live panes whose titles prove Workdash launched them: `code_` agent panes and `terminal_` terminal panes.
+    - Zellij exited or held panes are not live panes.
+    - `workdash info --all` also reports live non-plugin panes in the selected Workdash-owned session, but extra panes are `unknown` kind with unknown item mapping.
 
   @id:F-CLI-ORCHESTRATION-S003
   Scenario: Info inspects the only active Workdash-owned session
@@ -55,12 +58,12 @@ Feature: CLI orchestration commands
     And the pane item mapping is marked unknown
 
   @id:F-CLI-ORCHESTRATION-S007
-  Scenario: Info ignores exited Workdash panes
+  Scenario: Info ignores exited or held Workdash panes
     Given exactly one active Workdash-owned Zellij session exists
-    And that session has live and exited Workdash terminal-backed panes
+    And that session has live, exited, and held Workdash terminal-backed panes
     When the user runs `workdash info --json`
     Then the system returns JSON pane records
-    And the system does not report exited panes
+    And the system does not report exited or held panes
 
   @id:F-CLI-ORCHESTRATION-S008
   Scenario: Top-level JSON flag applies to info
@@ -94,3 +97,13 @@ Feature: CLI orchestration commands
     Then the system reports the malformed agent command with config context
     And the system does not prepare a worktree
     And the system exits with a non-zero status
+
+  @id:F-CLI-ORCHESTRATION-S012
+  Scenario: Info can include ordinary live panes on request
+    Given exactly one active Workdash-owned Zellij session exists
+    And that session has Workdash terminal-backed panes
+    And that session has ordinary live, exited, held, and plugin panes
+    When the user runs `workdash info --all --json`
+    Then the system returns JSON pane records
+    And the system reports the ordinary live pane as unknown kind with raw pane information
+    And the system does not report exited, held, or plugin panes

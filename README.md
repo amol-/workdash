@@ -89,7 +89,7 @@ Useful commands and flags:
 ```bash
 workdash list                # list items as plain text, no TUI
 workdash list --json         # list items as machine-readable JSON
-workdash info [--session NAME] [--json]  # report live Workdash-owned Zellij panes
+workdash info [--session NAME] [--all] [--json]  # report live Workdash-owned Zellij panes
 workdash analyze ITEM [--agent NAME] [--session NAME] [--json]  # analyze a current item
 workdash --refresh           # force a refresh from GitHub
 workdash --debug             # verbose logging
@@ -161,7 +161,9 @@ type, kind, repository, number, title, URL, timestamps, and suggested status.
 for terminal-backed work actions, including pane title, cwd, command, tab, state,
 and mapped Workdash item. It maps each live pane's current working directory to
 the matching Workdash item ID when the pane is inside a known worktree, or reports
-`unknown` when no mapping is known.
+`unknown` when no mapping is known. Add `--all` to include other live non-plugin
+panes from the selected Workdash session as `kind=unknown` with unknown item
+mapping.
 
 ## Analyze command
 
