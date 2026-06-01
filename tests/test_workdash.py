@@ -1,6 +1,7 @@
 import json
 import subprocess
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -587,8 +588,17 @@ def test_main_code_json_launches_selected_agent_through_shared_action(
             return [item], {}
 
     def fake_run(*args, **kwargs):
-        zellij_commands.append(args[0])
-        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+        command = args[0]
+        zellij_commands.append(command)
+        if command[-5:] == ["--json", "--all", "--command", "--state", "--tab"]:
+            stdout = (
+                '[{"id": 1, "title": "workdash"}]'
+                if len(zellij_commands) == 1
+                else '[{"id": 1, "title": "workdash"}, '
+                '{"id": 23, "title": "code_owner_repo_1", "pane_cwd": "/tmp/owner_repo_1"}]'
+            )
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout=stdout, stderr="")
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
 
     monkeypatch.delenv("ZELLIJ", raising=False)
     monkeypatch.setenv("SHELL", "/bin/bash")
@@ -624,10 +634,22 @@ def test_main_code_json_launches_selected_agent_through_shared_action(
         "agent": "codex",
         "cwd": "/tmp/owner_repo_1",
         "pane_title": "code_owner_repo_1",
-        "pane_id": None,
+        "pane_id": "terminal_23",
     }
     assert ensure_calls == [(_VALID_CONFIG.workdir, item)]
     assert zellij_commands == [
+        [
+            "/usr/bin/zellij",
+            "--session",
+            "workdash-main",
+            "action",
+            "list-panes",
+            "--json",
+            "--all",
+            "--command",
+            "--state",
+            "--tab",
+        ],
         [
             "/usr/bin/zellij",
             "--session",
@@ -642,7 +664,19 @@ def test_main_code_json_launches_selected_agent_through_shared_action(
             "/bin/bash",
             "-ic",
             "codex PROMPT",
-        ]
+        ],
+        [
+            "/usr/bin/zellij",
+            "--session",
+            "workdash-main",
+            "action",
+            "list-panes",
+            "--json",
+            "--all",
+            "--command",
+            "--state",
+            "--tab",
+        ],
     ]
 
 
@@ -672,7 +706,16 @@ def test_main_code_human_output_reports_launch_context(
     monkeypatch.setattr(
         workdash_module, "prepare_launch_agent_prompt", lambda *args, **kwargs: "PROMPT"
     )
-    monkeypatch.setattr(workdash_module, "launch_agent_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        workdash_module,
+        "launch_agent_context",
+        lambda *args, **kwargs: SimpleNamespace(
+            session="workdash-main",
+            pane_id="terminal_7",
+            pane_title="code_wt",
+            cwd="/tmp/wt",
+        ),
+    )
 
     assert workdash_module.main(["code", "owner/repo#ISSUE-1", "--agent", "pi"]) == 0
 
@@ -682,7 +725,7 @@ def test_main_code_human_output_reports_launch_context(
     assert "Session: workdash-main" in output
     assert "Cwd: /tmp/wt" in output
     assert "Pane title: code_wt" in output
-    assert "Pane id: -" in output
+    assert "Pane id: terminal_7" in output
 
 
 def test_main_code_requires_explicit_session_when_multiple_are_active(
@@ -1493,13 +1536,17 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
         "prepare_launch_agent_prompt",
         lambda *args, **kwargs: "PROMPT",
     )
-    monkeypatch.setattr(
-        workdash_module,
-        "launch_agent_context",
-        lambda repo, prompt, agent_command_tokens=None, *, zellij_session=None: agent_calls.append(
-            (repo, prompt, agent_command_tokens, zellij_session)
-        ),
-    )
+
+    def fake_launch_agent_context(repo, prompt, agent_command_tokens=None, *, zellij_session=None):
+        agent_calls.append((repo, prompt, agent_command_tokens, zellij_session))
+        return SimpleNamespace(
+            session=zellij_session,
+            pane_id=None,
+            pane_title="code_wt",
+            cwd=repo,
+        )
+
+    monkeypatch.setattr(workdash_module, "launch_agent_context", fake_launch_agent_context)
     monkeypatch.setattr(
         workdash_module,
         "launch_vscode_context",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -127,15 +128,19 @@ def _run_workdash(
         "prepare_launch_agent_prompt",
         lambda *args, **kwargs: "PROMPT",
     )
-    monkeypatch.setattr(
-        workdash_module,
-        "launch_agent_context",
-        lambda repo, prompt, agent_command_tokens=None, *, zellij_session=None: (
-            scenario_state.setdefault("launch_calls", []).append(
-                (repo, prompt, agent_command_tokens, zellij_session)
-            )
-        ),
-    )
+
+    def fake_launch_agent_context(repo, prompt, agent_command_tokens=None, *, zellij_session=None):
+        scenario_state.setdefault("launch_calls", []).append(
+            (repo, prompt, agent_command_tokens, zellij_session)
+        )
+        return SimpleNamespace(
+            session=zellij_session,
+            pane_id="terminal_23",
+            pane_title=f"code_{Path(repo).name}",
+            cwd=repo,
+        )
+
+    monkeypatch.setattr(workdash_module, "launch_agent_context", fake_launch_agent_context)
 
     scenario_state["exit_code"] = workdash_module.main(argv)
     captured = capsys.readouterr()
@@ -657,7 +662,7 @@ def _returns_code_json(scenario_state: dict[str, Any]) -> None:
         "agent": "codex",
         "cwd": str(Path(scenario_state["workdir"]) / "owner_repo_1"),
         "pane_title": "code_owner_repo_1",
-        "pane_id": None,
+        "pane_id": "terminal_23",
     }
 
 

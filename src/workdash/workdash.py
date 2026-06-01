@@ -329,26 +329,26 @@ class WorkdashCommands:
         )
         if tool == "vscode":
             launch_vscode_context(repo_path, prompt)
-            pane_title = None
-        else:
-            pane_title = f"code_{os.path.basename(repo_path)}"
-            launch_agent_context(
-                repo_path,
-                prompt,
-                agent_command_tokens=command_tokens,
-                zellij_session=zellij_session,
-            )
-        # TODO(EVO-050): Return targeted Zellij pane identifiers.
-        #                  Why: The shared launch path now exposes one place for TUI and
-        #                  CLI code behavior, but automation needs the session and pane
-        #                  id produced by Zellij when launching from the CLI.
-        #                  Done: terminal-backed launch helpers can target a selected
-        #                  Workdash-owned session, capture Zellij's created pane id, and
-        #                  this result includes session, pane id, pane title, cwd, agent,
-        #                  and Workdash item id for JSON and human CLI output.
-        #                  Non-Goals: Do not persist pane ids, add a pane registry, or
-        #                  change how closed panes are discovered by `workdash info`.
-        return {"agent": tool, "cwd": repo_path, "pane_title": pane_title, "pane_id": None}
+            return {
+                "session": zellij_session,
+                "agent": tool,
+                "cwd": repo_path,
+                "pane_title": None,
+                "pane_id": None,
+            }
+        launch = launch_agent_context(
+            repo_path,
+            prompt,
+            agent_command_tokens=command_tokens,
+            zellij_session=zellij_session,
+        )
+        return {
+            "session": launch.session,
+            "agent": tool,
+            "cwd": launch.cwd,
+            "pane_title": launch.pane_title,
+            "pane_id": launch.pane_id,
+        }
 
     def _load_config_and_backend(self) -> tuple[WorkdashConfig, WorkdashBackend] | None:
         if self._config is not None and self._backend is not None:

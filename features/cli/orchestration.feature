@@ -23,6 +23,7 @@ Feature: CLI orchestration commands
     - Missing optional agent commands mean that agent operation is not configured, not that the whole config is invalid.
     - `workdash code` launches only configured terminal-backed coding agents: `claude`, `codex`, and `pi`.
     - `workdash code` launches in the selected Workdash-owned Zellij session, not whichever session is currently attached.
+    - `workdash code` reports the created Zellij pane id from live session state without persisting it.
     - `workdash code` does not expose non-terminal editors such as VSCode.
 
   @id:F-CLI-ORCHESTRATION-S003

@@ -274,8 +274,12 @@ def test_launch_agent_context_uses_new_zellij_pane_when_in_zellij(
     )
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    launch_agent_context("/tmp/amol-_repoze.who_52", "review this change")
+    launch = launch_agent_context("/tmp/amol-_repoze.who_52", "review this change")
 
+    assert launch.session is None
+    assert launch.pane_id is None
+    assert launch.pane_title == "code_amol-_repoze.who_52"
+    assert launch.cwd == "/tmp/amol-_repoze.who_52"
     assert captured["command"] == [
         "/usr/bin/zellij",
         "action",
@@ -297,11 +301,21 @@ def test_launch_agent_context_uses_new_zellij_pane_when_in_zellij(
 def test_launch_agent_context_targets_selected_zellij_session_without_current_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, object] = {}
+    captured: list[list[str]] = []
 
     def fake_run(*args, **kwargs):
-        captured["command"] = args[0]
-        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+        command = args[0]
+        captured.append(command)
+        if command[-5:] == ["--json", "--all", "--command", "--state", "--tab"]:
+            stdout = (
+                '[{"id": 1, "title": "workdash"}]'
+                if len(captured) == 1
+                else '[{"id": 1, "title": "workdash"}, '
+                '{"id": 23, "title": "code_amol-_repoze.who_52", '
+                '"pane_cwd": "/tmp/amol-_repoze.who_52"}]'
+            )
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout=stdout, stderr="")
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
 
     monkeypatch.delenv("ZELLIJ", raising=False)
     monkeypatch.setenv("SHELL", "/bin/bash")
@@ -310,28 +324,94 @@ def test_launch_agent_context_targets_selected_zellij_session_without_current_en
     )
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    launch_agent_context(
+    launch = launch_agent_context(
         "/tmp/amol-_repoze.who_52",
         "review this change",
         agent_command_tokens=["codex"],
         zellij_session="workdash-main",
     )
 
-    assert captured["command"] == [
-        "/usr/bin/zellij",
-        "--session",
-        "workdash-main",
-        "action",
-        "new-pane",
-        "--name",
-        "code_amol-_repoze.who_52",
-        "--cwd",
-        "/tmp/amol-_repoze.who_52",
-        "--",
-        "/bin/bash",
-        "-ic",
-        "codex 'review this change'",
+    assert launch.session == "workdash-main"
+    assert launch.pane_id == "terminal_23"
+    assert launch.pane_title == "code_amol-_repoze.who_52"
+    assert launch.cwd == "/tmp/amol-_repoze.who_52"
+    assert captured == [
+        [
+            "/usr/bin/zellij",
+            "--session",
+            "workdash-main",
+            "action",
+            "list-panes",
+            "--json",
+            "--all",
+            "--command",
+            "--state",
+            "--tab",
+        ],
+        [
+            "/usr/bin/zellij",
+            "--session",
+            "workdash-main",
+            "action",
+            "new-pane",
+            "--name",
+            "code_amol-_repoze.who_52",
+            "--cwd",
+            "/tmp/amol-_repoze.who_52",
+            "--",
+            "/bin/bash",
+            "-ic",
+            "codex 'review this change'",
+        ],
+        [
+            "/usr/bin/zellij",
+            "--session",
+            "workdash-main",
+            "action",
+            "list-panes",
+            "--json",
+            "--all",
+            "--command",
+            "--state",
+            "--tab",
+        ],
     ]
+
+
+def test_launch_agent_context_captures_terminal_pane_when_plugin_id_overlaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[list[str]] = []
+
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        captured.append(command)
+        if command[-5:] == ["--json", "--all", "--command", "--state", "--tab"]:
+            stdout = (
+                '[{"id": 1, "title": "status", "is_plugin": true}]'
+                if len(captured) == 1
+                else '[{"id": 1, "title": "status", "is_plugin": true}, '
+                '{"id": 1, "title": "code_amol-_repoze.who_52", '
+                '"pane_cwd": "/tmp/amol-_repoze.who_52", "is_plugin": false}]'
+            )
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout=stdout, stderr="")
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/zellij" if name == "zellij" else None
+    )
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launch = launch_agent_context(
+        "/tmp/amol-_repoze.who_52",
+        "review this change",
+        agent_command_tokens=["codex"],
+        zellij_session="workdash-main",
+    )
+
+    assert launch.pane_id == "terminal_1"
 
 
 def test_launch_agent_context_raises_clear_error_when_zellij_launch_fails(
