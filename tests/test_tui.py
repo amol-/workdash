@@ -10,8 +10,15 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Static
 
 from workdash.backend import IncludeResult
+from workdash.config import AgentConfig, WorkdashConfig
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
-from workdash.tui import WorkdashApp
+from workdash.tui import AnalyzeDialog, CodeDialog, WorkdashApp
+
+_DEFAULT_TUI_CONFIG = WorkdashConfig(
+    claude=AgentConfig(analyze="claude -p", launch="claude"),
+    codex=AgentConfig(analyze="codex exec", launch="codex"),
+    pi=AgentConfig(launch="pi"),
+)
 
 
 def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_columns() -> None:
@@ -202,6 +209,8 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
         open_callback=open_callback,
         analyze_callback=analyze_callback,
         launch_callback=launch_callback,
+        analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
+        code_choices=_DEFAULT_TUI_CONFIG.tui_code_choices(),
         terminal_callback=terminal_callback,
         now_utc=now_utc,
     )
@@ -215,28 +224,28 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
             await pilot.press("o")
             await pilot.pause()
 
-            # Press "a" to open the AnalyzeDialog, then "c" to choose Claude
+            # Press "a" to open the AnalyzeDialog, then "1" to choose Claude
             await pilot.press("a")
             await pilot.pause()
-            await pilot.press("c")
+            await pilot.press("1")
             await pilot.pause()
 
-            # Press "c" to open CodeDialog, then "g" to choose Codex
+            # Press "c" to open CodeDialog, then "2" to choose Codex
             await pilot.press("c")
             await pilot.pause()
-            await pilot.press("g")
+            await pilot.press("2")
             await pilot.pause()
 
-            # Press "c" to open CodeDialog, then "v" to choose VSCode
+            # Press "c" to open CodeDialog, then "3" to choose VSCode
             await pilot.press("c")
             await pilot.pause()
-            await pilot.press("v")
+            await pilot.press("3")
             await pilot.pause()
 
-            # Press "c" to open CodeDialog, then "p" to choose pi
+            # Press "c" to open CodeDialog, then "4" to choose pi
             await pilot.press("c")
             await pilot.pause()
-            await pilot.press("p")
+            await pilot.press("4")
             await pilot.pause()
 
             await pilot.press("t")
@@ -342,6 +351,8 @@ def test_workdash_app_footer_shows_success_status_for_actions(
         refresh_callback=lambda: [work_item],
         analyze_callback=analyze_callback,
         launch_callback=lambda _, __tool="codex": None,
+        analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
+        code_choices=_DEFAULT_TUI_CONFIG.tui_code_choices(),
         terminal_callback=lambda _: None,
         now_utc=now_utc,
     )
@@ -359,31 +370,31 @@ def test_workdash_app_footer_shows_success_status_for_actions(
             await pilot.pause()
             assert footer.render().plain == "Refreshed 1 item(s)."
 
-            # Press "a" to open AnalyzeDialog, then "c" to choose Claude
+            # Press "a" to open AnalyzeDialog, then "1" to choose Claude
             await pilot.press("a")
             await pilot.pause()
-            await pilot.press("c")
+            await pilot.press("1")
             await pilot.pause()
             assert footer.render().plain == "Analyzed pr owner/repo#22 with Claude."
 
-            # Press "c" to open CodeDialog, then "g" to choose Codex
+            # Press "c" to open CodeDialog, then "2" to choose Codex
             await pilot.press("c")
             await pilot.pause()
-            await pilot.press("g")
+            await pilot.press("2")
             await pilot.pause()
             assert footer.render().plain == "Launched Codex for pr owner/repo#22."
 
-            # Press "c" to open CodeDialog, then "v" to choose VSCode
+            # Press "c" to open CodeDialog, then "3" to choose VSCode
             await pilot.press("c")
             await pilot.pause()
-            await pilot.press("v")
+            await pilot.press("3")
             await pilot.pause()
             assert footer.render().plain == "Launched VSCode for pr owner/repo#22."
 
-            # Press "c" to open CodeDialog, then "p" to choose pi
+            # Press "c" to open CodeDialog, then "4" to choose pi
             await pilot.press("c")
             await pilot.pause()
-            await pilot.press("p")
+            await pilot.press("4")
             await pilot.pause()
             assert footer.render().plain == "Launched pi for pr owner/repo#22."
 
@@ -420,15 +431,16 @@ def test_workdash_app_analyze_opens_markdown_file(
     app = WorkdashApp(
         work_items=[work_item],
         analyze_callback=analyze_callback,
+        analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
         now_utc=now_utc,
     )
 
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
-            # Press "a" to open AnalyzeDialog, then "g" to choose Codex
+            # Press "a" to open AnalyzeDialog, then "2" to choose Codex
             await pilot.press("a")
             await pilot.pause()
-            await pilot.press("g")
+            await pilot.press("2")
             await pilot.pause()
             assert opened_paths == ["/tmp/analyses/owner_repo_ISSUE11.md"]
             await pilot.press("q")
@@ -463,15 +475,16 @@ def test_workdash_app_analyze_runs_without_blocking_ui_loop(
     app = WorkdashApp(
         work_items=[work_item],
         analyze_callback=analyze_callback,
+        analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
         now_utc=now_utc,
     )
 
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
-            # Press "a" to open the dialog, then "c" to trigger analysis
+            # Press "a" to open the dialog, then "1" to trigger analysis
             await pilot.press("a")
             await pilot.pause()
-            analyze_press = asyncio.create_task(pilot.press("c"))
+            analyze_press = asyncio.create_task(pilot.press("1"))
             while not analyze_started.is_set():
                 await pilot.pause()
             table = app.query_one("#work-items", DataTable)
@@ -522,6 +535,70 @@ async def _wait_for_footer(footer: Static, expected: str, pilot) -> None:
     assert footer.render().plain == expected
 
 
+def test_workdash_app_uses_only_configured_tui_agent_choices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("workdash.tui.open_markdown", lambda path: None)
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+    )
+    analyze_calls: list[tuple[WorkItem, str]] = []
+    launch_calls: list[tuple[WorkItem, str]] = []
+    worktree_attempts: list[WorkItem] = []
+
+    app = WorkdashApp(
+        work_items=[work_item],
+        analyze_callback=lambda item, tool="codex": (
+            analyze_calls.append((item, tool)) or "/tmp/analysis.md"
+        ),
+        worktree_callback=lambda item: worktree_attempts.append(item) or "/tmp/worktree",
+        launch_callback=lambda item, tool="codex": launch_calls.append((item, tool)),
+        analyze_choices=WorkdashConfig(
+            codex=AgentConfig(analyze="codex exec")
+        ).tui_analyze_choices(),
+        code_choices=WorkdashConfig().tui_code_choices(),
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await pilot.press("a")
+            await pilot.pause()
+            assert isinstance(app.screen, AnalyzeDialog)
+            await pilot.press("2")
+            await pilot.pause()
+            assert analyze_calls == []
+            assert isinstance(app.screen, AnalyzeDialog)
+            await pilot.press("1")
+            await pilot.pause()
+            assert analyze_calls == [(work_item, "codex")]
+
+            await pilot.press("c")
+            await pilot.pause()
+            assert isinstance(app.screen, CodeDialog)
+            await pilot.press("2")
+            await pilot.pause()
+            assert worktree_attempts == []
+            assert launch_calls == []
+            assert isinstance(app.screen, CodeDialog)
+            await pilot.press("1")
+            await pilot.pause()
+            assert worktree_attempts == [work_item]
+            assert launch_calls == [(work_item, "vscode")]
+
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
 def test_workdash_app_analyze_uses_shared_callback_without_tui_worktree_prep() -> None:
     now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
     work_item = WorkItem(
@@ -549,6 +626,7 @@ def test_workdash_app_analyze_uses_shared_callback_without_tui_worktree_prep() -
         work_items=[work_item],
         worktree_callback=worktree_callback,
         analyze_callback=analyze_callback,
+        analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
         now_utc=now_utc,
     )
 
@@ -558,7 +636,7 @@ def test_workdash_app_analyze_uses_shared_callback_without_tui_worktree_prep() -
 
             await pilot.press("a")
             await pilot.pause()
-            await pilot.press("c")
+            await pilot.press("1")
             await _wait_for_footer(
                 footer,
                 "Analyze failed: Invalid configured analysis command for agent 'claude'",
@@ -607,6 +685,8 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
         refresh_callback=failing_refresh_callback,
         analyze_callback=failing_analyze_callback,
         launch_callback=failing_launch_callback,
+        analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
+        code_choices=_DEFAULT_TUI_CONFIG.tui_code_choices(),
         terminal_callback=failing_terminal_callback,
         now_utc=now_utc,
     )
@@ -623,17 +703,17 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
             await _wait_for_footer(footer, "Refresh failed: gh refresh failed", pilot)
             _assert_no_modal_screens(app)
 
-            # Press "a" to open AnalyzeDialog, then "c" to choose Claude
+            # Press "a" to open AnalyzeDialog, then "1" to choose Claude
             await pilot.press("a")
             await pilot.pause()
-            await pilot.press("c")
+            await pilot.press("1")
             await _wait_for_footer(footer, "Analyze failed: codex analyze failed", pilot)
             _assert_no_modal_screens(app)
 
-            # Press "c" to open CodeDialog, then "g" to choose Codex
+            # Press "c" to open CodeDialog, then "2" to choose Codex
             await pilot.press("c")
             await pilot.pause()
-            await pilot.press("g")
+            await pilot.press("2")
             await _wait_for_footer(footer, "Launch failed: codex launch failed", pilot)
             _assert_no_modal_screens(app)
 
@@ -676,6 +756,7 @@ def test_workdash_app_worktree_failure_closes_dialogs_and_skips_actions() -> Non
         work_items=[work_item],
         worktree_callback=failing_worktree_callback,
         launch_callback=launch_callback,
+        code_choices=_DEFAULT_TUI_CONFIG.tui_code_choices(),
         terminal_callback=terminal_callback,
         now_utc=now_utc,
     )
@@ -686,7 +767,7 @@ def test_workdash_app_worktree_failure_closes_dialogs_and_skips_actions() -> Non
 
             await pilot.press("c")
             await pilot.pause()
-            await pilot.press("g")
+            await pilot.press("2")
             await _wait_for_footer(footer, "Worktree setup failed: worktree failed 1", pilot)
             _assert_no_modal_screens(app)
             assert launch_calls == []

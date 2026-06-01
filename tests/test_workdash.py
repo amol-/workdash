@@ -99,6 +99,47 @@ def test_main_prints_loading_message_before_tui_start(
     assert captured.out.startswith("Loading work items from GitHub...\n")
 
 
+def test_main_passes_configured_agent_choices_to_tui(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_kwargs: dict[str, object] = {}
+    config = WorkdashConfig(
+        github_username="testuser",
+        codex=AgentConfig(analyze="codex exec"),
+        repositories=("owner/*",),
+        workdir="~/wrk",
+    )
+
+    class FakeBackend:
+        def __init__(self, config=None, **kwargs) -> None:
+            pass
+
+        def load_items(self, progress_callback=None):
+            return [], {}
+
+        def include_item_by_url(self, _url, _existing_identities):
+            return None
+
+    class FakeApp:
+        def __init__(self, **kwargs) -> None:
+            captured_kwargs.update(kwargs)
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+    monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
+    monkeypatch.setenv("ZELLIJ", "0")
+
+    assert workdash_module.main([]) == 0
+
+    assert captured_kwargs["analyze_choices"] == config.tui_analyze_choices()
+    assert captured_kwargs["code_choices"] == config.tui_code_choices()
+
+
 def test_main_tui_analyze_callback_uses_worktree_and_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -114,9 +155,6 @@ def test_main_tui_analyze_callback_uses_worktree_and_backend(
         def load_items(self, progress_callback=None):
             assert progress_callback is not None
             return [item], {}
-
-        def resolve_analyze_command_tokens(self, tool="codex"):
-            return [tool, "exec"]
 
         def analyze_item(self, item, tool="codex"):
             analyze_calls.append((item, tool))
@@ -217,6 +255,37 @@ def test_main_exits_with_error_when_config_incomplete(
     assert "--configure" in captured.err
 
 
+def test_main_exits_with_config_guidance_when_interactive_config_command_is_malformed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = WorkdashConfig(
+        github_username="testuser",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        codex=AgentConfig(analyze="codex exec", launch="codex"),
+        pi=AgentConfig(launch="pi 'broken"),
+        repositories=("owner/repo",),
+        workdir="~/wrk",
+    )
+
+    class FakeBackend:
+        def __init__(self, config=None, **kwargs) -> None:  # pragma: no cover - should not run
+            raise AssertionError("backend should not load invalid runtime config")
+
+    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+    monkeypatch.setenv("ZELLIJ", "0")
+
+    exit_code = workdash_module.main([])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "invalid configuration fields" in captured.err
+    assert "agents.pi.launch" in captured.err
+    assert "workdash --configure" in captured.err
+
+
 def test_select_workdash_session_treats_no_zellij_sessions_as_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -241,9 +310,6 @@ def test_main_analyze_human_output_defaults_to_codex_and_runs_shared_action(
         def load_items(self, progress_callback=None):
             assert progress_callback is None
             return [item], {}
-
-        def resolve_analyze_command_tokens(self, tool="codex"):
-            return [tool, "exec"]
 
         def analyze_item(self, item, tool="codex"):
             analyze_calls.append((item, tool))
@@ -311,6 +377,40 @@ def test_main_analyze_reuses_cache_for_github_url_without_worktree(
     assert analyze_calls == [(item, "cached")]
 
 
+def test_main_analyze_rejects_explicit_unsupported_agent_before_cached_result(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    item = _issue()
+    item.analysis = "cached analysis"
+
+    class FakeBackend:
+        def __init__(self, config=None, **kwargs) -> None:
+            pass
+
+        def load_items(self, progress_callback=None):
+            return [item], {}
+
+        def analyze_item(self, item, tool="codex"):  # pragma: no cover - should not run
+            raise AssertionError("unsupported explicit agent should fail before cache lookup")
+
+    monkeypatch.setattr(workdash_module, "_select_workdash_session", lambda _session: "workdash")
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+    monkeypatch.setattr(
+        workdash_module,
+        "ensure_worktree",
+        lambda _workdir, _item: (_ for _ in ()).throw(AssertionError("unexpected worktree")),
+    )
+
+    assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--agent", "vscode"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Analysis agent 'vscode' is not configured" in captured.err
+
+
 def test_main_analyze_accepts_selected_agent_when_unrelated_agent_config_is_missing(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -331,9 +431,6 @@ def test_main_analyze_accepts_selected_agent_when_unrelated_agent_config_is_miss
         def load_items(self, progress_callback=None):
             assert progress_callback is None
             return [item], {}
-
-        def resolve_analyze_command_tokens(self, tool="codex"):
-            return [tool, "exec"]
 
         def analyze_item(self, item, tool="codex"):
             analyze_calls.append((item, tool))
@@ -373,39 +470,22 @@ def test_main_analyze_requires_explicit_session_when_multiple_are_active(
     assert "--session" in captured.err
 
 
-def test_main_analyze_reports_malformed_agent_command_as_cli_error(
+def test_main_analyze_reports_malformed_agent_command_as_config_error_before_items(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    item = _issue()
     config = WorkdashConfig(
         github_username="testuser",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze="codex 'broken", launch="codex"),
+        pi=AgentConfig(launch="pi"),
         repositories=("owner/repo",),
         workdir="~/wrk",
     )
-    real_backend_class = workdash_module.WorkdashBackend
-
-    class FakeAnalyzer:
-        def analyze(self, _item, command_tokens=None):  # pragma: no cover - should not run
-            raise AssertionError("analyzer should not run with malformed command")
 
     class FakeBackend:
-        def __init__(self, config=None, **kwargs) -> None:
-            self.real = real_backend_class(config=config, analyzer=FakeAnalyzer())
-
-        def load_items(self, progress_callback=None):
-            assert progress_callback is None
-            return [item], {}
-
-        def resolve_analyze_command_tokens(self, tool="codex"):
-            return self.real.resolve_analyze_command_tokens(tool)
-
-        def analyze_item(self, item, tool="codex"):
-            return self.real.analyze_item(item, tool=tool)
-
-    ensure_calls: list[tuple[str, WorkItem]] = []
+        def __init__(self, config=None, **kwargs) -> None:  # pragma: no cover - should not run
+            raise AssertionError("backend should not load invalid runtime config")
 
     monkeypatch.setattr(workdash_module, "_select_workdash_session", lambda _session: "workdash")
     monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
@@ -414,18 +494,18 @@ def test_main_analyze_reports_malformed_agent_command_as_cli_error(
     monkeypatch.setattr(
         workdash_module,
         "ensure_worktree",
-        lambda workdir, item: ensure_calls.append((workdir, item)) or "/tmp/wt",
+        lambda _workdir, _item: (_ for _ in ()).throw(AssertionError("unexpected worktree")),
     )
 
     assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--agent", "codex"]) == 1
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.startswith("Error: Invalid configured analysis command")
+    assert captured.err.startswith("Error: invalid configuration fields")
     assert "agents.codex.analyze" in captured.err
     assert "No closing quotation" in captured.err
+    assert "workdash --configure" in captured.err
     assert "Traceback" not in captured.err
-    assert ensure_calls == []
 
 
 def test_main_analyze_rejects_targets_outside_current_items(
@@ -448,6 +528,210 @@ def test_main_analyze_rejects_targets_outside_current_items(
 
     captured = capsys.readouterr()
     assert "current Workdash item ID or GitHub issue/PR URL" in captured.err
+
+
+def test_main_code_reports_malformed_agent_command_as_config_error_before_items(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = WorkdashConfig(
+        github_username="testuser",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        codex=AgentConfig(analyze="codex exec", launch="codex 'broken"),
+        pi=AgentConfig(launch="pi"),
+        repositories=("owner/repo",),
+        workdir="~/wrk",
+    )
+
+    class FakeBackend:
+        def __init__(self, config=None, **kwargs) -> None:  # pragma: no cover - should not run
+            raise AssertionError("backend should not load invalid runtime config")
+
+    monkeypatch.setattr(workdash_module, "_select_workdash_session", lambda _session: "workdash")
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+    monkeypatch.setattr(
+        workdash_module,
+        "ensure_worktree",
+        lambda _workdir, _item: (_ for _ in ()).throw(AssertionError("unexpected worktree")),
+    )
+
+    assert workdash_module.main(["code", "owner/repo#ISSUE-1", "--agent", "codex"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("Error: invalid configuration fields")
+    assert "agents.codex.launch" in captured.err
+    assert "No closing quotation" in captured.err
+    assert "workdash --configure" in captured.err
+
+
+def test_main_code_json_launches_selected_agent_through_shared_action(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    item = _issue()
+    item.url = "https://github.com/owner/repo/issues/1"
+    ensure_calls: list[tuple[str, WorkItem]] = []
+    zellij_commands: list[list[str]] = []
+
+    class FakeBackend:
+        def __init__(self, config=None, **kwargs) -> None:
+            self.analysis_cache = type(
+                "_C", (), {"build_analysis_path": staticmethod(lambda _i: "/tmp/analysis.md")}
+            )()
+
+        def load_items(self, progress_callback=None):
+            assert progress_callback is None
+            return [item], {}
+
+    def fake_run(*args, **kwargs):
+        zellij_commands.append(args[0])
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.setattr(
+        workdash_module, "list_workdash_sessions", lambda: ["workdash-main", "workdash-alt"]
+    )
+    monkeypatch.setattr(workdash_module.shutil, "which", lambda _cmd: "/usr/bin/zellij")
+    monkeypatch.setattr(workdash_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+    monkeypatch.setattr(
+        workdash_module,
+        "ensure_worktree",
+        lambda workdir, item: ensure_calls.append((workdir, item)) or "/tmp/owner_repo_1",
+    )
+    monkeypatch.setattr(workdash_module, "get_merge_base", lambda _path: None)
+    monkeypatch.setattr(
+        workdash_module, "prepare_launch_agent_prompt", lambda *args, **kwargs: "PROMPT"
+    )
+
+    assert (
+        workdash_module.main(
+            ["code", item.url, "--agent", "codex", "--session", "workdash-main", "--json"]
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "item_id": "owner/repo#ISSUE-1",
+        "session": "workdash-main",
+        "agent": "codex",
+        "cwd": "/tmp/owner_repo_1",
+        "pane_title": "code_owner_repo_1",
+        "pane_id": None,
+    }
+    assert ensure_calls == [(_VALID_CONFIG.workdir, item)]
+    assert zellij_commands == [
+        [
+            "/usr/bin/zellij",
+            "--session",
+            "workdash-main",
+            "action",
+            "new-pane",
+            "--name",
+            "code_owner_repo_1",
+            "--cwd",
+            "/tmp/owner_repo_1",
+            "--",
+            "/bin/bash",
+            "-ic",
+            "codex PROMPT",
+        ]
+    ]
+
+
+def test_main_code_human_output_reports_launch_context(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    item = _issue()
+
+    class FakeBackend:
+        def __init__(self, config=None, **kwargs) -> None:
+            self.analysis_cache = type(
+                "_C", (), {"build_analysis_path": staticmethod(lambda _i: "/tmp/analysis.md")}
+            )()
+
+        def load_items(self, progress_callback=None):
+            return [item], {}
+
+    monkeypatch.setattr(
+        workdash_module, "_select_workdash_session", lambda _session: "workdash-main"
+    )
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+    monkeypatch.setattr(workdash_module, "ensure_worktree", lambda _workdir, _item: "/tmp/wt")
+    monkeypatch.setattr(workdash_module, "get_merge_base", lambda _path: None)
+    monkeypatch.setattr(
+        workdash_module, "prepare_launch_agent_prompt", lambda *args, **kwargs: "PROMPT"
+    )
+    monkeypatch.setattr(workdash_module, "launch_agent_context", lambda *args, **kwargs: None)
+
+    assert workdash_module.main(["code", "owner/repo#ISSUE-1", "--agent", "pi"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Item: owner/repo#ISSUE-1" in output
+    assert "Agent: pi" in output
+    assert "Session: workdash-main" in output
+    assert "Cwd: /tmp/wt" in output
+    assert "Pane title: code_wt" in output
+    assert "Pane id: -" in output
+
+
+def test_main_code_requires_explicit_session_when_multiple_are_active(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        workdash_module, "list_workdash_sessions", lambda: ["workdash-a", "workdash-b"]
+    )
+    monkeypatch.setattr(
+        workdash_module,
+        "load_config",
+        lambda: (_ for _ in ()).throw(AssertionError("configuration should not load")),
+    )
+
+    assert workdash_module.main(["code", "owner/repo#ISSUE-1"]) == 1
+
+    captured = capsys.readouterr()
+    assert "Multiple Workdash-owned Zellij sessions" in captured.err
+    assert "--session" in captured.err
+
+
+def test_main_code_rejects_non_terminal_agent_before_worktree(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeBackend:
+        def __init__(self, config=None, **kwargs) -> None:
+            pass
+
+        def load_items(self, progress_callback=None):  # pragma: no cover - should not run
+            raise AssertionError("items should not load for unsupported agent")
+
+    monkeypatch.setattr(workdash_module, "_select_workdash_session", lambda _session: "workdash")
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+    monkeypatch.setattr(
+        workdash_module,
+        "ensure_worktree",
+        lambda _workdir, _item: (_ for _ in ()).throw(AssertionError("unexpected worktree")),
+    )
+
+    assert workdash_module.main(["code", "owner/repo#ISSUE-1", "--agent", "vscode"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "not a configured terminal-backed agent" in captured.err
+    assert "vscode" in captured.err
 
 
 def test_main_info_json_maps_live_pane_cwd_to_current_work_item_not_title(
@@ -1172,7 +1456,7 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
     """
 
     captured_callback: dict[str, object] = {}
-    agent_calls: list[tuple[str, str, list[str] | None]] = []
+    agent_calls: list[tuple[str, str, list[str] | None, str | None]] = []
     vscode_calls: list[tuple[str, str]] = []
 
     class FakeBackend:
@@ -1212,8 +1496,8 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
     monkeypatch.setattr(
         workdash_module,
         "launch_agent_context",
-        lambda repo, prompt, agent_command_tokens=None: agent_calls.append(
-            (repo, prompt, agent_command_tokens)
+        lambda repo, prompt, agent_command_tokens=None, *, zellij_session=None: agent_calls.append(
+            (repo, prompt, agent_command_tokens, zellij_session)
         ),
     )
     monkeypatch.setattr(
@@ -1237,7 +1521,7 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
     )
     captured_callback["launch"](item, tool)
 
-    assert agent_calls == [("/tmp/wt", "PROMPT", expected_tokens)]
+    assert agent_calls == [("/tmp/wt", "PROMPT", expected_tokens, None)]
     assert vscode_calls == []
 
 

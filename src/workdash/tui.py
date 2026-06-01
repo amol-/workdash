@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TypeVar
 
 from .backend import IncludeResult, compute_suggestion_markers
+from .config import WorkdashAgentChoice
 from .launcher import open_markdown
 from .models import WorkItem, WorkItemType, format_type_label
 
@@ -45,6 +46,8 @@ except ModuleNotFoundError:  # pragma: no cover - allows import before deps are 
             refresh_callback: Callable[[], RefreshCallbackResult] | None = None,
             analyze_callback: Callable[[WorkItem, str], AnalyzeCallbackResult] | None = None,
             launch_callback: Callable[[WorkItem, str], None] | None = None,
+            analyze_choices: Sequence[WorkdashAgentChoice] | None = None,
+            code_choices: Sequence[WorkdashAgentChoice] | None = None,
             terminal_callback: Callable[[WorkItem], None] | None = None,
             include_callback: (
                 Callable[[str, set[tuple[WorkItemType, str, int]]], IncludeResult] | None
@@ -57,6 +60,8 @@ except ModuleNotFoundError:  # pragma: no cover - allows import before deps are 
             self.refresh_callback = refresh_callback
             self.analyze_callback = analyze_callback
             self.launch_callback = launch_callback
+            self.analyze_choices = tuple(analyze_choices or ())
+            self.code_choices = tuple(code_choices or ())
             self.terminal_callback = terminal_callback
             self.include_callback = include_callback
             self.now_utc = now_utc or datetime.now(UTC)
@@ -108,15 +113,21 @@ else:
         """
         BINDINGS = [
             ("a", "open_analysis", "Open"),
-            ("c", "analyze_claude", "Claude"),
-            ("g", "analyze_codex", "Codex"),
             ("escape", "cancel", "Cancel"),
         ]
 
-        def __init__(self, *, item: WorkItem, now_utc: datetime) -> None:
+        def __init__(
+            self,
+            *,
+            item: WorkItem,
+            now_utc: datetime,
+            choices: Sequence[WorkdashAgentChoice],
+        ) -> None:
             super().__init__()
             self._item = item
             self._now_utc = now_utc
+            self._choices = tuple(choices)
+            self._choices_by_key = {choice.key: choice for choice in self._choices}
 
         def compose(self) -> ComposeResult:
             with VerticalScroll(id="analyze-shell"):
@@ -131,8 +142,10 @@ else:
                 else:
                     yield Static("No previous analysis.", classes="analyze-line")
                 yield Static("")
-                yield Static("(c) Analyze with Claude", classes="analyze-line")
-                yield Static("(g) Analyze with ChatGPT Codex", classes="analyze-line")
+                for choice in self._choices:
+                    yield Static(f"({choice.key}) {choice.label}", classes="analyze-line")
+                if not self._choices:
+                    yield Static("No analysis agents configured.", classes="analyze-line")
                 yield Static("")
                 yield Static("(Esc) Cancel", classes="analyze-line")
 
@@ -140,11 +153,11 @@ else:
             if self._item.analyzed_at is not None:
                 self.dismiss("cached")
 
-        def action_analyze_claude(self) -> None:
-            self.dismiss("claude")
-
-        def action_analyze_codex(self) -> None:
-            self.dismiss("codex")
+        def on_key(self, event) -> None:
+            choice = self._choices_by_key.get(event.key)
+            if choice is not None:
+                event.stop()
+                self.dismiss(choice.agent)
 
         def action_cancel(self) -> None:
             self.dismiss(None)
@@ -166,36 +179,29 @@ else:
             width: 100%;
         }
         """
-        BINDINGS = [
-            ("c", "launch_claude", "Claude"),
-            ("g", "launch_codex", "Codex"),
-            ("v", "launch_vscode", "VSCode"),
-            ("p", "launch_pi", "pi"),
-            ("escape", "cancel", "Cancel"),
-        ]
+        BINDINGS = [("escape", "cancel", "Cancel")]
+
+        def __init__(self, *, choices: Sequence[WorkdashAgentChoice]) -> None:
+            super().__init__()
+            self._choices = tuple(choices)
+            self._choices_by_key = {choice.key: choice for choice in self._choices}
 
         def compose(self) -> ComposeResult:
             with VerticalScroll(id="code-shell"):
                 yield Static("Launch coding session:", classes="code-line")
                 yield Static("")
-                yield Static("(c) Claude", classes="code-line")
-                yield Static("(g) ChatGPT Codex", classes="code-line")
-                yield Static("(v) VSCode Copilot", classes="code-line")
-                yield Static("(p) pi", classes="code-line")
+                for choice in self._choices:
+                    yield Static(f"({choice.key}) {choice.label}", classes="code-line")
+                if not self._choices:
+                    yield Static("No coding agents configured.", classes="code-line")
                 yield Static("")
                 yield Static("(Esc) Cancel", classes="code-line")
 
-        def action_launch_claude(self) -> None:
-            self.dismiss("claude")
-
-        def action_launch_codex(self) -> None:
-            self.dismiss("codex")
-
-        def action_launch_vscode(self) -> None:
-            self.dismiss("vscode")
-
-        def action_launch_pi(self) -> None:
-            self.dismiss("pi")
+        def on_key(self, event) -> None:
+            choice = self._choices_by_key.get(event.key)
+            if choice is not None:
+                event.stop()
+                self.dismiss(choice.agent)
 
         def action_cancel(self) -> None:
             self.dismiss(None)
@@ -270,6 +276,8 @@ else:
             analyze_callback: Callable[[WorkItem, str], AnalyzeCallbackResult] | None = None,
             launch_callback: Callable[[WorkItem, str], None] | None = None,
             worktree_callback: Callable[[WorkItem], str] | None = None,
+            analyze_choices: Sequence[WorkdashAgentChoice] | None = None,
+            code_choices: Sequence[WorkdashAgentChoice] | None = None,
             terminal_callback: Callable[[WorkItem], None] | None = None,
             include_callback: (
                 Callable[[str, set[tuple[WorkItemType, str, int]]], IncludeResult] | None
@@ -285,6 +293,8 @@ else:
             self._analyze_callback = analyze_callback
             self._launch_callback = launch_callback
             self._worktree_callback = worktree_callback
+            self._analyze_choices = tuple(analyze_choices or ())
+            self._code_choices = tuple(code_choices or ())
             self._terminal_callback = terminal_callback
             self._include_callback = include_callback
             self._now_utc = now_utc or datetime.now(UTC)
@@ -400,6 +410,9 @@ else:
                     else:
                         await asyncio.sleep(0)
 
+        def _choice_tool_label(self, choices: Sequence[WorkdashAgentChoice], agent: str) -> str:
+            return next((choice.tool_label for choice in choices if choice.agent == agent), agent)
+
         async def action_open_link(self) -> None:
             selected_item = self._selected_item()
             if selected_item is None or self._open_callback is None:
@@ -448,7 +461,11 @@ else:
             if selected_item is None or self._analyze_callback is None:
                 self._update_status("Analyze skipped.")
                 return
-            dialog = AnalyzeDialog(item=selected_item, now_utc=self._now_utc)
+            dialog = AnalyzeDialog(
+                item=selected_item,
+                now_utc=self._now_utc,
+                choices=self._analyze_choices,
+            )
 
             def _on_dialog_result(choice: str | None) -> None:
                 if choice is not None:
@@ -459,8 +476,10 @@ else:
         async def _perform_analysis(self, item: WorkItem, choice: str) -> None:
             """Execute analysis after the user picks a tool from the dialog."""
 
-            tool_label = {"cached": "cached", "claude": "Claude", "codex": "Codex"}.get(
-                choice, choice
+            tool_label = (
+                "cached"
+                if choice == "cached"
+                else self._choice_tool_label(self._analyze_choices, choice)
             )
             busy_message = (
                 "Loading analysis..." if choice == "cached" else f"Analyzing with {tool_label}..."
@@ -494,7 +513,7 @@ else:
             if selected_item is None or self._launch_callback is None:
                 self._update_status("Code launch skipped.")
                 return
-            dialog = CodeDialog()
+            dialog = CodeDialog(choices=self._code_choices)
 
             def _on_dialog_result(choice: str | None) -> None:
                 if choice is not None:
@@ -515,12 +534,7 @@ else:
                     self._update_status(f"Worktree setup failed: {error}")
                     self.notify(f"Worktree setup failed: {error}", severity="error", timeout=10)
                     return
-            tool_label = {
-                "claude": "Claude",
-                "codex": "Codex",
-                "vscode": "VSCode",
-                "pi": "pi",
-            }.get(choice, choice)
+            tool_label = self._choice_tool_label(self._code_choices, choice)
             try:
                 await self._run_with_busy_screen(
                     message=f"Launching {tool_label}...",

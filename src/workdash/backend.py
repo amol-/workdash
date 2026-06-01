@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -221,23 +220,7 @@ class WorkdashBackend:
         return IncludeResult(fetched_item=item)
 
     def resolve_analyze_command_tokens(self, tool: str) -> list[str]:
-        if tool == "claude":
-            command = self.config.claude.analyze
-            field = "agents.claude.analyze"
-        else:
-            command = self.config.codex.analyze
-            field = "agents.codex.analyze"
-        if not isinstance(command, str) or not command.strip():
-            raise RuntimeError(
-                f"Invalid configured analysis command for agent {tool!r} ({field}): "
-                "expected a non-empty string"
-            )
-        try:
-            return shlex.split(command)
-        except ValueError as error:
-            raise RuntimeError(
-                f"Invalid configured analysis command for agent {tool!r} ({field}): {error}"
-            ) from error
+        return self.config.analyze_agent_command_tokens(tool)
 
     def analyze_item(self, item: WorkItem, tool: str = "codex") -> str | None:
         """Generate or retrieve analysis, returning the markdown file path.

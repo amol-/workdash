@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from . import __version__
 from .backend import SuggestionMarkers, WorkdashBackend
-from .config import WorkdashConfig, configure, load_config, validate_config
+from .config import WorkdashConfig, WorkdashConfigValidationError, configure, load_config
 from .github_client import parse_github_item_url
 from .launcher import (
     exec_zellij_wrapped_workdash,
@@ -58,17 +58,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             session=options.session,
             json_output=options.json_output,
         )
-
-    # TODO(EVO-030): Add CLI code through the shared launch action.
-    #                  Why: The shared launch action exists so TUI Code and CLI
-    #                  code do not drift, but the probe does not yet expose the
-    #                  CLI command that external automation will call.
-    #                  Done: `workdash code ITEM [--agent NAME] [--session NAME]
-    #                  [--json]` resolves the item, requires/selects a
-    #                  Workdash-owned Zellij session, launches a configured
-    #                  terminal-backed agent, and renders the session/pane result.
-    #                  Non-Goals: Do not support non-terminal editors, create a
-    #                  Workdash Zellij session automatically, or persist pane ids.
+    if options.command == "code":
+        return commands.code_cli(
+            target=options.target or "",
+            agent=options.agent,
+            session=options.session,
+            json_output=options.json_output,
+        )
 
     gh_error = _check_gh_preflight()
     if gh_error:
@@ -169,14 +165,10 @@ class WorkdashCommands:
             if gh_error:
                 print(f"Error: {gh_error}", file=sys.stderr, flush=True)
                 return 1
-            loaded = self._load_config_and_backend(validate=False)
+            loaded = self._load_config_and_backend()
             if loaded is None:
                 return 1
             config, backend = loaded
-            missing = _missing_analyze_load_fields(config)
-            if missing:
-                _print_missing_config(missing)
-                return 1
             work_items, _suggestion_markers = backend.load_items()
             item = _resolve_work_item_target(target, work_items)
             if item is None:
@@ -185,19 +177,15 @@ class WorkdashCommands:
                 )
             item_id = format_work_item_id(item)
             cache_used = item.analysis is not None
-            agents = _configured_analyze_agents(config)
+            agents = config.configured_analyze_agents()
             selected_agent = agent or (agents[0] if agents else None)
-            if not cache_used:
-                if selected_agent is None:
-                    raise RuntimeError("No analysis agents are configured.")
-                if selected_agent not in agents:
-                    raise RuntimeError(
-                        f"Analysis agent {selected_agent!r} is not configured. "
-                        f"Configured agents: {', '.join(agents) if agents else '(none)'}"
-                    )
-                if not config.workdir:
-                    _print_missing_config(["workdir"])
-                    return 1
+            if agent is not None and agent not in agents:
+                raise RuntimeError(
+                    f"Analysis agent {agent!r} is not configured. "
+                    f"Configured agents: {', '.join(agents) if agents else '(none)'}"
+                )
+            if not cache_used and selected_agent is None:
+                raise RuntimeError("No analysis agents are configured.")
             path = self.analyze(item, tool=selected_agent or "cached", prefer_cache=True)
             if path is None:
                 raise RuntimeError(f"Analysis failed for {item_id} with agent {selected_agent}.")
@@ -216,6 +204,54 @@ class WorkdashCommands:
             print(json.dumps(result, ensure_ascii=True, indent=2))
         else:
             _print_analysis_result(result)
+        return 0
+
+    def code_cli(
+        self,
+        *,
+        target: str,
+        agent: str | None,
+        session: str | None,
+        json_output: bool,
+    ) -> int:
+        """Launch a terminal-backed coding agent for a current work item from the CLI."""
+
+        try:
+            selected_session = _select_workdash_session(session)
+            gh_error = _check_gh_preflight()
+            if gh_error:
+                print(f"Error: {gh_error}", file=sys.stderr, flush=True)
+                return 1
+            loaded = self._load_config_and_backend()
+            if loaded is None:
+                return 1
+            config, backend = loaded
+            agents = config.configured_code_agents()
+            selected_agent = agent or (agents[0] if agents else None)
+            if selected_agent is None:
+                raise RuntimeError("No terminal-backed coding agents are configured.")
+            if selected_agent not in agents:
+                raise RuntimeError(
+                    f"Coding agent {selected_agent!r} is not a configured terminal-backed agent. "
+                    f"Configured agents: {', '.join(agents) if agents else '(none)'}"
+                )
+            work_items, _suggestion_markers = backend.load_items()
+            item = _resolve_work_item_target(target, work_items)
+            if item is None:
+                raise RuntimeError(
+                    f"{target!r} is not a current Workdash item ID or GitHub issue/PR URL."
+                )
+            item_id = format_work_item_id(item)
+            result = self.code(item, tool=selected_agent, zellij_session=selected_session)
+        except RuntimeError as error:
+            print(f"Error: {error}", file=sys.stderr, flush=True)
+            return 1
+
+        result = {"item_id": item_id, "session": selected_session, **result}
+        if json_output:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        else:
+            _print_code_result(result)
         return 0
 
     def interactive(self) -> int:
@@ -237,6 +273,8 @@ class WorkdashCommands:
             worktree_callback=lambda item: ensure_worktree(config.workdir, item),
             analyze_callback=lambda item, tool="codex": self.analyze(item, tool=tool),
             launch_callback=lambda item, tool="codex": self.code(item, tool=tool),
+            analyze_choices=config.tui_analyze_choices(),
+            code_choices=config.tui_code_choices(),
             terminal_callback=lambda item: launch_terminal_context(
                 ensure_worktree(config.workdir, item)
             ),
@@ -263,17 +301,23 @@ class WorkdashCommands:
             if cached_path is not None:
                 return cached_path
         if tool != "cached":
-            backend.resolve_analyze_command_tokens(tool)
             ensure_worktree(config.workdir, item)
         return backend.analyze_item(item, tool=tool)
 
-    def code(self, item: WorkItem, *, tool: str) -> dict[str, str | None]:
+    def code(
+        self,
+        item: WorkItem,
+        *,
+        tool: str,
+        zellij_session: str | None = None,
+    ) -> dict[str, str | None]:
         """Launch a terminal-backed coding session through the shared action path."""
 
         loaded = self._load_config_and_backend()
         if loaded is None:
             raise RuntimeError("Workdash configuration is incomplete.")
         config, backend = loaded
+        command_tokens = None if tool == "vscode" else config.code_agent_launch_command_tokens(tool)
         repo_path = ensure_worktree(config.workdir, item)
         prompt = prepare_launch_agent_prompt(
             item,
@@ -284,30 +328,15 @@ class WorkdashCommands:
             merge_base=get_merge_base(repo_path),
         )
         if tool == "vscode":
-            # TODO(EVO-040): Exclude non-terminal editor launches from CLI code.
-            #                  Why: The probe preserves the existing TUI behavior, but
-            #                  the CLI code command must only launch panes that external
-            #                  automation can control through Zellij.
-            #                  Done: CLI agent selection ignores editor commands that do
-            #                  not create terminal panes, while the TUI can still offer
-            #                  configured non-terminal editors through its own dialog.
-            #                  Non-Goals: Do not design the future configurable-editor
-            #                  system or add per-editor capability metadata here.
             launch_vscode_context(repo_path, prompt)
             pane_title = None
         else:
-            launch_commands = {
-                "claude": config.claude.launch,
-                "codex": config.codex.launch,
-                "pi": config.pi.launch,
-            }
-            if tool not in launch_commands:
-                raise ValueError(f"Unsupported coding agent: {tool!r}")
             pane_title = f"code_{os.path.basename(repo_path)}"
             launch_agent_context(
                 repo_path,
                 prompt,
-                agent_command_tokens=shlex.split(launch_commands[tool]),
+                agent_command_tokens=command_tokens,
+                zellij_session=zellij_session,
             )
         # TODO(EVO-050): Return targeted Zellij pane identifiers.
         #                  Why: The shared launch path now exposes one place for TUI and
@@ -321,17 +350,14 @@ class WorkdashCommands:
         #                  change how closed panes are discovered by `workdash info`.
         return {"agent": tool, "cwd": repo_path, "pane_title": pane_title, "pane_id": None}
 
-    def _load_config_and_backend(
-        self, *, validate: bool = True
-    ) -> tuple[WorkdashConfig, WorkdashBackend] | None:
+    def _load_config_and_backend(self) -> tuple[WorkdashConfig, WorkdashBackend] | None:
         if self._config is not None and self._backend is not None:
             return self._config, self._backend
-        config = load_config()
-        if validate:
-            missing = validate_config(config)
-            if missing:
-                _print_missing_config(missing)
-                return None
+        try:
+            config = load_config().require_valid()
+        except WorkdashConfigValidationError as error:
+            _print_config_validation_error(error)
+            return None
         backend = WorkdashBackend(config=config)
         self._config = config
         self._backend = backend
@@ -362,30 +388,8 @@ def _resolve_work_item_target(target: str, work_items: Sequence[WorkItem]) -> Wo
     return None
 
 
-def _configured_analyze_agents(config: WorkdashConfig) -> list[str]:
-    agents = []
-    if config.codex.analyze:
-        agents.append("codex")
-    if config.claude.analyze:
-        agents.append("claude")
-    return agents
-
-
-def _missing_analyze_load_fields(config: WorkdashConfig) -> list[str]:
-    missing = []
-    if not config.github_username:
-        missing.append("github_username")
-    if not config.repositories:
-        missing.append("repositories")
-    return missing
-
-
-def _print_missing_config(missing: Sequence[str]) -> None:
-    print(
-        f"Error: missing configuration fields: {', '.join(missing)}",
-        file=sys.stderr,
-        flush=True,
-    )
+def _print_config_validation_error(error: WorkdashConfigValidationError) -> None:
+    print(f"Error: {error}", file=sys.stderr, flush=True)
     print(
         "Run 'workdash --configure' to set up your configuration.",
         file=sys.stderr,
@@ -485,6 +489,26 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         default=argparse.SUPPRESS,
         help="Emit machine-readable JSON.",
     )
+    code_parser = subparsers.add_parser(
+        "code",
+        help="Launch a terminal-backed coding agent for a current Workdash item.",
+    )
+    code_parser.add_argument("target", metavar="ITEM", help="Workdash item ID or GitHub URL.")
+    code_parser.add_argument(
+        "--agent",
+        help="Configured terminal-backed coding agent to launch.",
+    )
+    code_parser.add_argument(
+        "--session",
+        help="Validate against a specific Workdash-owned Zellij session.",
+    )
+    code_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Emit machine-readable JSON.",
+    )
     namespace = parser.parse_args(argv) if argv is not None else parser.parse_args()
     return CLIOptions(
         debug=namespace.debug,
@@ -554,6 +578,15 @@ def _print_analysis_result(result: dict[str, object]) -> None:
     print(f"Agent: {result['agent']}")
     print(f"Status: {result['status']}")
     print(f"Path: {result['path']}")
+
+
+def _print_code_result(result: dict[str, object]) -> None:
+    print(f"Item: {result['item_id']}")
+    print(f"Agent: {result['agent']}")
+    print(f"Session: {result['session']}")
+    print(f"Cwd: {result['cwd']}")
+    print(f"Pane title: {result['pane_title'] or '-'}")
+    print(f"Pane id: {result['pane_id'] or '-'}")
 
 
 def _print_pane_info(info: dict[str, object]) -> None:

@@ -22,7 +22,7 @@ from workdash.config import WorkdashConfig
 from workdash.models import WorkItem
 from workdash.tui import AnalyzeDialog, WorkdashApp
 
-from .common import NOW_UTC, make_work_item, modal_screen_names
+from .common import NOW_UTC, make_valid_config, make_work_item, modal_screen_names
 
 # --------------------------------------------------------------------------
 # Shared helpers for analysis scenarios
@@ -156,8 +156,8 @@ def _dialog_offers_open_cached(scenario_state: dict[str, Any]) -> None:
 @then("the dialog offers to generate a fresh analysis")
 def _dialog_offers_fresh(scenario_state: dict[str, Any]) -> None:
     lines = scenario_state["dialog_lines"]
-    assert any("Claude" in line for line in lines), lines
-    assert any("Codex" in line for line in lines), lines
+    for choice in make_valid_config().tui_analyze_choices():
+        assert any(choice.label in line for line in lines), lines
 
 
 @then("the dialog tells the user there is no previous analysis")
@@ -401,9 +401,8 @@ def _run_generate_fresh(
     busy_messages: list[str] = []
 
     async def interactions(app, pilot) -> None:
-        dialog = await _open_analyze_dialog(app, pilot)
-        # 'g' fires Codex (always available, always offered).
-        dialog.action_analyze_codex()
+        await _open_analyze_dialog(app, pilot)
+        await pilot.press("2")
         for _ in range(40):
             await pilot.pause()
             status = app.query_one("#status-footer", Static).render().plain

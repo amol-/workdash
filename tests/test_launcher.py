@@ -294,6 +294,46 @@ def test_launch_agent_context_uses_new_zellij_pane_when_in_zellij(
     assert captured["text"] is True
 
 
+def test_launch_agent_context_targets_selected_zellij_session_without_current_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["command"] = args[0]
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/zellij" if name == "zellij" else None
+    )
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launch_agent_context(
+        "/tmp/amol-_repoze.who_52",
+        "review this change",
+        agent_command_tokens=["codex"],
+        zellij_session="workdash-main",
+    )
+
+    assert captured["command"] == [
+        "/usr/bin/zellij",
+        "--session",
+        "workdash-main",
+        "action",
+        "new-pane",
+        "--name",
+        "code_amol-_repoze.who_52",
+        "--cwd",
+        "/tmp/amol-_repoze.who_52",
+        "--",
+        "/bin/bash",
+        "-ic",
+        "codex 'review this change'",
+    ]
+
+
 def test_launch_agent_context_raises_clear_error_when_zellij_launch_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

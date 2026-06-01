@@ -20,6 +20,10 @@ Feature: CLI orchestration commands
     - `workdash info` reports only live panes whose titles prove Workdash launched them: `code_` agent panes and `terminal_` terminal panes.
     - Zellij exited or held panes are not live panes.
     - `workdash info --all` also reports live non-plugin panes in the selected Workdash-owned session, but extra panes are `unknown` kind with unknown item mapping.
+    - Missing optional agent commands mean that agent operation is not configured, not that the whole config is invalid.
+    - `workdash code` launches only configured terminal-backed coding agents: `claude`, `codex`, and `pi`.
+    - `workdash code` launches in the selected Workdash-owned Zellij session, not whichever session is currently attached.
+    - `workdash code` does not expose non-terminal editors such as VSCode.
 
   @id:F-CLI-ORCHESTRATION-S003
   Scenario: Info inspects the only active Workdash-owned session
@@ -81,6 +85,15 @@ Feature: CLI orchestration commands
     Then the system analyzes the current item with the selected configured agent
     And the system returns JSON with the item id, selected agent, analysis path, and cache status
 
+  @id:F-CLI-ORCHESTRATION-S016
+  Scenario: Analyze accepts a partial agent configuration
+    Given exactly one active Workdash-owned Zellij session exists
+    And the current Workdash items include an assigned issue without cached analysis
+    And only the Codex analyze command is configured
+    When the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`
+    Then the system analyzes the current item with the selected configured agent
+    And the system returns JSON with the item id, selected agent, analysis path, and cache status
+
   @id:F-CLI-ORCHESTRATION-S010
   Scenario: Orchestration commands require a Workdash-owned Zellij session
     Given no active Workdash-owned Zellij session exists
@@ -94,7 +107,8 @@ Feature: CLI orchestration commands
     And the current Workdash items include an assigned issue without cached analysis
     And the configured Codex analyze command is malformed
     When the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`
-    Then the system reports the malformed agent command with config context
+    Then the system reports the malformed agent command with config guidance
+    And the system does not load backend items
     And the system does not prepare a worktree
     And the system exits with a non-zero status
 
@@ -107,3 +121,31 @@ Feature: CLI orchestration commands
     Then the system returns JSON pane records
     And the system reports the ordinary live pane as unknown kind with raw pane information
     And the system does not report exited, held, or plugin panes
+
+  @id:F-CLI-ORCHESTRATION-S013
+  Scenario: Code launches a terminal-backed agent for a current work item
+    Given exactly one active Workdash-owned Zellij session exists
+    And the current Workdash items include an assigned issue without cached analysis
+    When the user runs `workdash code owner/repo#ISSUE-1 --agent codex --json`
+    Then the system launches code for the current item with the selected configured agent
+    And the system returns JSON with the item id, selected agent, selected session, cwd, pane title, and pane id
+
+  @id:F-CLI-ORCHESTRATION-S014
+  Scenario: Code does not expose non-terminal editors
+    Given exactly one active Workdash-owned Zellij session exists
+    And the current Workdash items include an assigned issue without cached analysis
+    When the user runs `workdash code owner/repo#ISSUE-1 --agent vscode --json`
+    Then the system reports that the coding agent is not a configured terminal-backed agent
+    And the system does not prepare a worktree
+    And the system exits with a non-zero status
+
+  @id:F-CLI-ORCHESTRATION-S015
+  Scenario: Code reports a malformed configured agent command
+    Given exactly one active Workdash-owned Zellij session exists
+    And the current Workdash items include an assigned issue without cached analysis
+    And the configured Codex launch command is malformed
+    When the user runs `workdash code owner/repo#ISSUE-1 --agent codex --json`
+    Then the system reports the malformed agent command with config guidance
+    And the system does not load backend items
+    And the system does not prepare a worktree
+    And the system exits with a non-zero status

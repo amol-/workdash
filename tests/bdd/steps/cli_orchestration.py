@@ -18,11 +18,16 @@ from workdash.repo_worktree import worktree_path
 from .common import NOW_UTC, make_work_item
 
 
-def _cli_config(workdir: str, *, codex_analyze: str = "codex exec") -> WorkdashConfig:
+def _cli_config(
+    workdir: str,
+    *,
+    codex_analyze: str = "codex exec",
+    codex_launch: str = "codex",
+) -> WorkdashConfig:
     return WorkdashConfig(
         github_username="testuser",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze=codex_analyze, launch="codex"),
+        codex=AgentConfig(analyze=codex_analyze, launch=codex_launch),
         pi=AgentConfig(launch="pi"),
         repositories=("owner/repo",),
         workdir=workdir,
@@ -37,10 +42,20 @@ def _run_workdash(
 ) -> None:
     import workdash.workdash as workdash_module
 
-    config = _cli_config(
-        scenario_state.get("workdir", "/tmp/workdash-bdd"),
-        codex_analyze=scenario_state.get("codex_analyze", "codex exec"),
-    )
+    workdir = scenario_state.get("workdir", "/tmp/workdash-bdd")
+    if scenario_state.get("only_codex_analyze_configured"):
+        config = WorkdashConfig(
+            github_username="testuser",
+            codex=AgentConfig(analyze=scenario_state.get("codex_analyze", "codex exec")),
+            repositories=("owner/repo",),
+            workdir=workdir,
+        )
+    else:
+        config = _cli_config(
+            workdir,
+            codex_analyze=scenario_state.get("codex_analyze", "codex exec"),
+            codex_launch=scenario_state.get("codex_launch", "codex"),
+        )
     items = list(scenario_state.get("work_items", []))
     markers = compute_suggestion_markers(items)
     real_backend_class = workdash_module.WorkdashBackend
@@ -52,8 +67,10 @@ def _run_workdash(
     class FakeBackend:
         def __init__(self, config=None, **kwargs) -> None:
             self.real = real_backend_class(config=config, analyzer=FakeAnalyzer())
+            self.analysis_cache = self.real.analysis_cache
 
         def load_items(self, progress_callback=None):
+            scenario_state["backend_loads"] = scenario_state.get("backend_loads", 0) + 1
             assert progress_callback is None
             return list(items), dict(markers)
 
@@ -64,8 +81,6 @@ def _run_workdash(
             scenario_state.setdefault("analyze_calls", []).append((item, tool))
             if tool == "cached":
                 return scenario_state.get("cached_analysis_path") if item.analysis else None
-            if scenario_state.get("use_real_analyze_item"):
-                return self.real.analyze_item(item, tool=tool)
             return scenario_state.get("analysis_path", "/tmp/workdash-analysis.md")
 
     def fake_run(*args, **kwargs):
@@ -105,6 +120,21 @@ def _run_workdash(
         workdash_module,
         "load_zellij_panes",
         lambda _session: list(scenario_state.get("panes", [])),
+    )
+    monkeypatch.setattr(workdash_module, "get_merge_base", lambda _path: None)
+    monkeypatch.setattr(
+        workdash_module,
+        "prepare_launch_agent_prompt",
+        lambda *args, **kwargs: "PROMPT",
+    )
+    monkeypatch.setattr(
+        workdash_module,
+        "launch_agent_context",
+        lambda repo, prompt, agent_command_tokens=None, *, zellij_session=None: (
+            scenario_state.setdefault("launch_calls", []).append(
+                (repo, prompt, agent_command_tokens, zellij_session)
+            )
+        ),
     )
 
     scenario_state["exit_code"] = workdash_module.main(argv)
@@ -347,7 +377,16 @@ def _current_items_include_uncached_issue(
 @given("the configured Codex analyze command is malformed")
 def _configured_codex_analyze_command_is_malformed(scenario_state: dict[str, Any]) -> None:
     scenario_state["codex_analyze"] = "codex 'broken"
-    scenario_state["use_real_analyze_item"] = True
+
+
+@given("only the Codex analyze command is configured")
+def _only_codex_analyze_command_is_configured(scenario_state: dict[str, Any]) -> None:
+    scenario_state["only_codex_analyze_configured"] = True
+
+
+@given("the configured Codex launch command is malformed")
+def _configured_codex_launch_command_is_malformed(scenario_state: dict[str, Any]) -> None:
+    scenario_state["codex_launch"] = "codex 'broken"
 
 
 @when("the user runs `workdash info`")
@@ -394,6 +433,34 @@ def _run_analyze_json(
 ) -> None:
     _run_workdash(
         ["analyze", "owner/repo#ISSUE-1", "--agent", "codex", "--json"],
+        scenario_state,
+        monkeypatch,
+        capsys,
+    )
+
+
+@when("the user runs `workdash code owner/repo#ISSUE-1 --agent codex --json`")
+def _run_code_json(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(
+        ["code", "owner/repo#ISSUE-1", "--agent", "codex", "--json"],
+        scenario_state,
+        monkeypatch,
+        capsys,
+    )
+
+
+@when("the user runs `workdash code owner/repo#ISSUE-1 --agent vscode --json`")
+def _run_code_vscode_json(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(
+        ["code", "owner/repo#ISSUE-1", "--agent", "vscode", "--json"],
         scenario_state,
         monkeypatch,
         capsys,
@@ -563,19 +630,62 @@ def _returns_analyze_json(scenario_state: dict[str, Any]) -> None:
     }
 
 
+@then("the system launches code for the current item with the selected configured agent")
+def _launches_code_with_selected_agent(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state
+    item = scenario_state["work_items"][0]
+    assert scenario_state["ensure_calls"] == [(scenario_state["workdir"], item)]
+    assert scenario_state["launch_calls"] == [
+        (
+            str(Path(scenario_state["workdir"]) / "owner_repo_1"),
+            "PROMPT",
+            ["codex"],
+            "workdash-main",
+        )
+    ]
+
+
+@then(
+    "the system returns JSON with the item id, selected agent, selected session, cwd, pane title, "
+    "and pane id"
+)
+def _returns_code_json(scenario_state: dict[str, Any]) -> None:
+    payload = json.loads(scenario_state["stdout"])
+    assert payload == {
+        "item_id": "owner/repo#ISSUE-1",
+        "session": "workdash-main",
+        "agent": "codex",
+        "cwd": str(Path(scenario_state["workdir"]) / "owner_repo_1"),
+        "pane_title": "code_owner_repo_1",
+        "pane_id": None,
+    }
+
+
+@then("the system reports that the coding agent is not a configured terminal-backed agent")
+def _reports_non_terminal_agent_rejected(scenario_state: dict[str, Any]) -> None:
+    assert "not a configured terminal-backed agent" in scenario_state["stderr"]
+    assert "vscode" in scenario_state["stderr"]
+
+
 @then("the system reports that an active Workdash-owned Zellij session is required")
 def _reports_session_required(scenario_state: dict[str, Any]) -> None:
     assert "active Workdash-owned Zellij session" in scenario_state["output"]
     assert "required" in scenario_state["output"]
 
 
-@then("the system reports the malformed agent command with config context")
-def _reports_malformed_agent_command_with_context(scenario_state: dict[str, Any]) -> None:
+@then("the system reports the malformed agent command with config guidance")
+def _reports_malformed_agent_command_with_guidance(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["stdout"] == ""
-    assert scenario_state["stderr"].startswith("Error: Invalid configured analysis command")
-    assert "agents.codex.analyze" in scenario_state["stderr"]
+    assert scenario_state["stderr"].startswith("Error: invalid configuration fields")
+    assert "agents.codex." in scenario_state["stderr"]
     assert "No closing quotation" in scenario_state["stderr"]
+    assert "workdash --configure" in scenario_state["stderr"]
     assert "Traceback" not in scenario_state["output"]
+
+
+@then("the system does not load backend items")
+def _does_not_load_backend_items(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("backend_loads", 0) == 0
 
 
 @then("the system does not prepare a worktree")

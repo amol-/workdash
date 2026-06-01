@@ -271,8 +271,10 @@ def _launch_zellij_command(
     *,
     context: str,
     work_action: str,
+    zellij_session: str | None = None,
 ) -> None:
-    if not os.getenv("ZELLIJ"):
+    target_session = (zellij_session or "").strip()
+    if not target_session and not os.getenv("ZELLIJ", "").strip():
         raise RuntimeError(
             f"{context}: terminal-backed work actions require an active Zellij session. "
             "Start workdash normally, or run it inside Zellij."
@@ -284,6 +286,7 @@ def _launch_zellij_command(
             repo_path,
             command,
             work_action=work_action,
+            zellij_session=target_session or None,
         ),
         context=context,
     )
@@ -295,9 +298,12 @@ def _build_zellij_new_pane_command(
     command: list[str],
     *,
     work_action: str,
+    zellij_session: str | None = None,
 ) -> list[str]:
+    session_args = ["--session", zellij_session] if zellij_session is not None else []
     return [
         zellij,
+        *session_args,
         "action",
         "new-pane",
         *_zellij_pane_name_argument(work_action, repo_path),
@@ -457,6 +463,8 @@ def launch_agent_context(
     repo_path: str,
     prompt: str,
     agent_command_tokens: list[str] | None = None,
+    *,
+    zellij_session: str | None = None,
 ) -> None:
     if not isinstance(repo_path, str) or not repo_path.strip():
         raise ValueError("Repository path must be a non-empty string.")
@@ -475,6 +483,7 @@ def launch_agent_context(
         agent_command,
         context="Failed to launch coding agent in zellij",
         work_action="code",
+        zellij_session=zellij_session,
     )
 
 

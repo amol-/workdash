@@ -24,7 +24,7 @@ def _no_config(scenario_state: dict[str, Any], config_path: Path) -> None:
     assert not config_path.exists()
     scenario_state["config_path"] = config_path
     scenario_state.setdefault("on_path_tools", {"zellij", "gh"})
-    # Fresh-config scenario (S001): no agents on PATH so every prompt fires.
+    # Fresh-config scenario (S001): no agents on PATH, so the wizard offers agent defaults too.
     scenario_state.setdefault(
         "input_responses",
         [
@@ -189,10 +189,10 @@ def _wizard_completes(
     _run_configure_with_fakes(scenario_state, config_path, monkeypatch, capsys)
 
 
-@then("the system prompts the user for each missing required field")
+@then("the system prompts the user for each missing globally required field")
 def _prompts_for_missing(scenario_state: dict[str, Any]) -> None:
     prompts = scenario_state["prompts"]
-    # Auto-detected both agents, so only username + workdir should have been prompted.
+    # Agent command prompts may also appear, but only these fields are globally required.
     assert any("GitHub username" in prompt for prompt in prompts), prompts
     assert any("Work directory" in prompt for prompt in prompts), prompts
 

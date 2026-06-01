@@ -45,7 +45,7 @@ def run_code_dialog_scenario(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Drive pressing 'c' in the TUI and then choosing Claude from the dialog.
+    """Drive pressing 'c' in the TUI and then choosing the first configured agent.
 
     The ``launch_callback`` mirrors ``workdash.workdash._launch`` so the
     production prompt builder runs end-to-end. External boundaries (``gh``
@@ -129,8 +129,8 @@ def run_code_dialog_scenario(
     captured: dict[str, Any] = {}
 
     async def interactions(app, pilot) -> None:
-        dialog = await _open_code_dialog(app, pilot)
-        dialog.action_launch_claude()
+        await _open_code_dialog(app, pilot)
+        await pilot.press("1")
         for _ in range(40):
             await pilot.pause()
             status = app.query_one("#status-footer", Static).render().plain
@@ -214,8 +214,8 @@ def _tui_reports_session_launched(
         launch_calls.append((item, tool))
 
     async def interactions(app, pilot) -> None:
-        dialog = await _open_code_dialog(app, pilot)
-        dialog.action_launch_claude()
+        await _open_code_dialog(app, pilot)
+        await pilot.press("1")
         for _ in range(40):
             await pilot.pause()
             if launch_calls:

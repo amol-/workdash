@@ -2,15 +2,17 @@
 Feature: First-time configuration
 
   Before the system can triage work, the user must have a configuration file
-  that identifies them on GitHub, lists the repositories to track, points at
-  a local work directory, and names the coding agent commands to use. The
+  that identifies them on GitHub, lists the repositories to track, and points
+  at a local work directory. Agent commands are optional configuration: when a
+  command is present it must be valid and enables that agent/action. The
   system ships an interactive wizard that fills in whatever is missing and
   can install local Zellij and GitHub CLI binaries when global binaries are
   not available.
 
   Rules:
     - The configuration lives at ~/.config/workdash/config.json.
-    - Required configuration fields are the GitHub username, at least one repository selector, the work directory, and the command-line commands needed to drive each supported coding agent that requires configuration — the launch command, and the analyze command for agents that support cached analysis.
+    - Required configuration fields are the GitHub username, at least one repository selector, and the work directory.
+    - Present agent command fields must be valid command lines; each valid command enables that agent action.
     - The wizard only prompts for fields that are currently empty; previously filled fields are left untouched.
     - When a supported coding agent's command-line tool is detected on PATH, the wizard fills in its commands automatically and tells the user what was detected.
     - When Zellij is detected on PATH, the wizard tells the user what was detected.
@@ -30,7 +32,7 @@ Feature: First-time configuration
   Scenario: Generate a fresh configuration interactively
     Given the user has no configuration file
     When the user runs the system with "--configure"
-    Then the system prompts the user for each missing required field
+    Then the system prompts the user for each missing globally required field
     And the system writes the collected values to "~/.config/workdash/config.json"
     And the system reports the saved configuration path
 

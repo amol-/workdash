@@ -91,6 +91,7 @@ workdash list                # list items as plain text, no TUI
 workdash list --json         # list items as machine-readable JSON
 workdash info [--session NAME] [--all] [--json]  # report live Workdash-owned Zellij panes
 workdash analyze ITEM [--agent NAME] [--session NAME] [--json]  # analyze a current item
+workdash code ITEM [--agent NAME] [--session NAME] [--json]  # launch a terminal-backed coding agent
 workdash --refresh           # force a refresh from GitHub
 workdash --debug             # verbose logging
 workdash --configure         # run the interactive setup wizard
@@ -177,6 +178,17 @@ selected configured analysis agent.
 
 Human output reports the item, agent, cache status, and analysis path. `--json`
 emits the same result as machine-readable JSON.
+
+## Code command
+
+`workdash code ITEM [--agent NAME] [--session NAME] [--json]` launches a
+configured terminal-backed coding agent (`claude`, `codex`, or `pi`) for a
+current Workdash item. `ITEM` accepts the same row IDs and GitHub URLs as
+`workdash analyze`. The command requires an active Workdash-owned Zellij session;
+pass `--session` when more than one exists.
+
+Human output reports the item, agent, selected session, cwd, pane title, and pane
+id when available. `--json` emits the same result as machine-readable JSON.
 
 ## Analysis cache
 

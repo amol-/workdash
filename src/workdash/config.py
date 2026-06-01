@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import platform
+import shlex
 import shutil
 import stat
 import tarfile
@@ -30,12 +31,40 @@ _DEFAULT_PI_LAUNCH = "pi"
 _DEFAULT_WORKDIR = "~/wrk"
 
 
+class WorkdashConfigValidationError(RuntimeError):
+    """Raised when runtime configuration is incomplete or invalid."""
+
+    def __init__(
+        self,
+        missing_fields: list[str],
+        invalid_fields: list[str] | None = None,
+    ) -> None:
+        self.missing_fields = tuple(missing_fields)
+        self.invalid_fields = tuple(invalid_fields or [])
+        messages = []
+        if self.missing_fields:
+            messages.append(f"missing configuration fields: {', '.join(self.missing_fields)}")
+        if self.invalid_fields:
+            messages.append(f"invalid configuration fields: {', '.join(self.invalid_fields)}")
+        super().__init__("; ".join(messages))
+
+
 @dataclass(frozen=True)
 class AgentConfig:
     """Per-agent command configuration."""
 
     analyze: str = ""
     launch: str = ""
+
+
+@dataclass(frozen=True)
+class WorkdashAgentChoice:
+    """A TUI action the user can choose."""
+
+    key: str
+    agent: str
+    label: str
+    tool_label: str
 
 
 @dataclass(frozen=True)
@@ -48,6 +77,73 @@ class WorkdashConfig:
     pi: AgentConfig = field(default_factory=AgentConfig)
     repositories: tuple[str, ...] = ()
     workdir: str = ""
+
+    def require_valid(self) -> WorkdashConfig:
+        missing = validate_config(self)
+        invalid = _invalid_config_command_fields(self)
+        if missing or invalid:
+            raise WorkdashConfigValidationError(missing, invalid)
+        return self
+
+    def configured_analyze_agents(self) -> list[str]:
+        agents = []
+        if _is_configured_command(self.codex.analyze):
+            agents.append("codex")
+        if _is_configured_command(self.claude.analyze):
+            agents.append("claude")
+        return agents
+
+    def configured_code_agents(self) -> list[str]:
+        agents = []
+        if _is_configured_command(self.codex.launch):
+            agents.append("codex")
+        if _is_configured_command(self.claude.launch):
+            agents.append("claude")
+        if _is_configured_command(self.pi.launch):
+            agents.append("pi")
+        return agents
+
+    def tui_analyze_choices(self) -> list[WorkdashAgentChoice]:
+        choices = []
+        if _is_configured_command(self.claude.analyze):
+            choices.append(("claude", "Analyze with Claude", "Claude"))
+        if _is_configured_command(self.codex.analyze):
+            choices.append(("codex", "Analyze with ChatGPT Codex", "Codex"))
+        return _numbered_agent_choices(choices)
+
+    def tui_code_choices(self) -> list[WorkdashAgentChoice]:
+        choices = []
+        if _is_configured_command(self.claude.launch):
+            choices.append(("claude", "Claude", "Claude"))
+        if _is_configured_command(self.codex.launch):
+            choices.append(("codex", "ChatGPT Codex", "Codex"))
+        choices.append(("vscode", "VSCode Copilot", "VSCode"))
+        if _is_configured_command(self.pi.launch):
+            choices.append(("pi", "pi", "pi"))
+        return _numbered_agent_choices(choices)
+
+    def analyze_agent_command_tokens(self, agent: str) -> list[str]:
+        analyze_commands = {
+            "claude": ("agents.claude.analyze", self.claude.analyze),
+            "codex": ("agents.codex.analyze", self.codex.analyze),
+        }
+        try:
+            field, command = analyze_commands[agent]
+        except KeyError as error:
+            raise ValueError(f"Unsupported analyze agent: {agent!r}") from error
+        return _config_command_tokens(field, command)
+
+    def code_agent_launch_command_tokens(self, agent: str) -> list[str]:
+        launch_commands = {
+            "claude": ("agents.claude.launch", self.claude.launch),
+            "codex": ("agents.codex.launch", self.codex.launch),
+            "pi": ("agents.pi.launch", self.pi.launch),
+        }
+        try:
+            field, command = launch_commands[agent]
+        except KeyError as error:
+            raise ValueError(f"Unsupported coding agent: {agent!r}") from error
+        return _config_command_tokens(field, command)
 
 
 def _config_to_json(config: WorkdashConfig) -> str:
@@ -144,17 +240,58 @@ def validate_config(config: WorkdashConfig) -> list[str]:
         missing.append("repositories")
     if not config.workdir:
         missing.append("workdir")
-    if not config.claude.analyze:
-        missing.append("agents.claude.analyze")
-    if not config.claude.launch:
-        missing.append("agents.claude.launch")
-    if not config.codex.analyze:
-        missing.append("agents.codex.analyze")
-    if not config.codex.launch:
-        missing.append("agents.codex.launch")
-    if not config.pi.launch:
-        missing.append("agents.pi.launch")
     return missing
+
+
+def _numbered_agent_choices(choices: list[tuple[str, str, str]]) -> list[WorkdashAgentChoice]:
+    return [
+        WorkdashAgentChoice(str(index), agent, label, tool_label)
+        for index, (agent, label, tool_label) in enumerate(choices, start=1)
+    ]
+
+
+def _config_command_fields(config: WorkdashConfig) -> tuple[tuple[str, object], ...]:
+    return (
+        ("agents.claude.analyze", config.claude.analyze),
+        ("agents.claude.launch", config.claude.launch),
+        ("agents.codex.analyze", config.codex.analyze),
+        ("agents.codex.launch", config.codex.launch),
+        ("agents.pi.launch", config.pi.launch),
+    )
+
+
+def _invalid_config_command_fields(config: WorkdashConfig) -> list[str]:
+    invalid: list[str] = []
+    for field_name, command in _config_command_fields(config):
+        if isinstance(command, str) and not command.strip():
+            continue
+        problem = _config_command_problem(command)
+        if problem is not None:
+            invalid.append(f"{field_name}: {problem}")
+    return invalid
+
+
+def _is_configured_command(command: object) -> bool:
+    return isinstance(command, str) and command.strip() and _config_command_problem(command) is None
+
+
+def _config_command_tokens(field: str, command: object) -> list[str]:
+    problem = _config_command_problem(command)
+    if problem is not None:
+        raise WorkdashConfigValidationError([], [f"{field}: {problem}"])
+    return shlex.split(command)
+
+
+def _config_command_problem(command: object) -> str | None:
+    if not isinstance(command, str) or not command.strip():
+        return "expected a non-empty string"
+    try:
+        tokens = shlex.split(command)
+    except ValueError as error:
+        return str(error)
+    if any(not token.strip() for token in tokens):
+        return "contains a blank shell token"
+    return None
 
 
 def _prompt_with_default(input_fn: Callable[[str], str], label: str, default: str) -> str:

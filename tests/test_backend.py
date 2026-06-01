@@ -6,7 +6,7 @@ import pytest
 
 import workdash.backend as backend_module
 from workdash.backend import IncludeResult, WorkdashBackend, compute_suggestion_markers
-from workdash.config import AgentConfig, WorkdashConfig
+from workdash.config import AgentConfig, WorkdashConfig, WorkdashConfigValidationError
 from workdash.github_client import GitHubClient, TransientFetchError
 from workdash.included_items import IncludedItemsStore
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
@@ -395,7 +395,7 @@ def test_analyze_item_tool_claude_bypasses_cache() -> None:
     assert analyzer.analyze_calls == [(55, ["claude", "-p"])]
 
 
-def test_analyze_item_reports_malformed_agent_command_with_config_context() -> None:
+def test_analyze_item_uses_config_boundary_for_malformed_agent_command() -> None:
     analyzer = MagicMock()
     config = WorkdashConfig(
         github_username="testuser",
@@ -416,16 +416,14 @@ def test_analyze_item_reports_malformed_agent_command_with_config_context() -> N
         created_at=datetime(2026, 2, 2, 0, 0, 0, tzinfo=UTC),
     )
 
-    with pytest.raises(RuntimeError) as error:
+    with pytest.raises(WorkdashConfigValidationError) as error:
         backend.analyze_item(item, tool="codex")
 
-    assert "Invalid configured analysis command for agent 'codex'" in str(error.value)
-    assert "agents.codex.analyze" in str(error.value)
-    assert "No closing quotation" in str(error.value)
+    assert error.value.invalid_fields == ("agents.codex.analyze: No closing quotation",)
     analyzer.analyze.assert_not_called()
 
 
-def test_analyze_item_reports_non_string_agent_command_with_config_context() -> None:
+def test_analyze_item_uses_config_boundary_for_non_string_agent_command() -> None:
     analyzer = MagicMock()
     config = WorkdashConfig(
         github_username="testuser",
@@ -446,12 +444,36 @@ def test_analyze_item_reports_non_string_agent_command_with_config_context() -> 
         created_at=datetime(2026, 2, 2, 0, 0, 0, tzinfo=UTC),
     )
 
-    with pytest.raises(RuntimeError) as error:
+    with pytest.raises(WorkdashConfigValidationError) as error:
         backend.analyze_item(item, tool="codex")
 
-    assert "Invalid configured analysis command for agent 'codex'" in str(error.value)
-    assert "agents.codex.analyze" in str(error.value)
-    assert "expected a non-empty string" in str(error.value)
+    assert error.value.invalid_fields == ("agents.codex.analyze: expected a non-empty string",)
+    analyzer.analyze.assert_not_called()
+
+
+def test_analyze_item_rejects_unsupported_agent_without_codex_fallback() -> None:
+    analyzer = MagicMock()
+    config = WorkdashConfig(
+        github_username="testuser",
+        codex=AgentConfig(analyze="codex exec", launch="codex"),
+        repositories=("owner/*",),
+        workdir="~/src",
+    )
+    backend = WorkdashBackend(
+        github_client=MagicMock(),
+        analyzer=analyzer,
+        config=config,
+    )
+    item = make_work_item(
+        item_type=WorkItemType.ISSUE,
+        kind=WorkItemKind.TRACKED_ISSUE,
+        number=101,
+        created_at=datetime(2026, 2, 2, 0, 0, 0, tzinfo=UTC),
+    )
+
+    with pytest.raises(ValueError, match="Unsupported analyze agent: 'pi'"):
+        backend.analyze_item(item, tool="pi")
+
     analyzer.analyze.assert_not_called()
 
 
