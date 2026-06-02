@@ -37,6 +37,9 @@ from .steps import (
     startup as _startup,
 )
 from .steps import (
+    show_config as _show_config,
+)
+from .steps import (
     terminal as _terminal,
 )
 from .steps import (
@@ -58,6 +61,7 @@ for _step_module in (
     _coding,
     _browse,
     _terminal,
+    _show_config,
 ):
     for _name in dir(_step_module):
         if _name.startswith("pytestbdd_stepdef_") or _name in {
