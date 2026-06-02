@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -179,6 +180,92 @@ def _server_session_running(
     _seed_dashboard_item(work_items, scenario_state)
     session = _ensure_api_session(scenario_state, work_items, tmp_path)
     session.tui_app = _FakeLiveTui(session, scenario_state)  # type: ignore[assignment]
+
+
+@given("a server-backed Workdash session has open work items and a suggested item exists")
+def _server_session_has_items_with_suggestion(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    work_items.extend(
+        [
+            make_work_item(
+                item_type=WorkItemType.ISSUE,
+                kind=WorkItemKind.TRACKED_ISSUE,
+                number=77,
+                title="Oldest suggestion target",
+                created_at=NOW_UTC - timedelta(days=30),
+                updated_at=NOW_UTC - timedelta(days=1),
+            ),
+            make_work_item(
+                item_type=WorkItemType.PR,
+                kind=WorkItemKind.TRACKED_PR,
+                number=78,
+                title="Fresh PR",
+                created_at=NOW_UTC - timedelta(days=2),
+                updated_at=NOW_UTC - timedelta(days=0),
+            ),
+        ]
+    )
+    _ensure_api_session(scenario_state, work_items, tmp_path)
+
+
+@given("a server-backed Workdash session has no open work items")
+def _server_session_has_no_items(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    work_items.clear()
+    scenario_state["work_items"] = list(work_items)
+    backend = _FakeApiBackend(scenario_state, tmp_path)
+    session = WorkdashSession(
+        config=_api_config(tmp_path),
+        backend=backend,  # type: ignore[arg-type]
+        work_items=list(work_items),
+        suggestion_markers=compute_suggestion_markers(list(work_items)),
+        zellij_session=scenario_state.get("zellij_session", "workdash-main"),
+    )
+    scenario_state["api_session"] = session
+    scenario_state["api_backend"] = backend
+
+
+@given("a server-backed Workdash session has issue, pull request, and review work items")
+def _server_session_has_item_types(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    work_items[:] = [
+        make_work_item(
+            item_type=WorkItemType.ISSUE,
+            kind=WorkItemKind.ASSIGNED_ISSUE,
+            number=1,
+            title="Issue",
+            created_at=NOW_UTC,
+            updated_at=NOW_UTC,
+        ),
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.AUTHORED_PR,
+            number=2,
+            title="Pull request",
+            created_at=NOW_UTC,
+            updated_at=NOW_UTC,
+        ),
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.REVIEW_REQUESTED_PR,
+            number=3,
+            title="Review",
+            created_at=NOW_UTC,
+            updated_at=NOW_UTC,
+        ),
+    ]
+    scenario_state["work_items"] = list(work_items)
+    _ensure_api_session(scenario_state, work_items, tmp_path)
+
+
+@given("a server-backed Workdash session has work items")
+def _server_session_has_work_items(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    _server_session_has_item_types(scenario_state, work_items, tmp_path)
 
 
 @given("the Workdash Zellij session has live Workdash-owned panes")
