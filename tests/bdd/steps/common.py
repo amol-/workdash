@@ -68,8 +68,7 @@ def work_items() -> list[WorkItem]:
     return []
 
 
-@pytest.fixture
-def valid_config() -> WorkdashConfig:
+def make_valid_config() -> WorkdashConfig:
     return WorkdashConfig(
         github_username="testuser",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
@@ -77,7 +76,12 @@ def valid_config() -> WorkdashConfig:
         pi=AgentConfig(launch="pi"),
         repositories=("owner/repo",),
         workdir="/tmp/workdash-bdd",
-    )
+    ).require_valid()
+
+
+@pytest.fixture
+def valid_config() -> WorkdashConfig:
+    return make_valid_config()
 
 
 # -- Reusable TUI harness ---------------------------------------------------
@@ -103,6 +107,7 @@ def run_app(
     terminal_callback=None,
     include_callback=None,
     busy_messages: list[str] | None = None,
+    config: WorkdashConfig | None = None,
 ) -> None:
     """Drive ``WorkdashApp`` through an async pilot routine for BDD tests.
 
@@ -120,6 +125,7 @@ def run_app(
         if suggestion_markers is not None
         else compute_suggestion_markers(list(work_items))
     )
+    config = config or make_valid_config()
     app = WorkdashApp(
         work_items=list(work_items),
         suggestion_markers=markers,
@@ -128,6 +134,8 @@ def run_app(
         analyze_callback=analyze_callback,
         launch_callback=launch_callback,
         worktree_callback=worktree_callback,
+        analyze_choices=config.tui_analyze_choices(),
+        code_choices=config.tui_code_choices(),
         terminal_callback=terminal_callback,
         include_callback=include_callback,
         now_utc=now_utc,

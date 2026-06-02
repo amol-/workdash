@@ -222,8 +222,8 @@ def _user_starts_interactive_dashboard_direct(
     scenario_state["exec_calls"] = []
 
 
-@when("the user starts the non-interactive print mode")
-def _user_starts_print_mode(
+@when("the user starts the non-interactive list command")
+def _user_starts_list_command(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -261,7 +261,7 @@ def _user_starts_print_mode(
     else:
         monkeypatch.setenv("ZELLIJ", "0")
 
-    exit_code = workdash_module.main(["--print"])
+    exit_code = workdash_module.main(["list"])
     captured = capsys.readouterr()
     scenario_state["exit_code"] = exit_code
     scenario_state["output"] = captured.out + captured.err

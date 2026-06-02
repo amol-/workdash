@@ -7,7 +7,7 @@ Feature: Recent activity highlighting
   Rules:
     - In the TUI, a work item whose last update is within the last 24 hours is rendered in bold across all of its columns.
     - Work items outside that window are rendered in the normal weight.
-    - This highlighting only affects the TUI; print mode output is not styled.
+    - This highlighting only affects the TUI; list command output is not styled.
 
   @id:F-TRIAGE-RECENT-S001
   Scenario: Recently updated items are bolded in the TUI

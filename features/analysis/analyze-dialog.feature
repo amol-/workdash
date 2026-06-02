@@ -9,7 +9,7 @@ Feature: Analyze dialog
     - Pressing "a" in the TUI opens the analyze dialog for the selected work item.
     - If an analysis already exists for the item, the dialog shows how long ago it was produced and offers to open it.
     - If no analysis exists, the dialog tells the user there is no previous analysis.
-    - The dialog always offers to generate a fresh analysis with a supported coding agent.
+    - The dialog offers fresh analysis only for configured analysis agents.
     - The user can cancel the dialog without triggering any action.
 
   @id:F-ANALYSIS-DIALOG-S001

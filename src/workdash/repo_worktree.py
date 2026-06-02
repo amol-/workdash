@@ -31,6 +31,179 @@ def worktree_path(workdir: str, repo: str, number: int) -> Path:
     return main.parent / f"{main.name}_{number}"
 
 
+def existing_worktree_path(workdir: str, item: WorkItem) -> Path | None:
+    """Find a locally proven worktree without creating, fetching, or querying GitHub."""
+    base = Path(workdir).expanduser()
+    if not base.is_dir():
+        return None
+    git = GitHelpers()
+    matches = [
+        candidate
+        for candidate in _worktree_candidates(base, item)
+        if git.worktree_proves_item(candidate, item)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def ensure_worktree(workdir: str, item: WorkItem) -> str:
+    """Ensure a worktree exists for the given work item and return its path.
+
+    Clones the repository if it does not exist locally, fetches the latest
+    changes, and creates a worktree checked out to the appropriate branch.
+
+    :param str workdir: Base working directory (may use ~ for home).
+    :param WorkItem item: The work item to prepare a worktree for.
+    """
+    existing = existing_worktree_path(workdir, item)
+    if existing is not None:
+        # Local divergence or missing upstream shouldn't block the user.
+        with contextlib.suppress(subprocess.CalledProcessError, OSError):
+            subprocess.run(
+                ["git", "pull", "--ff-only"],
+                cwd=existing,
+                capture_output=True,
+                text=True,
+            )
+        return str(existing)
+    # Worktree doesn't exist — resolve the target repo and create it
+    if item.item_type == WorkItemType.PR:
+        head_ref, head_repo = _get_pr_head_info(item)
+        repo = head_repo
+    else:
+        repo = item.repo
+    wt = worktree_path(workdir, repo, item.number)
+    main = main_repo_path(workdir, repo)
+    branch = head_ref if item.item_type == WorkItemType.PR else f"issue-{item.number}"
+    # Check if git already tracks a worktree for this branch before creating another one.
+    git_existing = _find_worktree_for_branch(main, branch)
+    if git_existing is not None:
+        with contextlib.suppress(subprocess.CalledProcessError, OSError):
+            subprocess.run(
+                ["git", "pull", "--ff-only"],
+                cwd=git_existing,
+                capture_output=True,
+                text=True,
+            )
+        return str(git_existing)
+    Path(workdir).expanduser().mkdir(parents=True, exist_ok=True)
+    if not main.exists():
+        _clone_repo(repo, main)
+    _fetch_origin(main)
+    if item.item_type == WorkItemType.PR:
+        _create_worktree(main, wt, head_ref, f"origin/{head_ref}")
+    else:
+        _create_worktree(main, wt, f"issue-{item.number}", "origin/HEAD")
+    return str(wt)
+
+
+def get_merge_base(worktree: str) -> str | None:
+    """Return the merge-base commit between HEAD and origin's default branch.
+
+    Returns None if the merge-base cannot be determined (e.g. shallow clone).
+    """
+    # Resolve default branch name from origin/HEAD
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    default_branch = result.stdout.strip()
+    if not default_branch:
+        return None
+    result = subprocess.run(
+        ["git", "merge-base", "HEAD", default_branch],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    commit = result.stdout.strip()
+    return commit if commit else None
+
+
+class GitHelpers:
+    """Local git metadata helpers used to prove Workdash worktrees."""
+
+    def worktree_proves_item(self, candidate: Path, item: WorkItem) -> bool:
+        if not self.is_worktree_root(candidate):
+            return False
+        origin_repo = self.remote_repo(candidate, "origin")
+        if origin_repo == item.repo:
+            return candidate.name == self.worktree_name(origin_repo, item.number)
+        if item.item_type == WorkItemType.PR and origin_repo is not None:
+            if self.remote_repo(candidate, "upstream") != item.repo:
+                return False
+            return candidate.name == self.worktree_name(origin_repo, item.number)
+        return False
+
+    def is_worktree_root(self, candidate: Path) -> bool:
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=candidate,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return False
+        if result.returncode != 0:
+            return False
+        root = result.stdout.strip()
+        return bool(root) and Path(root).resolve() == candidate.resolve()
+
+    def remote_repo(self, candidate: Path, remote_name: str) -> str | None:
+        remote_url = self.remote_url(candidate, remote_name)
+        if remote_url is None:
+            return None
+        return self.repo_from_remote_url(remote_url) or None
+
+    def worktree_name(self, repo: str, number: int) -> str:
+        owner, _, name = repo.partition("/")
+        if not owner or not name:
+            return ""
+        return f"{owner}_{name}_{number}"
+
+    def remote_url(self, candidate: Path, remote_name: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", "config", "--local", "--get", f"remote.{remote_name}.url"],
+                cwd=candidate,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+    @staticmethod
+    def repo_from_remote_url(remote_url: str) -> str:
+        normalized = remote_url.strip().rstrip("/").removesuffix(".git")
+        if "://" not in normalized and ":" in normalized:
+            normalized = normalized.replace(":", "/", 1)
+        parts = normalized.rsplit("/", 2)
+        if len(parts) < 2:
+            return ""
+        return f"{parts[-2]}/{parts[-1]}"
+
+
+def _worktree_candidates(base: Path, item: WorkItem) -> list[Path]:
+    suffix = f"_{item.number}"
+    return sorted(
+        (
+            candidate
+            for candidate in base.iterdir()
+            if candidate.is_dir() and candidate.name.endswith(suffix)
+        ),
+        key=lambda candidate: candidate.name,
+    )
+
+
 def _clone_repo(repo: str, target: Path) -> None:
     try:
         subprocess.run(
@@ -176,35 +349,6 @@ def _set_branch_upstream(main_path: Path, branch: str) -> None:
     )
 
 
-def get_merge_base(worktree: str) -> str | None:
-    """Return the merge-base commit between HEAD and origin's default branch.
-
-    Returns None if the merge-base cannot be determined (e.g. shallow clone).
-    """
-    # Resolve default branch name from origin/HEAD
-    result = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return None
-    default_branch = result.stdout.strip()
-    if not default_branch:
-        return None
-    result = subprocess.run(
-        ["git", "merge-base", "HEAD", default_branch],
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return None
-    commit = result.stdout.strip()
-    return commit if commit else None
-
-
 def _find_worktree_for_branch(main_path: Path, branch: str) -> Path | None:
     """Find an existing worktree checked out on the given branch via git."""
     if not main_path.is_dir():
@@ -228,77 +372,3 @@ def _find_worktree_for_branch(main_path: Path, branch: str) -> Path | None:
                 if wt.is_dir():
                     return wt
     return None
-
-
-def _find_existing_worktree(workdir: str, item: WorkItem) -> Path | None:
-    """Find an existing worktree without a network call.
-
-    Checks the item.repo-based path first (issues and same-repo PRs),
-    then scans for fork worktrees by matching on repo name and number.
-    """
-    base = Path(workdir).expanduser()
-    if not base.exists():
-        return None
-    # Direct match covers issues and same-repo PRs
-    direct = worktree_path(workdir, item.repo, item.number)
-    if direct.is_dir():
-        return direct
-    if item.item_type == WorkItemType.PR:
-        _, _, repo_name = item.repo.partition("/")
-        suffix = f"_{repo_name}_{item.number}"
-        for candidate in base.iterdir():
-            if candidate.is_dir() and candidate.name.endswith(suffix):
-                return candidate
-    return None
-
-
-def ensure_worktree(workdir: str, item: WorkItem) -> str:
-    """Ensure a worktree exists for the given work item and return its path.
-
-    Clones the repository if it does not exist locally, fetches the latest
-    changes, and creates a worktree checked out to the appropriate branch.
-
-    :param str workdir: Base working directory (may use ~ for home).
-    :param WorkItem item: The work item to prepare a worktree for.
-    """
-    existing = _find_existing_worktree(workdir, item)
-    if existing is not None:
-        # Local divergence or missing upstream shouldn't block the user.
-        with contextlib.suppress(subprocess.CalledProcessError, OSError):
-            subprocess.run(
-                ["git", "pull", "--ff-only"],
-                cwd=existing,
-                capture_output=True,
-                text=True,
-            )
-        return str(existing)
-    # Worktree doesn't exist — resolve the target repo and create it
-    if item.item_type == WorkItemType.PR:
-        head_ref, head_repo = _get_pr_head_info(item)
-        repo = head_repo
-    else:
-        repo = item.repo
-    wt = worktree_path(workdir, repo, item.number)
-    main = main_repo_path(workdir, repo)
-    branch = head_ref if item.item_type == WorkItemType.PR else f"issue-{item.number}"
-    # Check if git already tracks a worktree for this branch (covers cases
-    # where the directory-name scan missed, e.g. fork repo name mismatch).
-    git_existing = _find_worktree_for_branch(main, branch)
-    if git_existing is not None:
-        with contextlib.suppress(subprocess.CalledProcessError, OSError):
-            subprocess.run(
-                ["git", "pull", "--ff-only"],
-                cwd=git_existing,
-                capture_output=True,
-                text=True,
-            )
-        return str(git_existing)
-    Path(workdir).expanduser().mkdir(parents=True, exist_ok=True)
-    if not main.exists():
-        _clone_repo(repo, main)
-    _fetch_origin(main)
-    if item.item_type == WorkItemType.PR:
-        _create_worktree(main, wt, head_ref, f"origin/{head_ref}")
-    else:
-        _create_worktree(main, wt, f"issue-{item.number}", "origin/HEAD")
-    return str(wt)

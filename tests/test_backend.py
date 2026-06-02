@@ -6,7 +6,7 @@ import pytest
 
 import workdash.backend as backend_module
 from workdash.backend import IncludeResult, WorkdashBackend, compute_suggestion_markers
-from workdash.config import AgentConfig, WorkdashConfig
+from workdash.config import AgentConfig, WorkdashConfig, WorkdashConfigValidationError
 from workdash.github_client import GitHubClient, TransientFetchError
 from workdash.included_items import IncludedItemsStore
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
@@ -208,6 +208,75 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
     assert suggestion_markers == {(WorkItemType.PR, "owner/repo", 10): "*"}
 
 
+def test_load_items_submits_independent_github_fetches_before_waiting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[tuple[str, str]] = []
+
+    class FakeFuture:
+        def __init__(self, name, callback, args, kwargs) -> None:
+            self.name = name
+            self.callback = callback
+            self.args = args
+            self.kwargs = kwargs
+
+        def result(self):
+            events.append(("result", self.name))
+            return self.callback(*self.args, **self.kwargs)
+
+    class FakeThreadPoolExecutor:
+        def __init__(self, max_workers) -> None:
+            assert max_workers == 5
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback) -> None:
+            pass
+
+        def submit(self, callback, *args, **kwargs):
+            events.append(("submit", callback.__name__))
+            return FakeFuture(callback.__name__, callback, args, kwargs)
+
+    class FakeGitHubClient:
+        def list_open_authored_prs(self, login):
+            return []
+
+        def list_open_review_requested_prs(self, login, progress_callback=None):
+            return []
+
+        def list_open_reviewed_prs(self, login):
+            return []
+
+        def list_open_assigned_issues(self, login):
+            return []
+
+        def list_recent_tracked_items(self, repositories, progress_callback=None):
+            return []
+
+    monkeypatch.setattr(backend_module, "ThreadPoolExecutor", FakeThreadPoolExecutor)
+    backend = WorkdashBackend(
+        github_client=FakeGitHubClient(),
+        analysis_cache=MagicMock(),
+        config=WorkdashConfig(repositories=("owner/repo",)),
+        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+    )
+
+    work_items, suggestion_markers = backend.load_items(progress_callback=lambda _: None)
+
+    expected_fetches = [
+        "list_open_authored_prs",
+        "list_open_review_requested_prs",
+        "list_open_reviewed_prs",
+        "list_open_assigned_issues",
+        "list_recent_tracked_items",
+    ]
+    assert work_items == []
+    assert suggestion_markers == {}
+    assert events[:5] == [("submit", name) for name in expected_fetches]
+    assert events[5] == ("result", "list_open_authored_prs")
+
+
 def test_compute_suggestion_markers_prefers_pr_when_age_is_tied() -> None:
     created_at = datetime(2026, 2, 1, 0, 0, 0, tzinfo=UTC)
     issue = make_work_item(
@@ -393,6 +462,88 @@ def test_analyze_item_tool_claude_bypasses_cache() -> None:
     assert analysis_path == "/tmp/analyses/owner_repo_PR55.md"
     assert cache.saved == [(55, "## Summary\nfresh analysis 55")]
     assert analyzer.analyze_calls == [(55, ["claude", "-p"])]
+
+
+def test_analyze_item_uses_config_boundary_for_malformed_agent_command() -> None:
+    analyzer = MagicMock()
+    config = WorkdashConfig(
+        github_username="testuser",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        codex=AgentConfig(analyze="codex 'broken", launch="codex"),
+        repositories=("owner/*",),
+        workdir="~/src",
+    )
+    backend = WorkdashBackend(
+        github_client=MagicMock(),
+        analyzer=analyzer,
+        config=config,
+    )
+    item = make_work_item(
+        item_type=WorkItemType.ISSUE,
+        kind=WorkItemKind.TRACKED_ISSUE,
+        number=101,
+        created_at=datetime(2026, 2, 2, 0, 0, 0, tzinfo=UTC),
+    )
+
+    with pytest.raises(WorkdashConfigValidationError) as error:
+        backend.analyze_item(item, tool="codex")
+
+    assert error.value.invalid_fields == ("agents.codex.analyze: No closing quotation",)
+    analyzer.analyze.assert_not_called()
+
+
+def test_analyze_item_uses_config_boundary_for_non_string_agent_command() -> None:
+    analyzer = MagicMock()
+    config = WorkdashConfig(
+        github_username="testuser",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        codex=AgentConfig(analyze=["codex", "exec"], launch="codex"),
+        repositories=("owner/*",),
+        workdir="~/src",
+    )
+    backend = WorkdashBackend(
+        github_client=MagicMock(),
+        analyzer=analyzer,
+        config=config,
+    )
+    item = make_work_item(
+        item_type=WorkItemType.ISSUE,
+        kind=WorkItemKind.TRACKED_ISSUE,
+        number=101,
+        created_at=datetime(2026, 2, 2, 0, 0, 0, tzinfo=UTC),
+    )
+
+    with pytest.raises(WorkdashConfigValidationError) as error:
+        backend.analyze_item(item, tool="codex")
+
+    assert error.value.invalid_fields == ("agents.codex.analyze: expected a non-empty string",)
+    analyzer.analyze.assert_not_called()
+
+
+def test_analyze_item_rejects_unsupported_agent_without_codex_fallback() -> None:
+    analyzer = MagicMock()
+    config = WorkdashConfig(
+        github_username="testuser",
+        codex=AgentConfig(analyze="codex exec", launch="codex"),
+        repositories=("owner/*",),
+        workdir="~/src",
+    )
+    backend = WorkdashBackend(
+        github_client=MagicMock(),
+        analyzer=analyzer,
+        config=config,
+    )
+    item = make_work_item(
+        item_type=WorkItemType.ISSUE,
+        kind=WorkItemKind.TRACKED_ISSUE,
+        number=101,
+        created_at=datetime(2026, 2, 2, 0, 0, 0, tzinfo=UTC),
+    )
+
+    with pytest.raises(ValueError, match="Unsupported analyze agent: 'pi'"):
+        backend.analyze_item(item, tool="pi")
+
+    analyzer.analyze.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

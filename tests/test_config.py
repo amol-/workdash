@@ -7,7 +7,9 @@ import pytest
 
 from workdash.config import (
     AgentConfig,
+    WorkdashAgentChoice,
     WorkdashConfig,
+    WorkdashConfigValidationError,
     configure,
     install_gh_binary,
     install_zellij_binary,
@@ -125,19 +127,103 @@ def test_validate_config_returns_empty_for_complete_config():
     )
 
     assert validate_config(config) == []
+    assert config.require_valid() is config
+
+
+def test_require_valid_accepts_partial_agent_config():
+    config = WorkdashConfig(
+        github_username="octocat",
+        codex=AgentConfig(analyze="codex exec"),
+        repositories=("owner/repo",),
+        workdir="~/src",
+    )
+
+    assert validate_config(config) == []
+    assert config.require_valid() is config
+    assert config.configured_analyze_agents() == ["codex"]
+    assert config.configured_code_agents() == []
+    assert config.tui_analyze_choices() == [
+        WorkdashAgentChoice("1", "codex", "Analyze with ChatGPT Codex", "Codex")
+    ]
+    assert config.tui_code_choices() == [
+        WorkdashAgentChoice("1", "vscode", "VSCode Copilot", "VSCode")
+    ]
+
+
+@pytest.mark.parametrize("agent", ["pi", "vscode", "typo"])
+def test_analyze_agent_command_tokens_rejects_unsupported_agent_without_codex_fallback(
+    agent: str,
+):
+    config = WorkdashConfig(codex=AgentConfig(analyze="codex exec"))
+
+    with pytest.raises(ValueError, match=f"Unsupported analyze agent: '{agent}'"):
+        config.analyze_agent_command_tokens(agent)
+
+
+def test_require_valid_rejects_malformed_command_strings():
+    config = WorkdashConfig(
+        github_username="octocat",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        codex=AgentConfig(analyze="codex 'broken", launch="codex"),
+        pi=AgentConfig(launch="pi 'broken"),
+        repositories=("owner/repo",),
+        workdir="~/src",
+    )
+
+    with pytest.raises(WorkdashConfigValidationError) as error:
+        config.require_valid()
+
+    assert error.value.missing_fields == ()
+    assert error.value.invalid_fields == (
+        "agents.codex.analyze: No closing quotation",
+        "agents.pi.launch: No closing quotation",
+    )
+    assert str(error.value) == (
+        "invalid configuration fields: agents.codex.analyze: No closing quotation, "
+        "agents.pi.launch: No closing quotation"
+    )
+
+
+def test_require_valid_rejects_non_string_command_values():
+    config = WorkdashConfig(
+        github_username="octocat",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        codex=AgentConfig(analyze=["codex", "exec"], launch="codex"),
+        pi=AgentConfig(launch="pi"),
+        repositories=("owner/repo",),
+        workdir="~/src",
+    )
+
+    with pytest.raises(WorkdashConfigValidationError) as error:
+        config.require_valid()
+
+    assert error.value.invalid_fields == ("agents.codex.analyze: expected a non-empty string",)
+
+
+@pytest.mark.parametrize("command", ["''", '""'])
+def test_require_valid_rejects_blank_command_tokens(command: str):
+    config = WorkdashConfig(
+        github_username="octocat",
+        codex=AgentConfig(analyze="codex exec", launch=command),
+        repositories=("owner/repo",),
+        workdir="~/src",
+    )
+
+    with pytest.raises(WorkdashConfigValidationError) as error:
+        config.require_valid()
+
+    assert error.value.invalid_fields == ("agents.codex.launch: contains a blank shell token",)
+    assert config.configured_code_agents() == []
 
 
 def test_validate_config_returns_all_missing_fields():
-    assert validate_config(WorkdashConfig()) == [
-        "github_username",
-        "repositories",
-        "workdir",
-        "agents.claude.analyze",
-        "agents.claude.launch",
-        "agents.codex.analyze",
-        "agents.codex.launch",
-        "agents.pi.launch",
-    ]
+    expected_missing = ["github_username", "repositories", "workdir"]
+
+    assert validate_config(WorkdashConfig()) == expected_missing
+    with pytest.raises(WorkdashConfigValidationError) as error:
+        WorkdashConfig().require_valid()
+    assert error.value.missing_fields == tuple(expected_missing)
+    assert str(error.value) == "missing configuration fields: " + ", ".join(expected_missing)
 
 
 def test_validate_config_returns_subset_of_missing_fields():
@@ -146,13 +232,7 @@ def test_validate_config_returns_subset_of_missing_fields():
         claude=AgentConfig(analyze="claude -p", launch="claude"),
     )
 
-    assert validate_config(config) == [
-        "repositories",
-        "workdir",
-        "agents.codex.analyze",
-        "agents.codex.launch",
-        "agents.pi.launch",
-    ]
+    assert validate_config(config) == ["repositories", "workdir"]
 
 
 def test_configure_fresh_auto_detects_and_asks_username(tmp_path, capsys):

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -21,6 +22,14 @@ _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _BROWSER_OPEN_COMMANDS = ("xdg-open", "open")
 _BROWSER_OPEN_TIMEOUT_SECONDS = 4
 _WORKDASH_LOCAL_BIN = LOCAL_BIN_PATH
+
+
+@dataclass(frozen=True)
+class ZellijPaneLaunch:
+    session: str | None
+    pane_id: str | None
+    pane_title: str
+    cwd: str
 
 
 def _load_prompt_template(name: str) -> str:
@@ -157,6 +166,67 @@ def exec_zellij_wrapped_workdash(argv: Sequence[str] | None) -> NoReturn:
     raise AssertionError("os.execvp returned unexpectedly")
 
 
+def list_workdash_sessions() -> list[str]:
+    zellij = _resolve_zellij_binary()
+    try:
+        completed = subprocess.run(
+            [zellij, "list-sessions", "--no-formatting"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        details = (error.stderr or "").strip() or (error.stdout or "").strip()
+        if "no active zellij sessions found" in details.lower():
+            return []
+        raise RuntimeError(
+            f"Failed to list Zellij sessions: {details or error.returncode}"
+        ) from error
+
+    sessions = []
+    for line in completed.stdout.splitlines():
+        if "(EXITED" in line:
+            continue
+        session_name = line.split(" [Created ", maxsplit=1)[0].strip()
+        if session_name.startswith("workdash"):
+            sessions.append(session_name)
+    return sessions
+
+
+def load_zellij_panes(session: str) -> list[dict[str, object]]:
+    zellij = _resolve_zellij_binary()
+    try:
+        completed = subprocess.run(
+            [
+                zellij,
+                "--session",
+                session,
+                "action",
+                "list-panes",
+                "--json",
+                "--all",
+                "--command",
+                "--state",
+                "--tab",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        details = (error.stderr or "").strip() or (error.stdout or "").strip()
+        raise RuntimeError(
+            f"Failed to list Zellij panes for {session}: {details or error.returncode}"
+        ) from error
+    try:
+        panes = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"Failed to parse Zellij pane JSON: {error.msg}") from error
+    if not isinstance(panes, list):
+        raise RuntimeError("Zellij pane JSON must be a list.")
+    return [pane for pane in panes if isinstance(pane, dict)]
+
+
 def _build_direct_workdash_command(original_args: Sequence[str]) -> list[str]:
     current_entrypoint = Path(sys.argv[0])
     if current_entrypoint.name in {"__main__.py", "workdash.py"} and (
@@ -210,21 +280,53 @@ def _launch_zellij_command(
     *,
     context: str,
     work_action: str,
-) -> None:
-    if not os.getenv("ZELLIJ"):
+    zellij_session: str | None = None,
+) -> ZellijPaneLaunch:
+    target_session = (zellij_session or "").strip()
+    if not target_session and not os.getenv("ZELLIJ", "").strip():
         raise RuntimeError(
             f"{context}: terminal-backed work actions require an active Zellij session. "
             "Start workdash normally, or run it inside Zellij."
         )
     zellij = _resolve_zellij_binary()
+    pane_title = _zellij_pane_name_for_work_action(work_action, repo_path)
+    before_panes = (
+        {_zellij_pane_identity(pane) for pane in load_zellij_panes(target_session)}
+        if target_session
+        else set()
+    )
     _run_launch_command(
         _build_zellij_new_pane_command(
             zellij,
             repo_path,
             command,
             work_action=work_action,
+            zellij_session=target_session or None,
         ),
         context=context,
+    )
+    pane_id = None
+    if target_session:
+        new_panes = [
+            pane
+            for pane in load_zellij_panes(target_session)
+            if pane.get("is_plugin") is not True and _zellij_pane_identity(pane) not in before_panes
+        ]
+        matching_panes = [
+            pane
+            for pane in new_panes
+            if pane.get("title") == pane_title
+            and isinstance(pane.get("pane_cwd"), str)
+            and os.path.realpath(str(pane.get("pane_cwd"))) == os.path.realpath(repo_path)
+        ]
+        candidates = matching_panes or new_panes
+        if len(candidates) == 1:
+            pane_id = _format_zellij_pane_id(candidates[0].get("id"))
+    return ZellijPaneLaunch(
+        session=target_session or None,
+        pane_id=pane_id,
+        pane_title=pane_title,
+        cwd=repo_path,
     )
 
 
@@ -234,9 +336,12 @@ def _build_zellij_new_pane_command(
     command: list[str],
     *,
     work_action: str,
+    zellij_session: str | None = None,
 ) -> list[str]:
+    session_args = ["--session", zellij_session] if zellij_session is not None else []
     return [
         zellij,
+        *session_args,
         "action",
         "new-pane",
         *_zellij_pane_name_argument(work_action, repo_path),
@@ -253,6 +358,19 @@ def _zellij_pane_name_argument(work_action: str, repo_path: str) -> list[str]:
 
 def _zellij_pane_name_for_work_action(work_action: str, repo_path: str) -> str:
     return f"{work_action}_{Path(repo_path).name}"
+
+
+def _zellij_pane_identity(pane: dict[str, object]) -> tuple[bool, object]:
+    return (pane.get("is_plugin") is True, pane.get("id"))
+
+
+def _format_zellij_pane_id(pane_id: object) -> str | None:
+    if pane_id is None or pane_id == "":
+        return None
+    pane_id_text = str(pane_id)
+    if pane_id_text.startswith("terminal_"):
+        return pane_id_text
+    return f"terminal_{pane_id_text}"
 
 
 def _run_gh_context_command(*, item: WorkItem, command: list[str]) -> dict[str, Any]:
@@ -396,7 +514,9 @@ def launch_agent_context(
     repo_path: str,
     prompt: str,
     agent_command_tokens: list[str] | None = None,
-) -> None:
+    *,
+    zellij_session: str | None = None,
+) -> ZellijPaneLaunch:
     if not isinstance(repo_path, str) or not repo_path.strip():
         raise ValueError("Repository path must be a non-empty string.")
     if not isinstance(prompt, str) or not prompt.strip():
@@ -409,11 +529,12 @@ def launch_agent_context(
         raise ValueError("Agent command tokens must be a non-empty list of non-empty strings.")
     user_shell = os.environ.get("SHELL", "/bin/sh")
     agent_command = [user_shell, "-ic", shlex.join([*command_tokens, prompt])]
-    _launch_zellij_command(
+    return _launch_zellij_command(
         repo_path,
         agent_command,
         context="Failed to launch coding agent in zellij",
         work_action="code",
+        zellij_session=zellij_session,
     )
 
 
@@ -433,14 +554,14 @@ def launch_vscode_context(repo_path: str, prompt: str) -> None:
     )
 
 
-def launch_terminal_context(repo_path: str) -> None:
+def launch_terminal_context(repo_path: str) -> ZellijPaneLaunch:
     """Open a terminal in zellij rooted at the given repository path."""
 
     if not isinstance(repo_path, str) or not repo_path.strip():
         raise ValueError("Repository path must be a non-empty string.")
     user_shell = os.environ.get("SHELL", "/bin/sh")
     shell_command = [user_shell, "-i"]
-    _launch_zellij_command(
+    return _launch_zellij_command(
         repo_path,
         shell_command,
         context="Failed to launch terminal in zellij",

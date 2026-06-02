@@ -1,6 +1,6 @@
 """Step definitions for the triage domain feature files.
 
-Covers list-work-items, print-mode, recent-activity, refresh, suggested-item,
+Covers list-work-items, list-command, recent-activity, refresh, suggested-item,
 and include-item scenarios. Each step exercises real
 ``WorkdashApp``/``WorkdashBackend`` code — only the external GitHub and
 browser-open boundaries are faked.
@@ -25,6 +25,7 @@ from workdash.github_client import GitHubClient
 from workdash.included_items import IncludedItemsStore
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import IncludeDialog
+from workdash.workdash import format_work_item_id
 
 from .common import (
     NOW_UTC,
@@ -135,7 +136,7 @@ def _review_prs_render_as_review(scenario_state: dict[str, Any]) -> None:
     items = scenario_state["work_items"]
     review_items = [i for i in items if i.kind == WorkItemKind.REVIEW_REQUESTED_PR]
     assert review_items, "No review-requested PR items present"
-    # The REVIEW label is applied by the TUI/print-mode layer — verify both.
+    # The REVIEW label is applied by the TUI/list-command layer — verify both.
     import contextlib
     import io
 
@@ -146,10 +147,10 @@ def _review_prs_render_as_review(scenario_state: dict[str, Any]) -> None:
         _print_work_items(items, compute_suggestion_markers(items))
     output = buffer.getvalue()
     for review_item in review_items:
+        expected_id = f"{review_item.repo}#REVIEW-{review_item.number}"
         assert any(
-            line.startswith("REVIEW") and f"#{review_item.number}" in line
-            for line in output.splitlines()
-        ), f"REVIEW label missing for PR #{review_item.number}: {output}"
+            line.startswith("REVIEW") and expected_id in line for line in output.splitlines()
+        ), f"REVIEW label missing for {expected_id}: {output}"
 
 
 @then("issues assigned to the user appear as ISSUE items")
@@ -372,9 +373,9 @@ def _no_work_items(work_items: list[WorkItem]) -> None:
 
 @then("the system reports that no work items were found")
 def _system_reports_empty_from_open(scenario_state: dict[str, Any], capsys) -> None:
-    # When invoked via the triage S005 flow we run the CLI --print path once
+    # When invoked via the triage S005 flow we run the CLI list path once
     # here so the assertion can consume stdout. If we already captured output
-    # via a prior print-mode step we reuse it.
+    # via a prior list-command step we reuse it.
     if "print_output" in scenario_state:
         assert "No work items found." in scenario_state["print_output"]
         return
@@ -608,7 +609,7 @@ def _warns_unauthorized_review_requested_pr_skipped(
 
 
 # --------------------------------------------------------------------------
-# F-TRIAGE-PRINT
+# F-TRIAGE-LIST-COMMAND
 # --------------------------------------------------------------------------
 
 
@@ -657,6 +658,42 @@ def _user_has_items_with_suggestion(work_items: list[WorkItem]) -> None:
     )
 
 
+@given("the dashboard has issue, pull request, and review work items")
+def _dashboard_has_item_types(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
+    work_items[:] = [
+        make_work_item(
+            item_type=WorkItemType.ISSUE,
+            kind=WorkItemKind.ASSIGNED_ISSUE,
+            number=1,
+            title="Issue",
+            created_at=NOW_UTC,
+            updated_at=NOW_UTC,
+        ),
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.AUTHORED_PR,
+            number=2,
+            title="Pull request",
+            created_at=NOW_UTC,
+            updated_at=NOW_UTC,
+        ),
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.REVIEW_REQUESTED_PR,
+            number=3,
+            title="Review",
+            created_at=NOW_UTC,
+            updated_at=NOW_UTC,
+        ),
+    ]
+    scenario_state["work_items"] = list(work_items)
+
+
+@given("the dashboard has work items")
+def _dashboard_has_work_items(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
+    _dashboard_has_item_types(scenario_state, work_items)
+
+
 @when(parsers.parse('the user runs the system with "{flag}"'))
 def _run_system_with_flag(
     flag: str,
@@ -667,8 +704,6 @@ def _run_system_with_flag(
     valid_config: WorkdashConfig,
     tmp_path: Path,
 ) -> None:
-    import workdash.workdash as workdash_module
-
     if flag == "--configure":
         # Delegate to the setup helper so wizard inputs and detection
         # fakes run against real workdash.config.configure().
@@ -679,24 +714,61 @@ def _run_system_with_flag(
         setup_mod._run_configure_with_fakes(scenario_state, config_path, monkeypatch, capsys)
         return
 
+    _run_list_command([flag], scenario_state, work_items, monkeypatch, capsys, valid_config)
+
+
+@when("the user runs `workdash list`")
+@when("the user lists work items with `workdash list`")
+def _list_work_items(
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    valid_config: WorkdashConfig,
+) -> None:
+    _run_list_command(["list"], scenario_state, work_items, monkeypatch, capsys, valid_config)
+
+
+@when("the user lists work items with `workdash list --json`")
+def _list_work_items_json(
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    valid_config: WorkdashConfig,
+) -> None:
+    _run_list_command(
+        ["list", "--json"], scenario_state, work_items, monkeypatch, capsys, valid_config
+    )
+
+
+def _run_list_command(
+    argv: list[str],
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    valid_config: WorkdashConfig,
+) -> None:
+    import workdash.workdash as workdash_module
+
     install_valid_env(monkeypatch, which_succeeds=True)
     install_config(monkeypatch, valid_config)
     mock_backend(monkeypatch, items=list(work_items))
-    # Assert TUI is never constructed in print-mode scenarios.
 
     class UnreachableApp:
         def __init__(self, **kwargs) -> None:  # pragma: no cover - sanity
-            raise AssertionError("TUI should not be constructed for print mode")
+            raise AssertionError("TUI should not be constructed for list command")
 
         def run(self) -> None:  # pragma: no cover - sanity
-            raise AssertionError("TUI should not run for print mode")
+            raise AssertionError("TUI should not run for list command")
 
-    if flag == "--print":
-        monkeypatch.setattr(workdash_module, "WorkdashApp", UnreachableApp)
-
-    exit_code = workdash_module.main([flag])
-    scenario_state["exit_code"] = exit_code
-    scenario_state["print_output"] = capsys.readouterr().out
+    monkeypatch.setattr(workdash_module, "WorkdashApp", UnreachableApp)
+    scenario_state["exit_code"] = workdash_module.main(argv)
+    captured = capsys.readouterr()
+    scenario_state["print_output"] = captured.out
+    scenario_state["stdout"] = captured.out
+    scenario_state["stderr"] = captured.err
 
 
 @then("the system emits one line per work item to standard output")
@@ -733,6 +805,61 @@ def _suggested_item_prefix(scenario_state: dict[str, Any], work_items: list[Work
 @then("the system prints that no work items were found")
 def _system_prints_empty(scenario_state: dict[str, Any]) -> None:
     assert "No work items found." in scenario_state["print_output"]
+
+
+@then("each row includes a Workdash item ID")
+def _each_row_has_workdash_id(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state
+    lines = [line for line in scenario_state["print_output"].splitlines() if line.strip()]
+    assert len(lines) == len(scenario_state["work_items"])
+    for item in scenario_state["work_items"]:
+        assert any(format_work_item_id(item) in line for line in lines), lines
+
+
+@then("the issue row can be copied as `owner/repo#ISSUE-1`")
+def _issue_row_copy_id(scenario_state: dict[str, Any]) -> None:
+    assert "owner/repo#ISSUE-1" in scenario_state["print_output"]
+
+
+@then("the pull request row can be copied as `owner/repo#PR-2`")
+def _pr_row_copy_id(scenario_state: dict[str, Any]) -> None:
+    assert "owner/repo#PR-2" in scenario_state["print_output"]
+
+
+@then("the review row can be copied as `owner/repo#REVIEW-3`")
+def _review_row_copy_id(scenario_state: dict[str, Any]) -> None:
+    assert "owner/repo#REVIEW-3" in scenario_state["print_output"]
+
+
+@then("the system returns JSON work item records")
+def _returns_json_work_items(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state
+    payload = json.loads(scenario_state["print_output"])
+    scenario_state["json_payload"] = payload
+    assert isinstance(payload.get("items"), list)
+    assert payload["items"]
+
+
+@then(
+    "each record includes the Workdash item ID, type, kind, repository, number, title, URL, "
+    "timestamps, and suggested status"
+)
+def _json_work_items_have_contract(scenario_state: dict[str, Any]) -> None:
+    required = {
+        "id",
+        "type",
+        "kind",
+        "repo",
+        "number",
+        "title",
+        "url",
+        "created_at",
+        "updated_at",
+        "suggested",
+    }
+    for record in scenario_state["json_payload"]["items"]:
+        assert required <= set(record), record
+        assert record["id"].startswith(f"{record['repo']}#"), record
 
 
 # --------------------------------------------------------------------------
@@ -1241,7 +1368,7 @@ def _seed_three_included_items(
     )
     monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
     monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
-    # Seed one non-included tracked PR so the print-mode assertion can verify
+    # Seed one non-included tracked PR so the list-command assertion can verify
     # that format_type_label does not spuriously append "+" to regular rows.
     monkeypatch.setattr(
         GitHubClient,
@@ -1544,8 +1671,8 @@ def _assert_type_column(scenario_state: dict[str, Any], *, number: int, expected
     raise AssertionError(f"No row for number {number}: {captured['rows']}")
 
 
-@then('the same suffixes appear when the user runs the system with "--print"')
-def _print_mode_suffixes(scenario_state: dict[str, Any]) -> None:
+@then("the same suffixes appear when the user runs `workdash list`")
+def _list_command_suffixes(scenario_state: dict[str, Any]) -> None:
     import contextlib
     import io
 
@@ -1556,26 +1683,26 @@ def _print_mode_suffixes(scenario_state: dict[str, Any]) -> None:
     with contextlib.redirect_stdout(buffer):
         _print_work_items(work_items, compute_suggestion_markers(work_items))
     lines = [line for line in buffer.getvalue().splitlines() if line.strip()]
-    # Each seeded item's row identity is repo#number; per-row assertions
-    # guarantee the "+" suffix is anchored to the type column of the
-    # correct row rather than appearing somewhere else in the output.
-    expected_by_number = {
-        111: "PR+",
-        222: "ISSUE+",
-        333: "REVIEW+",
+    # Each seeded item's row identity is the copy/paste Workdash item ID;
+    # per-row assertions guarantee the "+" suffix is anchored to the type
+    # column of the correct row rather than appearing somewhere else.
+    expected_by_id = {
+        "owner/repo#PR-111": "PR+",
+        "owner/repo#ISSUE-222": "ISSUE+",
+        "owner/repo#REVIEW-333": "REVIEW+",
         # The tracked non-included PR must NOT carry the "+" suffix; this
         # guards against a regression where format_type_label always
         # appends "+".
-        444: "PR",
+        "owner/repo#PR-444": "PR",
     }
-    found: dict[int, str] = {}
+    found: dict[str, str] = {}
     for line in lines:
-        for number, expected_label in expected_by_number.items():
-            if f"owner/repo#{number}" in line:
+        for item_id, expected_label in expected_by_id.items():
+            if item_id in line:
                 assert line.startswith(f"{expected_label:7} "), (line, expected_label)
-                found[number] = expected_label
+                found[item_id] = expected_label
                 break
-    assert set(found) == set(expected_by_number), (found, lines)
+    assert set(found) == set(expected_by_id), (found, lines)
 
 
 @then("the included item appears on the dashboard")

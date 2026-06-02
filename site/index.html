@@ -629,7 +629,7 @@
             <p>Drop into a terminal in the item's worktree, no agent attached.</p>
           </div>
           <div class="feature">
-            <h3><span class="kbd">--print</span>Print mode</h3>
+            <h3><span class="kbd">list</span>List command</h3>
             <p>
               Same triage, emitted as plain text for scripts, pipes, and agents
               that want the dashboard without the TUI.
@@ -782,6 +782,74 @@
                 </li>
               </ul>
             </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="cli">
+      <div class="container">
+        <h2>A local control plane for agent swarms</h2>
+        <p class="lead">
+          Workdash is not just a human dashboard. On the same host, agents can
+          read the queue, inspect live Zellij panes, request analysis, and launch
+          coding sessions through commands whose <code>--json</code> output is
+          safe to parse.
+        </p>
+        <div class="features">
+          <div class="feature">
+            <h3><span class="kbd">1</span>List work items</h3>
+            <p>
+              Start here. The list command returns copy/paste item IDs that the
+              other commands accept.
+            </p>
+            <pre><code>workdash list --json
+{
+  "items": [
+    {
+      "id": "owner/repo#ISSUE-42",
+      "type": "ISSUE",
+      "title": "Fix failing deploy",
+      "suggested": true
+    }
+  ]
+}</code></pre>
+          </div>
+          <div class="feature">
+            <h3><span class="kbd">2</span>Inspect panes</h3>
+            <p>See which Workdash-owned Zellij panes already exist.</p>
+            <pre><code>workdash info --json
+{
+  "session": "workdash-a1b2c3d4",
+  "panes": [
+    {
+      "pane_id": "terminal_7",
+      "kind": "agent",
+      "item": "owner/repo#ISSUE-42"
+    }
+  ]
+}</code></pre>
+          </div>
+          <div class="feature">
+            <h3><span class="kbd">3</span>Analyze an item</h3>
+            <p>Ask a configured analysis agent for a cached or fresh briefing.</p>
+            <pre><code>workdash analyze owner/repo#ISSUE-42 --json
+{
+  "item_id": "owner/repo#ISSUE-42",
+  "status": "generated",
+  "path": "/home/me/wrk/.../analysis.md"
+}</code></pre>
+          </div>
+          <div class="feature">
+            <h3><span class="kbd">4</span>Launch coding</h3>
+            <p>Start a coding agent and get back the Zellij pane it created.</p>
+            <pre><code>workdash code owner/repo#ISSUE-42 --agent codex --json
+{
+  "item_id": "owner/repo#ISSUE-42",
+  "session": "workdash-a1b2c3d4",
+  "pane_id": "terminal_9",
+  "cwd": "/home/me/wrk/owner_repo_issue_42"
+}</code></pre>
           </div>
         </div>
       </div>

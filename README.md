@@ -84,15 +84,19 @@ Launch the TUI:
 workdash
 ```
 
-Useful flags:
+Useful commands and flags:
 
 ```bash
-workdash --print       # list items as plain text, no TUI
-workdash --refresh     # force a refresh from GitHub
-workdash --debug       # verbose logging
-workdash --configure   # run the interactive setup wizard
-workdash --direct      # start without the automatic Zellij wrapper
-workdash --version     # print version and exit
+workdash list                # list items as plain text, no TUI
+workdash list --json         # list items as machine-readable JSON
+workdash info [--session NAME] [--all] [--json]  # report live Workdash-owned Zellij panes
+workdash analyze ITEM [--agent NAME] [--session NAME] [--json]  # analyze a current item
+workdash code ITEM [--agent NAME] [--session NAME] [--json]  # launch a terminal-backed coding agent
+workdash --refresh           # force a refresh from GitHub
+workdash --debug             # verbose logging
+workdash --configure         # run the interactive setup wizard
+workdash --direct            # start without the automatic Zellij wrapper
+workdash --version           # print version and exit
 ```
 
 ## What gets shown
@@ -136,24 +140,63 @@ configured `workdir`. Each tracked repository gets a local clone, and each work
 item gets its own worktree alongside it, so you can hop between items without
 disturbing other in-progress work.
 
-## Print mode
+## List command
 
-`--print` emits one row per item, sorted by last update (most recent first):
+`workdash list` emits one row per item, sorted by last update (most recent first):
 
 ```
-TYPE   repo#number   YYYY-MM-DD   title
+TYPE   repo#TYPE-N   YYYY-MM-DD   title
 ```
 
-`TYPE` is `ISSUE`, `PR`, or `REVIEW` (for review-requested PRs). The suggested
+`TYPE` is `ISSUE`, `PR`, or `REVIEW` (for review-requested PRs). The row ID is
+copy/paste-friendly: `repo#ISSUE-N`, `repo#PR-N`, or `repo#REVIEW-N`. The suggested
 item's title is prefixed with `* `. If nothing matches, the output is
 `No work items found.`.
 
+Use `workdash list --json` to emit the same list as JSON records with item ID,
+type, kind, repository, number, title, URL, timestamps, and suggested status.
+
+## Info command
+
+`workdash info [--session NAME] [--json]` reports live Workdash-owned Zellij panes
+for terminal-backed work actions, including pane title, cwd, command, tab, state,
+and mapped Workdash item. It maps each live pane's current working directory to
+the matching Workdash item ID when the pane is inside a known worktree, or reports
+`unknown` when no mapping is known. Add `--all` to include other live non-plugin
+panes from the selected Workdash session as `kind=unknown` with unknown item
+mapping.
+
+## Analyze command
+
+`workdash analyze ITEM [--agent NAME] [--session NAME] [--json]` analyzes a
+current Workdash item from the CLI. `ITEM` can be a row ID from `workdash list`
+(such as `owner/repo#ISSUE-123`) or a GitHub issue/PR URL that is already in the
+current dashboard data. The command requires an active Workdash-owned Zellij
+session; pass `--session` when more than one exists. It reuses a fresh cached
+analysis when available, otherwise prepares the item's worktree and runs the
+selected configured analysis agent.
+
+Human output reports the item, agent, cache status, and analysis path. `--json`
+emits the same result as machine-readable JSON.
+
+## Code command
+
+`workdash code ITEM [--agent NAME] [--session NAME] [--json]` launches a
+configured terminal-backed coding agent (`claude`, `codex`, or `pi`) for a
+current Workdash item. `ITEM` accepts the same row IDs and GitHub URLs as
+`workdash analyze`. The command requires an active Workdash-owned Zellij session;
+pass `--session` when more than one exists.
+
+Human output reports the item, agent, selected session, cwd, pane title, and pane
+id when available. `--json` emits the same result as machine-readable JSON.
+
 ## Analysis cache
 
-Analyses produced with `a` are cached under `~/.config/workdash/cache/` so that
-re-opening an item is instant. The cache is keyed by the item's GitHub
+Analyses produced with `a` or `workdash analyze` are cached under
+`~/.config/workdash/cache/` so that re-opening an item is instant. The cache is
+keyed by the item's GitHub
 `updated_at` timestamp, so any change on GitHub automatically invalidates the
-cached analysis and the next `a` will re-run it.
+cached analysis and the next analyze action will re-run it.
 
 ## Product behavior
 

@@ -12,6 +12,7 @@ from workdash.repo_worktree import (
     _find_worktree_for_branch,
     _get_pr_head_info,
     ensure_worktree,
+    existing_worktree_path,
     main_repo_path,
     worktree_path,
 )
@@ -57,6 +58,10 @@ def make_issue(number: int = 42, repo: str = "owner/repo") -> WorkItem:
         updated_at=datetime(2026, 2, 1, tzinfo=UTC),
         url=f"https://github.com/{repo}/issues/{number}",
     )
+
+
+def _git_show_toplevel(cmd: list[str], cwd: Path | str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(cmd, 0, stdout=f"{Path(cwd).resolve()}\n", stderr="")
 
 
 # --- Pure path tests (no mocking) ---
@@ -285,6 +290,348 @@ def test_ensure_worktree_fetches_existing_main_for_issue(
     assert "origin/HEAD" in wt_add
 
 
+def test_existing_worktree_path_finds_direct_worktree_when_origin_matches_item_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = tmp_path / "owner_repo_42"
+    candidate.mkdir()
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert existing_worktree_path(str(tmp_path), make_pr()) == candidate
+
+
+def test_existing_worktree_path_returns_none_when_workdir_is_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workdir = tmp_path / "workdir"
+    workdir.write_text("not a directory", encoding="utf-8")
+
+    def fake_run(*args, **kwargs):
+        raise AssertionError(f"Unexpected command: {args[0]}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert existing_worktree_path(str(workdir), make_pr()) is None
+
+
+def test_existing_worktree_path_ignores_global_remote_in_plain_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = tmp_path / "owner_repo_42"
+    candidate.mkdir()
+    subprocess.run(["git", "init"], cwd=candidate, check=True, capture_output=True, text=True)
+    global_config = tmp_path / "global-gitconfig"
+    global_config.write_text(
+        '[remote "origin"]\n\turl = https://github.com/owner/repo.git\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "home").mkdir()
+    (tmp_path / "xdg").mkdir()
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+    inherited = subprocess.run(
+        ["git", "config", "--get", "remote.origin.url"],
+        cwd=candidate,
+        capture_output=True,
+        text=True,
+    )
+    local = subprocess.run(
+        ["git", "config", "--local", "--get", "remote.origin.url"],
+        cwd=candidate,
+        capture_output=True,
+        text=True,
+    )
+
+    assert inherited.returncode == 0
+    assert inherited.stdout.strip() == "https://github.com/owner/repo.git"
+    assert local.returncode != 0
+    assert existing_worktree_path(str(tmp_path), make_pr()) is None
+
+
+def test_existing_worktree_path_ignores_plain_subdir_in_matching_parent_repo(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    subprocess.run(["git", "init"], cwd=parent, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/repo.git"],
+        cwd=parent,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (parent / "owner_repo_42").mkdir()
+
+    assert existing_worktree_path(str(parent), make_pr()) is None
+
+
+def test_existing_worktree_path_ignores_direct_worktree_without_matching_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "owner_repo_42").mkdir()
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/other/repo.git\n", stderr=""
+            )
+        if cmd == ["git", "config", "--local", "--get", "remote.upstream.url"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert existing_worktree_path(str(tmp_path), make_pr()) is None
+
+
+def test_existing_worktree_path_ignores_manually_renamed_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "custom_name_42").mkdir()
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/contributor/repo.git\n", stderr=""
+            )
+        if cmd == ["git", "config", "--local", "--get", "remote.upstream.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert existing_worktree_path(str(tmp_path), make_pr()) is None
+
+
+def test_existing_worktree_path_finds_workdash_shaped_fork_pr_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = tmp_path / "contributor_repo-fork_42"
+    candidate.mkdir()
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/contributor/repo-fork.git\n", stderr=""
+            )
+        if cmd == ["git", "config", "--local", "--get", "remote.upstream.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert existing_worktree_path(str(tmp_path), make_pr()) == candidate
+
+
+def test_existing_worktree_path_ignores_unrelated_renamed_fork_like_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "other_repo-fork_42").mkdir()
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/other/repo-fork.git\n", stderr=""
+            )
+        if cmd == ["git", "config", "--local", "--get", "remote.upstream.url"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert existing_worktree_path(str(tmp_path), make_pr()) is None
+
+
+def test_existing_worktree_path_ignores_unrelated_same_name_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "other_repo_42").mkdir()
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/other/repo.git\n", stderr=""
+            )
+        if cmd == ["git", "config", "--local", "--get", "remote.upstream.url"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert existing_worktree_path(str(tmp_path), make_pr()) is None
+
+
+def test_existing_worktree_path_returns_none_for_ambiguous_number_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "contributor_repo-fork_42").mkdir()
+    (tmp_path / "other_repo-fork_42").mkdir()
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        cwd = kwargs["cwd"]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, cwd)
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            repo = (
+                "contributor/repo-fork"
+                if cwd.name.startswith("contributor_")
+                else "other/repo-fork"
+            )
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=f"https://github.com/{repo}.git\n", stderr=""
+            )
+        if cmd == ["git", "config", "--local", "--get", "remote.upstream.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert existing_worktree_path(str(tmp_path), make_pr()) is None
+
+
+def test_existing_worktree_path_ignores_unrelated_number_suffix_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "scratch_42").mkdir()
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/other/scratch.git\n", stderr=""
+            )
+        if cmd == ["git", "config", "--local", "--get", "remote.upstream.url"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert existing_worktree_path(str(tmp_path), make_pr()) is None
+
+
+def test_ensure_worktree_does_not_pull_unrelated_direct_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "owner_repo_42").mkdir()
+    calls: list[list[str]] = []
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        calls.append(cmd)
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/other/repo.git\n", stderr=""
+            )
+        if cmd[0] == "gh" and cmd[1] == "pr" and cmd[2] == "view":
+            return subprocess.CompletedProcess(cmd, 0, stdout=_SAME_REPO_HEAD_INFO, stderr="")
+        if cmd[0] == "gh" and cmd[1] == "repo" and cmd[2] == "clone":
+            (tmp_path / "owner_repo").mkdir(exist_ok=True)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[0] == "git" and cmd[1] == "fetch":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "prune":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[0] == "git" and cmd[1] == "show-ref":
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "add":
+            raise subprocess.CalledProcessError(1, cmd, stderr="path already exists")
+        if cmd[0] == "git" and cmd[1] == "config":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Failed to create worktree"):
+        ensure_worktree(str(tmp_path), make_pr())
+
+    assert ["git", "pull", "--ff-only"] not in calls
+    assert any(c[0] == "git" and c[1] == "worktree" and c[2] == "add" for c in calls)
+
+
+def test_ensure_worktree_does_not_pull_unrelated_number_suffix_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "scratch_42").mkdir()
+    calls: list[list[str]] = []
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        calls.append(cmd)
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/other/scratch.git\n", stderr=""
+            )
+        if cmd == ["git", "config", "--local", "--get", "remote.upstream.url"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if cmd[0] == "gh" and cmd[1] == "pr" and cmd[2] == "view":
+            return subprocess.CompletedProcess(cmd, 0, stdout=_SAME_REPO_HEAD_INFO, stderr="")
+        if cmd[0] == "gh" and cmd[1] == "repo" and cmd[2] == "clone":
+            (tmp_path / "owner_repo").mkdir(exist_ok=True)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[0] == "git" and cmd[1] == "fetch":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "prune":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[0] == "git" and cmd[1] == "show-ref":
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "add":
+            (tmp_path / "owner_repo_42").mkdir(exist_ok=True)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[0] == "git" and cmd[1] == "config":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = ensure_worktree(str(tmp_path), make_pr())
+
+    assert result == str(tmp_path / "owner_repo_42")
+    assert ["git", "pull", "--ff-only"] not in calls
+
+
 def test_ensure_worktree_pulls_existing_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -296,6 +643,12 @@ def test_ensure_worktree_pulls_existing_worktree(
     def fake_run(*args, **kwargs):
         cmd = args[0]
         calls.append(cmd)
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -303,27 +656,48 @@ def test_ensure_worktree_pulls_existing_worktree(
     result = ensure_worktree(str(tmp_path), make_pr())
 
     assert result == str(tmp_path / "owner_repo_42")
-    assert calls == [["git", "pull", "--ff-only"]]
+    assert calls == [
+        ["git", "rev-parse", "--show-toplevel"],
+        ["git", "config", "--local", "--get", "remote.origin.url"],
+        ["git", "pull", "--ff-only"],
+    ]
 
 
-def test_ensure_worktree_finds_fork_worktree_without_gh_call(
+def test_ensure_worktree_finds_fork_worktree_with_upstream_without_gh_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Existing fork worktree (contributor_repo_42) is found without calling gh."""
+    """Existing fork worktree is found only when upstream proves the base repo."""
     (tmp_path / "contributor_repo_42").mkdir()
     calls: list[list[str]] = []
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
         calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/contributor/repo.git\n", stderr=""
+            )
+        if cmd == ["git", "config", "--local", "--get", "remote.upstream.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
+        if cmd == ["git", "pull", "--ff-only"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd}")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     result = ensure_worktree(str(tmp_path), make_pr())
 
     assert result == str(tmp_path / "contributor_repo_42")
-    assert calls == [["git", "pull", "--ff-only"]]
+    assert calls == [
+        ["git", "rev-parse", "--show-toplevel"],
+        ["git", "config", "--local", "--get", "remote.origin.url"],
+        ["git", "config", "--local", "--get", "remote.upstream.url"],
+        ["git", "pull", "--ff-only"],
+    ]
 
 
 def test_ensure_worktree_pull_failure_is_silent(
@@ -335,6 +709,12 @@ def test_ensure_worktree_pull_failure_is_silent(
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
         if cmd[0] == "git" and cmd[1] == "pull":
             raise subprocess.CalledProcessError(1, cmd, stderr="merge conflict")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -465,10 +845,9 @@ def test_ensure_worktree_creates_workdir_if_missing(
 def test_ensure_worktree_found_by_git_worktree_list(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Worktree exists under a non-standard name: directory scan misses but git worktree list finds it."""
-    # Main repo exists, worktree exists at an unexpected path
+    """TUI worktree preparation still reuses a git-tracked target branch."""
     (tmp_path / "owner_repo").mkdir()
-    unexpected_wt = tmp_path / "custom_name_42"
+    unexpected_wt = tmp_path / "custom_name"
     unexpected_wt.mkdir()
     calls: list[list[str]] = []
 
@@ -486,6 +865,8 @@ def test_ensure_worktree_found_by_git_worktree_list(
     def fake_run(*args, **kwargs):
         cmd = args[0]
         calls.append(cmd)
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
         if cmd[0] == "gh" and cmd[1] == "pr" and cmd[2] == "view":
             return subprocess.CompletedProcess(cmd, 0, stdout=_SAME_REPO_HEAD_INFO, stderr="")
         if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "list":
