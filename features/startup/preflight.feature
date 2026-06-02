@@ -12,7 +12,8 @@ Feature: Startup preflight checks
     - When the GitHub CLI is available but `gh auth status` fails, the system exits with a non-zero status and tells the user to authenticate with `gh auth login`.
     - When the configuration file is missing required fields, the system exits with a non-zero status, lists the missing fields, and tells the user to re-run the configuration wizard.
     - Binary availability and authentication preflight checks run before the system replaces itself with Zellij.
-    - Preflight checks run before the system starts the TUI, the refresh, the list command, command-specific Zellij session checks, or orchestration commands.
+    - Preflight checks run before the system starts the TUI or server-backed TUI.
+    - Server-backed client commands do not run local GitHub, configuration, or Zellij preflight; they connect to the local Workdash server and report server errors.
 
   @id:F-STARTUP-PREFLIGHT-S001
   Scenario: Missing GitHub CLI aborts startup
@@ -36,3 +37,11 @@ Feature: Startup preflight checks
     Then the system lists the missing fields
     And the system tells the user to run the configuration wizard
     And the system exits with a non-zero status
+
+  @id:F-STARTUP-PREFLIGHT-S004
+  Scenario: Server-backed client command skips local preflight
+    Given the local Workdash server is reachable
+    And the client process cannot find GitHub CLI on PATH
+    When the user runs a server-backed client command
+    Then the command sends the request to the local Workdash server
+    And the command does not report a local GitHub CLI preflight error

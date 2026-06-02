@@ -16,20 +16,23 @@ from dataclasses import dataclass
 from . import __version__
 from .backend import SuggestionMarkers, WorkdashBackend
 from .config import WorkdashConfig, WorkdashConfigValidationError, configure, load_config
-from .github_client import parse_github_item_url
+from .control import (
+    WorkdashControlClient,
+    WorkdashControlError,
+    WorkdashControlServer,
+    WorkdashSession,
+    format_work_item_id,
+    show_config_payload,
+)
 from .launcher import (
     exec_zellij_wrapped_workdash,
     inject_workdash_local_bin_into_path,
-    launch_agent_context,
     launch_terminal_context,
-    launch_vscode_context,
     list_workdash_sessions,
-    load_zellij_panes,
     open_in_browser,
-    prepare_launch_agent_prompt,
 )
 from .models import WorkItem, format_type_label
-from .repo_worktree import ensure_worktree, existing_worktree_path, get_merge_base
+from .repo_worktree import ensure_worktree
 from .tui import WorkdashApp
 
 
@@ -44,32 +47,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         configure()
         return 0
 
+    commands = WorkdashCommands()
+    if options.command in {"list", "info", "analyze", "code"}:
+        return _run_server_backed_command(commands, options)
+    if options.command == "show-config":
+        return commands.show_config(json_output=options.json_output)
+
     gh_error = _check_gh_preflight()
     if gh_error:
         print(f"Error: {gh_error}", file=sys.stderr, flush=True)
         return 1
-
-    commands = WorkdashCommands()
-    if options.command == "info":
-        return commands.info(
-            session=options.session,
-            json_output=options.json_output,
-            include_all_panes=options.include_all_panes,
-        )
-    if options.command == "analyze":
-        return commands.analyze_cli(
-            target=options.target or "",
-            agent=options.agent,
-            session=options.session,
-            json_output=options.json_output,
-        )
-    if options.command == "code":
-        return commands.code_cli(
-            target=options.target or "",
-            agent=options.agent,
-            session=options.session,
-            json_output=options.json_output,
-        )
 
     if _should_wrap_interactive_start(options):
         try:
@@ -78,9 +65,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Error: {error}", file=sys.stderr, flush=True)
             return 1
 
-    if options.command == "list":
-        return commands.list_items(json_output=options.json_output)
-    return commands.interactive()
+    return commands.interactive(server=options.server)
 
 
 @dataclass(frozen=True)
@@ -91,6 +76,7 @@ class CLIOptions:
     refresh: bool
     configure: bool
     direct: bool
+    server: bool
     json_output: bool
     command: str | None = None
     session: str | None = None
@@ -100,150 +86,86 @@ class CLIOptions:
 
 
 class WorkdashCommands:
-    """Commands that share Workdash config, backend, and item actions."""
+    """Commands that share Workdash config, backend, and server-backed clients."""
 
     def __init__(self) -> None:
         self._config: WorkdashConfig | None = None
         self._backend: WorkdashBackend | None = None
+        self._client = WorkdashControlClient()
 
-    def info(self, *, session: str | None, json_output: bool, include_all_panes: bool) -> int:
-        """Report live Workdash-owned Zellij panes."""
-
-        try:
-            selected_session = _select_workdash_session(session)
-            loaded = self._load_config_and_backend()
-            if loaded is None:
-                return 1
-            config, backend = loaded
-            work_items, _suggestion_markers = backend.load_items()
-            pane_info = _workdash_pane_info(
-                selected_session,
-                config.workdir,
-                work_items,
-                include_all_panes=include_all_panes,
-            )
-        except RuntimeError as error:
-            print(f"Error: {error}", file=sys.stderr, flush=True)
-            return 1
-        if json_output:
-            print(json.dumps(pane_info, ensure_ascii=True, indent=2))
-        else:
-            _print_pane_info(pane_info)
-        return 0
-
-    def list_items(self, *, json_output: bool) -> int:
-        """List work items without starting the TUI."""
-
-        loaded = self._load_config_and_backend()
-        if loaded is None:
-            return 1
-        _config, backend = loaded
-        work_items, suggestion_markers = backend.load_items()
-        if json_output:
-            _print_work_items_json(work_items, suggestion_markers)
-        else:
-            _print_work_items(work_items, suggestion_markers)
-        return 0
-
-    def analyze_cli(
-        self,
-        *,
-        target: str,
-        agent: str | None,
-        session: str | None,
-        json_output: bool,
-    ) -> int:
-        """Analyze a current work item from the CLI."""
+    def list_items(self, *, json_output: bool, refresh: bool = False) -> int:
+        """List work items through the local Workdash server."""
 
         try:
-            _select_workdash_session(session)
-            loaded = self._load_config_and_backend()
-            if loaded is None:
-                return 1
-            config, backend = loaded
-            work_items, _suggestion_markers = backend.load_items()
-            item = _resolve_work_item_target(target, work_items)
-            if item is None:
-                raise RuntimeError(
-                    f"{target!r} is not a current Workdash item ID or GitHub issue/PR URL."
-                )
-            item_id = format_work_item_id(item)
-            cache_used = item.analysis is not None
-            agents = config.configured_analyze_agents()
-            selected_agent = agent or (agents[0] if agents else None)
-            if agent is not None and agent not in agents:
-                raise RuntimeError(
-                    f"Analysis agent {agent!r} is not configured. "
-                    f"Configured agents: {', '.join(agents) if agents else '(none)'}"
-                )
-            if not cache_used and selected_agent is None:
-                raise RuntimeError("No analysis agents are configured.")
-            path = self.analyze(item, tool=selected_agent or "cached", prefer_cache=True)
-            if path is None:
-                raise RuntimeError(f"Analysis failed for {item_id} with agent {selected_agent}.")
-        except RuntimeError as error:
-            print(f"Error: {error}", file=sys.stderr, flush=True)
+            result = self._client.request("list", {"refresh": refresh})
+        except WorkdashControlError as error:
+            _print_control_error(error)
             return 1
+        if json_output:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        else:
+            _print_work_items_result(result)
+        return 0
 
-        result = {
-            "item_id": item_id,
-            "path": path,
-            "agent": selected_agent,
-            "cache_used": cache_used,
-            "status": "cached" if cache_used else "generated",
-        }
+    def info(self, *, json_output: bool, include_all_panes: bool) -> int:
+        """Report live panes through the local Workdash server."""
+
+        try:
+            result = self._client.request("info", {"include_all_panes": include_all_panes})
+        except WorkdashControlError as error:
+            _print_control_error(error)
+            return 1
+        if json_output:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        else:
+            _print_pane_info(result)
+        return 0
+
+    def analyze_cli(self, *, target: str, agent: str | None, json_output: bool) -> int:
+        """Analyze a current work item through the local Workdash server."""
+
+        try:
+            result = self._client.request("analyze", {"target": target, "agent": agent})
+        except WorkdashControlError as error:
+            _print_control_error(error)
+            return 1
         if json_output:
             print(json.dumps(result, ensure_ascii=True, indent=2))
         else:
             _print_analysis_result(result)
         return 0
 
-    def code_cli(
-        self,
-        *,
-        target: str,
-        agent: str | None,
-        session: str | None,
-        json_output: bool,
-    ) -> int:
-        """Launch a terminal-backed coding agent for a current work item from the CLI."""
+    def code_cli(self, *, target: str, agent: str | None, json_output: bool) -> int:
+        """Launch a coding agent through the local Workdash server."""
 
         try:
-            selected_session = _select_workdash_session(session)
-            loaded = self._load_config_and_backend()
-            if loaded is None:
-                return 1
-            config, backend = loaded
-            agents = config.configured_code_agents()
-            selected_agent = agent or (agents[0] if agents else None)
-            if selected_agent is None:
-                raise RuntimeError("No terminal-backed coding agents are configured.")
-            if selected_agent not in agents:
-                raise RuntimeError(
-                    f"Coding agent {selected_agent!r} is not a configured terminal-backed agent. "
-                    f"Configured agents: {', '.join(agents) if agents else '(none)'}"
-                )
-            work_items, _suggestion_markers = backend.load_items()
-            item = _resolve_work_item_target(target, work_items)
-            if item is None:
-                raise RuntimeError(
-                    f"{target!r} is not a current Workdash item ID or GitHub issue/PR URL."
-                )
-            item_id = format_work_item_id(item)
-            result = self.code(item, tool=selected_agent, zellij_session=selected_session)
-        except RuntimeError as error:
-            print(f"Error: {error}", file=sys.stderr, flush=True)
+            result = self._client.request("code", {"target": target, "agent": agent})
+        except WorkdashControlError as error:
+            _print_control_error(error)
             return 1
-
-        result = {"item_id": item_id, "session": selected_session, **result}
         if json_output:
             print(json.dumps(result, ensure_ascii=True, indent=2))
         else:
             _print_code_result(result)
         return 0
 
-    def interactive(self) -> int:
-        """Start the interactive dashboard."""
+    def show_config(self, *, json_output: bool) -> int:
+        """Show configured automation choices without requiring the server."""
+
+        try:
+            config = load_config().require_valid()
+        except WorkdashConfigValidationError as error:
+            _print_config_validation_error(error)
+            return 1
+        result = show_config_payload(config)
+        if json_output:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        else:
+            _print_show_config(result)
+        return 0
+
+    def interactive(self, *, server: bool = False) -> int:
+        """Start the interactive dashboard, optionally with the JSON server."""
 
         loaded = self._load_config_and_backend()
         if loaded is None:
@@ -253,14 +175,38 @@ class WorkdashCommands:
         work_items, suggestion_markers = backend.load_items(
             progress_callback=lambda message: print(message, flush=True)
         )
-        app = WorkdashApp(
+        try:
+            zellij_session = _select_workdash_session(None) if server else None
+        except RuntimeError as error:
+            print(f"Error: {error}", file=sys.stderr, flush=True)
+            return 1
+        session = WorkdashSession(
+            config=config,
+            backend=backend,
             work_items=work_items,
             suggestion_markers=suggestion_markers,
+            zellij_session=zellij_session,
+        )
+        control_server = WorkdashControlServer(session) if server else None
+        if control_server is not None:
+            try:
+                control_server.start()
+            except RuntimeError as error:
+                print(f"Error: {error}", file=sys.stderr, flush=True)
+                return 1
+        app = WorkdashApp(
+            work_items=session.work_items,
+            suggestion_markers=session.suggestion_markers,
             open_callback=lambda item: open_in_browser(item.url),
-            refresh_callback=backend.load_items,
+            refresh_callback=lambda: session.list_items(refresh=True)
+            and (session.work_items, session.suggestion_markers),
             worktree_callback=lambda item: ensure_worktree(config.workdir, item),
-            analyze_callback=lambda item, tool="codex": self.analyze(item, tool=tool),
-            launch_callback=lambda item, tool="codex": self.code(item, tool=tool),
+            analyze_callback=lambda item, tool="codex": session.analyze(
+                target=format_work_item_id(item), agent=tool, prefer_cache=(tool == "cached")
+            )["path"],
+            launch_callback=lambda item, tool="codex": session.code(
+                target=format_work_item_id(item), agent=tool, allow_vscode=True
+            ),
             analyze_choices=config.tui_analyze_choices(),
             code_choices=config.tui_code_choices(),
             terminal_callback=lambda item: launch_terminal_context(
@@ -268,75 +214,12 @@ class WorkdashCommands:
             ),
             include_callback=backend.include_item_by_url,
         )
-        app.run()
+        try:
+            app.run()
+        finally:
+            if control_server is not None:
+                control_server.stop()
         return 0
-
-    def analyze(
-        self,
-        item: WorkItem,
-        *,
-        tool: str = "codex",
-        prefer_cache: bool = False,
-    ) -> str | None:
-        """Produce an analysis file for a work item through the shared action path."""
-
-        loaded = self._load_config_and_backend()
-        if loaded is None:
-            raise RuntimeError("Workdash configuration is incomplete.")
-        config, backend = loaded
-        if prefer_cache:
-            cached_path = backend.analyze_item(item, tool="cached")
-            if cached_path is not None:
-                return cached_path
-        if tool != "cached":
-            ensure_worktree(config.workdir, item)
-        return backend.analyze_item(item, tool=tool)
-
-    def code(
-        self,
-        item: WorkItem,
-        *,
-        tool: str,
-        zellij_session: str | None = None,
-    ) -> dict[str, str | None]:
-        """Launch a terminal-backed coding session through the shared action path."""
-
-        loaded = self._load_config_and_backend()
-        if loaded is None:
-            raise RuntimeError("Workdash configuration is incomplete.")
-        config, backend = loaded
-        command_tokens = None if tool == "vscode" else config.code_agent_launch_command_tokens(tool)
-        repo_path = ensure_worktree(config.workdir, item)
-        prompt = prepare_launch_agent_prompt(
-            item,
-            repo_path,
-            analysis_path=str(backend.analysis_cache.build_analysis_path(item))
-            if item.analysis is not None
-            else None,
-            merge_base=get_merge_base(repo_path),
-        )
-        if tool == "vscode":
-            launch_vscode_context(repo_path, prompt)
-            return {
-                "session": zellij_session,
-                "agent": tool,
-                "cwd": repo_path,
-                "pane_title": None,
-                "pane_id": None,
-            }
-        launch = launch_agent_context(
-            repo_path,
-            prompt,
-            agent_command_tokens=command_tokens,
-            zellij_session=zellij_session,
-        )
-        return {
-            "session": launch.session,
-            "agent": tool,
-            "cwd": launch.cwd,
-            "pane_title": launch.pane_title,
-            "pane_id": launch.pane_id,
-        }
 
     def _load_config_and_backend(self) -> tuple[WorkdashConfig, WorkdashBackend] | None:
         if self._config is not None and self._backend is not None:
@@ -352,28 +235,27 @@ class WorkdashCommands:
         return config, backend
 
 
-def format_work_item_id(item: WorkItem) -> str:
-    """Return the copy/paste identifier accepted by CLI work-item commands."""
-
-    item_type = format_type_label(item).removesuffix("+")
-    return f"{item.repo}#{item_type}-{item.number}"
-
-
-def _resolve_work_item_target(target: str, work_items: Sequence[WorkItem]) -> WorkItem | None:
-    for item in work_items:
-        if target == format_work_item_id(item):
-            return item
-    parsed = parse_github_item_url(target)
-    if parsed is None:
-        return None
-    for item in work_items:
-        if (
-            item.repo == parsed.repo
-            and item.item_type == parsed.item_type
-            and item.number == parsed.number
-        ):
-            return item
-    return None
+def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) -> int:
+    if options.command == "list":
+        return commands.list_items(json_output=options.json_output, refresh=options.refresh)
+    if options.command == "info":
+        return commands.info(
+            json_output=options.json_output,
+            include_all_panes=options.include_all_panes,
+        )
+    if options.command == "analyze":
+        return commands.analyze_cli(
+            target=options.target or "",
+            agent=options.agent,
+            json_output=options.json_output,
+        )
+    if options.command == "code":
+        return commands.code_cli(
+            target=options.target or "",
+            agent=options.agent,
+            json_output=options.json_output,
+        )
+    raise AssertionError(f"Unsupported server-backed command: {options.command}")
 
 
 def _print_config_validation_error(error: WorkdashConfigValidationError) -> None:
@@ -418,6 +300,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         help="Start directly without wrapping the interactive dashboard in Zellij.",
     )
     parser.add_argument(
+        "--server",
+        action="store_true",
+        help="Start the TUI with the localhost JSON control API.",
+    )
+    parser.add_argument(
         "--json",
         dest="json_output",
         action="store_true",
@@ -435,13 +322,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         default=argparse.SUPPRESS,
         help="Emit machine-readable JSON.",
     )
+    list_parser.add_argument(
+        "--refresh",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Ask the running Workdash server to refresh items before listing.",
+    )
     info_parser = subparsers.add_parser(
         "info",
         help="Report live Workdash-owned Zellij panes.",
-    )
-    info_parser.add_argument(
-        "--session",
-        help="Inspect a specific Workdash-owned Zellij session.",
     )
     info_parser.add_argument(
         "--json",
@@ -467,10 +356,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         help="Configured analysis agent to run when no fresh cache exists.",
     )
     analyze_parser.add_argument(
-        "--session",
-        help="Validate against a specific Workdash-owned Zellij session.",
-    )
-    analyze_parser.add_argument(
         "--json",
         dest="json_output",
         action="store_true",
@@ -487,10 +372,17 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         help="Configured terminal-backed coding agent to launch.",
     )
     code_parser.add_argument(
-        "--session",
-        help="Validate against a specific Workdash-owned Zellij session.",
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Emit machine-readable JSON.",
     )
-    code_parser.add_argument(
+    show_config_parser = subparsers.add_parser(
+        "show-config",
+        help="Show configured agents and the fixed server address.",
+    )
+    show_config_parser.add_argument(
         "--json",
         dest="json_output",
         action="store_true",
@@ -503,6 +395,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         refresh=namespace.refresh,
         configure=namespace.configure,
         direct=namespace.direct,
+        server=namespace.server,
         json_output=namespace.json_output,
         command=namespace.command,
         session=getattr(namespace, "session", None),
@@ -561,6 +454,19 @@ def _print_work_items_json(
     print(json.dumps({"items": items}, ensure_ascii=True, indent=2))
 
 
+def _print_work_items_result(result: dict[str, object]) -> None:
+    items = result.get("items")
+    if not items:
+        print("No work items found.")
+        return
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = f"* {item['title']}" if item.get("suggested") else item["title"]
+        type_label = str(item["id"]).split("#", maxsplit=1)[1].split("-", maxsplit=1)[0]
+        print(f"{type_label:7} {item['id']:24} {str(item['updated_at'])[:10]} {title}")
+
+
 def _print_analysis_result(result: dict[str, object]) -> None:
     print(f"Item: {result['item_id']}")
     print(f"Agent: {result['agent']}")
@@ -592,6 +498,18 @@ def _print_pane_info(info: dict[str, object]) -> None:
         )
 
 
+def _print_show_config(result: dict[str, object]) -> None:
+    agents = result["agents"]
+    server = result["server"]
+    print("Analysis agents: " + ", ".join(agents["analyze"] or ["-"]))
+    print("Code agents: " + ", ".join(agents["code"] or ["-"]))
+    print(f"Server: {server['host']}:{server['port']}")
+
+
+def _print_control_error(error: WorkdashControlError) -> None:
+    print(f"Error: {error}", file=sys.stderr, flush=True)
+
+
 def _select_workdash_session(requested_session: str | None) -> str:
     sessions = list_workdash_sessions()
     if requested_session is not None:
@@ -605,99 +523,10 @@ def _select_workdash_session(requested_session: str | None) -> str:
         raise RuntimeError("An active Workdash-owned Zellij session is required.")
     if len(sessions) > 1:
         raise RuntimeError(
-            "Multiple Workdash-owned Zellij sessions found. Pass --session with one of: "
-            + ", ".join(sessions)
+            "Multiple Workdash-owned Zellij sessions found. Close the extras before "
+            "starting `workdash --server`: " + ", ".join(sessions)
         )
     return sessions[0]
-
-
-def _is_live_non_plugin_pane(pane: dict[str, object]) -> bool:
-    return (
-        pane.get("is_plugin") is not True
-        and pane.get("exited") is not True
-        and pane.get("is_held") is not True
-    )
-
-
-def _is_workdash_work_pane(pane: dict[str, object]) -> bool:
-    if not _is_live_non_plugin_pane(pane):
-        return False
-    title = pane.get("title")
-    return isinstance(title, str) and (title.startswith("code_") or title.startswith("terminal_"))
-
-
-def _workdash_pane_info(
-    session: str,
-    workdir: str | None,
-    work_items: Sequence[WorkItem],
-    *,
-    include_all_panes: bool = False,
-) -> dict[str, object]:
-    item_by_cwd = {}
-    if workdir is not None:
-        for item in work_items:
-            item_path = existing_worktree_path(workdir, item)
-            if item_path is not None:
-                item_by_cwd[_normalized_path(item_path)] = format_work_item_id(item)
-    panes = []
-    for pane in load_zellij_panes(session):
-        if _is_workdash_work_pane(pane):
-            panes.append(_pane_info(selected_session=session, pane=pane, item_by_cwd=item_by_cwd))
-        elif include_all_panes and _is_live_non_plugin_pane(pane):
-            panes.append(
-                _pane_info(
-                    selected_session=session,
-                    pane=pane,
-                    item_by_cwd={},
-                    kind="unknown",
-                )
-            )
-    return {"session": session, "panes": panes}
-
-
-def _pane_info(
-    selected_session: str,
-    pane: dict[str, object],
-    item_by_cwd: dict[str, str],
-    *,
-    kind: str | None = None,
-) -> dict[str, object]:
-    title = str(pane.get("title") or "")
-    pane_id = pane.get("id")
-    kind = kind or ("agent" if title.startswith("code_") else "terminal")
-    cwd = pane.get("pane_cwd")
-    mapped_item = None
-    if isinstance(cwd, str) and cwd:
-        normalized_cwd = _normalized_path(cwd)
-        matches = [
-            (root, item_id)
-            for root, item_id in item_by_cwd.items()
-            if normalized_cwd == root or normalized_cwd.startswith(root + os.sep)
-        ]
-        if matches:
-            mapped_item = max(matches, key=lambda match: len(match[0]))[1]
-    state = pane.get("state")
-    if not isinstance(state, str) or not state:
-        state = "exited" if pane.get("exited") is True else "running"
-    return {
-        "session": selected_session,
-        "tab_id": pane.get("tab_id"),
-        "tab_name": pane.get("tab_name"),
-        "pane_id": f"terminal_{pane_id}",
-        "title": title,
-        "cwd": cwd,
-        "command": pane.get("pane_command") or pane.get("terminal_command"),
-        "kind": kind,
-        "state": state,
-        "exited": pane.get("exited"),
-        "focused": pane.get("is_focused"),
-        "floating": pane.get("is_floating"),
-        "item": mapped_item or "unknown",
-    }
-
-
-def _normalized_path(path: os.PathLike[str] | str) -> str:
-    return os.path.realpath(os.path.expanduser(os.fspath(path)))
 
 
 def _check_gh_preflight() -> str | None:

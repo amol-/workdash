@@ -29,6 +29,7 @@ classifiers = [
 ]
 dependencies = [
   "markdown>=3.6",
+  "TurboGears2>=2.5.1",
   "textual>=0.58",
 ]
 

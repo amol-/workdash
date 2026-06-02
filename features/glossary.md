@@ -25,7 +25,12 @@ Canonical product vocabulary used by the feature files.
 - Coding session: An interactive session with a supported coding agent, launched in the item's worktree and preloaded with work item context.
 - Supported coding agent: One of Claude, ChatGPT Codex, VSCode Copilot, or pi.
 - Terminal-backed work action: A work action that opens a shell or terminal-hosted coding agent for a work item.
-- CLI orchestration command: A non-interactive command that lets a user or automation client inspect or launch Workdash-owned Zellij panes.
+- CLI orchestration command: A non-interactive command that lets a user or automation client inspect or control the active server-backed Workdash session.
+- Workdash server: The localhost JSON API server started by `workdash --server` in the same process as the TUI.
+- Server-backed Workdash session: A Workdash TUI process started with `--server`, sharing one in-memory dashboard state with the local JSON API.
+- Local Workdash JSON API: The HTTP JSON API exposed by the Workdash server on `127.0.0.1:8765`.
+- API client: A local command or automation agent that sends JSON requests to the Workdash server.
+- Pane ID: The copy/paste Zellij pane identifier reported by `workdash info`, used by pane content and send APIs.
 - Zellij session: A terminal multiplexer session used by the system to host terminal-backed work actions.
 - Workdash Zellij session: A Zellij session whose name starts with `workdash`, used by the system as the live terminal surface for orchestration commands and terminal-backed work actions.
 - Agent pane: A Zellij pane opened by the system for a terminal-hosted coding agent.
@@ -33,5 +38,6 @@ Canonical product vocabulary used by the feature files.
 - Configuration: The user settings stored at `~/.config/workdash/config.json`.
 - Configuration wizard: The interactive flow started by `--configure` that fills in any missing configuration fields.
 - TUI: The interactive terminal interface shown by default when the system starts.
-- List command: The non-interactive listing emitted by `workdash list`, intended for automation and for agents that need to read the dashboard without driving the TUI.
+- List command: The non-interactive listing emitted by `workdash list`, intended for automation and for agents that need to read the active server-backed dashboard without driving the TUI.
+- Show-config command: The command and API capability that reports configured analysis and coding agents plus the fixed V0 server address.
 - Recent activity: A work item whose last update is within the last 24 hours.

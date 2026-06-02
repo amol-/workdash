@@ -16,6 +16,7 @@ Feature: Start the interactive dashboard inside Zellij
     - The replacement Zellij process uses Zellij's documented force-close behavior to quit the session when its terminal closes.
     - The replacement Zellij process disables session serialization and session metadata so closed generated sessions do not become resurrection targets.
     - When the dashboard command exits, its Zellij pane closes instead of leaving an exited command pane behind.
+    - Starting with `--server` preserves the startup wrapper behavior, and the wrapped dashboard command runs with `--direct --server`.
     - Direct mode is only for bypassing the startup wrapper.
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S001
@@ -40,11 +41,11 @@ Feature: Start the interactive dashboard inside Zellij
     Then the system starts the dashboard directly
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S004
-  Scenario: List command outside Zellij does not wrap itself
+  Scenario: Server-backed client commands outside Zellij do not wrap themselves
     Given the system is not running inside a Zellij session
-    When the user starts the non-interactive list command
+    When the user starts a server-backed client command
     Then the system does not replace itself with Zellij
-    And the system prints work items directly
+    And the command connects to the local Workdash server
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S005
   Scenario: The generated Zellij session uses documented close behavior
@@ -63,3 +64,12 @@ Feature: Start the interactive dashboard inside Zellij
     When the user starts the interactive dashboard
     Then the system tells the user to run the configuration wizard
     And the system exits with a non-zero status
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S007
+  Scenario: Server mode outside Zellij wraps the server-backed dashboard
+    Given the system is not running inside a Zellij session
+    And Zellij is installed on PATH
+    When the user starts the interactive dashboard with `--server`
+    Then the system replaces itself with a Zellij process
+    And the Zellij process starts a fresh workdash-prefixed session
+    And the Zellij process runs the dashboard with `--direct --server`
