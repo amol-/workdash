@@ -251,6 +251,21 @@ def _system_not_running_inside_zellij(
     scenario_state["outside_zellij"] = True
 
 
+@given("no server-backed Workdash session is running")
+def _no_server_backed_workdash_session(
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workdash.control as control_module
+
+    scenario_state.pop("api_session", None)
+
+    def fail_urlopen(request):
+        scenario_state.setdefault("urlopen_requests", []).append(request)
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(control_module.urllib.request, "urlopen", fail_urlopen)
+
+
 # -- Exit-code assertions ----------------------------------------------------
 
 
@@ -261,6 +276,20 @@ def _system_exits_zero(scenario_state: dict[str, Any]) -> None:
 
 @then("the system exits with a non-zero status")
 def _system_exits_nonzero(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] != 0, scenario_state
+
+
+@then("the command reports that `workdash --server` must be running")
+def _reports_server_must_be_running(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("urlopen_requests"), scenario_state
+    assert (
+        "No Workdash server is reachable at 127.0.0.1:8765. "
+        "Start one with `workdash --server`."
+    ) in scenario_state["stderr"]
+
+
+@then("the command exits with a non-zero status")
+def _command_exits_nonzero(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["exit_code"] != 0, scenario_state
 
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -41,6 +40,7 @@ def _run_workdash(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    import workdash.control as control_module
     import workdash.workdash as workdash_module
 
     workdir = scenario_state.get("workdir", "/tmp/workdash-bdd")
@@ -100,6 +100,34 @@ def _run_workdash(
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
         raise AssertionError(f"Unexpected command: {cmd}")
 
+    if scenario_state.get("api_session") is not None:
+
+        class FakeControlClient:
+            def request(
+                self, endpoint: str, payload: dict[str, object] | None = None
+            ) -> dict[str, object]:
+                payload = payload or {}
+                scenario_state.setdefault("control_requests", []).append(
+                    {"endpoint": endpoint, "payload": dict(payload)}
+                )
+                if endpoint == "info":
+                    return scenario_state["api_session"].info(
+                        include_all_panes=bool(payload.get("include_all_panes", False))
+                    )
+                raise AssertionError(f"Unexpected control endpoint: {endpoint}")
+
+        monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+        monkeypatch.setattr(
+            control_module,
+            "load_zellij_panes",
+            lambda _session: list(scenario_state.get("panes", [])),
+        )
+        monkeypatch.setattr(
+            control_module,
+            "existing_worktree_path",
+            lambda _workdir, _item: scenario_state.get("known_worktree_path"),
+        )
+
     monkeypatch.setattr(workdash_module.subprocess, "run", fake_run)
     monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: config)
@@ -117,30 +145,6 @@ def _run_workdash(
         "list_workdash_sessions",
         lambda: list(scenario_state.get("sessions", [])),
     )
-    monkeypatch.setattr(
-        workdash_module,
-        "load_zellij_panes",
-        lambda _session: list(scenario_state.get("panes", [])),
-    )
-    monkeypatch.setattr(workdash_module, "get_merge_base", lambda _path: None)
-    monkeypatch.setattr(
-        workdash_module,
-        "prepare_launch_agent_prompt",
-        lambda *args, **kwargs: "PROMPT",
-    )
-
-    def fake_launch_agent_context(repo, prompt, agent_command_tokens=None, *, zellij_session=None):
-        scenario_state.setdefault("launch_calls", []).append(
-            (repo, prompt, agent_command_tokens, zellij_session)
-        )
-        return SimpleNamespace(
-            session=zellij_session,
-            pane_id="terminal_23",
-            pane_title=f"code_{Path(repo).name}",
-            cwd=repo,
-        )
-
-    monkeypatch.setattr(workdash_module, "launch_agent_context", fake_launch_agent_context)
 
     scenario_state["exit_code"] = workdash_module.main(argv)
     captured = capsys.readouterr()
@@ -194,6 +198,7 @@ def _session_has_agent_pane(
     scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
 ) -> None:
     _item, cwd = _seed_info_item(scenario_state, work_items, tmp_path)
+    scenario_state["known_worktree_path"] = cwd
     scenario_state.setdefault("panes", []).append(
         {
             "id": 1,
@@ -473,6 +478,7 @@ def _run_code_vscode_json(
 
 
 @when("the user runs an orchestration command")
+@when("the user runs a server-backed orchestration command")
 def _run_orchestration_command(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
@@ -481,6 +487,14 @@ def _run_orchestration_command(
     _run_workdash(["info"], scenario_state, monkeypatch, capsys)
 
 
+@then("the command requests pane information from the local Workdash server")
+def _requests_pane_information(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("control_requests") == [
+        {"endpoint": "info", "payload": {"include_all_panes": False}}
+    ]
+
+
+@then("the system reports the Workdash session name")
 @then("the system reports the Workdash-owned session name")
 def _reports_session_name(scenario_state: dict[str, Any]) -> None:
     assert "Session: workdash-main" in scenario_state["stdout"]
