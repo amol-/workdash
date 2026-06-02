@@ -44,6 +44,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         configure()
         return 0
 
+    gh_error = _check_gh_preflight()
+    if gh_error:
+        print(f"Error: {gh_error}", file=sys.stderr, flush=True)
+        return 1
+
     commands = WorkdashCommands()
     if options.command == "info":
         return commands.info(
@@ -65,11 +70,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             session=options.session,
             json_output=options.json_output,
         )
-
-    gh_error = _check_gh_preflight()
-    if gh_error:
-        print(f"Error: {gh_error}", file=sys.stderr, flush=True)
-        return 1
 
     if _should_wrap_interactive_start(options):
         try:
@@ -111,10 +111,6 @@ class WorkdashCommands:
 
         try:
             selected_session = _select_workdash_session(session)
-            gh_error = _check_gh_preflight()
-            if gh_error:
-                print(f"Error: {gh_error}", file=sys.stderr, flush=True)
-                return 1
             loaded = self._load_config_and_backend()
             if loaded is None:
                 return 1
@@ -161,10 +157,6 @@ class WorkdashCommands:
 
         try:
             _select_workdash_session(session)
-            gh_error = _check_gh_preflight()
-            if gh_error:
-                print(f"Error: {gh_error}", file=sys.stderr, flush=True)
-                return 1
             loaded = self._load_config_and_backend()
             if loaded is None:
                 return 1
@@ -218,10 +210,6 @@ class WorkdashCommands:
 
         try:
             selected_session = _select_workdash_session(session)
-            gh_error = _check_gh_preflight()
-            if gh_error:
-                print(f"Error: {gh_error}", file=sys.stderr, flush=True)
-                return 1
             loaded = self._load_config_and_backend()
             if loaded is None:
                 return 1

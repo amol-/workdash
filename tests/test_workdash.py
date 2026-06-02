@@ -296,6 +296,105 @@ def test_select_workdash_session_treats_no_zellij_sessions_as_empty(
         workdash_module._select_workdash_session(None)
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["info"],
+        ["analyze", "owner/repo#ISSUE-1"],
+        ["code", "owner/repo#ISSUE-1"],
+    ],
+)
+def test_main_orchestration_commands_report_gh_error_before_selecting_zellij_session(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: "gh CLI is not installed")
+    monkeypatch.setattr(
+        workdash_module,
+        "_select_workdash_session",
+        lambda _session: (_ for _ in ()).throw(AssertionError("unexpected session selection")),
+    )
+
+    assert workdash_module.main(argv) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "gh CLI is not installed" in captured.err
+
+
+def test_main_list_reports_gh_error_before_loading_items(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: "gh CLI is not installed")
+    monkeypatch.setattr(
+        workdash_module,
+        "load_config",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected config loading")),
+    )
+
+    assert workdash_module.main(["list"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "gh CLI is not installed" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_dispatch"),
+    [
+        (["list"], "list"),
+        (["info"], "info"),
+        (["analyze", "owner/repo#ISSUE-1"], "analyze"),
+        (["code", "owner/repo#ISSUE-1"], "code"),
+    ],
+)
+def test_main_dispatch_commands_run_gh_preflight_once(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], expected_dispatch: str
+) -> None:
+    events: list[str] = []
+
+    def fake_preflight():
+        events.append("preflight")
+        return None
+
+    class FakeCommands:
+        def list_items(self, *, json_output: bool) -> int:
+            events.append("list")
+            return 0
+
+        def info(self, *, session: str | None, json_output: bool, include_all_panes: bool) -> int:
+            events.append("info")
+            return 0
+
+        def analyze_cli(
+            self,
+            *,
+            target: str,
+            agent: str | None,
+            session: str | None,
+            json_output: bool,
+        ) -> int:
+            events.append("analyze")
+            return 0
+
+        def code_cli(
+            self,
+            *,
+            target: str,
+            agent: str | None,
+            session: str | None,
+            json_output: bool,
+        ) -> int:
+            events.append("code")
+            return 0
+
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", fake_preflight)
+    monkeypatch.setattr(workdash_module, "WorkdashCommands", FakeCommands)
+
+    assert workdash_module.main(argv) == 0
+
+    assert events == ["preflight", expected_dispatch]
+
+
 def test_main_analyze_human_output_defaults_to_codex_and_runs_shared_action(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -455,6 +554,7 @@ def test_main_analyze_requires_explicit_session_when_multiple_are_active(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
     monkeypatch.setattr(
         workdash_module, "list_workdash_sessions", lambda: ["workdash-a", "workdash-b"]
     )
@@ -732,6 +832,7 @@ def test_main_code_requires_explicit_session_when_multiple_are_active(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
     monkeypatch.setattr(
         workdash_module, "list_workdash_sessions", lambda: ["workdash-a", "workdash-b"]
     )
@@ -1380,11 +1481,32 @@ def test_main_configure_runs_setup_and_exits(
         return _VALID_CONFIG
 
     monkeypatch.setattr(workdash_module, "configure", fake_configure)
+    monkeypatch.setattr(
+        workdash_module,
+        "_check_gh_preflight",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected gh preflight")),
+    )
 
     exit_code = workdash_module.main(["--configure"])
 
     assert exit_code == 0
     assert configure_called
+
+
+@pytest.mark.parametrize("argv", [["--help"], ["--version"]])
+def test_main_help_and_version_exit_without_gh_preflight(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str]
+) -> None:
+    monkeypatch.setattr(
+        workdash_module,
+        "_check_gh_preflight",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected gh preflight")),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        workdash_module.main(argv)
+
+    assert error.value.code == 0
 
 
 def test_main_outside_zellij_replaces_process_with_zellij(
