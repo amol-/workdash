@@ -114,6 +114,11 @@ def _run_workdash(
                     return scenario_state["api_session"].info(
                         include_all_panes=bool(payload.get("include_all_panes", False))
                     )
+                if endpoint == "analyze":
+                    return scenario_state["api_session"].analyze(
+                        target=payload["target"],
+                        agent=payload.get("agent"),
+                    )
                 raise AssertionError(f"Unexpected control endpoint: {endpoint}")
 
         monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
@@ -134,6 +139,25 @@ def _run_workdash(
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(
         workdash_module,
+        "ensure_worktree",
+        lambda workdir, item: (
+            scenario_state.setdefault("ensure_calls", []).append((workdir, item))
+            or str(Path(workdir) / "owner_repo_1")
+        ),
+    )
+    # Also mock repo_worktree.ensure_worktree for control.py which imports it directly
+    import workdash.repo_worktree as repo_worktree_module
+    monkeypatch.setattr(
+        repo_worktree_module,
+        "ensure_worktree",
+        lambda workdir, item: (
+            scenario_state.setdefault("ensure_calls", []).append((workdir, item))
+            or str(Path(workdir) / "owner_repo_1")
+        ),
+    )
+    # Mock control_module.ensure_worktree since control.py imports it
+    monkeypatch.setattr(
+        control_module,
         "ensure_worktree",
         lambda workdir, item: (
             scenario_state.setdefault("ensure_calls", []).append((workdir, item))
@@ -495,6 +519,12 @@ def _requests_pane_information(scenario_state: dict[str, Any]) -> None:
     ]
 
 
+@then("the command requests analysis from the local Workdash server")
+def _requests_analysis(scenario_state: dict[str, Any]) -> None:
+    control_requests = scenario_state.get("control_requests", [])
+    assert any(req["endpoint"] == "analyze" for req in control_requests)
+
+
 @then("the system reports the Workdash session name")
 @then("the system reports the Workdash-owned session name")
 def _reports_session_name(scenario_state: dict[str, Any]) -> None:
@@ -638,7 +668,7 @@ def _analyzes_with_selected_agent(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["ensure_calls"] == [(scenario_state["workdir"], item)]
 
 
-@then("the system returns JSON with the item id, selected agent, analysis path, and cache status")
+@then("the system returns JSON with the item ID, selected agent, analysis path, and cache status")
 def _returns_analyze_json(scenario_state: dict[str, Any]) -> None:
     payload = json.loads(scenario_state["stdout"])
     assert payload == {
