@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from http import HTTPStatus
 from socketserver import BaseServer
+from typing import TYPE_CHECKING
 from wsgiref.simple_server import make_server
 
 from .backend import SuggestionMarkers, WorkdashBackend
@@ -26,6 +27,9 @@ from .launcher import (
 )
 from .models import WorkItem, format_type_label
 from .repo_worktree import ensure_worktree, existing_worktree_path, get_merge_base
+
+if TYPE_CHECKING:
+    from .tui import WorkdashApp
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8765
@@ -63,29 +67,28 @@ class WorkdashSession:
         work_items: Sequence[WorkItem],
         suggestion_markers: SuggestionMarkers,
         zellij_session: str | None,
+        tui_app: WorkdashApp | None = None,
     ) -> None:
         self.config = config
         self.backend = backend
         self.work_items = list(work_items)
         self.suggestion_markers = dict(suggestion_markers)
         self.zellij_session = zellij_session
+        self.tui_app = tui_app
         self._lock = threading.RLock()
 
     def list_items(self, *, refresh: bool = False) -> dict[str, object]:
         """Return the dashboard items currently known to the shared session."""
 
+        notify_tui = False
         with self._lock:
             if refresh:
                 self.work_items, self.suggestion_markers = self.backend.load_items()
-                # TODO(EVO-010): Notify the live TUI after server-side refresh.
-                # Why: The probe proves shared state refresh, but the visible TUI may not repaint
-                #      immediately after an HTTP client refreshes the server-side item list.
-                # Done: `workdash list --refresh` updates the in-memory state and schedules a safe
-                #       TUI table repaint from the TUI event loop without direct cross-thread widget
-                #       access; focused tests prove both the API response and visible table update.
-                # Non-Goals: Do not introduce a general event bus, background polling loop, or broad
-                #            TUI state management framework in this step.
-            return _work_items_payload(self.work_items, self.suggestion_markers)
+                notify_tui = True
+            payload = _work_items_payload(self.work_items, self.suggestion_markers)
+        if notify_tui:
+            self._notify_tui_refresh()
+        return payload
 
     def info(self, *, include_all_panes: bool = False) -> dict[str, object]:
         """Return live pane state for the server-backed Workdash session."""
@@ -234,6 +237,10 @@ class WorkdashSession:
             )
         send_zellij_pane_input(self.zellij_session, pane_id, data, raw=raw)
         return {"pane_id": pane_id, "raw": raw, "accepted": True}
+
+    def _notify_tui_refresh(self) -> None:
+        if self.tui_app is not None:
+            self.tui_app.call_from_thread(self.tui_app._refresh_from_session)
 
     def _analyze_item(self, item: WorkItem, *, tool: str, prefer_cache: bool) -> str | None:
         if prefer_cache:

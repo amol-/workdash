@@ -742,6 +742,42 @@ def _list_work_items_json(
     )
 
 
+@when("the user runs `workdash list --refresh`")
+def _list_work_items_refresh(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import workdash.workdash as workdash_module
+
+    scenario_state["github_fetches"] = 0
+    scenario_state["refreshed_items"] = [
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.TRACKED_PR,
+            number=2,
+            title="Fresh item",
+            created_at=NOW_UTC,
+            updated_at=NOW_UTC,
+        )
+    ]
+
+    class FakeControlClient:
+        def request(self, endpoint: str, payload: dict[str, object] | None = None):
+            scenario_state.setdefault("client_requests", []).append((endpoint, payload or {}))
+            assert endpoint == "list"
+            return scenario_state["api_session"].list_items(
+                refresh=bool((payload or {}).get("refresh", False))
+            )
+
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+    scenario_state["exit_code"] = workdash_module.main(["list", "--refresh"])
+    captured = capsys.readouterr()
+    scenario_state["print_output"] = captured.out
+    scenario_state["stdout"] = captured.out
+    scenario_state["stderr"] = captured.err
+
+
 def _run_list_command(
     argv: list[str],
     scenario_state: dict[str, Any],
@@ -769,6 +805,31 @@ def _run_list_command(
     scenario_state["print_output"] = captured.out
     scenario_state["stdout"] = captured.out
     scenario_state["stderr"] = captured.err
+
+
+@then("the command asks the local Workdash server to refresh dashboard items")
+def _command_requests_refresh(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("client_requests") == [("list", {"refresh": True})]
+    assert scenario_state.get("github_fetches") == 1
+
+
+@then("the system emits the refreshed work items")
+def _system_emits_refreshed_items(scenario_state: dict[str, Any]) -> None:
+    output = scenario_state["print_output"]
+    for item in scenario_state["refreshed_items"]:
+        assert format_work_item_id(item) in output
+        assert item.title in output
+
+
+@then("the refreshed work items become the shared dashboard state used by the TUI and API")
+def _refreshed_items_become_shared_tui_api_state(scenario_state: dict[str, Any]) -> None:
+    assert [format_work_item_id(item) for item in scenario_state["api_session"].work_items] == [
+        format_work_item_id(item) for item in scenario_state["refreshed_items"]
+    ]
+    assert scenario_state.get("tui_refresh_callbacks") == ["_refresh_from_session"]
+    assert [format_work_item_id(item) for item in scenario_state["tui_work_items"]] == [
+        format_work_item_id(item) for item in scenario_state["refreshed_items"]
+    ]
 
 
 @then("the system emits one line per work item to standard output")

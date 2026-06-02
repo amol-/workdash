@@ -110,6 +110,26 @@ def _api_result(scenario_state: dict[str, Any]) -> dict[str, Any]:
     return payload["result"]
 
 
+class _FakeLiveTui:
+    def __init__(self, session: WorkdashSession, scenario_state: dict[str, Any]) -> None:
+        self._session = session
+        self._state = scenario_state
+        self._inside_call_from_thread = False
+
+    def call_from_thread(self, callback):
+        self._state.setdefault("tui_refresh_callbacks", []).append(callback.__name__)
+        self._inside_call_from_thread = True
+        try:
+            callback()
+        finally:
+            self._inside_call_from_thread = False
+
+    def _refresh_from_session(self) -> None:
+        assert self._inside_call_from_thread
+        self._state["tui_work_items"] = list(self._session.work_items)
+        self._state["tui_suggestion_markers"] = dict(self._session.suggestion_markers)
+
+
 class _FakeApiBackend:
     def __init__(self, scenario_state: dict[str, Any], tmp_path: Path) -> None:
         self._state = scenario_state
@@ -157,7 +177,8 @@ def _server_session_running(
     scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
 ) -> None:
     _seed_dashboard_item(work_items, scenario_state)
-    _ensure_api_session(scenario_state, work_items, tmp_path)
+    session = _ensure_api_session(scenario_state, work_items, tmp_path)
+    session.tui_app = _FakeLiveTui(session, scenario_state)  # type: ignore[assignment]
 
 
 @given("the Workdash Zellij session has live Workdash-owned panes")
@@ -603,7 +624,13 @@ def _refreshed_items_become_shared_state(scenario_state: dict[str, Any]) -> None
 
 @then("the live TUI reflects the refreshed state when it can safely repaint")
 def _live_tui_reflects_refreshed_state_when_safe(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["api_session"].work_items == scenario_state["refreshed_items"]
+    assert scenario_state.get("tui_refresh_callbacks") == ["_refresh_from_session"]
+    assert [format_work_item_id(item) for item in scenario_state["tui_work_items"]] == [
+        format_work_item_id(item) for item in scenario_state["refreshed_items"]
+    ]
+    assert scenario_state["tui_suggestion_markers"] == compute_suggestion_markers(
+        scenario_state["refreshed_items"]
+    )
 
 
 @then("the API returns pane records from the live Zellij session")

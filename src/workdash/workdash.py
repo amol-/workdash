@@ -187,13 +187,6 @@ class WorkdashCommands:
             suggestion_markers=suggestion_markers,
             zellij_session=zellij_session,
         )
-        control_server = WorkdashControlServer(session) if server else None
-        if control_server is not None:
-            try:
-                control_server.start()
-            except RuntimeError as error:
-                print(f"Error: {error}", file=sys.stderr, flush=True)
-                return 1
         app = WorkdashApp(
             work_items=session.work_items,
             suggestion_markers=session.suggestion_markers,
@@ -213,7 +206,16 @@ class WorkdashCommands:
                 ensure_worktree(config.workdir, item)
             ),
             include_callback=backend.include_item_by_url,
+            session=session,
         )
+        session.tui_app = app
+        control_server = WorkdashControlServer(session) if server else None
+        if control_server is not None:
+            try:
+                control_server.start()
+            except RuntimeError as error:
+                print(f"Error: {error}", file=sys.stderr, flush=True)
+                return 1
         try:
             app.run()
         finally:

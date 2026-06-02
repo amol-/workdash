@@ -325,6 +325,68 @@ def test_workdash_app_refresh_keybinding_invokes_callback_and_reloads_rows() -> 
     asyncio.run(run_smoke())
 
 
+def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    initial_item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=11,
+        title="Fix parser",
+        created_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/issues/11",
+    )
+    refreshed_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=33,
+        title="Ship refresh",
+        created_at=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/33",
+    )
+
+    class Session:
+        work_items = [initial_item]
+        suggestion_markers = {}
+
+    session = Session()
+    app = WorkdashApp(
+        work_items=[initial_item],
+        session=session,
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            table = app.query_one("#work-items", DataTable)
+            assert table.get_row_at(0) == [
+                "ISSUE",
+                "owner/repo",
+                "Fix parser",
+                "6d",
+                "6d",
+            ]
+
+            session.work_items = [refreshed_item]
+            session.suggestion_markers = {(WorkItemType.PR, "owner/repo", 33): "*"}
+            app._refresh_from_session()
+
+            assert table.row_count == 1
+            assert [str(c) for c in table.get_row_at(0)] == [
+                "PR",
+                "owner/repo",
+                "* Ship refresh",
+                "0d",
+                "0d",
+            ]
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
 def test_workdash_app_footer_shows_success_status_for_actions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

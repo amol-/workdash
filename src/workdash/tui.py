@@ -6,7 +6,7 @@ import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from .backend import IncludeResult, compute_suggestion_markers
 from .config import WorkdashAgentChoice
@@ -17,6 +17,9 @@ SuggestionMarkers = dict[tuple[WorkItemType, str, int], str]
 RefreshCallbackResult = Sequence[WorkItem] | tuple[Sequence[WorkItem], SuggestionMarkers]
 AnalyzeCallbackResult = str | None
 _CallbackResult = TypeVar("_CallbackResult")
+
+if TYPE_CHECKING:
+    from .control import WorkdashSession
 
 
 def _to_utc(dt: datetime) -> datetime:
@@ -52,6 +55,7 @@ except ModuleNotFoundError:  # pragma: no cover - allows import before deps are 
             include_callback: (
                 Callable[[str, set[tuple[WorkItemType, str, int]]], IncludeResult] | None
             ) = None,
+            session: WorkdashSession | None = None,
             now_utc: datetime | None = None,
         ) -> None:
             self.work_items = tuple(work_items or ())
@@ -64,6 +68,7 @@ except ModuleNotFoundError:  # pragma: no cover - allows import before deps are 
             self.code_choices = tuple(code_choices or ())
             self.terminal_callback = terminal_callback
             self.include_callback = include_callback
+            self.session = session
             self.now_utc = now_utc or datetime.now(UTC)
             self.status_message = "Ready."
 else:
@@ -282,9 +287,11 @@ else:
             include_callback: (
                 Callable[[str, set[tuple[WorkItemType, str, int]]], IncludeResult] | None
             ) = None,
+            session: WorkdashSession | None = None,
             now_utc: datetime | None = None,
         ) -> None:
             super().__init__()
+            self._session = session
             self._work_items = list(work_items or ())
             self._sorted_work_items: list[WorkItem] = []
             self._suggestion_markers = dict(suggestion_markers or {})
@@ -315,6 +322,13 @@ else:
         def _title_with_suggestion_marker(self, item: WorkItem) -> str:
             marker = self._suggestion_markers.get((item.item_type, item.repo, item.number))
             return f"* {item.title}" if marker else item.title
+
+        def _refresh_from_session(self) -> None:
+            if self._session is None:
+                return
+            self._work_items = list(self._session.work_items)
+            self._suggestion_markers = dict(self._session.suggestion_markers)
+            self._render_table()
 
         def _render_table(self, *, focus_item: WorkItem | None = None) -> None:
             table = self.query_one("#work-items", DataTable)

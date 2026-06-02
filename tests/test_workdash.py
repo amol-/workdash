@@ -100,6 +100,58 @@ def test_main_prints_loading_message_before_tui_start(
     assert captured.out.startswith("Loading work items from GitHub...\n")
 
 
+def test_main_wires_live_tui_app_before_starting_control_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = _issue()
+    captured: dict[str, object] = {}
+
+    class FakeBackend:
+        def __init__(self, config=None, **kwargs) -> None:
+            pass
+
+        def load_items(self, progress_callback=None):
+            return [item], {}
+
+        def include_item_by_url(self, _url, _existing_identities):
+            return None
+
+    class FakeControlServer:
+        def __init__(self, session) -> None:
+            self.session = session
+
+        def start(self) -> None:
+            assert self.session.tui_app is captured["app"]
+            captured["server_started"] = True
+
+        def stop(self) -> None:
+            captured["server_stopped"] = True
+
+    class FakeApp:
+        def __init__(self, **kwargs) -> None:
+            captured["app"] = self
+            captured["app_session"] = kwargs["session"]
+
+        def run(self) -> None:
+            captured["app_ran"] = True
+
+    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+    monkeypatch.setattr(workdash_module, "WorkdashControlServer", FakeControlServer)
+    monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
+    monkeypatch.setattr(workdash_module, "list_workdash_sessions", lambda: ["workdash-main"])
+    monkeypatch.setenv("ZELLIJ", "0")
+
+    assert workdash_module.main(["--server"]) == 0
+
+    assert captured["app_session"].tui_app is captured["app"]
+    assert captured["server_started"] is True
+    assert captured["app_ran"] is True
+    assert captured["server_stopped"] is True
+
+
 def test_main_passes_configured_agent_choices_to_tui(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
