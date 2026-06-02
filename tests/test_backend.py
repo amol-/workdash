@@ -208,6 +208,75 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
     assert suggestion_markers == {(WorkItemType.PR, "owner/repo", 10): "*"}
 
 
+def test_load_items_submits_independent_github_fetches_before_waiting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[tuple[str, str]] = []
+
+    class FakeFuture:
+        def __init__(self, name, callback, args, kwargs) -> None:
+            self.name = name
+            self.callback = callback
+            self.args = args
+            self.kwargs = kwargs
+
+        def result(self):
+            events.append(("result", self.name))
+            return self.callback(*self.args, **self.kwargs)
+
+    class FakeThreadPoolExecutor:
+        def __init__(self, max_workers) -> None:
+            assert max_workers == 5
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback) -> None:
+            pass
+
+        def submit(self, callback, *args, **kwargs):
+            events.append(("submit", callback.__name__))
+            return FakeFuture(callback.__name__, callback, args, kwargs)
+
+    class FakeGitHubClient:
+        def list_open_authored_prs(self, login):
+            return []
+
+        def list_open_review_requested_prs(self, login, progress_callback=None):
+            return []
+
+        def list_open_reviewed_prs(self, login):
+            return []
+
+        def list_open_assigned_issues(self, login):
+            return []
+
+        def list_recent_tracked_items(self, repositories, progress_callback=None):
+            return []
+
+    monkeypatch.setattr(backend_module, "ThreadPoolExecutor", FakeThreadPoolExecutor)
+    backend = WorkdashBackend(
+        github_client=FakeGitHubClient(),
+        analysis_cache=MagicMock(),
+        config=WorkdashConfig(repositories=("owner/repo",)),
+        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+    )
+
+    work_items, suggestion_markers = backend.load_items(progress_callback=lambda _: None)
+
+    expected_fetches = [
+        "list_open_authored_prs",
+        "list_open_review_requested_prs",
+        "list_open_reviewed_prs",
+        "list_open_assigned_issues",
+        "list_recent_tracked_items",
+    ]
+    assert work_items == []
+    assert suggestion_markers == {}
+    assert events[:5] == [("submit", name) for name in expected_fetches]
+    assert events[5] == ("result", "list_open_authored_prs")
+
+
 def test_compute_suggestion_markers_prefers_pr_when_age_is_tied() -> None:
     created_at = datetime(2026, 2, 1, 0, 0, 0, tzinfo=UTC)
     issue = make_work_item(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -105,28 +106,43 @@ class WorkdashBackend:
         for repository in repositories:
             report_progress(f"  - {repository}")
         github_username = self.config.github_username
-        report_progress("Fetching open authored pull requests...")
-        authored_pull_requests = self.github_client.list_open_authored_prs(github_username)
-        report_progress(f"Fetched {len(authored_pull_requests)} open authored pull request(s).")
-        report_progress("Fetching open review-requested pull requests...")
-        review_requested_pull_requests = self.github_client.list_open_review_requested_prs(
-            github_username,
-            progress_callback=report_progress,
-        )
-        report_progress(
-            f"Fetched {len(review_requested_pull_requests)} open review-requested pull request(s)."
-        )
-        report_progress("Fetching open reviewed pull requests...")
-        reviewed_pull_requests = self.github_client.list_open_reviewed_prs(github_username)
-        report_progress(f"Fetched {len(reviewed_pull_requests)} open reviewed pull request(s).")
-        report_progress("Fetching open assigned issues...")
-        assigned_issues = self.github_client.list_open_assigned_issues(github_username)
-        report_progress(f"Fetched {len(assigned_issues)} open assigned issue(s).")
-        report_progress("Fetching tracked issues and pull requests...")
-        recent_tracked_items = self.github_client.list_recent_tracked_items(
-            repositories,
-            progress_callback=report_progress,
-        )
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            report_progress("Fetching open authored pull requests...")
+            authored_future = executor.submit(
+                self.github_client.list_open_authored_prs, github_username
+            )
+            report_progress("Fetching open review-requested pull requests...")
+            review_requested_future = executor.submit(
+                self.github_client.list_open_review_requested_prs,
+                github_username,
+                progress_callback=report_progress,
+            )
+            report_progress("Fetching open reviewed pull requests...")
+            reviewed_future = executor.submit(
+                self.github_client.list_open_reviewed_prs, github_username
+            )
+            report_progress("Fetching open assigned issues...")
+            assigned_future = executor.submit(
+                self.github_client.list_open_assigned_issues, github_username
+            )
+            report_progress("Fetching tracked issues and pull requests...")
+            tracked_future = executor.submit(
+                self.github_client.list_recent_tracked_items,
+                repositories,
+                progress_callback=report_progress,
+            )
+
+            authored_pull_requests = authored_future.result()
+            report_progress(f"Fetched {len(authored_pull_requests)} open authored pull request(s).")
+            review_requested_pull_requests = review_requested_future.result()
+            report_progress(
+                f"Fetched {len(review_requested_pull_requests)} open review-requested pull request(s)."
+            )
+            reviewed_pull_requests = reviewed_future.result()
+            report_progress(f"Fetched {len(reviewed_pull_requests)} open reviewed pull request(s).")
+            assigned_issues = assigned_future.result()
+            report_progress(f"Fetched {len(assigned_issues)} open assigned issue(s).")
+            recent_tracked_items = tracked_future.result()
         merged_review_items = merge_normalized_work_items(
             normalize_review_requested_pull_requests(review_requested_pull_requests),
             normalize_review_requested_pull_requests(reviewed_pull_requests),
