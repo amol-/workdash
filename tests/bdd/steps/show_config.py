@@ -58,6 +58,34 @@ def _run_show_config_json(
     scenario_state["output"] = captured.out + captured.err
 
 
+@when("the user runs `workdash show-config`")
+def _run_show_config(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import workdash.workdash as workdash_module
+
+    config = WorkdashConfig(
+        github_username="testuser",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        codex=AgentConfig(analyze="codex exec", launch="codex"),
+        pi=AgentConfig(launch="pi"),
+        repositories=("owner/repo",),
+        workdir="/tmp/workdash-bdd",
+    )
+
+    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
+    monkeypatch.setattr(workdash_module.WorkdashConfig, "require_valid", lambda self: self)
+
+    commands = workdash_module.WorkdashCommands()
+    scenario_state["exit_code"] = commands.show_config(json_output=False)
+    captured = capsys.readouterr()
+    scenario_state["stdout"] = captured.out
+    scenario_state["stderr"] = captured.err
+    scenario_state["output"] = captured.out + captured.err
+
+
 @then("the system reports `codex` as an analysis agent")
 def _reports_codex_analyze_agent(scenario_state: dict[str, Any]) -> None:
     payload = json.loads(scenario_state["stdout"])
@@ -82,3 +110,11 @@ def _reports_server_host(scenario_state: dict[str, Any]) -> None:
 def _reports_server_port(scenario_state: dict[str, Any]) -> None:
     payload = json.loads(scenario_state["stdout"])
     assert payload["server"]["port"] == 8765
+
+
+@then("the system reports the configured automation options")
+def _reports_configured_automation_options(scenario_state: dict[str, Any]) -> None:
+    output = scenario_state["output"]
+    assert "Analysis agents:" in output
+    assert "Code agents:" in output
+    assert "Server:" in output
