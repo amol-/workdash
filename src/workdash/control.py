@@ -505,16 +505,6 @@ def _make_turbogears_app(session: WorkdashSession):
             response.status_int = HTTPStatus.NOT_FOUND
             return _error_envelope("not_found", "Unknown Workdash API endpoint.")
 
-        # TODO(EVO-020): Graduate the API contract with focused endpoint tests.
-        # Why: The probe wires real TurboGears routes and CLI clients, but the public HTTP surface
-        #      needs focused contract tests and BDD step bindings before other agents can safely
-        #      depend on it.
-        # Done: Tests cover every documented `/api/v0/...` endpoint, success/error envelopes, HTTP
-        #       statuses, localhost rejection, CLI passthrough for list/info/show-config/analyze/code,
-        #       and the new feature scenarios no longer fail due to missing step definitions.
-        # Non-Goals: Do not add browser UI tests, authentication, non-local binding, or a broad
-        #            end-to-end suite in this step.
-
     class ApiController(TGController):
         def __init__(self, workdash_session: WorkdashSession) -> None:
             self.v0 = V0Controller(workdash_session)

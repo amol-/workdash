@@ -16,6 +16,9 @@ from .steps import (
     analysis as _analysis,
 )
 from .steps import (
+    api as _api,
+)
+from .steps import (
     browse as _browse,
 )
 from .steps import (
@@ -45,6 +48,7 @@ from .steps import (
 
 for _step_module in (
     _common,
+    _api,
     _cli_orchestration,
     _triage,
     _worktrees,
