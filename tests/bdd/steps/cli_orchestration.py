@@ -235,6 +235,7 @@ def _session_has_terminal_backed_panes(
     scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
 ) -> None:
     _item, cwd = _seed_info_item(scenario_state, work_items, tmp_path)
+    scenario_state["known_worktree_path"] = cwd
     scenario_state["panes"] = [
         {
             "id": 3,
