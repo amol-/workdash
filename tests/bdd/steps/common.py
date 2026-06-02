@@ -293,6 +293,11 @@ def _command_exits_nonzero(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["exit_code"] != 0, scenario_state
 
 
+@then("the command exits with a zero status")
+def _command_exits_zero(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state
+
+
 # -- Auxiliary helpers shared across domains --------------------------------
 
 

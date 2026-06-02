@@ -800,6 +800,25 @@ def _run_list_command(
             raise AssertionError("TUI should not run for list command")
 
     monkeypatch.setattr(workdash_module, "WorkdashApp", UnreachableApp)
+
+    if scenario_state.get("api_session") is not None:
+
+        class FakeControlClient:
+            def request(
+                self, endpoint: str, payload: dict[str, object] | None = None
+            ) -> dict[str, object]:
+                payload = payload or {}
+                scenario_state.setdefault("control_requests", []).append(
+                    {"endpoint": endpoint, "payload": dict(payload)}
+                )
+                if endpoint == "list":
+                    return scenario_state["api_session"].list_items(
+                        refresh=bool(payload.get("refresh", False))
+                    )
+                raise AssertionError(f"Unexpected control endpoint: {endpoint}")
+
+        monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+
     scenario_state["exit_code"] = workdash_module.main(argv)
     captured = capsys.readouterr()
     scenario_state["print_output"] = captured.out
@@ -832,16 +851,30 @@ def _refreshed_items_become_shared_tui_api_state(scenario_state: dict[str, Any])
     ]
 
 
+@then("the command requests the current item list from the local Workdash server")
+def _command_requests_current_items(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("control_requests") == [
+        {"endpoint": "list", "payload": {"refresh": False}}
+    ]
+
+
 @then("the system emits one line per work item to standard output")
-def _print_one_line_per_item(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
+def _print_one_line_per_item(scenario_state: dict[str, Any]) -> None:
     output_lines = [line for line in scenario_state["print_output"].splitlines() if line.strip()]
-    assert len(output_lines) == len(work_items), (
+    expected_items = scenario_state["api_session"].list_items(refresh=False)["items"]
+    assert len(output_lines) == len(expected_items), (
         scenario_state["print_output"],
-        work_items,
+        expected_items,
     )
+    assert "No work items found." not in scenario_state["print_output"]
+    for line, item in zip(output_lines, expected_items, strict=True):
+        assert item["id"] in line
+        assert item["title"] in line
+        assert str(item["updated_at"])[:10] in line
 
 
 @then("the TUI is not started")
+@then("the TUI is not started by the command")
 def _tui_not_started(scenario_state: dict[str, Any]) -> None:
     # UnreachableApp raises if instantiated — reaching this step means no TUI.
     assert "print_output" in scenario_state
