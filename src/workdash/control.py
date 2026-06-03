@@ -7,14 +7,12 @@ import os
 import threading
 import urllib.error
 import urllib.request
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
 from http import HTTPStatus
 from socketserver import BaseServer
-from typing import TYPE_CHECKING
 from wsgiref.simple_server import make_server
 
-from .backend import SuggestionMarkers, WorkdashBackend
+from .backend import IncludeResult, SuggestionMarkers, WorkdashBackend, compute_suggestion_markers
 from .config import WorkdashConfig
 from .github_client import parse_github_item_url
 from .launcher import (
@@ -27,9 +25,6 @@ from .launcher import (
 )
 from .models import WorkItem, format_type_label
 from .repo_worktree import ensure_worktree, existing_worktree_path, get_merge_base
-
-if TYPE_CHECKING:
-    from .tui import WorkdashApp
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8765
@@ -45,17 +40,6 @@ class WorkdashControlError(RuntimeError):
         super().__init__(message)
 
 
-@dataclass(frozen=True)
-class WorkdashServerAddress:
-    """The fixed V0 local server address reported to clients."""
-
-    host: str = SERVER_HOST
-    port: int = SERVER_PORT
-
-    def as_dict(self) -> dict[str, object]:
-        return {"host": self.host, "port": self.port}
-
-
 class WorkdashSession:
     """Shared in-memory dashboard state used by the TUI and JSON API."""
 
@@ -67,27 +51,27 @@ class WorkdashSession:
         work_items: Sequence[WorkItem],
         suggestion_markers: SuggestionMarkers,
         zellij_session: str | None,
-        tui_app: WorkdashApp | None = None,
+        items_changed_callback: Callable[[], None] | None = None,
     ) -> None:
         self.config = config
         self.backend = backend
         self.work_items = list(work_items)
         self.suggestion_markers = dict(suggestion_markers)
         self.zellij_session = zellij_session
-        self.tui_app = tui_app
+        self.items_changed_callback = items_changed_callback
         self._lock = threading.RLock()
 
     def list_items(self, *, refresh: bool = False) -> dict[str, object]:
         """Return the dashboard items currently known to the shared session."""
 
-        notify_tui = False
+        notify_items_changed = False
         with self._lock:
             if refresh:
                 self.work_items, self.suggestion_markers = self.backend.load_items()
-                notify_tui = True
+                notify_items_changed = True
             payload = _work_items_payload(self.work_items, self.suggestion_markers)
-        if notify_tui:
-            self._notify_tui_refresh()
+        if notify_items_changed:
+            self._notify_items_changed()
         return payload
 
     def info(self, *, include_all_panes: bool = False) -> dict[str, object]:
@@ -112,6 +96,32 @@ class WorkdashSession:
 
         return show_config_payload(self.config)
 
+    def include_item_by_url(self, url: str) -> IncludeResult:
+        """Include a GitHub URL in the shared dashboard session."""
+
+        notify_items_changed = False
+        with self._lock:
+            existing_identities = {
+                (item.item_type, item.repo, item.number) for item in self.work_items
+            }
+            result = self.backend.include_item_by_url(url, existing_identities)
+            if result.duplicate_identity is not None:
+                item_type, repo, number = result.duplicate_identity
+                existing = next(
+                    item
+                    for item in self.work_items
+                    if item.item_type == item_type and item.repo == repo and item.number == number
+                )
+                existing.included = True
+                notify_items_changed = True
+            elif result.fetched_item is not None:
+                self.work_items.append(result.fetched_item)
+                self.suggestion_markers = compute_suggestion_markers(self.work_items)
+                notify_items_changed = True
+        if notify_items_changed:
+            self._notify_items_changed()
+        return result
+
     def analyze(
         self, *, target: str, agent: str | None = None, prefer_cache: bool = True
     ) -> dict[str, object]:
@@ -132,6 +142,8 @@ class WorkdashSession:
                         f"Analysis agent {agent!r} is not configured.",
                         status=HTTPStatus.BAD_REQUEST,
                     )
+                if selected_agent is None and cache_used:
+                    selected_agent = "cached"
                 if selected_agent is None:
                     raise WorkdashControlError(
                         "no_agent",
@@ -238,9 +250,9 @@ class WorkdashSession:
         send_zellij_pane_input(self.zellij_session, pane_id, data, raw=raw)
         return {"pane_id": pane_id, "raw": raw, "accepted": True}
 
-    def _notify_tui_refresh(self) -> None:
-        if self.tui_app is not None:
-            self.tui_app.call_from_thread(self.tui_app._refresh_from_session)
+    def _notify_items_changed(self) -> None:
+        if self.items_changed_callback is not None:
+            self.items_changed_callback()
 
     def _analyze_item(self, item: WorkItem, *, tool: str, prefer_cache: bool) -> str | None:
         if prefer_cache:
@@ -328,10 +340,14 @@ class WorkdashControlClient:
                 f"Workdash server returned invalid JSON: {error.msg}",
             ) from error
         if not isinstance(envelope, dict) or envelope.get("ok") is not True:
-            raise WorkdashControlError("invalid_response", "Workdash server returned an invalid response.")
+            raise WorkdashControlError(
+                "invalid_response", "Workdash server returned an invalid response."
+            )
         result = envelope.get("result")
         if not isinstance(result, dict):
-            raise WorkdashControlError("invalid_response", "Workdash server result was not an object.")
+            raise WorkdashControlError(
+                "invalid_response", "Workdash server result was not an object."
+            )
         return result
 
 
@@ -365,7 +381,7 @@ def show_config_payload(config: WorkdashConfig) -> dict[str, object]:
             "analyze": config.configured_analyze_agents(),
             "code": config.configured_code_agents(),
         },
-        "server": WorkdashServerAddress().as_dict(),
+        "server": {"host": SERVER_HOST, "port": SERVER_PORT},
     }
 
 
@@ -378,6 +394,7 @@ def _work_items_payload(
             {
                 "id": format_work_item_id(item),
                 "type": item.item_type.value,
+                "display_type": format_type_label(item),
                 "kind": item.kind.value,
                 "repo": item.repo,
                 "number": item.number,
@@ -409,7 +426,9 @@ def _pane_info_payload(
     panes = []
     for pane in load_zellij_panes(session):
         if _is_workdash_work_pane(pane):
-            panes.append(_pane_payload(selected_session=session, pane=pane, item_by_cwd=item_by_cwd))
+            panes.append(
+                _pane_payload(selected_session=session, pane=pane, item_by_cwd=item_by_cwd)
+            )
         elif include_all_panes and _is_live_non_plugin_pane(pane):
             panes.append(
                 _pane_payload(
@@ -464,7 +483,9 @@ def _make_turbogears_app(session: WorkdashSession):
             return _handle_json_request(
                 request,
                 response,
-                lambda payload: self._session.list_items(refresh=bool(payload.get("refresh", False))),
+                lambda payload: self._session.list_items(
+                    refresh=bool(payload.get("refresh", False))
+                ),
             )
 
         @expose("json")
@@ -501,7 +522,9 @@ def _make_turbogears_app(session: WorkdashSession):
 
         @expose("json")
         def show_config(self):
-            return _handle_json_request(request, response, lambda _payload: self._session.show_config())
+            return _handle_json_request(
+                request, response, lambda _payload: self._session.show_config()
+            )
 
         @expose("json")
         def _default(self, *path):
@@ -528,7 +551,9 @@ def _make_turbogears_app(session: WorkdashSession):
 def _handle_json_request(request, response, action) -> dict[str, object]:
     if request.method != "POST":
         response.status_int = HTTPStatus.METHOD_NOT_ALLOWED
-        return _error_envelope("method_not_allowed", "Workdash API endpoints accept POST JSON only.")
+        return _error_envelope(
+            "method_not_allowed", "Workdash API endpoints accept POST JSON only."
+        )
     try:
         body = request.body or b"{}"
         if isinstance(body, str):
@@ -536,7 +561,9 @@ def _handle_json_request(request, response, action) -> dict[str, object]:
         payload = json.loads(body.decode("utf-8") or "{}")
         if not isinstance(payload, dict):
             raise WorkdashControlError(
-                "invalid_json", "Request JSON body must be an object.", status=HTTPStatus.BAD_REQUEST
+                "invalid_json",
+                "Request JSON body must be an object.",
+                status=HTTPStatus.BAD_REQUEST,
             )
         return {"ok": True, "result": action(payload)}
     except WorkdashControlError as error:
@@ -590,7 +617,9 @@ def _required_text(payload: dict[str, object], field: str) -> str:
     value = payload.get(field)
     if not isinstance(value, str) or not value:
         raise WorkdashControlError(
-            "bad_request", f"Missing required string field {field!r}.", status=HTTPStatus.BAD_REQUEST
+            "bad_request",
+            f"Missing required string field {field!r}.",
+            status=HTTPStatus.BAD_REQUEST,
         )
     return value
 
@@ -601,7 +630,9 @@ def _optional_text(payload: dict[str, object], field: str) -> str | None:
         return None
     if not isinstance(value, str) or not value:
         raise WorkdashControlError(
-            "bad_request", f"Optional field {field!r} must be a non-empty string.", status=HTTPStatus.BAD_REQUEST
+            "bad_request",
+            f"Optional field {field!r} must be a non-empty string.",
+            status=HTTPStatus.BAD_REQUEST,
         )
     return value
 

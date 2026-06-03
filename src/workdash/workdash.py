@@ -58,6 +58,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Error: {gh_error}", file=sys.stderr, flush=True)
         return 1
 
+    if not commands.preload_config():
+        return 1
+
     if _should_wrap_interactive_start(options):
         try:
             exec_zellij_wrapped_workdash(argv)
@@ -164,6 +167,18 @@ class WorkdashCommands:
             _print_show_config(result)
         return 0
 
+    def preload_config(self) -> bool:
+        """Validate startup config before any Zellij wrapping."""
+
+        if self._config is not None:
+            return True
+        try:
+            self._config = load_config().require_valid()
+        except WorkdashConfigValidationError as error:
+            _print_config_validation_error(error)
+            return False
+        return True
+
     def interactive(self, *, server: bool = False) -> int:
         """Start the interactive dashboard, optionally with the JSON server."""
 
@@ -191,8 +206,10 @@ class WorkdashCommands:
             work_items=session.work_items,
             suggestion_markers=session.suggestion_markers,
             open_callback=lambda item: open_in_browser(item.url),
-            refresh_callback=lambda: session.list_items(refresh=True)
-            and (session.work_items, session.suggestion_markers),
+            refresh_callback=lambda: (
+                session.list_items(refresh=True)
+                and (session.work_items, session.suggestion_markers)
+            ),
             worktree_callback=lambda item: ensure_worktree(config.workdir, item),
             analyze_callback=lambda item, tool="codex": session.analyze(
                 target=format_work_item_id(item), agent=tool, prefer_cache=(tool == "cached")
@@ -205,10 +222,21 @@ class WorkdashCommands:
             terminal_callback=lambda item: launch_terminal_context(
                 ensure_worktree(config.workdir, item)
             ),
-            include_callback=backend.include_item_by_url,
+            include_callback=lambda url, _identities: session.include_item_by_url(url),
             session=session,
         )
-        session.tui_app = app
+        if server:
+
+            def refresh_tui_from_session() -> None:
+                if not app.is_running:
+                    return
+                try:
+                    app.call_from_thread(app.refresh_from_session)
+                except RuntimeError as error:
+                    if str(error) != "App is not running":
+                        raise
+
+            session.items_changed_callback = refresh_tui_from_session
         control_server = WorkdashControlServer(session) if server else None
         if control_server is not None:
             try:
@@ -226,13 +254,11 @@ class WorkdashCommands:
     def _load_config_and_backend(self) -> tuple[WorkdashConfig, WorkdashBackend] | None:
         if self._config is not None and self._backend is not None:
             return self._config, self._backend
-        try:
-            config = load_config().require_valid()
-        except WorkdashConfigValidationError as error:
-            _print_config_validation_error(error)
+        if self._config is None and not self.preload_config():
             return None
+        config = self._config
+        assert config is not None
         backend = WorkdashBackend(config=config)
-        self._config = config
         self._backend = backend
         return config, backend
 
@@ -465,8 +491,10 @@ def _print_work_items_result(result: dict[str, object]) -> None:
         if not isinstance(item, dict):
             continue
         title = f"* {item['title']}" if item.get("suggested") else item["title"]
-        type_label = str(item["id"]).split("#", maxsplit=1)[1].split("-", maxsplit=1)[0]
-        print(f"{type_label:7} {item['id']:24} {str(item['updated_at'])[:10]} {title}")
+        display_type = item.get("display_type")
+        if display_type is None:
+            display_type = str(item["id"]).split("#", maxsplit=1)[1].split("-", maxsplit=1)[0]
+        print(f"{display_type:7} {item['id']:24} {str(item['updated_at'])[:10]} {title}")
 
 
 def _print_analysis_result(result: dict[str, object]) -> None:

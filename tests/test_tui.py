@@ -1,6 +1,7 @@
 import asyncio
 import threading
 from datetime import UTC, datetime
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -11,6 +12,7 @@ from textual.widgets import DataTable, Static
 
 from workdash.backend import IncludeResult
 from workdash.config import AgentConfig, WorkdashConfig
+from workdash.control import WorkdashSession
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import AnalyzeDialog, CodeDialog, WorkdashApp
 
@@ -325,6 +327,60 @@ def test_workdash_app_refresh_keybinding_invokes_callback_and_reloads_rows() -> 
     asyncio.run(run_smoke())
 
 
+def test_workdash_app_uses_session_state_for_first_render() -> None:
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    initial_item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=11,
+        title="Stale constructor copy",
+        created_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/issues/11",
+    )
+    refreshed_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=33,
+        title="Session state before Textual starts",
+        created_at=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/33",
+    )
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=MagicMock(),
+        work_items=[initial_item],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+    app = WorkdashApp(
+        work_items=session.work_items,
+        suggestion_markers=session.suggestion_markers,
+        session=session,
+        now_utc=now_utc,
+    )
+    session.work_items = [refreshed_item]
+    session.suggestion_markers = {(WorkItemType.PR, "owner/repo", 33): "*"}
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            table = app.query_one("#work-items", DataTable)
+            assert table.row_count == 1
+            assert [str(c) for c in table.get_row_at(0)] == [
+                "PR",
+                "owner/repo",
+                "* Session state before Textual starts",
+                "0d",
+                "0d",
+            ]
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
 def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
     now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
     initial_item = WorkItem(
@@ -372,7 +428,7 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
 
             session.work_items = [refreshed_item]
             session.suggestion_markers = {(WorkItemType.PR, "owner/repo", 33): "*"}
-            app._refresh_from_session()
+            app.refresh_from_session()
 
             assert table.row_count == 1
             assert [str(c) for c in table.get_row_at(0)] == [
@@ -895,6 +951,65 @@ def test_workdash_app_include_recomputes_suggestion_marker() -> None:
             await pilot.press("q")
 
     asyncio.run(run_smoke())
+
+
+def test_workdash_app_include_updates_server_session_state() -> None:
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    existing_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Previously suggested",
+        created_at=datetime(2026, 2, 10, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        url="https://github.com/owner/repo/pull/22",
+    )
+    newly_fetched_item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=77,
+        title="Freshly fetched older issue",
+        created_at=datetime(2026, 1, 5, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 24, 0, 0, 0, tzinfo=UTC),
+        url="https://github.com/owner/repo/issues/77",
+        included=True,
+    )
+    backend = MagicMock()
+    backend.include_item_by_url.return_value = IncludeResult(fetched_item=newly_fetched_item)
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=[existing_item],
+        suggestion_markers={(WorkItemType.PR, "owner/repo", 22): "*"},
+        zellij_session="workdash-main",
+    )
+    app = WorkdashApp(
+        work_items=session.work_items,
+        suggestion_markers=session.suggestion_markers,
+        include_callback=lambda url, _identities: session.include_item_by_url(url),
+        session=session,
+        now_utc=now_utc,
+    )
+    session.items_changed_callback = lambda: app.call_from_thread(app.refresh_from_session)
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await app._perform_include("https://github.com/owner/repo/issues/77")
+            await pilot.pause()
+            table = app.query_one("#work-items", DataTable)
+            assert table.row_count == 2
+            assert session.work_items == [existing_item, newly_fetched_item]
+            assert session.suggestion_markers == {(WorkItemType.ISSUE, "owner/repo", 77): "*"}
+            assert session.list_items()["items"][0]["id"] == "owner/repo#ISSUE-77"
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+    backend.include_item_by_url.assert_called_once_with(
+        "https://github.com/owner/repo/issues/77", {(WorkItemType.PR, "owner/repo", 22)}
+    )
 
 
 def test_workdash_app_include_duplicate_url_surfaces_persist_failure() -> None:

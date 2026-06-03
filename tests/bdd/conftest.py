@@ -34,10 +34,10 @@ from .steps import (
     setup as _setup,
 )
 from .steps import (
-    startup as _startup,
+    show_config as _show_config,
 )
 from .steps import (
-    show_config as _show_config,
+    startup as _startup,
 )
 from .steps import (
     terminal as _terminal,

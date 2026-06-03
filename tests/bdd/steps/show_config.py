@@ -22,6 +22,16 @@ def _config_has_codex_and_pi_launch(scenario_state: dict[str, Any]) -> None:
     scenario_state.setdefault("config_overrides", {})["pi_launch"] = "pi"
 
 
+@given("the configuration has no Claude analyze command")
+def _config_has_no_claude_analyze(scenario_state: dict[str, Any]) -> None:
+    scenario_state.setdefault("config_overrides", {})["claude_analyze"] = ""
+
+
+@given("the configuration has no pi launch command")
+def _config_has_no_pi_launch(scenario_state: dict[str, Any]) -> None:
+    scenario_state.setdefault("config_overrides", {})["pi_launch"] = ""
+
+
 @when("the user runs `workdash show-config --json`")
 def _run_show_config_json(
     scenario_state: dict[str, Any],
@@ -34,7 +44,7 @@ def _run_show_config_json(
     config_overrides = scenario_state.get("config_overrides", {})
     config = WorkdashConfig(
         github_username="testuser",
-        claude=AgentConfig(analyze="", launch=""),
+        claude=AgentConfig(analyze=config_overrides.get("claude_analyze", ""), launch=""),
         codex=AgentConfig(
             analyze=config_overrides.get("codex_analyze", ""),
             launch=config_overrides.get("codex_launch", ""),
@@ -118,3 +128,15 @@ def _reports_configured_automation_options(scenario_state: dict[str, Any]) -> No
     assert "Analysis agents:" in output
     assert "Code agents:" in output
     assert "Server:" in output
+
+
+@then("the system does not report `claude` as an analysis agent")
+def _does_not_report_claude_analyze_agent(scenario_state: dict[str, Any]) -> None:
+    payload = json.loads(scenario_state["stdout"])
+    assert "claude" not in payload["agents"]["analyze"]
+
+
+@then("the system does not report `pi` as a coding agent")
+def _does_not_report_pi_code_agent(scenario_state: dict[str, Any]) -> None:
+    payload = json.loads(scenario_state["stdout"])
+    assert "pi" not in payload["agents"]["code"]

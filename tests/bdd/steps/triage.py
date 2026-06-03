@@ -21,14 +21,18 @@ from textual.widgets import DataTable, Input, Static
 
 from workdash.backend import WorkdashBackend, compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
+from workdash.control import WorkdashSession, _work_items_payload
 from workdash.github_client import GitHubClient
 from workdash.included_items import IncludedItemsStore
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import IncludeDialog
-from workdash.workdash import format_work_item_id
+from workdash.workdash import _print_work_items_result, format_work_item_id
 
 from .common import (
     NOW_UTC,
+    FakeApiBackend,
+    api_config,
+    ensure_api_session,
     install_config,
     install_valid_env,
     make_work_item,
@@ -694,6 +698,65 @@ def _dashboard_has_work_items(scenario_state: dict[str, Any], work_items: list[W
     _dashboard_has_item_types(scenario_state, work_items)
 
 
+@given("a server-backed Workdash session has no open work items")
+def _server_session_has_no_items(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    work_items.clear()
+    scenario_state["work_items"] = []
+    backend = FakeApiBackend(scenario_state, tmp_path)
+    session = WorkdashSession(
+        config=api_config(tmp_path),
+        backend=backend,  # type: ignore[arg-type]
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=scenario_state.get("zellij_session", "workdash-main"),
+    )
+    scenario_state["api_session"] = session
+    scenario_state["api_backend"] = backend
+
+
+@given("a server-backed Workdash session has issue, pull request, and review work items")
+def _server_session_has_item_types(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    work_items[:] = [
+        make_work_item(
+            item_type=WorkItemType.ISSUE,
+            kind=WorkItemKind.ASSIGNED_ISSUE,
+            number=1,
+            title="Issue",
+            created_at=NOW_UTC,
+            updated_at=NOW_UTC,
+        ),
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.AUTHORED_PR,
+            number=2,
+            title="Pull request",
+            created_at=NOW_UTC,
+            updated_at=NOW_UTC,
+        ),
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.REVIEW_REQUESTED_PR,
+            number=3,
+            title="Review",
+            created_at=NOW_UTC,
+            updated_at=NOW_UTC,
+        ),
+    ]
+    scenario_state["work_items"] = list(work_items)
+    ensure_api_session(scenario_state, work_items, tmp_path)
+
+
+@given("a server-backed Workdash session has work items")
+def _server_session_has_work_items(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    _server_session_has_item_types(scenario_state, work_items, tmp_path)
+
+
 @when(parsers.parse('the user runs the system with "{flag}"'))
 def _run_system_with_flag(
     flag: str,
@@ -845,7 +908,7 @@ def _refreshed_items_become_shared_tui_api_state(scenario_state: dict[str, Any])
     assert [format_work_item_id(item) for item in scenario_state["api_session"].work_items] == [
         format_work_item_id(item) for item in scenario_state["refreshed_items"]
     ]
-    assert scenario_state.get("tui_refresh_callbacks") == ["_refresh_from_session"]
+    assert scenario_state.get("tui_refresh_callbacks") == ["refresh_from_session"]
     assert [format_work_item_id(item) for item in scenario_state["tui_work_items"]] == [
         format_work_item_id(item) for item in scenario_state["refreshed_items"]
     ]
@@ -1770,12 +1833,12 @@ def _list_command_suffixes(scenario_state: dict[str, Any]) -> None:
     import contextlib
     import io
 
-    from workdash.workdash import _print_work_items
-
     work_items = scenario_state["work_items"]
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        _print_work_items(work_items, compute_suggestion_markers(work_items))
+        _print_work_items_result(
+            _work_items_payload(work_items, compute_suggestion_markers(work_items))
+        )
     lines = [line for line in buffer.getvalue().splitlines() if line.strip()]
     # Each seeded item's row identity is the copy/paste Workdash item ID;
     # per-row assertions guarantee the "+" suffix is anchored to the type

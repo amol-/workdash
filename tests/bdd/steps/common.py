@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -19,6 +20,7 @@ from textual.screen import ModalScreen
 
 from workdash.backend import IncludeResult, compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
+from workdash.control import WorkdashSession, format_work_item_id
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 
 # -- Datetime helpers -------------------------------------------------------
@@ -266,6 +268,176 @@ def _no_server_backed_workdash_session(
     monkeypatch.setattr(control_module.urllib.request, "urlopen", fail_urlopen)
 
 
+@given("the local Workdash server is reachable")
+def _local_workdash_server_reachable(
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workdash.workdash as workdash_module
+
+    class FakeControlClient:
+        def request(self, endpoint: str, payload: dict[str, object] | None = None):
+            scenario_state.setdefault("control_requests", []).append(
+                {"endpoint": endpoint, "payload": dict(payload or {})}
+            )
+            if endpoint == "list":
+                return {"items": []}
+            if endpoint == "info":
+                return {"session": "workdash-main", "panes": []}
+            raise AssertionError(f"Unexpected control endpoint: {endpoint}")
+
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+
+
+@given("the client process cannot find GitHub CLI on PATH")
+def _client_process_cannot_find_github_cli(scenario_state: dict[str, Any]) -> None:
+    scenario_state["client_missing_gh"] = True
+
+
+# -- Shared server-backed session setup --------------------------------------
+
+
+def api_config(tmp_path: Path) -> WorkdashConfig:
+    return WorkdashConfig(
+        github_username="testuser",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        codex=AgentConfig(analyze="codex exec", launch="codex"),
+        pi=AgentConfig(launch="pi"),
+        repositories=("owner/repo",),
+        workdir=str(tmp_path / "wrk"),
+    ).require_valid()
+
+
+def set_session_items(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
+    scenario_state["work_items"] = list(work_items)
+    markers = compute_suggestion_markers(list(work_items))
+    scenario_state["suggestion_markers"] = markers
+    session = scenario_state.get("api_session")
+    if session is not None:
+        session.work_items = list(work_items)
+        session.suggestion_markers = dict(markers)
+
+
+def seed_dashboard_item(work_items: list[WorkItem], scenario_state: dict[str, Any]) -> WorkItem:
+    item = make_work_item(
+        item_type=WorkItemType.ISSUE,
+        kind=WorkItemKind.ASSIGNED_ISSUE,
+        number=1,
+        title="Fix the issue",
+        created_at=NOW_UTC,
+        updated_at=NOW_UTC,
+    )
+    work_items[:] = [item]
+    set_session_items(scenario_state, work_items)
+    return item
+
+
+def ensure_api_session(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> WorkdashSession:
+    session = scenario_state.get("api_session")
+    if session is not None:
+        return session
+    if not work_items:
+        seed_dashboard_item(work_items, scenario_state)
+    backend = FakeApiBackend(scenario_state, tmp_path)
+    session = WorkdashSession(
+        config=api_config(tmp_path),
+        backend=backend,  # type: ignore[arg-type]
+        work_items=list(work_items),
+        suggestion_markers=compute_suggestion_markers(list(work_items)),
+        zellij_session=scenario_state.get("zellij_session", "workdash-main"),
+    )
+    scenario_state["api_session"] = session
+    scenario_state["api_backend"] = backend
+    return session
+
+
+class FakeLiveTui:
+    def __init__(self, session: WorkdashSession, scenario_state: dict[str, Any]) -> None:
+        self._session = session
+        self._state = scenario_state
+        self._inside_call_from_thread = False
+
+    def call_from_thread(self, callback):
+        self._state.setdefault("tui_refresh_callbacks", []).append(callback.__name__)
+        self._inside_call_from_thread = True
+        try:
+            callback()
+        finally:
+            self._inside_call_from_thread = False
+
+    def refresh_from_session(self) -> None:
+        assert self._inside_call_from_thread
+        self._state["tui_work_items"] = list(self._session.work_items)
+        self._state["tui_suggestion_markers"] = dict(self._session.suggestion_markers)
+
+
+class FakeApiBackend:
+    def __init__(self, scenario_state: dict[str, Any], tmp_path: Path) -> None:
+        self._state = scenario_state
+        self.analysis_cache = SimpleNamespace(
+            build_analysis_path=lambda _item: tmp_path / "cached-analysis.md"
+        )
+
+    def load_items(self, progress_callback=None):
+        self._state["github_fetches"] = self._state.get("github_fetches", 0) + 1
+        assert progress_callback is None
+        items = list(self._state.get("refreshed_items", self._state.get("work_items", [])))
+        self._state["work_items"] = items
+        return items, compute_suggestion_markers(items)
+
+    def analyze_item(self, item: WorkItem, tool: str = "codex") -> str | None:
+        self._state.setdefault("analyze_calls", []).append((format_work_item_id(item), tool))
+        if tool == "cached":
+            return None
+        return self._state.get("analysis_path", "/tmp/workdash-analysis.md")
+
+
+@given("a server-backed Workdash session has loaded dashboard items")
+def _server_session_has_loaded_dashboard_items(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    seed_dashboard_item(work_items, scenario_state)
+    ensure_api_session(scenario_state, work_items, tmp_path)
+
+
+@given("a server-backed Workdash session is running")
+def _server_session_running(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    seed_dashboard_item(work_items, scenario_state)
+    session = ensure_api_session(scenario_state, work_items, tmp_path)
+    tui = FakeLiveTui(session, scenario_state)
+    session.items_changed_callback = lambda: tui.call_from_thread(tui.refresh_from_session)
+
+
+@given("a server-backed Workdash session has open work items and a suggested item exists")
+def _server_session_has_items_with_suggestion(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    work_items.extend(
+        [
+            make_work_item(
+                item_type=WorkItemType.ISSUE,
+                kind=WorkItemKind.TRACKED_ISSUE,
+                number=77,
+                title="Oldest suggestion target",
+                created_at=NOW_UTC - timedelta(days=30),
+                updated_at=NOW_UTC - timedelta(days=1),
+            ),
+            make_work_item(
+                item_type=WorkItemType.PR,
+                kind=WorkItemKind.TRACKED_PR,
+                number=78,
+                title="Fresh PR",
+                created_at=NOW_UTC - timedelta(days=2),
+                updated_at=NOW_UTC,
+            ),
+        ]
+    )
+    ensure_api_session(scenario_state, work_items, tmp_path)
+
+
 # -- Exit-code assertions ----------------------------------------------------
 
 
@@ -283,9 +455,19 @@ def _system_exits_nonzero(scenario_state: dict[str, Any]) -> None:
 def _reports_server_must_be_running(scenario_state: dict[str, Any]) -> None:
     assert scenario_state.get("urlopen_requests"), scenario_state
     assert (
-        "No Workdash server is reachable at 127.0.0.1:8765. "
-        "Start one with `workdash --server`."
+        "No Workdash server is reachable at 127.0.0.1:8765. Start one with `workdash --server`."
     ) in scenario_state["stderr"]
+
+
+@then("the command sends the request to the local Workdash server")
+@then("the command connects to the local Workdash server")
+def _command_sends_request_to_local_server(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("control_requests"), scenario_state
+
+
+@then("the command does not report a local GitHub CLI preflight error")
+def _command_does_not_report_local_gh_preflight_error(scenario_state: dict[str, Any]) -> None:
+    assert "gh CLI" not in scenario_state.get("output", "")
 
 
 @then("the command exits with a non-zero status")

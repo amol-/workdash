@@ -257,7 +257,16 @@ def send_zellij_pane_input(session: str, pane_id: str, data: str, *, raw: bool =
         )
         if not raw:
             subprocess.run(
-                [zellij, "--session", session, "action", "send-keys", "--pane-id", pane_id, "Enter"],
+                [
+                    zellij,
+                    "--session",
+                    session,
+                    "action",
+                    "send-keys",
+                    "--pane-id",
+                    pane_id,
+                    "Enter",
+                ],
                 check=True,
                 capture_output=True,
                 text=True,

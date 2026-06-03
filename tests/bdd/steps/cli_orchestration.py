@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -119,6 +120,11 @@ def _run_workdash(
                         target=payload["target"],
                         agent=payload.get("agent"),
                     )
+                if endpoint == "code":
+                    return scenario_state["api_session"].code(
+                        target=payload["target"],
+                        agent=payload.get("agent"),
+                    )
                 raise AssertionError(f"Unexpected control endpoint: {endpoint}")
 
         monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
@@ -132,9 +138,42 @@ def _run_workdash(
             "existing_worktree_path",
             lambda _workdir, _item: scenario_state.get("known_worktree_path"),
         )
+        monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
+        monkeypatch.setattr(
+            control_module,
+            "prepare_launch_agent_prompt",
+            lambda *args, **kwargs: "PROMPT",
+        )
+        monkeypatch.setattr(
+            control_module,
+            "launch_agent_context",
+            lambda repo, prompt, agent_command_tokens=None, *, zellij_session=None: (
+                scenario_state.setdefault("launch_calls", []).append(
+                    (repo, prompt, agent_command_tokens, zellij_session)
+                )
+                or SimpleNamespace(
+                    session=zellij_session,
+                    pane_id="terminal_23",
+                    pane_title="code_owner_repo_1",
+                    cwd=repo,
+                )
+            ),
+        )
 
     monkeypatch.setattr(workdash_module.subprocess, "run", fake_run)
-    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    if scenario_state.get("client_missing_tools"):
+        monkeypatch.setattr(
+            workdash_module,
+            "_check_gh_preflight",
+            lambda: (_ for _ in ()).throw(AssertionError("unexpected GitHub preflight")),
+        )
+        monkeypatch.setattr(
+            workdash_module,
+            "_select_workdash_session",
+            lambda _session: (_ for _ in ()).throw(AssertionError("unexpected Zellij inspection")),
+        )
+    else:
+        monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: config)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(
@@ -147,6 +186,7 @@ def _run_workdash(
     )
     # Also mock repo_worktree.ensure_worktree for control.py which imports it directly
     import workdash.repo_worktree as repo_worktree_module
+
     monkeypatch.setattr(
         repo_worktree_module,
         "ensure_worktree",
@@ -409,19 +449,9 @@ def _current_items_include_uncached_issue(
     scenario_state["analysis_path"] = str(tmp_path / "analysis.md")
 
 
-@given("the configured Codex analyze command is malformed")
-def _configured_codex_analyze_command_is_malformed(scenario_state: dict[str, Any]) -> None:
-    scenario_state["codex_analyze"] = "codex 'broken"
-
-
 @given("only the Codex analyze command is configured")
 def _only_codex_analyze_command_is_configured(scenario_state: dict[str, Any]) -> None:
     scenario_state["only_codex_analyze_configured"] = True
-
-
-@given("the configured Codex launch command is malformed")
-def _configured_codex_launch_command_is_malformed(scenario_state: dict[str, Any]) -> None:
-    scenario_state["codex_launch"] = "codex 'broken"
 
 
 @when("the user runs `workdash info`")
@@ -482,6 +512,20 @@ def _run_code_json(
 ) -> None:
     _run_workdash(
         ["code", "owner/repo#ISSUE-1", "--agent", "codex", "--json"],
+        scenario_state,
+        monkeypatch,
+        capsys,
+    )
+
+
+@when("the user runs `workdash analyze owner/repo#ISSUE-99 --agent codex --json`")
+def _run_analyze_unknown_issue_json(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(
+        ["analyze", "owner/repo#ISSUE-99", "--agent", "codex", "--json"],
         scenario_state,
         monkeypatch,
         capsys,
@@ -699,6 +743,10 @@ def _launches_code_with_selected_agent(scenario_state: dict[str, Any]) -> None:
     "the system returns JSON with the item id, selected agent, selected session, cwd, pane title, "
     "and pane id"
 )
+@then(
+    "the system returns JSON with the item ID, selected agent, selected session, cwd, pane title, "
+    "and pane ID"
+)
 def _returns_code_json(scenario_state: dict[str, Any]) -> None:
     payload = json.loads(scenario_state["stdout"])
     assert payload == {
@@ -723,21 +771,54 @@ def _reports_session_required(scenario_state: dict[str, Any]) -> None:
     assert "required" in scenario_state["output"]
 
 
-@then("the system reports the malformed agent command with config guidance")
-def _reports_malformed_agent_command_with_guidance(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["stdout"] == ""
-    assert scenario_state["stderr"].startswith("Error: invalid configuration fields")
-    assert "agents.codex." in scenario_state["stderr"]
-    assert "No closing quotation" in scenario_state["stderr"]
-    assert "workdash --configure" in scenario_state["stderr"]
-    assert "Traceback" not in scenario_state["output"]
+@given("`workdash show-config` reports only `codex` as an analysis agent")
+def _show_config_reports_only_codex_analyze(scenario_state: dict[str, Any]) -> None:
+    config = WorkdashConfig(
+        github_username="testuser",
+        codex=AgentConfig(analyze="codex exec"),
+        repositories=("owner/repo",),
+        workdir=scenario_state.get("workdir", "/tmp/workdash-bdd"),
+    )
+    scenario_state["api_session"].config = config
 
 
-@then("the system does not load backend items")
-def _does_not_load_backend_items(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("backend_loads", 0) == 0
+@given("the current Workdash items do not include `owner/repo#ISSUE-99`")
+def _current_items_do_not_include_issue_99(scenario_state: dict[str, Any]) -> None:
+    assert all(item.number != 99 for item in scenario_state.get("work_items", []))
 
 
-@then("the system does not prepare a worktree")
-def _does_not_prepare_worktree(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("ensure_calls", []) == []
+@given("the client process cannot find GitHub CLI or Zellij on PATH")
+def _client_process_cannot_find_github_or_zellij(scenario_state: dict[str, Any]) -> None:
+    scenario_state["client_missing_tools"] = True
+
+
+@then(
+    "the command requests pane information from the local Workdash server with ordinary panes included"
+)
+def _requests_pane_information_with_ordinary_panes(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("control_requests") == [
+        {"endpoint": "info", "payload": {"include_all_panes": True}}
+    ]
+
+
+@then("the command requests code launch from the local Workdash server")
+def _requests_code_launch(scenario_state: dict[str, Any]) -> None:
+    control_requests = scenario_state.get("control_requests", [])
+    assert any(req["endpoint"] == "code" for req in control_requests)
+
+
+@then("the command still sends the request to the local Workdash server")
+def _still_sends_request_to_server(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("control_requests"), scenario_state
+
+
+@then("the command formats the server response")
+def _formats_server_response(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state
+    assert "Session: workdash-main" in scenario_state["stdout"]
+
+
+@then("the system reports that the work item is unknown")
+def _reports_unknown_work_item(scenario_state: dict[str, Any]) -> None:
+    assert "No dashboard item matches" in scenario_state["stderr"]
+    assert "owner/repo#ISSUE-99" in scenario_state["stderr"]

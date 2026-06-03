@@ -96,16 +96,6 @@ Feature: CLI orchestration commands
     Then the command reports that `workdash --server` must be running
     And the command exits with a non-zero status
 
-  @id:F-CLI-ORCHESTRATION-S011
-  Scenario: Analyze reports server-side agent command errors
-    Given a server-backed Workdash session has loaded dashboard items
-    And the current Workdash items include an assigned issue without cached analysis
-    And the configured Codex analyze command is malformed
-    When the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`
-    Then the command requests analysis from the local Workdash server
-    And the system reports the server-side malformed agent command error
-    And the command exits with a non-zero status
-
   @id:F-CLI-ORCHESTRATION-S012
   Scenario: Info can include ordinary live panes on request
     Given a server-backed Workdash session is running
@@ -132,16 +122,6 @@ Feature: CLI orchestration commands
     When the user runs `workdash code owner/repo#ISSUE-1 --agent vscode --json`
     Then the command requests code launch from the local Workdash server
     And the system reports that the coding agent is not a configured terminal-backed agent
-    And the command exits with a non-zero status
-
-  @id:F-CLI-ORCHESTRATION-S015
-  Scenario: Code reports server-side agent command errors
-    Given a server-backed Workdash session has loaded dashboard items
-    And the current Workdash items include an assigned issue without cached analysis
-    And the configured Codex launch command is malformed
-    When the user runs `workdash code owner/repo#ISSUE-1 --agent codex --json`
-    Then the command requests code launch from the local Workdash server
-    And the system reports the server-side malformed agent command error
     And the command exits with a non-zero status
 
   @id:F-CLI-ORCHESTRATION-S016

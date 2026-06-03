@@ -19,6 +19,7 @@ Feature: Local JSON control API
     - Successful API responses use `{ "ok": true, "result": ... }`.
     - Failed API responses use an appropriate HTTP error status and `{ "ok": false, "error": { "code": ..., "message": ... } }`.
     - Work item actions accept Workdash item IDs exactly as emitted by `workdash list`.
+    - A refresh request may arrive before the TUI event loop is running; it still succeeds and updates shared state, and the first TUI render uses that shared state.
     - Pane actions accept pane IDs exactly as emitted by `workdash info`.
 
   @id:F-API-JSON-CONTROL-S001
@@ -50,7 +51,7 @@ Feature: Local JSON control API
     Given a server-backed Workdash session has loaded dashboard items
     When a client requests the list API without refresh
     Then the API returns the current in-memory work items
-    And each item includes its Workdash item ID, type, kind, repository, number, title, URL, timestamps, and suggested status
+    And each item includes its Workdash item ID, API type, display type, kind, repository, number, title, URL, timestamps, and suggested status
     And the API does not fetch GitHub before responding
 
   @id:F-API-JSON-CONTROL-S005

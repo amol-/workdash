@@ -71,6 +71,12 @@ except ModuleNotFoundError:  # pragma: no cover - allows import before deps are 
             self.session = session
             self.now_utc = now_utc or datetime.now(UTC)
             self.status_message = "Ready."
+
+        def refresh_from_session(self) -> None:
+            if self.session is None:
+                return
+            self.work_items = tuple(self.session.work_items)
+            self.suggestion_markers = dict(self.session.suggestion_markers)
 else:
 
     class BusyScreen(ModalScreen[None]):
@@ -313,6 +319,16 @@ else:
             yield Static(self.COMMAND_HINT_TEXT, id="command-footer")
 
         def on_mount(self) -> None:
+            if self._session is not None:
+                self.refresh_from_session()
+            else:
+                self._render_table()
+
+        def refresh_from_session(self) -> None:
+            if self._session is None:
+                return
+            self._work_items = list(self._session.work_items)
+            self._suggestion_markers = dict(self._session.suggestion_markers)
             self._render_table()
 
         def _update_status(self, message: str) -> None:
@@ -322,13 +338,6 @@ else:
         def _title_with_suggestion_marker(self, item: WorkItem) -> str:
             marker = self._suggestion_markers.get((item.item_type, item.repo, item.number))
             return f"* {item.title}" if marker else item.title
-
-        def _refresh_from_session(self) -> None:
-            if self._session is None:
-                return
-            self._work_items = list(self._session.work_items)
-            self._suggestion_markers = dict(self._session.suggestion_markers)
-            self._render_table()
 
         def _render_table(self, *, focus_item: WorkItem | None = None) -> None:
             table = self.query_one("#work-items", DataTable)
@@ -647,11 +656,23 @@ else:
                 return
             fetched_item = result.fetched_item
             assert fetched_item is not None  # IncludeResult invariant
-            self._work_items.append(fetched_item)
-            # Suggestion markers depend on the full item set; recompute so any
-            # newer/better candidate is highlighted correctly on the next render.
-            self._suggestion_markers = compute_suggestion_markers(self._work_items)
-            self._render_table(focus_item=fetched_item)
+            existing = next(
+                (
+                    item
+                    for item in self._work_items
+                    if item.item_type == fetched_item.item_type
+                    and item.repo == fetched_item.repo
+                    and item.number == fetched_item.number
+                ),
+                None,
+            )
+            if existing is None:
+                self._work_items.append(fetched_item)
+                # Suggestion markers depend on the full item set; recompute so any
+                # newer/better candidate is highlighted correctly on the next render.
+                self._suggestion_markers = compute_suggestion_markers(self._work_items)
+                existing = fetched_item
+            self._render_table(focus_item=existing)
             self._update_status(
                 f"Included {fetched_item.item_type.value} "
                 f"{fetched_item.repo}#{fetched_item.number}."

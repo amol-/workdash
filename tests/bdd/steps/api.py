@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,73 +12,17 @@ from pytest_bdd import given, parsers, then, when
 from webob import Request
 
 from workdash.backend import compute_suggestion_markers
-from workdash.config import AgentConfig, WorkdashConfig
-from workdash.control import (
-    WorkdashSession,
-    _localhost_only_wsgi_app,
-    _make_turbogears_app,
-    format_work_item_id,
-)
+from workdash.control import _localhost_only_wsgi_app, _make_turbogears_app, format_work_item_id
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.repo_worktree import worktree_path
 
-from .common import NOW_UTC, make_work_item
-
-
-def _api_config(tmp_path: Path) -> WorkdashConfig:
-    return WorkdashConfig(
-        github_username="testuser",
-        claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze="codex exec", launch="codex"),
-        pi=AgentConfig(launch="pi"),
-        repositories=("owner/repo",),
-        workdir=str(tmp_path / "wrk"),
-    ).require_valid()
-
-
-def _seed_dashboard_item(work_items: list[WorkItem], scenario_state: dict[str, Any]) -> WorkItem:
-    item = make_work_item(
-        item_type=WorkItemType.ISSUE,
-        kind=WorkItemKind.ASSIGNED_ISSUE,
-        number=1,
-        title="Fix the issue",
-        created_at=NOW_UTC,
-        updated_at=NOW_UTC,
-    )
-    work_items[:] = [item]
-    _set_session_items(scenario_state, work_items)
-    return item
-
-
-def _set_session_items(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
-    scenario_state["work_items"] = list(work_items)
-    markers = compute_suggestion_markers(list(work_items))
-    scenario_state["suggestion_markers"] = markers
-    session = scenario_state.get("api_session")
-    if session is not None:
-        session.work_items = list(work_items)
-        session.suggestion_markers = dict(markers)
-
-
-def _ensure_api_session(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> WorkdashSession:
-    session = scenario_state.get("api_session")
-    if session is not None:
-        return session
-    if not work_items:
-        _seed_dashboard_item(work_items, scenario_state)
-    backend = _FakeApiBackend(scenario_state, tmp_path)
-    session = WorkdashSession(
-        config=_api_config(tmp_path),
-        backend=backend,  # type: ignore[arg-type]
-        work_items=list(work_items),
-        suggestion_markers=compute_suggestion_markers(list(work_items)),
-        zellij_session=scenario_state.get("zellij_session", "workdash-main"),
-    )
-    scenario_state["api_session"] = session
-    scenario_state["api_backend"] = backend
-    return session
+from .common import (
+    NOW_UTC,
+    api_config,
+    ensure_api_session,
+    make_work_item,
+    seed_dashboard_item,
+)
 
 
 def _call_api(
@@ -90,7 +33,7 @@ def _call_api(
     payload: dict[str, object] | None = None,
 ) -> None:
     app = _localhost_only_wsgi_app(
-        _make_turbogears_app(_ensure_api_session(scenario_state, work_items, tmp_path))
+        _make_turbogears_app(ensure_api_session(scenario_state, work_items, tmp_path))
     )
     request = Request.blank(
         f"/api/v0/{endpoint}",
@@ -111,47 +54,6 @@ def _api_result(scenario_state: dict[str, Any]) -> dict[str, Any]:
     return payload["result"]
 
 
-class _FakeLiveTui:
-    def __init__(self, session: WorkdashSession, scenario_state: dict[str, Any]) -> None:
-        self._session = session
-        self._state = scenario_state
-        self._inside_call_from_thread = False
-
-    def call_from_thread(self, callback):
-        self._state.setdefault("tui_refresh_callbacks", []).append(callback.__name__)
-        self._inside_call_from_thread = True
-        try:
-            callback()
-        finally:
-            self._inside_call_from_thread = False
-
-    def _refresh_from_session(self) -> None:
-        assert self._inside_call_from_thread
-        self._state["tui_work_items"] = list(self._session.work_items)
-        self._state["tui_suggestion_markers"] = dict(self._session.suggestion_markers)
-
-
-class _FakeApiBackend:
-    def __init__(self, scenario_state: dict[str, Any], tmp_path: Path) -> None:
-        self._state = scenario_state
-        self.analysis_cache = SimpleNamespace(
-            build_analysis_path=lambda _item: tmp_path / "cached-analysis.md"
-        )
-
-    def load_items(self, progress_callback=None):
-        self._state["github_fetches"] = self._state.get("github_fetches", 0) + 1
-        assert progress_callback is None
-        items = list(self._state.get("refreshed_items", self._state.get("work_items", [])))
-        self._state["work_items"] = items
-        return items, compute_suggestion_markers(items)
-
-    def analyze_item(self, item: WorkItem, tool: str = "codex") -> str | None:
-        self._state.setdefault("analyze_calls", []).append((format_work_item_id(item), tool))
-        if tool == "cached":
-            return None
-        return self._state.get("analysis_path", "/tmp/workdash-analysis.md")
-
-
 @given("no server-backed Workdash session is already running")
 def _no_server_backed_session(scenario_state: dict[str, Any]) -> None:
     scenario_state["server_port_busy"] = False
@@ -165,115 +67,12 @@ def _server_backed_session_already_running(address: str, scenario_state: dict[st
     scenario_state["sessions"] = ["workdash-main"]
 
 
-@given("a server-backed Workdash session has loaded dashboard items")
-def _server_session_has_loaded_dashboard_items(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    _seed_dashboard_item(work_items, scenario_state)
-    _ensure_api_session(scenario_state, work_items, tmp_path)
-
-
-@given("a server-backed Workdash session is running")
-def _server_session_running(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    _seed_dashboard_item(work_items, scenario_state)
-    session = _ensure_api_session(scenario_state, work_items, tmp_path)
-    session.tui_app = _FakeLiveTui(session, scenario_state)  # type: ignore[assignment]
-
-
-@given("a server-backed Workdash session has open work items and a suggested item exists")
-def _server_session_has_items_with_suggestion(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    work_items.extend(
-        [
-            make_work_item(
-                item_type=WorkItemType.ISSUE,
-                kind=WorkItemKind.TRACKED_ISSUE,
-                number=77,
-                title="Oldest suggestion target",
-                created_at=NOW_UTC - timedelta(days=30),
-                updated_at=NOW_UTC - timedelta(days=1),
-            ),
-            make_work_item(
-                item_type=WorkItemType.PR,
-                kind=WorkItemKind.TRACKED_PR,
-                number=78,
-                title="Fresh PR",
-                created_at=NOW_UTC - timedelta(days=2),
-                updated_at=NOW_UTC - timedelta(days=0),
-            ),
-        ]
-    )
-    _ensure_api_session(scenario_state, work_items, tmp_path)
-
-
-@given("a server-backed Workdash session has no open work items")
-def _server_session_has_no_items(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    work_items.clear()
-    scenario_state["work_items"] = list(work_items)
-    backend = _FakeApiBackend(scenario_state, tmp_path)
-    session = WorkdashSession(
-        config=_api_config(tmp_path),
-        backend=backend,  # type: ignore[arg-type]
-        work_items=list(work_items),
-        suggestion_markers=compute_suggestion_markers(list(work_items)),
-        zellij_session=scenario_state.get("zellij_session", "workdash-main"),
-    )
-    scenario_state["api_session"] = session
-    scenario_state["api_backend"] = backend
-
-
-@given("a server-backed Workdash session has issue, pull request, and review work items")
-def _server_session_has_item_types(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    work_items[:] = [
-        make_work_item(
-            item_type=WorkItemType.ISSUE,
-            kind=WorkItemKind.ASSIGNED_ISSUE,
-            number=1,
-            title="Issue",
-            created_at=NOW_UTC,
-            updated_at=NOW_UTC,
-        ),
-        make_work_item(
-            item_type=WorkItemType.PR,
-            kind=WorkItemKind.AUTHORED_PR,
-            number=2,
-            title="Pull request",
-            created_at=NOW_UTC,
-            updated_at=NOW_UTC,
-        ),
-        make_work_item(
-            item_type=WorkItemType.PR,
-            kind=WorkItemKind.REVIEW_REQUESTED_PR,
-            number=3,
-            title="Review",
-            created_at=NOW_UTC,
-            updated_at=NOW_UTC,
-        ),
-    ]
-    scenario_state["work_items"] = list(work_items)
-    _ensure_api_session(scenario_state, work_items, tmp_path)
-
-
-@given("a server-backed Workdash session has work items")
-def _server_session_has_work_items(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    _server_session_has_item_types(scenario_state, work_items, tmp_path)
-
-
 @given("the Workdash Zellij session has live Workdash-owned panes")
 def _workdash_zellij_session_has_live_panes(
     scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
 ) -> None:
-    item = _seed_dashboard_item(work_items, scenario_state)
-    path = worktree_path(_api_config(tmp_path).workdir, item.repo, item.number)
+    item = seed_dashboard_item(work_items, scenario_state)
+    path = worktree_path(api_config(tmp_path).workdir, item.repo, item.number)
     path.mkdir(parents=True, exist_ok=True)
     scenario_state["known_worktree_path"] = path
     scenario_state["panes"] = [
@@ -294,7 +93,7 @@ def _workdash_zellij_session_has_live_panes(
 def _current_dashboard_items_include(
     item_id: str, scenario_state: dict[str, Any], work_items: list[WorkItem]
 ) -> None:
-    item = _seed_dashboard_item(work_items, scenario_state)
+    item = seed_dashboard_item(work_items, scenario_state)
     assert format_work_item_id(item) == item_id
 
 
@@ -302,7 +101,7 @@ def _current_dashboard_items_include(
 def _current_dashboard_items_do_not_include(
     item_id: str, scenario_state: dict[str, Any], work_items: list[WorkItem]
 ) -> None:
-    _seed_dashboard_item(work_items, scenario_state)
+    seed_dashboard_item(work_items, scenario_state)
     assert all(format_work_item_id(item) != item_id for item in work_items)
 
 
@@ -388,7 +187,7 @@ def _user_starts_workdash_with_server(
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
     monkeypatch.setattr(
-        workdash_module, "load_config", lambda: _api_config(Path("/tmp/workdash-bdd"))
+        workdash_module, "load_config", lambda: api_config(Path("/tmp/workdash-bdd"))
     )
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashControlServer", FakeControlServer)
@@ -664,13 +463,14 @@ def _api_returns_current_in_memory_items(scenario_state: dict[str, Any]) -> None
 
 
 @then(
-    "each item includes its Workdash item ID, type, kind, repository, number, title, URL, "
-    "timestamps, and suggested status"
+    "each item includes its Workdash item ID, API type, display type, kind, repository, "
+    "number, title, URL, timestamps, and suggested status"
 )
 def _api_items_include_contract_fields(scenario_state: dict[str, Any]) -> None:
     required = {
         "id",
         "type",
+        "display_type",
         "kind",
         "repo",
         "number",
@@ -711,7 +511,7 @@ def _refreshed_items_become_shared_state(scenario_state: dict[str, Any]) -> None
 
 @then("the live TUI reflects the refreshed state when it can safely repaint")
 def _live_tui_reflects_refreshed_state_when_safe(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("tui_refresh_callbacks") == ["_refresh_from_session"]
+    assert scenario_state.get("tui_refresh_callbacks") == ["refresh_from_session"]
     assert [format_work_item_id(item) for item in scenario_state["tui_work_items"]] == [
         format_work_item_id(item) for item in scenario_state["refreshed_items"]
     ]
