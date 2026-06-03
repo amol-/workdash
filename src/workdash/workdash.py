@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import logging
 import os
@@ -10,7 +12,9 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 
 from . import __version__
@@ -48,7 +52,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     commands = WorkdashCommands()
-    if options.command in {"list", "info", "analyze", "code"}:
+    if options.command in {"list", "info", "analyze", "code", "read", "write"}:
         return _run_server_backed_command(commands, options)
     if options.command == "show-config":
         return commands.show_config(json_output=options.json_output)
@@ -86,6 +90,10 @@ class CLIOptions:
     target: str | None = None
     agent: str | None = None
     include_all_panes: bool = False
+    pane_id: str | None = None
+    text: str | None = None
+    full: bool = False
+    raw: bool = False
 
 
 class WorkdashCommands:
@@ -132,6 +140,11 @@ class WorkdashCommands:
         except WorkdashControlError as error:
             _print_control_error(error)
             return 1
+        try:
+            result = _with_local_analysis_path(result)
+        except WorkdashControlError as error:
+            _print_control_error(error)
+            return 1
         if json_output:
             print(json.dumps(result, ensure_ascii=True, indent=2))
         else:
@@ -150,6 +163,39 @@ class WorkdashCommands:
             print(json.dumps(result, ensure_ascii=True, indent=2))
         else:
             _print_code_result(result)
+        return 0
+
+    def read_pane(self, *, pane_id: str, full: bool, json_output: bool) -> int:
+        """Read pane content through the local Workdash server."""
+
+        try:
+            result = self._client.request("pane/content", {"pane_id": pane_id, "full": full})
+        except WorkdashControlError as error:
+            _print_control_error(error)
+            return 1
+        if json_output:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        else:
+            content = str(result.get("content") or "")
+            print(content, end="" if content.endswith("\n") else "\n")
+        return 0
+
+    def write_pane(self, *, pane_id: str, text: str, raw: bool, json_output: bool) -> int:
+        """Send pane input through the local Workdash server."""
+
+        try:
+            result = self._client.request(
+                "pane/send", {"pane_id": pane_id, "data": text, "raw": raw}
+            )
+        except WorkdashControlError as error:
+            _print_control_error(error)
+            return 1
+        if json_output:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        else:
+            print(
+                f"Accepted input for {result['pane_id']} (raw: {'yes' if result['raw'] else 'no'})."
+            )
         return 0
 
     def show_config(self, *, json_output: bool) -> int:
@@ -283,6 +329,19 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             agent=options.agent,
             json_output=options.json_output,
         )
+    if options.command == "read":
+        return commands.read_pane(
+            pane_id=options.pane_id or "",
+            full=options.full,
+            json_output=options.json_output,
+        )
+    if options.command == "write":
+        return commands.write_pane(
+            pane_id=options.pane_id or "",
+            text=options.text or "",
+            raw=options.raw,
+            json_output=options.json_output,
+        )
     raise AssertionError(f"Unsupported server-backed command: {options.command}")
 
 
@@ -406,6 +465,45 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         default=argparse.SUPPRESS,
         help="Emit machine-readable JSON.",
     )
+    read_parser = subparsers.add_parser(
+        "read",
+        help="Read text from a live pane.",
+    )
+    read_parser.add_argument("pane_id", metavar="PANE_ID", help="Pane ID from workdash info.")
+    read_parser.add_argument(
+        "--full",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Read full scrollback instead of the visible viewport.",
+    )
+    read_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Emit machine-readable JSON.",
+    )
+    write_parser = subparsers.add_parser(
+        "write",
+        help="Send text to a live pane.",
+    )
+    write_parser.add_argument("pane_id", metavar="PANE_ID", help="Pane ID from workdash info.")
+    write_parser.add_argument("text", metavar="TEXT", help="Text to send to the pane.")
+    write_parser.add_argument(
+        "--raw",
+        "--no-enter",
+        dest="raw",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Send raw text without the default trailing Enter.",
+    )
+    write_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Emit machine-readable JSON.",
+    )
     show_config_parser = subparsers.add_parser(
         "show-config",
         help="Show configured agents and the fixed server address.",
@@ -430,6 +528,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         target=getattr(namespace, "target", None),
         agent=getattr(namespace, "agent", None),
         include_all_panes=getattr(namespace, "include_all_panes", False),
+        pane_id=getattr(namespace, "pane_id", None),
+        text=getattr(namespace, "text", None),
+        full=getattr(namespace, "full", False),
+        raw=getattr(namespace, "raw", False),
     )
 
 
@@ -497,11 +599,50 @@ def _print_work_items_result(result: dict[str, object]) -> None:
         print(f"{display_type:7} {item['id']:24} {str(item['updated_at'])[:10]} {title}")
 
 
+def _with_local_analysis_path(result: dict[str, object]) -> dict[str, object]:
+    cli_result = dict(result)
+    file_content = cli_result.pop("file_content", None)
+    file_name = cli_result.pop("file_name", None)
+    cli_result.pop("content_type", None)
+    if not isinstance(file_content, str):
+        raise WorkdashControlError(
+            "invalid_response",
+            "Workdash server analysis response is missing base64 file_content.",
+        )
+
+    base_name = (
+        os.path.basename(file_name) if isinstance(file_name, str) and file_name else "analysis.md"
+    )
+    stem, suffix = os.path.splitext(base_name)
+    stem = "".join(character if character.isalnum() else "-" for character in stem).strip("-")
+    prefix = f"workdash-{(stem or 'analysis')[:32]}-"
+    analysis_path: str | None = None
+    try:
+        content = base64.b64decode(file_content, validate=True)
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            prefix=prefix,
+            suffix=suffix or ".md",
+        ) as analysis_file:
+            analysis_path = analysis_file.name
+            analysis_file.write(content)
+    except (binascii.Error, ValueError, OSError) as error:
+        if analysis_path is not None:
+            with suppress(OSError):
+                os.unlink(analysis_path)
+        raise WorkdashControlError(
+            "invalid_response", "Workdash server returned invalid analysis content."
+        ) from error
+    cli_result["analysis_path"] = analysis_path
+    cli_result.pop("path", None)
+    return cli_result
+
+
 def _print_analysis_result(result: dict[str, object]) -> None:
     print(f"Item: {result['item_id']}")
     print(f"Agent: {result['agent']}")
     print(f"Status: {result['status']}")
-    print(f"Path: {result['path']}")
+    print(f"Analysis path: {result['analysis_path']}")
 
 
 def _print_code_result(result: dict[str, object]) -> None:

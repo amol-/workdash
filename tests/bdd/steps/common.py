@@ -390,7 +390,14 @@ class FakeApiBackend:
         self._state.setdefault("analyze_calls", []).append((format_work_item_id(item), tool))
         if tool == "cached":
             return None
-        return self._state.get("analysis_path", "/tmp/workdash-analysis.md")
+        if "analysis_path" not in self._state:
+            raise AssertionError("scenario must set analysis_path from tmp_path")
+        analysis_path = Path(self._state["analysis_path"])
+        analysis_path.parent.mkdir(parents=True, exist_ok=True)
+        analysis_path.write_text(
+            self._state.get("analysis_content", "analysis body\n"), encoding="utf-8"
+        )
+        return str(analysis_path)
 
 
 @given("a server-backed Workdash session has loaded dashboard items")

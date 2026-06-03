@@ -1,3 +1,4 @@
+import base64
 import json
 from datetime import UTC, datetime
 
@@ -108,16 +109,18 @@ def test_session_include_notifies_items_changed_callback() -> None:
     assert repainted_item_ids == [["owner/repo#ISSUE-1", "owner/repo#PR-2"]]
 
 
-def test_session_analyze_returns_cached_analysis_without_configured_agents() -> None:
+def test_session_analyze_returns_cached_analysis_without_configured_agents(tmp_path) -> None:
     item = _work_item(number=1, title="Cached")
     item.analysis = "# cached analysis"
+    cached_path = tmp_path / "cached-analysis.md"
+    cached_path.write_text("# cached analysis\n", encoding="utf-8")
     analyze_calls: list[tuple[WorkItem, str]] = []
 
     class FakeBackend:
         def analyze_item(self, requested_item, tool="codex"):
             analyze_calls.append((requested_item, tool))
             if tool == "cached":
-                return "/tmp/cached-analysis.md"
+                return str(cached_path)
             raise AssertionError(f"Unexpected fresh analysis with {tool}")
 
     session = WorkdashSession(
@@ -132,10 +135,13 @@ def test_session_analyze_returns_cached_analysis_without_configured_agents() -> 
 
     assert result == {
         "item_id": "owner/repo#ISSUE-1",
-        "path": "/tmp/cached-analysis.md",
+        "path": str(cached_path),
         "agent": "cached",
         "cache_used": True,
         "status": "cached",
+        "content_type": "text/markdown",
+        "file_name": "cached-analysis.md",
+        "file_content": base64.b64encode(b"# cached analysis\n").decode("ascii"),
     }
     assert analyze_calls == [(item, "cached")]
 

@@ -1,5 +1,8 @@
+import base64
 import json
+import os
 import subprocess
+import tempfile
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -277,8 +280,10 @@ def test_main_passes_configured_agent_choices_to_tui(
 
 def test_main_tui_analyze_callback_uses_worktree_and_backend(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
     item = _issue()
+    analysis_path = tmp_path / "analysis.md"
     ensure_calls: list[tuple[str | None, WorkItem]] = []
     analyze_calls: list[tuple[WorkItem, str]] = []
     captured_callback: dict[str, object] = {}
@@ -293,7 +298,8 @@ def test_main_tui_analyze_callback_uses_worktree_and_backend(
 
         def analyze_item(self, item, tool="codex"):
             analyze_calls.append((item, tool))
-            return "/tmp/analysis.md"
+            analysis_path.write_text("analysis body\n", encoding="utf-8")
+            return str(analysis_path)
 
         def include_item_by_url(self, _url, _existing_identities):
             return None
@@ -323,7 +329,7 @@ def test_main_tui_analyze_callback_uses_worktree_and_backend(
 
     assert ensure_calls == [(_VALID_CONFIG.workdir, item)]
     assert analyze_calls == [(item, "codex")]
-    assert result == "/tmp/analysis.md"
+    assert result == str(analysis_path)
 
 
 def test_main_list_command_does_not_print_loading_message(
@@ -463,15 +469,34 @@ def test_select_workdash_session_treats_no_zellij_sessions_as_empty(
             "code",
             {"target": "owner/repo#ISSUE-1", "agent": "pi"},
         ),
+        (["read", "terminal_23"], "pane/content", {"pane_id": "terminal_23", "full": False}),
+        (
+            ["read", "terminal_23", "--full"],
+            "pane/content",
+            {"pane_id": "terminal_23", "full": True},
+        ),
+        (
+            ["write", "terminal_23", "continue"],
+            "pane/send",
+            {"pane_id": "terminal_23", "data": "continue", "raw": False},
+        ),
+        (
+            ["write", "terminal_23", "continue", "--raw"],
+            "pane/send",
+            {"pane_id": "terminal_23", "data": "continue", "raw": True},
+        ),
     ],
 )
 def test_main_server_backed_commands_are_pure_http_clients(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path,
     argv: list[str],
     expected_endpoint: str,
     expected_payload: dict[str, object],
 ) -> None:
     requests: list[tuple[str, dict[str, object]]] = []
+    analysis_path = tmp_path / "missing-analysis.md"
 
     class FakeControlClient:
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
@@ -483,10 +508,13 @@ def test_main_server_backed_commands_are_pure_http_clients(
             if endpoint == "analyze":
                 return {
                     "item_id": "owner/repo#ISSUE-1",
-                    "path": "/tmp/analysis.md",
+                    "path": str(analysis_path),
                     "agent": "codex",
                     "cache_used": False,
                     "status": "generated",
+                    "content_type": "text/markdown",
+                    "file_name": "analysis.md",
+                    "file_content": base64.b64encode(b"analysis body\n").decode("ascii"),
                 }
             if endpoint == "code":
                 return {
@@ -497,6 +525,10 @@ def test_main_server_backed_commands_are_pure_http_clients(
                     "pane_title": "code_owner_repo_1",
                     "pane_id": "terminal_1",
                 }
+            if endpoint == "pane/content":
+                return {"pane_id": "terminal_23", "content": "ready\n", "full": payload["full"]}
+            if endpoint == "pane/send":
+                return {"pane_id": "terminal_23", "raw": payload["raw"], "accepted": True}
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
@@ -530,11 +562,30 @@ def test_main_server_backed_commands_are_pure_http_clients(
 
     assert workdash_module.main(argv) == 0
 
+    output = capsys.readouterr().out
+    if expected_endpoint == "analyze":
+        local_path = next(
+            line.removeprefix("Analysis path: ")
+            for line in output.splitlines()
+            if line.startswith("Analysis path: ")
+        )
+        os.unlink(local_path)
     assert requests == [(expected_endpoint, expected_payload)]
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["list"],
+        ["info"],
+        ["analyze", "owner/repo#ISSUE-1"],
+        ["code", "owner/repo#ISSUE-1"],
+        ["read", "terminal_23"],
+        ["write", "terminal_23", "continue"],
+    ],
+)
 def test_main_server_backed_command_reports_unreachable_server(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
 ) -> None:
     class FakeControlClient:
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
@@ -546,7 +597,7 @@ def test_main_server_backed_command_reports_unreachable_server(
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
 
-    assert workdash_module.main(["info"]) == 1
+    assert workdash_module.main(argv) == 1
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -563,10 +614,13 @@ def test_main_analyze_human_output_formats_server_response(
             assert payload == {"target": "owner/repo#ISSUE-1", "agent": None}
             return {
                 "item_id": "owner/repo#ISSUE-1",
-                "path": "/tmp/analysis.md",
+                "path": "/server/cache/analysis.md",
                 "agent": "codex",
                 "cache_used": False,
                 "status": "generated",
+                "content_type": "text/markdown",
+                "file_name": "analysis.md",
+                "file_content": base64.b64encode(b"analysis body\n").decode("ascii"),
             }
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
@@ -574,29 +628,38 @@ def test_main_analyze_human_output_formats_server_response(
     assert workdash_module.main(["analyze", "owner/repo#ISSUE-1"]) == 0
 
     output = capsys.readouterr().out
-    assert "Item: owner/repo#ISSUE-1" in output
-    assert "Agent: codex" in output
-    assert "Status: generated" in output
-    assert "Path: /tmp/analysis.md" in output
+    analysis_path = next(
+        line.removeprefix("Analysis path: ")
+        for line in output.splitlines()
+        if line.startswith("Analysis path: ")
+    )
+    try:
+        assert "Item: owner/repo#ISSUE-1" in output
+        assert "Agent: codex" in output
+        assert "Status: generated" in output
+        assert open(analysis_path, encoding="utf-8").read() == "analysis body\n"
+    finally:
+        os.unlink(analysis_path)
 
 
-def test_main_analyze_json_outputs_server_response(
+def test_main_analyze_json_outputs_local_analysis_path_without_server_content_fields(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    response = {
-        "item_id": "owner/repo#ISSUE-1",
-        "path": "/tmp/cached.md",
-        "agent": "codex",
-        "cache_used": True,
-        "status": "cached",
-    }
-
     class FakeControlClient:
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "analyze"
             assert payload == {"target": "https://github.com/owner/repo/issues/1", "agent": None}
-            return response
+            return {
+                "item_id": "owner/repo#ISSUE-1",
+                "path": "/server/cache/cached.md",
+                "agent": "codex",
+                "cache_used": True,
+                "status": "cached",
+                "content_type": "text/markdown",
+                "file_name": "cached.md",
+                "file_content": base64.b64encode(b"cached body\n").decode("ascii"),
+            }
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
 
@@ -604,7 +667,106 @@ def test_main_analyze_json_outputs_server_response(
         workdash_module.main(["--json", "analyze", "https://github.com/owner/repo/issues/1"]) == 0
     )
 
-    assert json.loads(capsys.readouterr().out) == response
+    payload = json.loads(capsys.readouterr().out)
+    analysis_path = payload.pop("analysis_path")
+    try:
+        assert payload == {
+            "item_id": "owner/repo#ISSUE-1",
+            "agent": "codex",
+            "cache_used": True,
+            "status": "cached",
+        }
+        assert open(analysis_path, encoding="utf-8").read() == "cached body\n"
+    finally:
+        os.unlink(analysis_path)
+
+
+def test_main_analyze_json_writes_unique_secure_temp_file_from_server_content(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeControlClient:
+        def request(self, endpoint: str, payload: dict[str, object] | None = None):
+            assert endpoint == "analyze"
+            return {
+                "item_id": "owner/repo#ISSUE-1",
+                "path": "/server/cache/analysis.md",
+                "agent": "codex",
+                "cache_used": False,
+                "status": "generated",
+                "content_type": "text/markdown",
+                "file_name": "owner_repo_ISSUE1.md",
+                "file_content": base64.b64encode(b"analysis body\n").decode("ascii"),
+            }
+
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+
+    analysis_paths = []
+    try:
+        assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--json"]) == 0
+        first_payload = json.loads(capsys.readouterr().out)
+        analysis_paths.append(first_payload["analysis_path"])
+        assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--json"]) == 0
+        second_payload = json.loads(capsys.readouterr().out)
+        analysis_paths.append(second_payload["analysis_path"])
+
+        assert "copy_path" not in first_payload
+        assert "file_content" not in first_payload
+        assert "file_name" not in first_payload
+        assert "content_type" not in first_payload
+        assert analysis_paths[0] != analysis_paths[1]
+        for analysis_path in analysis_paths:
+            assert analysis_path.startswith(
+                os.path.join(tempfile.gettempdir(), "workdash-owner-repo-ISSUE1-")
+            )
+            assert analysis_path.endswith(".md")
+            assert os.stat(analysis_path).st_mode & 0o077 == 0
+            assert open(analysis_path, encoding="utf-8").read() == "analysis body\n"
+    finally:
+        for analysis_path in analysis_paths:
+            try:
+                os.unlink(analysis_path)
+            except FileNotFoundError:
+                pass
+
+
+@pytest.mark.parametrize(
+    ("response_fields", "expected_error"),
+    [
+        ({}, "missing base64 file_content"),
+        ({"file_content": 123}, "missing base64 file_content"),
+        ({"file_content": "not base64"}, "invalid analysis content"),
+        ({"file_content": "☃"}, "invalid analysis content"),
+    ],
+)
+def test_main_analyze_reports_invalid_content_response(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    response_fields: dict[str, object],
+    expected_error: str,
+) -> None:
+    class FakeControlClient:
+        def request(self, endpoint: str, payload: dict[str, object] | None = None):
+            assert endpoint == "analyze"
+            return {
+                "item_id": "owner/repo#ISSUE-1",
+                "path": "/server/cache/analysis.md",
+                "agent": "codex",
+                "cache_used": False,
+                "status": "generated",
+                "content_type": "text/markdown",
+                "file_name": "analysis.md",
+                **response_fields,
+            }
+
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+
+    assert workdash_module.main(["analyze", "owner/repo#ISSUE-1"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert expected_error in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_main_analyze_reports_server_error(
@@ -711,6 +873,78 @@ def test_main_code_reports_server_error_before_local_worktree(
     assert captured.out == ""
     assert "not a configured terminal-backed agent" in captured.err
     assert "vscode" in captured.err
+
+
+def test_main_read_human_output_prints_pane_content(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeControlClient:
+        def request(self, endpoint: str, payload: dict[str, object] | None = None):
+            assert endpoint == "pane/content"
+            assert payload == {"pane_id": "terminal_23", "full": False}
+            return {"pane_id": "terminal_23", "content": "agent output\nnext", "full": False}
+
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+
+    assert workdash_module.main(["read", "terminal_23"]) == 0
+
+    assert capsys.readouterr().out == "agent output\nnext\n"
+
+
+def test_main_read_json_outputs_server_response(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    response = {"pane_id": "terminal_23", "content": "history", "full": True}
+
+    class FakeControlClient:
+        def request(self, endpoint: str, payload: dict[str, object] | None = None):
+            assert endpoint == "pane/content"
+            assert payload == {"pane_id": "terminal_23", "full": True}
+            return response
+
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+
+    assert workdash_module.main(["read", "terminal_23", "--full", "--json"]) == 0
+
+    assert json.loads(capsys.readouterr().out) == response
+
+
+def test_main_write_human_output_confirms_accepted_input(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeControlClient:
+        def request(self, endpoint: str, payload: dict[str, object] | None = None):
+            assert endpoint == "pane/send"
+            assert payload == {"pane_id": "terminal_23", "data": "continue", "raw": False}
+            return {"pane_id": "terminal_23", "raw": False, "accepted": True}
+
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+
+    assert workdash_module.main(["write", "terminal_23", "continue"]) == 0
+
+    assert capsys.readouterr().out == "Accepted input for terminal_23 (raw: no).\n"
+
+
+def test_main_write_json_outputs_server_response(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    response = {"pane_id": "terminal_23", "raw": True, "accepted": True}
+
+    class FakeControlClient:
+        def request(self, endpoint: str, payload: dict[str, object] | None = None):
+            assert endpoint == "pane/send"
+            assert payload == {"pane_id": "terminal_23", "data": "continue", "raw": True}
+            return response
+
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+
+    assert workdash_module.main(["write", "terminal_23", "continue", "--no-enter", "--json"]) == 0
+
+    assert json.loads(capsys.readouterr().out) == response
 
 
 def test_main_info_human_output_formats_server_response(

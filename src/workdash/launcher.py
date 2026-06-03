@@ -250,7 +250,17 @@ def send_zellij_pane_input(session: str, pane_id: str, data: str, *, raw: bool =
     zellij = _resolve_zellij_binary()
     try:
         subprocess.run(
-            [zellij, "--session", session, "action", "write-chars", "--pane-id", pane_id, data],
+            [
+                zellij,
+                "--session",
+                session,
+                "action",
+                "write-chars",
+                "--pane-id",
+                pane_id,
+                "--",
+                data,
+            ],
             check=True,
             capture_output=True,
             text=True,

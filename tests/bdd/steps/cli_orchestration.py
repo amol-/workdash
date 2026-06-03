@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 from pathlib import Path
@@ -83,7 +84,14 @@ def _run_workdash(
             scenario_state.setdefault("analyze_calls", []).append((item, tool))
             if tool == "cached":
                 return scenario_state.get("cached_analysis_path") if item.analysis else None
-            return scenario_state.get("analysis_path", "/tmp/workdash-analysis.md")
+            if "analysis_path" not in scenario_state:
+                raise AssertionError("scenario must set analysis_path from tmp_path")
+            analysis_path = Path(scenario_state["analysis_path"])
+            analysis_path.parent.mkdir(parents=True, exist_ok=True)
+            analysis_path.write_text(
+                scenario_state.get("analysis_content", "analysis body\n"), encoding="utf-8"
+            )
+            return str(analysis_path)
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
@@ -116,14 +124,27 @@ def _run_workdash(
                         include_all_panes=bool(payload.get("include_all_panes", False))
                     )
                 if endpoint == "analyze":
-                    return scenario_state["api_session"].analyze(
+                    result = scenario_state["api_session"].analyze(
                         target=payload["target"],
                         agent=payload.get("agent"),
                     )
+                    scenario_state["last_control_result"] = result
+                    return result
                 if endpoint == "code":
                     return scenario_state["api_session"].code(
                         target=payload["target"],
                         agent=payload.get("agent"),
+                    )
+                if endpoint == "pane/content":
+                    return scenario_state["api_session"].pane_content(
+                        pane_id=payload["pane_id"],
+                        full=bool(payload.get("full", False)),
+                    )
+                if endpoint == "pane/send":
+                    return scenario_state["api_session"].pane_send(
+                        pane_id=payload["pane_id"],
+                        data=payload["data"],
+                        raw=bool(payload.get("raw", False)),
                     )
                 raise AssertionError(f"Unexpected control endpoint: {endpoint}")
 
@@ -159,6 +180,19 @@ def _run_workdash(
                 )
             ),
         )
+        monkeypatch.setattr(
+            control_module,
+            "dump_zellij_pane",
+            lambda session, pane_id, *, full=False: (
+                scenario_state.setdefault("pane_content_calls", []).append((session, pane_id, full))
+                or scenario_state.get("pane_content", "pane text\n")
+            ),
+        )
+
+        def fake_send_zellij_pane_input(session, pane_id, data, *, raw=False):
+            scenario_state.setdefault("pane_send_calls", []).append((session, pane_id, data, raw))
+
+        monkeypatch.setattr(control_module, "send_zellij_pane_input", fake_send_zellij_pane_input)
 
     monkeypatch.setattr(workdash_module.subprocess, "run", fake_run)
     if scenario_state.get("client_missing_tools"):
@@ -454,6 +488,11 @@ def _only_codex_analyze_command_is_configured(scenario_state: dict[str, Any]) ->
     scenario_state["only_codex_analyze_configured"] = True
 
 
+@given("the generated analysis content is returned by the server")
+def _generated_analysis_content_is_returned_by_server(scenario_state: dict[str, Any]) -> None:
+    scenario_state["analysis_content"] = "analysis body\n"
+
+
 @when("the user runs `workdash info`")
 def _run_info(
     scenario_state: dict[str, Any],
@@ -540,6 +579,47 @@ def _run_code_vscode_json(
 ) -> None:
     _run_workdash(
         ["code", "owner/repo#ISSUE-1", "--agent", "vscode", "--json"],
+        scenario_state,
+        monkeypatch,
+        capsys,
+    )
+
+
+@when("the user runs `workdash read terminal_23`")
+def _run_read(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(["read", "terminal_23"], scenario_state, monkeypatch, capsys)
+
+
+@when("the user runs `workdash read terminal_23 --full --json`")
+def _run_read_full_json(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(["read", "terminal_23", "--full", "--json"], scenario_state, monkeypatch, capsys)
+
+
+@when('the user runs `workdash write terminal_23 "continue"`')
+def _run_write(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(["write", "terminal_23", "continue"], scenario_state, monkeypatch, capsys)
+
+
+@when('the user runs `workdash write terminal_23 "continue" --raw --json`')
+def _run_write_raw_json(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(
+        ["write", "terminal_23", "continue", "--raw", "--json"],
         scenario_state,
         monkeypatch,
         capsys,
@@ -712,16 +792,37 @@ def _analyzes_with_selected_agent(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["ensure_calls"] == [(scenario_state["workdir"], item)]
 
 
-@then("the system returns JSON with the item ID, selected agent, analysis path, and cache status")
+@then("the server analysis response includes markdown content as base64 with a file name")
+def _server_analysis_response_includes_content(scenario_state: dict[str, Any]) -> None:
+    result = scenario_state["last_control_result"]
+    assert result["content_type"] == "text/markdown"
+    assert result["file_name"] == Path(scenario_state["analysis_path"]).name
+    assert base64.b64decode(result["file_content"]) == scenario_state.get(
+        "analysis_content", "analysis body\n"
+    ).encode("utf-8")
+    assert "content_encoding" not in result
+
+
+@then(
+    "the system returns JSON with the item ID, selected agent, local analysis path, and cache status"
+)
 def _returns_analyze_json(scenario_state: dict[str, Any]) -> None:
     payload = json.loads(scenario_state["stdout"])
-    assert payload == {
-        "item_id": "owner/repo#ISSUE-1",
-        "path": scenario_state["analysis_path"],
-        "agent": "codex",
-        "cache_used": False,
-        "status": "generated",
-    }
+    analysis_path = Path(payload.pop("analysis_path"))
+    try:
+        assert payload == {
+            "item_id": "owner/repo#ISSUE-1",
+            "agent": "codex",
+            "cache_used": False,
+            "status": "generated",
+        }
+        assert analysis_path.name.startswith("workdash-analysis-")
+        assert analysis_path.suffix == ".md"
+        assert analysis_path.read_text(encoding="utf-8") == scenario_state.get(
+            "analysis_content", "analysis body\n"
+        )
+    finally:
+        analysis_path.unlink(missing_ok=True)
 
 
 @then("the system launches code for the current item with the selected configured agent")
@@ -805,6 +906,93 @@ def _requests_pane_information_with_ordinary_panes(scenario_state: dict[str, Any
 def _requests_code_launch(scenario_state: dict[str, Any]) -> None:
     control_requests = scenario_state.get("control_requests", [])
     assert any(req["endpoint"] == "code" for req in control_requests)
+
+
+@then("the command requests pane content from the local Workdash server")
+def _requests_pane_content(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("control_requests") == [
+        {"endpoint": "pane/content", "payload": {"pane_id": "terminal_23", "full": False}}
+    ]
+
+
+@then("the command requests full pane content from the local Workdash server")
+def _requests_full_pane_content(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("control_requests") == [
+        {"endpoint": "pane/content", "payload": {"pane_id": "terminal_23", "full": True}}
+    ]
+
+
+@then("the command sends pane input through the local Workdash server")
+def _sends_pane_input(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("control_requests") == [
+        {
+            "endpoint": "pane/send",
+            "payload": {"pane_id": "terminal_23", "data": "continue", "raw": False},
+        }
+    ]
+
+
+@then("the command sends raw pane input through the local Workdash server")
+def _sends_raw_pane_input(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("control_requests") == [
+        {
+            "endpoint": "pane/send",
+            "payload": {"pane_id": "terminal_23", "data": "continue", "raw": True},
+        }
+    ]
+
+
+@then("the system prints the pane text for direct agent use")
+def _prints_pane_text(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["stdout"] == scenario_state.get("pane_content", "pane text\n")
+
+
+@then("the system returns JSON with the pane ID, content, and full flag")
+def _returns_pane_content_json(scenario_state: dict[str, Any]) -> None:
+    assert json.loads(scenario_state["stdout"]) == {
+        "pane_id": "terminal_23",
+        "content": scenario_state.get("pane_content", "pane text\n"),
+        "full": True,
+    }
+
+
+@then("the system confirms that the pane input was accepted")
+def _confirms_pane_input_accepted(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["stdout"] == "Accepted input for terminal_23 (raw: no).\n"
+
+
+@then("the system returns JSON with the pane ID, raw flag, and accepted status")
+def _returns_pane_send_json(scenario_state: dict[str, Any]) -> None:
+    assert json.loads(scenario_state["stdout"]) == {
+        "pane_id": "terminal_23",
+        "raw": True,
+        "accepted": True,
+    }
+
+
+@then(
+    "the system returns JSON with the item ID, selected agent, local analysis path, cache status, "
+    "and no server file content fields"
+)
+def _returns_analyze_json_with_local_path(scenario_state: dict[str, Any]) -> None:
+    payload = json.loads(scenario_state["stdout"])
+    analysis_path = Path(payload.pop("analysis_path"))
+    try:
+        assert payload == {
+            "item_id": "owner/repo#ISSUE-1",
+            "agent": "codex",
+            "cache_used": False,
+            "status": "generated",
+        }
+        assert "file_content" not in payload
+        assert "file_name" not in payload
+        assert "content_type" not in payload
+        assert "copy_path" not in payload
+        assert analysis_path.name.startswith("workdash-analysis-")
+        assert analysis_path.suffix == ".md"
+        assert analysis_path.read_text(encoding="utf-8") == "analysis body\n"
+    finally:
+        analysis_path.unlink(missing_ok=True)
 
 
 @then("the command still sends the request to the local Workdash server")

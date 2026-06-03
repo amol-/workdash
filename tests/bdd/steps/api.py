@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -576,7 +577,9 @@ def _server_analyzes_known_item_with_agent(scenario_state: dict[str, Any]) -> No
     ]
 
 
-@then("the API returns the item ID, selected agent, analysis path, and cache status")
+@then(
+    "the API returns the item ID, selected agent, analysis path, cache status, and base64 markdown content"
+)
 def _api_returns_analysis_result(scenario_state: dict[str, Any]) -> None:
     result = _api_result(scenario_state)
     assert result == {
@@ -585,7 +588,11 @@ def _api_returns_analysis_result(scenario_state: dict[str, Any]) -> None:
         "agent": "codex",
         "cache_used": False,
         "status": "generated",
+        "content_type": "text/markdown",
+        "file_name": "analysis.md",
+        "file_content": base64.b64encode(b"analysis body\n").decode("ascii"),
     }
+    assert "content_encoding" not in result
 
 
 @then("the API returns an error saying the work item is unknown")

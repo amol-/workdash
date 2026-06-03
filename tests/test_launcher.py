@@ -255,6 +255,82 @@ def test_load_zellij_panes_returns_dict_panes(monkeypatch: pytest.MonkeyPatch) -
     ]
 
 
+def test_send_zellij_pane_input_separates_text_from_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_args = []
+
+    def fake_run(args, **kwargs):
+        run_args.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        launcher_module.shutil,
+        "which",
+        lambda name: "/usr/bin/zellij" if name == "zellij" else None,
+    )
+    monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
+
+    launcher_module.send_zellij_pane_input("workdash-main", "terminal_23", "--literal", raw=True)
+
+    assert run_args == [
+        [
+            "/usr/bin/zellij",
+            "--session",
+            "workdash-main",
+            "action",
+            "write-chars",
+            "--pane-id",
+            "terminal_23",
+            "--",
+            "--literal",
+        ]
+    ]
+
+
+def test_send_zellij_pane_input_adds_enter_when_not_raw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_args = []
+
+    def fake_run(args, **kwargs):
+        run_args.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        launcher_module.shutil,
+        "which",
+        lambda name: "/usr/bin/zellij" if name == "zellij" else None,
+    )
+    monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
+
+    launcher_module.send_zellij_pane_input("workdash-main", "terminal_23", "--literal", raw=False)
+
+    assert run_args == [
+        [
+            "/usr/bin/zellij",
+            "--session",
+            "workdash-main",
+            "action",
+            "write-chars",
+            "--pane-id",
+            "terminal_23",
+            "--",
+            "--literal",
+        ],
+        [
+            "/usr/bin/zellij",
+            "--session",
+            "workdash-main",
+            "action",
+            "send-keys",
+            "--pane-id",
+            "terminal_23",
+            "Enter",
+        ],
+    ]
+
+
 def test_launch_agent_context_uses_new_zellij_pane_when_in_zellij(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -21,6 +21,8 @@ Feature: Local JSON control API
     - Work item actions accept Workdash item IDs exactly as emitted by `workdash list`.
     - A refresh request may arrive before the TUI event loop is running; it still succeeds and updates shared state, and the first TUI render uses that shared state.
     - Pane actions accept pane IDs exactly as emitted by `workdash info`.
+    - Analyze responses include `content_type`, `file_name`, and base64 `file_content`; there is no `content_encoding` field because content is always base64.
+    - CLI analyze treats a missing or invalid base64 `file_content` as an invalid server response instead of falling back to the server cache path.
 
   @id:F-API-JSON-CONTROL-S001
   Scenario: Server-backed startup exposes a local JSON API with the TUI
@@ -77,7 +79,7 @@ Feature: Local JSON control API
     And the current dashboard items include `owner/repo#ISSUE-1`
     When a client requests analysis for `owner/repo#ISSUE-1` with agent `codex`
     Then the server analyzes the known item with the selected configured agent
-    And the API returns the item ID, selected agent, analysis path, and cache status
+    And the API returns the item ID, selected agent, analysis path, cache status, and base64 markdown content
 
   @id:F-API-JSON-CONTROL-S008
   Scenario: Analyze API rejects an unknown item

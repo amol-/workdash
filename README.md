@@ -94,6 +94,8 @@ workdash list --json         # list items as machine-readable JSON
 workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
 workdash analyze ITEM [--agent NAME] [--json]  # analyze a current server item
 workdash code ITEM [--agent NAME] [--json]  # launch a terminal-backed coding agent
+workdash read PANE_ID [--full] [--json]  # read text from a live pane
+workdash write PANE_ID TEXT [--raw] [--json]  # send text to a live pane
 workdash show-config [--json] # show configured agents and fixed server address
 workdash --debug             # verbose logging
 workdash --configure         # run the interactive setup wizard
@@ -146,8 +148,9 @@ disturbing other in-progress work.
 
 `workdash --server` starts the normal TUI and a localhost JSON control API in the
 same process. V0 listens on `127.0.0.1:8765`, accepts JSON only, and stops when
-the TUI exits. Client commands such as `list`, `info`, `analyze`, and `code`
-connect to this server instead of loading GitHub or Zellij state themselves.
+the TUI exits. Client commands such as `list`, `info`, `analyze`, `code`,
+`read`, and `write` connect to this server instead of loading GitHub or Zellij
+state themselves.
 
 ## List command
 
@@ -187,8 +190,11 @@ GitHub issue/PR URL that is already in the current dashboard data. It reuses a
 fresh cached analysis when available, otherwise the server prepares the item's
 worktree and runs the selected configured analysis agent.
 
-Human output reports the item, agent, cache status, and analysis path. `--json`
-emits the same result as machine-readable JSON.
+The server analyze response includes `content_type` (`text/markdown`), `file_name`,
+and base64 `file_content` so clients do not need filesystem access to the server
+cache. The CLI writes that content to a secure temporary local file and reports it
+as `analysis_path`. `--json` emits the same client-side result without the raw
+base64 content.
 
 ## Code command
 
@@ -199,6 +205,17 @@ agent (`claude`, `codex`, or `pi`) for a current server-known Workdash item.
 
 Human output reports the item, agent, selected session, cwd, pane title, and pane
 id when available. `--json` emits the same result as machine-readable JSON.
+
+## Read and write commands
+
+`workdash read PANE_ID [--full] [--json]` requires a running `workdash --server`
+session and reads pane text through the server-backed pane content API. Human
+output prints the pane text directly. Add `--full` to request full scrollback.
+
+`workdash write PANE_ID TEXT [--raw] [--json]` requires a running
+`workdash --server` session and sends pane input through the server-backed pane
+send API. By default Workdash appends Enter; `--raw` or `--no-enter` sends the
+text exactly. Human output confirms that the pane accepted the input.
 
 ## Show-config command
 

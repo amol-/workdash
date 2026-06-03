@@ -6,7 +6,7 @@ Feature: CLI orchestration commands
   humans or pass structured JSON through for agents.
 
   Rules:
-    - `workdash list`, `workdash info`, `workdash analyze`, and `workdash code` require a running `workdash --server` session.
+    - `workdash list`, `workdash info`, `workdash analyze`, `workdash code`, `workdash read`, and `workdash write` require a running `workdash --server` session.
     - Server-backed CLI commands connect to the local Workdash JSON API at `127.0.0.1:8765`.
     - Server-backed CLI commands do not load configuration, run GitHub preflight, inspect Zellij, or fetch GitHub directly.
     - Server-backed CLI commands report a clear error when the local Workdash server is not reachable.
@@ -28,6 +28,10 @@ Feature: CLI orchestration commands
     - `workdash code` launches only configured terminal-backed coding agents reported by `workdash show-config`.
     - `workdash code` reports the created Zellij pane ID from live session state without persisting it.
     - `workdash code` does not expose non-terminal editors such as VSCode in V0.
+    - `workdash read` returns pane text from the server-backed pane content API, with `--full` requesting full scrollback.
+    - `workdash write` sends pane input through the server-backed pane send API, appending Enter unless raw input is requested.
+    - `workdash analyze` returns markdown analysis content as base64 in the server response with `content_type`, `file_name`, and `file_content`.
+    - `workdash analyze` writes the server-returned analysis content to a secure temporary local file and reports that client-side path as `analysis_path`.
 
   @id:F-CLI-ORCHESTRATION-S003
   Scenario: Info inspects panes through the local Workdash server
@@ -87,7 +91,8 @@ Feature: CLI orchestration commands
     And the current Workdash items include an assigned issue without cached analysis
     When the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`
     Then the command requests analysis from the local Workdash server
-    And the system returns JSON with the item ID, selected agent, analysis path, and cache status
+    And the server analysis response includes markdown content as base64 with a file name
+    And the system returns JSON with the item ID, selected agent, local analysis path, and cache status
 
   @id:F-CLI-ORCHESTRATION-S010
   Scenario: Orchestration commands require the local Workdash server
@@ -131,7 +136,8 @@ Feature: CLI orchestration commands
     And `workdash show-config` reports only `codex` as an analysis agent
     When the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`
     Then the command requests analysis from the local Workdash server
-    And the system returns JSON with the item ID, selected agent, analysis path, and cache status
+    And the server analysis response includes markdown content as base64 with a file name
+    And the system returns JSON with the item ID, selected agent, local analysis path, and cache status
 
   @id:F-CLI-ORCHESTRATION-S017
   Scenario: Server-backed commands skip local GitHub and Zellij preflight
@@ -149,3 +155,45 @@ Feature: CLI orchestration commands
     Then the command requests analysis from the local Workdash server
     And the system reports that the work item is unknown
     And the command exits with a non-zero status
+
+  @id:F-CLI-ORCHESTRATION-S019
+  Scenario: Read shows pane text through the local Workdash server
+    Given a server-backed Workdash session is running
+    And `workdash info` reports pane ID `terminal_23`
+    When the user runs `workdash read terminal_23`
+    Then the command requests pane content from the local Workdash server
+    And the system prints the pane text for direct agent use
+
+  @id:F-CLI-ORCHESTRATION-S020
+  Scenario: Read can request full scrollback and JSON output
+    Given a server-backed Workdash session is running
+    And `workdash info` reports pane ID `terminal_23`
+    When the user runs `workdash read terminal_23 --full --json`
+    Then the command requests full pane content from the local Workdash server
+    And the system returns JSON with the pane ID, content, and full flag
+
+  @id:F-CLI-ORCHESTRATION-S021
+  Scenario: Write sends pane input through the local Workdash server
+    Given a server-backed Workdash session is running
+    And `workdash info` reports pane ID `terminal_23`
+    When the user runs `workdash write terminal_23 "continue"`
+    Then the command sends pane input through the local Workdash server
+    And the system confirms that the pane input was accepted
+
+  @id:F-CLI-ORCHESTRATION-S022
+  Scenario: Write can send raw input and JSON output
+    Given a server-backed Workdash session is running
+    And `workdash info` reports pane ID `terminal_23`
+    When the user runs `workdash write terminal_23 "continue" --raw --json`
+    Then the command sends raw pane input through the local Workdash server
+    And the system returns JSON with the pane ID, raw flag, and accepted status
+
+  @id:F-CLI-ORCHESTRATION-S023
+  Scenario: Analyze CLI writes server-returned analysis content to a secure local file
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current Workdash items include an assigned issue without cached analysis
+    And the generated analysis content is returned by the server
+    When the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`
+    Then the command requests analysis from the local Workdash server
+    And the server analysis response includes markdown content as base64 with a file name
+    And the system returns JSON with the item ID, selected agent, local analysis path, cache status, and no server file content fields

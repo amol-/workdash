@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import threading
@@ -161,12 +162,24 @@ class WorkdashSession:
                     f"Analysis failed for {item_id} with agent {selected_agent}.",
                     status=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
+            try:
+                with open(path, "rb") as analysis_file:
+                    file_content = base64.b64encode(analysis_file.read()).decode("ascii")
+            except OSError as error:
+                raise WorkdashControlError(
+                    "analysis_failed",
+                    f"Analysis output could not be read for {item_id}.",
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                ) from error
             return {
                 "item_id": item_id,
                 "path": path,
                 "agent": selected_agent,
                 "cache_used": cache_used,
                 "status": "cached" if cache_used else "generated",
+                "content_type": "text/markdown",
+                "file_name": os.path.basename(path),
+                "file_content": file_content,
             }
 
     def code(
