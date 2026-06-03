@@ -187,6 +187,10 @@
         margin-top: 1.5rem;
       }
 
+      .control-plane-features {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
       .feature {
         background: var(--bg-elev);
         border: 1px solid var(--border);
@@ -511,6 +515,10 @@
         .tour-step:nth-child(even) .tour-shot {
           order: 0;
         }
+
+        .control-plane-features {
+          grid-template-columns: 1fr;
+        }
       }
 
       .requirements ul {
@@ -796,7 +804,7 @@
           coding sessions through commands whose <code>--json</code> output is
           safe to parse.
         </p>
-        <div class="features">
+        <div class="features control-plane-features">
           <div class="feature">
             <h3><span class="kbd">1</span>List work items</h3>
             <p>
