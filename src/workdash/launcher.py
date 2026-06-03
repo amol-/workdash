@@ -227,6 +227,58 @@ def load_zellij_panes(session: str) -> list[dict[str, object]]:
     return [pane for pane in panes if isinstance(pane, dict)]
 
 
+def dump_zellij_pane(session: str, pane_id: str, *, full: bool = False) -> str:
+    """Dump a Zellij pane viewport or scrollback."""
+
+    zellij = _resolve_zellij_binary()
+    command = [zellij, "--session", session, "action", "dump-screen", "--pane-id", pane_id]
+    if full:
+        command.append("--full")
+    try:
+        completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as error:
+        details = (error.stderr or "").strip() or (error.stdout or "").strip()
+        raise RuntimeError(
+            f"Failed to dump Zellij pane {pane_id} in {session}: {details or error.returncode}"
+        ) from error
+    return completed.stdout
+
+
+def send_zellij_pane_input(session: str, pane_id: str, data: str, *, raw: bool = False) -> None:
+    """Send characters to a Zellij pane, optionally followed by Enter."""
+
+    zellij = _resolve_zellij_binary()
+    try:
+        subprocess.run(
+            [zellij, "--session", session, "action", "write-chars", "--pane-id", pane_id, data],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if not raw:
+            subprocess.run(
+                [
+                    zellij,
+                    "--session",
+                    session,
+                    "action",
+                    "send-keys",
+                    "--pane-id",
+                    pane_id,
+                    "Enter",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+    except subprocess.CalledProcessError as error:
+        details = (error.stderr or "").strip() or (error.stdout or "").strip()
+        raise RuntimeError(
+            f"Failed to send input to Zellij pane {pane_id} in {session}: "
+            f"{details or error.returncode}"
+        ) from error
+
+
 def _build_direct_workdash_command(original_args: Sequence[str]) -> list[str]:
     current_entrypoint = Path(sys.argv[0])
     if current_entrypoint.name in {"__main__.py", "workdash.py"} and (

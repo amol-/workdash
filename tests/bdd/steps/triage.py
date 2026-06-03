@@ -21,14 +21,18 @@ from textual.widgets import DataTable, Input, Static
 
 from workdash.backend import WorkdashBackend, compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
+from workdash.control import WorkdashSession, _work_items_payload
 from workdash.github_client import GitHubClient
 from workdash.included_items import IncludedItemsStore
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import IncludeDialog
-from workdash.workdash import format_work_item_id
+from workdash.workdash import _print_work_items_result, format_work_item_id
 
 from .common import (
     NOW_UTC,
+    FakeApiBackend,
+    api_config,
+    ensure_api_session,
     install_config,
     install_valid_env,
     make_work_item,
@@ -694,6 +698,65 @@ def _dashboard_has_work_items(scenario_state: dict[str, Any], work_items: list[W
     _dashboard_has_item_types(scenario_state, work_items)
 
 
+@given("a server-backed Workdash session has no open work items")
+def _server_session_has_no_items(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    work_items.clear()
+    scenario_state["work_items"] = []
+    backend = FakeApiBackend(scenario_state, tmp_path)
+    session = WorkdashSession(
+        config=api_config(tmp_path),
+        backend=backend,  # type: ignore[arg-type]
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=scenario_state.get("zellij_session", "workdash-main"),
+    )
+    scenario_state["api_session"] = session
+    scenario_state["api_backend"] = backend
+
+
+@given("a server-backed Workdash session has issue, pull request, and review work items")
+def _server_session_has_item_types(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    work_items[:] = [
+        make_work_item(
+            item_type=WorkItemType.ISSUE,
+            kind=WorkItemKind.ASSIGNED_ISSUE,
+            number=1,
+            title="Issue",
+            created_at=NOW_UTC,
+            updated_at=NOW_UTC,
+        ),
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.AUTHORED_PR,
+            number=2,
+            title="Pull request",
+            created_at=NOW_UTC,
+            updated_at=NOW_UTC,
+        ),
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.REVIEW_REQUESTED_PR,
+            number=3,
+            title="Review",
+            created_at=NOW_UTC,
+            updated_at=NOW_UTC,
+        ),
+    ]
+    scenario_state["work_items"] = list(work_items)
+    ensure_api_session(scenario_state, work_items, tmp_path)
+
+
+@given("a server-backed Workdash session has work items")
+def _server_session_has_work_items(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    _server_session_has_item_types(scenario_state, work_items, tmp_path)
+
+
 @when(parsers.parse('the user runs the system with "{flag}"'))
 def _run_system_with_flag(
     flag: str,
@@ -742,6 +805,42 @@ def _list_work_items_json(
     )
 
 
+@when("the user runs `workdash list --refresh`")
+def _list_work_items_refresh(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import workdash.workdash as workdash_module
+
+    scenario_state["github_fetches"] = 0
+    scenario_state["refreshed_items"] = [
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.TRACKED_PR,
+            number=2,
+            title="Fresh item",
+            created_at=NOW_UTC,
+            updated_at=NOW_UTC,
+        )
+    ]
+
+    class FakeControlClient:
+        def request(self, endpoint: str, payload: dict[str, object] | None = None):
+            scenario_state.setdefault("client_requests", []).append((endpoint, payload or {}))
+            assert endpoint == "list"
+            return scenario_state["api_session"].list_items(
+                refresh=bool((payload or {}).get("refresh", False))
+            )
+
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+    scenario_state["exit_code"] = workdash_module.main(["list", "--refresh"])
+    captured = capsys.readouterr()
+    scenario_state["print_output"] = captured.out
+    scenario_state["stdout"] = captured.out
+    scenario_state["stderr"] = captured.err
+
+
 def _run_list_command(
     argv: list[str],
     scenario_state: dict[str, Any],
@@ -764,6 +863,25 @@ def _run_list_command(
             raise AssertionError("TUI should not run for list command")
 
     monkeypatch.setattr(workdash_module, "WorkdashApp", UnreachableApp)
+
+    if scenario_state.get("api_session") is not None:
+
+        class FakeControlClient:
+            def request(
+                self, endpoint: str, payload: dict[str, object] | None = None
+            ) -> dict[str, object]:
+                payload = payload or {}
+                scenario_state.setdefault("control_requests", []).append(
+                    {"endpoint": endpoint, "payload": dict(payload)}
+                )
+                if endpoint == "list":
+                    return scenario_state["api_session"].list_items(
+                        refresh=bool(payload.get("refresh", False))
+                    )
+                raise AssertionError(f"Unexpected control endpoint: {endpoint}")
+
+        monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+
     scenario_state["exit_code"] = workdash_module.main(argv)
     captured = capsys.readouterr()
     scenario_state["print_output"] = captured.out
@@ -771,16 +889,55 @@ def _run_list_command(
     scenario_state["stderr"] = captured.err
 
 
+@then("the command asks the local Workdash server to refresh dashboard items")
+def _command_requests_refresh(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("client_requests") == [("list", {"refresh": True})]
+    assert scenario_state.get("github_fetches") == 1
+
+
+@then("the system emits the refreshed work items")
+def _system_emits_refreshed_items(scenario_state: dict[str, Any]) -> None:
+    output = scenario_state["print_output"]
+    for item in scenario_state["refreshed_items"]:
+        assert format_work_item_id(item) in output
+        assert item.title in output
+
+
+@then("the refreshed work items become the shared dashboard state used by the TUI and API")
+def _refreshed_items_become_shared_tui_api_state(scenario_state: dict[str, Any]) -> None:
+    assert [format_work_item_id(item) for item in scenario_state["api_session"].work_items] == [
+        format_work_item_id(item) for item in scenario_state["refreshed_items"]
+    ]
+    assert scenario_state.get("tui_refresh_callbacks") == ["refresh_from_session"]
+    assert [format_work_item_id(item) for item in scenario_state["tui_work_items"]] == [
+        format_work_item_id(item) for item in scenario_state["refreshed_items"]
+    ]
+
+
+@then("the command requests the current item list from the local Workdash server")
+def _command_requests_current_items(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("control_requests") == [
+        {"endpoint": "list", "payload": {"refresh": False}}
+    ]
+
+
 @then("the system emits one line per work item to standard output")
-def _print_one_line_per_item(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
+def _print_one_line_per_item(scenario_state: dict[str, Any]) -> None:
     output_lines = [line for line in scenario_state["print_output"].splitlines() if line.strip()]
-    assert len(output_lines) == len(work_items), (
+    expected_items = scenario_state["api_session"].list_items(refresh=False)["items"]
+    assert len(output_lines) == len(expected_items), (
         scenario_state["print_output"],
-        work_items,
+        expected_items,
     )
+    assert "No work items found." not in scenario_state["print_output"]
+    for line, item in zip(output_lines, expected_items, strict=True):
+        assert item["id"] in line
+        assert item["title"] in line
+        assert str(item["updated_at"])[:10] in line
 
 
 @then("the TUI is not started")
+@then("the TUI is not started by the command")
 def _tui_not_started(scenario_state: dict[str, Any]) -> None:
     # UnreachableApp raises if instantiated — reaching this step means no TUI.
     assert "print_output" in scenario_state
@@ -1676,12 +1833,12 @@ def _list_command_suffixes(scenario_state: dict[str, Any]) -> None:
     import contextlib
     import io
 
-    from workdash.workdash import _print_work_items
-
     work_items = scenario_state["work_items"]
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        _print_work_items(work_items, compute_suggestion_markers(work_items))
+        _print_work_items_result(
+            _work_items_payload(work_items, compute_suggestion_markers(work_items))
+        )
     lines = [line for line in buffer.getvalue().splitlines() if line.strip()]
     # Each seeded item's row identity is the copy/paste Workdash item ID;
     # per-row assertions guarantee the "+" suffix is anchored to the type

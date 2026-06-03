@@ -42,13 +42,46 @@ def _config_missing_fields(scenario_state: dict[str, Any]) -> None:
     )
 
 
+@given("the configuration file has a malformed configured agent command")
+def _config_has_malformed_agent_command(scenario_state: dict[str, Any]) -> None:
+    scenario_state["_malformed_config"] = WorkdashConfig(
+        github_username="testuser",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        codex=AgentConfig(analyze="codex exec", launch="codex"),
+        pi=AgentConfig(launch="pi 'broken"),
+        repositories=("owner/repo",),
+        workdir="~/wrk",
+    )
+
+
 @when("the user runs the system")
 def _user_runs_system(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setenv("ZELLIJ", "0")
+    _run_system(scenario_state, monkeypatch, capsys, [])
+
+
+@when("the user runs the system with `--server`")
+def _user_runs_system_with_server(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_system(scenario_state, monkeypatch, capsys, ["--server"])
+
+
+def _run_system(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+) -> None:
+    if "_malformed_config" in scenario_state:
+        monkeypatch.delenv("ZELLIJ", raising=False)
+    else:
+        monkeypatch.setenv("ZELLIJ", "0")
     exec_calls: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(
         launcher_module.os,
@@ -90,16 +123,28 @@ def _user_runs_system(
                 workdir="~/wrk",
             ),
         )
-    elif "_incomplete_config" in scenario_state:
+    elif "_incomplete_config" in scenario_state or "_malformed_config" in scenario_state:
         monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
         monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
+        config = scenario_state.get("_incomplete_config") or scenario_state["_malformed_config"]
+        monkeypatch.setattr(workdash_module, "load_config", lambda: config)
+        if "_malformed_config" in scenario_state:
+            monkeypatch.setattr(
+                workdash_module,
+                "exec_zellij_wrapped_workdash",
+                lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
+            )
         monkeypatch.setattr(
-            workdash_module, "load_config", lambda: scenario_state["_incomplete_config"]
+            workdash_module,
+            "WorkdashBackend",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("backend should not load invalid runtime config")
+            ),
         )
     else:  # pragma: no cover - defensive; no current scenario hits this
         raise AssertionError("Preflight scenario setup missing")
 
-    exit_code = workdash_module.main([])
+    exit_code = workdash_module.main(argv)
     captured = capsys.readouterr()
     scenario_state["exit_code"] = exit_code
     scenario_state["output"] = captured.out + captured.err
@@ -163,11 +208,11 @@ def _install_startup_which(
     monkeypatch.setattr(workdash_module.shutil, "which", fake_which)
 
 
-@when("the user starts the interactive dashboard")
-def _user_starts_interactive_dashboard(
+def _start_interactive_dashboard(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    argv: list[str] | None = None,
 ) -> None:
     exec_calls: list[tuple[str, list[str]]] = []
 
@@ -189,13 +234,22 @@ def _user_starts_interactive_dashboard(
         monkeypatch.setenv("ZELLIJ", "0")
 
     try:
-        exit_code = workdash_module.main([])
+        exit_code = workdash_module.main(argv or [])
     except SystemExit as error:
         exit_code = int(error.code or 0)
     captured = capsys.readouterr()
     scenario_state["exit_code"] = exit_code
     scenario_state["output"] = captured.out + captured.err
     scenario_state["exec_calls"] = exec_calls
+
+
+@when("the user starts the interactive dashboard")
+def _user_starts_interactive_dashboard(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _start_interactive_dashboard(scenario_state, monkeypatch, capsys)
 
 
 @when("the user starts the interactive dashboard with `--direct`")
@@ -218,6 +272,43 @@ def _user_starts_interactive_dashboard_direct(
     exit_code = workdash_module.main(["--direct"])
     captured = capsys.readouterr()
     scenario_state["exit_code"] = exit_code
+    scenario_state["output"] = captured.out + captured.err
+    scenario_state["exec_calls"] = []
+
+
+@when("the user starts a server-backed client command")
+@when("the user runs a server-backed client command")
+def _user_starts_server_backed_client_command(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeControlClient:
+        def request(self, endpoint: str, payload: dict[str, object] | None = None):
+            scenario_state.setdefault("control_requests", []).append(
+                {"endpoint": endpoint, "payload": dict(payload or {})}
+            )
+            assert endpoint == "info"
+            return {"session": "workdash-main", "panes": []}
+
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+    monkeypatch.setattr(
+        workdash_module,
+        "_check_gh_preflight",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected GitHub preflight")),
+    )
+    monkeypatch.setattr(
+        workdash_module,
+        "exec_zellij_wrapped_workdash",
+        lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
+    )
+
+    exit_code = workdash_module.main(["info"])
+    captured = capsys.readouterr()
+    scenario_state["exit_code"] = exit_code
+    scenario_state["stdout"] = captured.out
+    scenario_state["stderr"] = captured.err
     scenario_state["output"] = captured.out + captured.err
     scenario_state["exec_calls"] = []
 
@@ -304,6 +395,22 @@ def _zellij_runs_dashboard_direct(scenario_state: dict[str, Any]) -> None:
     assert "--direct" in layout
 
 
+@when("the user starts the interactive dashboard with `--server`")
+def _user_starts_interactive_dashboard_server(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _start_interactive_dashboard(scenario_state, monkeypatch, capsys, argv=["--server"])
+
+
+@then("the Zellij process runs the dashboard with `--direct --server`")
+def _zellij_runs_dashboard_direct_server(scenario_state: dict[str, Any]) -> None:
+    layout = _read_startup_layout(scenario_state)
+    assert "--direct" in layout
+    assert "--server" in layout
+
+
 def _read_startup_layout(scenario_state: dict[str, Any]) -> str:
     command = scenario_state["exec_calls"][0][1]
     layout_path = command[command.index("--layout") + 1]
@@ -366,3 +473,12 @@ def _lists_missing(scenario_state: dict[str, Any]) -> None:
 @then("the system tells the user to run the configuration wizard")
 def _tells_run_wizard(scenario_state: dict[str, Any]) -> None:
     assert "--configure" in scenario_state["output"]
+
+
+@then("the system reports the malformed configuration with wizard guidance")
+def _reports_malformed_config_with_wizard_guidance(scenario_state: dict[str, Any]) -> None:
+    output = scenario_state["output"]
+    assert "invalid configuration fields" in output
+    assert "agents.pi.launch" in output
+    assert "workdash --configure" in output
+    assert "Traceback" not in output

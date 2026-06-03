@@ -16,6 +16,9 @@ from .steps import (
     analysis as _analysis,
 )
 from .steps import (
+    api as _api,
+)
+from .steps import (
     browse as _browse,
 )
 from .steps import (
@@ -29,6 +32,9 @@ from .steps import (
 )
 from .steps import (
     setup as _setup,
+)
+from .steps import (
+    show_config as _show_config,
 )
 from .steps import (
     startup as _startup,
@@ -45,6 +51,7 @@ from .steps import (
 
 for _step_module in (
     _common,
+    _api,
     _cli_orchestration,
     _triage,
     _worktrees,
@@ -54,6 +61,7 @@ for _step_module in (
     _coding,
     _browse,
     _terminal,
+    _show_config,
 ):
     for _name in dir(_step_module):
         if _name.startswith("pytestbdd_stepdef_") or _name in {
