@@ -133,6 +133,9 @@ def _user_starts_workdash_with_server(
 
         monkeypatch.setattr(workdash_module.shutil, "which", fake_which)
         monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            workdash_module, "load_config", lambda: api_config(Path("/tmp/workdash-bdd"))
+        )
         monkeypatch.setattr("workdash.launcher.shutil.which", fake_which)
         monkeypatch.setattr("workdash.launcher.os.execvp", fake_execvp)
         monkeypatch.setattr("workdash.launcher.secrets.token_hex", lambda _length: "abc123ef")
