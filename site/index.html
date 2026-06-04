@@ -448,6 +448,24 @@
         font-weight: 600;
       }
 
+      .what-layout {
+        display: grid;
+        grid-template-columns: 3fr 2fr;
+        gap: 2rem;
+        align-items: start;
+        margin-top: 1rem;
+      }
+
+      .what-layout .what-text p.lead:first-child {
+        margin-top: 0;
+      }
+
+      .what-shot {
+        aspect-ratio: 4 / 5;
+        position: sticky;
+        top: 1.5rem;
+      }
+
       .remote-access {
         display: grid;
         grid-template-columns: 2fr 3fr;
@@ -507,9 +525,14 @@
       @media (max-width: 720px) {
         .tour-step,
         .tour-step:nth-child(even),
-        .remote-access {
+        .remote-access,
+        .what-layout {
           grid-template-columns: 1fr;
           gap: 1rem;
+        }
+
+        .what-shot {
+          position: static;
         }
 
         .tour-step:nth-child(even) .tour-shot {
@@ -589,19 +612,47 @@
     <section id="what">
       <div class="container">
         <h2>Your GitHub work, with less friction</h2>
-        <p class="lead">
-          GitHub tells you what is waiting. Getting from there to an open
-          editor with the right branch, the right context, and a summary of
-          the thing you are about to touch is the part that eats the morning.
-          <code>workdash</code> compresses that into a single keystroke.
-        </p>
-        <p class="lead">
-          It pulls your authored PRs, review requests, assignments, and
-          tracked issues into one list, suggests what to pick up next, and
-          lets you launch an AI analysis or a full coding session in a
-          dedicated git worktree — each keyed to the GitHub item so context
-          never gets lost between sessions.
-        </p>
+        <div class="what-layout">
+          <div class="what-text">
+            <p class="lead">
+              GitHub tells you what is waiting. Getting from there to an open
+              editor with the right branch, the right context, and a summary of
+              the thing you are about to touch is the part that eats the morning.
+              <code>workdash</code> compresses that into a single keystroke.
+            </p>
+            <p class="lead">
+              It pulls
+              <a href="#authored-prs">your authored PRs</a>,
+              <a href="#review">review requests</a>, assignments, and
+              tracked issues into one list, suggests what to pick up next, and
+              lets you
+              <a href="#tackle">launch an AI analysis or a full coding session</a>
+              in a dedicated git worktree — each keyed to the GitHub item so
+              context never gets lost between sessions.
+            </p>
+            <p class="lead">
+              It also doubles as a
+              <a href="#cli">local control plane for agent swarms</a>, so your
+              <strong>assistant agent can act as a control agent</strong> —
+              reading the queue, requesting analyses, and launching coding
+              sessions against your dashboard.
+            </p>
+            <p class="lead">
+              <strong>And it works on mobile too</strong> —
+              <a href="#remote">access everywhere</a> from a laptop, tablet, or
+              phone.
+            </p>
+            <p class="lead">
+              <a class="cta primary" href="#install">Try it now &rarr;</a>
+            </p>
+          </div>
+          <figure class="tour-shot what-shot" data-full="chat_session.png">
+            <img
+              src="chat_session.png"
+              alt="workdash driven by an assistant agent in a chat session, reading the work queue and launching actions on the dashboard"
+            />
+          </figure>
+        </div>
       </div>
     </section>
 
@@ -657,7 +708,7 @@
           your GitHub day on. Click any screenshot to zoom in.
         </p>
 
-        <div class="workflow">
+        <div class="workflow" id="review">
           <div class="workflow-header">
             <h3>Review a pull request</h3>
             <p class="workflow-lead">
@@ -710,7 +761,7 @@
           </div>
         </div>
 
-        <div class="workflow">
+        <div class="workflow" id="tackle">
           <div class="workflow-header">
             <h3>Tackle an issue</h3>
             <p class="workflow-lead">
@@ -751,7 +802,7 @@
           </div>
         </div>
 
-        <div class="workflow">
+        <div class="workflow" id="authored-prs">
           <div class="workflow-header">
             <h3>Keep up with feedback on your own PRs</h3>
             <p class="workflow-lead">
@@ -920,6 +971,24 @@
         <pre><code>workdash --configure</code></pre>
         <p class="lead">Launch the TUI:</p>
         <pre><code>workdash</code></pre>
+
+        <h3 style="margin-top: 2.5rem">Give another agent access</h3>
+        <p class="lead">
+          To let an assistant agent drive your dashboard, start workdash with
+          the localhost JSON control API:
+        </p>
+        <pre><code>workdash --server</code></pre>
+        <p class="lead">
+          Then copy the
+          <a href="https://github.com/amol-/workdash/tree/main/skills">workdash
+          skills</a> into your control agent so it knows how to talk to the
+          dashboard.
+        </p>
+        <p class="lead">
+          The control agent must have the <code>workdash</code> command
+          available and run on the <strong>same host</strong> as the workdash
+          server.
+        </p>
       </div>
     </section>
 
@@ -937,7 +1006,7 @@
           <li><code>xdg-open</code> or <code>open</code> for links and rendered analyses.</li>
           <li>
             Optional, per action: <code>claude</code>, <code>codex</code>,
-            <code>code</code>.
+            <code>code</code>, <a href="https://pi.dev"><code>pi</code></a>.
           </li>
         </ul>
         <p class="lead" style="margin-top: 1rem">
