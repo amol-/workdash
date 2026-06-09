@@ -629,3 +629,24 @@ def launch_terminal_context(repo_path: str) -> ZellijPaneLaunch:
         context="Failed to launch terminal in zellij",
         work_action="terminal",
     )
+
+
+def launch_branchdiff_context(repo_path: str) -> ZellijPaneLaunch:
+    """Open branchdiff TUI in zellij rooted at the given repository path.
+
+    This launches the `workdash branchdiff` command as a standalone subprocess
+    in a new zellij pane. The command will display a side-by-side diff viewer
+    for the git repository at repo_path.
+    """
+    if not isinstance(repo_path, str) or not repo_path.strip():
+        raise ValueError("Repository path must be a non-empty string.")
+
+    # Run workdash branchdiff command in the repo directory
+    user_shell = os.environ.get("SHELL", "/bin/sh")
+    command = [user_shell, "-ic", "workdash branchdiff"]
+    return _launch_zellij_command(
+        repo_path,
+        command,
+        context="Failed to launch branchdiff in zellij",
+        work_action="diff",
+    )

@@ -26,6 +26,7 @@ from .control import (
     WorkdashControlServer,
     WorkdashSession,
     format_work_item_id,
+    resolve_work_item_target,
     show_config_payload,
 )
 from .launcher import (
@@ -54,6 +55,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands = WorkdashCommands()
     if options.command in {"list", "info", "analyze", "code", "read", "write"}:
         return _run_server_backed_command(commands, options)
+    if options.command == "branchdiff":
+        # branchdiff is a standalone subcommand that needs to parse its own args
+        # Re-execute as a subprocess so it gets its own sys.argv
+        import subprocess
+
+        args = ["python", "-m", "workdash.branchdiff"]
+        if options.target is not None:
+            args.append(options.target)
+        try:
+            return subprocess.run(args, check=True).returncode
+        except subprocess.CalledProcessError as error:
+            return error.returncode
     if options.command == "show-config":
         return commands.show_config(json_output=options.json_output)
 
@@ -342,6 +355,17 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             raw=options.raw,
             json_output=options.json_output,
         )
+    if options.command == "branchdiff":
+        # Spawn branchdiff as subprocess so it can parse its own args
+        import subprocess
+
+        args = ["python", "-m", "workdash.branchdiff"]
+        if options.target is not None:
+            args.append(options.target)
+        try:
+            return subprocess.run(args, check=True).returncode
+        except subprocess.CalledProcessError as error:
+            return error.returncode
     raise AssertionError(f"Unsupported server-backed command: {options.command}")
 
 
@@ -515,6 +539,16 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         default=argparse.SUPPRESS,
         help="Emit machine-readable JSON.",
     )
+    branchdiff_parser = subparsers.add_parser(
+        "branchdiff",
+        help="Show side-by-side diff of current branch vs upstream.",
+    )
+    branchdiff_parser.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        help="Branch to compare against (default: upstream).",
+    )
     namespace = parser.parse_args(argv) if argv is not None else parser.parse_args()
     return CLIOptions(
         debug=namespace.debug,
@@ -652,6 +686,7 @@ def _print_code_result(result: dict[str, object]) -> None:
     print(f"Cwd: {result['cwd']}")
     print(f"Pane title: {result['pane_title'] or '-'}")
     print(f"Pane id: {result['pane_id'] or '-'}")
+
 
 
 def _print_pane_info(info: dict[str, object]) -> None:
