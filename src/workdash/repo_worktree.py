@@ -64,6 +64,11 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
                 capture_output=True,
                 text=True,
             )
+        if item.item_type == WorkItemType.PR:
+            git = GitHelpers()
+            if existing.name != git.worktree_name(item.repo, item.number):
+                with contextlib.suppress(RuntimeError):
+                    _fetch_remote(existing, "upstream")
         return str(existing)
     # Worktree doesn't exist — resolve the target repo and create it
     if item.item_type == WorkItemType.PR:
@@ -84,12 +89,18 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
                 capture_output=True,
                 text=True,
             )
+        if item.item_type == WorkItemType.PR and head_repo != item.repo:
+            _ensure_upstream_remote(main, item.repo)
+            _fetch_remote(main, "upstream")
         return str(git_existing)
     Path(workdir).expanduser().mkdir(parents=True, exist_ok=True)
     if not main.exists():
         _clone_repo(repo, main)
-    _fetch_origin(main)
+    _fetch_remote(main, "origin")
     if item.item_type == WorkItemType.PR:
+        if head_repo != item.repo:
+            _ensure_upstream_remote(main, item.repo)
+            _fetch_remote(main, "upstream")
         _create_worktree(main, wt, head_ref, f"origin/{head_ref}")
     else:
         _create_worktree(main, wt, f"issue-{item.number}", "origin/HEAD")
@@ -223,21 +234,51 @@ def _clone_repo(repo: str, target: Path) -> None:
         ) from exc
 
 
-def _fetch_origin(main_path: Path) -> None:
+def _fetch_remote(main_path: Path, remote: str) -> None:
     try:
         subprocess.run(
-            ["git", "fetch", "origin"],
+            ["git", "fetch", remote],
             cwd=main_path,
             check=True,
             capture_output=True,
             text=True,
         )
     except FileNotFoundError as exc:
-        raise RuntimeError("Failed to fetch origin: git is not installed or not on PATH.") from exc
+        raise RuntimeError(f"Failed to fetch {remote}: git is not installed or not on PATH.") from exc
     except subprocess.CalledProcessError as exc:
         stderr = (exc.stderr or "").strip()
         raise RuntimeError(
-            f"Failed to fetch origin: {stderr or f'exit code {exc.returncode}'}"
+            f"Failed to fetch {remote}: {stderr or f'exit code {exc.returncode}'}"
+        ) from exc
+
+
+def _ensure_upstream_remote(main_path: Path, repo: str) -> None:
+    upstream_url = f"https://github.com/{repo}.git"
+    existing = subprocess.run(
+        ["git", "remote", "get-url", "upstream"],
+        cwd=main_path,
+        capture_output=True,
+        text=True,
+    )
+    command = (
+        ["git", "remote", "set-url", "upstream", upstream_url]
+        if existing.returncode == 0
+        else ["git", "remote", "add", "upstream", upstream_url]
+    )
+    try:
+        subprocess.run(
+            command,
+            cwd=main_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("Failed to configure upstream: git is not installed or not on PATH.") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        raise RuntimeError(
+            f"Failed to configure upstream for {repo}: {stderr or f'exit code {exc.returncode}'}"
         ) from exc
 
 

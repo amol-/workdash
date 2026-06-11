@@ -7,13 +7,14 @@ a side-by-side diff viewer for git repositories.
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 
 import pytest
-from pytest_bdd import given, then, when
+from pytest_bdd import given, parsers, then, when
 
 import workdash.branchdiff as branchdiff_module
 from workdash.branchdiff import get_changed_files, get_file_diff, get_upstream_branch
@@ -496,9 +497,42 @@ def _tui_has_pull_request_selected(
     scenario_state.setdefault("selected_item", work_items[0])
 
 
+@given(parsers.parse('GitHub reports the PR base branch "{base_branch}"'))
+def _github_reports_pr_base_branch(base_branch: str, scenario_state: dict[str, Any]) -> None:
+    scenario_state["branchdiff_pr_base_branch"] = base_branch
+
+
 @given("the worktree for that item exists")
 def _worktree_for_item_exists(scenario_state: dict[str, Any]) -> None:
     scenario_state["worktree_exists"] = True
+
+
+@then("Workdash has prepared the worktree for the selected item")
+def _workdash_prepared_worktree_for_selected_item(scenario_state: dict[str, Any]) -> None:
+    selected_item = scenario_state["selected_item"]
+    assert scenario_state.get("branchdiff_worktree_calls") == [selected_item]
+
+
+@then("Workdash asks GitHub for that PR's base branch")
+def _workdash_asks_github_for_pr_base_branch(scenario_state: dict[str, Any]) -> None:
+    selected_item = scenario_state["selected_item"]
+    assert scenario_state.get("branchdiff_gh_commands") == [
+        [
+            "gh",
+            "pr",
+            "view",
+            str(selected_item.number),
+            "--repo",
+            selected_item.repo,
+            "--json",
+            "baseRefName,headRepository,headRepositoryOwner",
+        ]
+    ]
+
+
+@then("GitHub is not queried for a PR base branch")
+def _github_is_not_queried_for_pr_base_branch(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("branchdiff_gh_commands") == []
 
 
 @then("a new zellij pane opens")
@@ -512,13 +546,27 @@ def _new_zellij_pane_opens(scenario_state: dict[str, Any]) -> None:
 
 @then('the pane runs "workdash branchdiff" in the worktree directory')
 def _pane_runs_branchdiff_in_worktree(scenario_state: dict[str, Any]) -> None:
+    _assert_branchdiff_pane_command(scenario_state, "workdash branchdiff")
+
+
+@then(
+    parsers.parse('the pane runs "workdash branchdiff {target_branch}" in the worktree directory')
+)
+def _pane_runs_branchdiff_with_target_in_worktree(
+    target_branch: str,
+    scenario_state: dict[str, Any],
+) -> None:
+    _assert_branchdiff_pane_command(scenario_state, f"workdash branchdiff {target_branch}")
+
+
+def _assert_branchdiff_pane_command(scenario_state: dict[str, Any], shell_text: str) -> None:
     commands = scenario_state["branchdiff_zellij_commands"]
     worktree_path = scenario_state["branchdiff_worktree_path"]
     command = commands[0]
     cwd_index = command.index("--cwd")
     separator_index = command.index("--")
     assert command[cwd_index : cwd_index + 2] == ["--cwd", worktree_path]
-    assert command[separator_index + 1 :] == ["/bin/bash", "-ic", "workdash branchdiff"]
+    assert command[separator_index + 1 :] == ["/bin/bash", "-ic", shell_text]
 
 
 @then("the diff viewer displays the PR changes")
@@ -552,6 +600,7 @@ def run_branchdiff_tui_scenario(
     import workdash.launcher as launcher_module
 
     zellij_commands: list[list[str]] = []
+    gh_commands: list[list[str]] = []
     worktree_calls: list[WorkItem] = []
     captured: dict[str, Any] = {}
     worktree_path = tmp_path / "wt"
@@ -563,8 +612,23 @@ def run_branchdiff_tui_scenario(
         return None
 
     def fake_run(*args, **kwargs):
-        zellij_commands.append(args[0])
-        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+        command = args[0]
+        if command[:3] == ["gh", "pr", "view"]:
+            gh_commands.append(command)
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "baseRefName": scenario_state.get("branchdiff_pr_base_branch", "main"),
+                        "headRepository": {"name": "repo"},
+                        "headRepositoryOwner": {"login": "owner"},
+                    }
+                ),
+                stderr="",
+            )
+        zellij_commands.append(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
 
     def worktree_callback(item: WorkItem) -> str:
         if scenario_state.get("worktree_fails"):
@@ -598,6 +662,7 @@ def run_branchdiff_tui_scenario(
     )
     scenario_state["branchdiff_worktree_calls"] = worktree_calls
     scenario_state["branchdiff_worktree_path"] = str(worktree_path)
+    scenario_state["branchdiff_gh_commands"] = gh_commands
     scenario_state["branchdiff_zellij_commands"] = zellij_commands
     scenario_state["branchdiff_status"] = captured["status"]
     scenario_state["modal_screen_names"] = captured["modal_screen_names"]

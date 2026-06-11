@@ -435,7 +435,12 @@ def _format_zellij_pane_id(pane_id: object) -> str | None:
     return f"terminal_{pane_id_text}"
 
 
-def _run_gh_context_command(*, item: WorkItem, command: list[str]) -> dict[str, Any]:
+def _run_gh_context_command(
+    *,
+    item: WorkItem,
+    command: list[str],
+    context_label: str = "launch context",
+) -> dict[str, Any]:
     try:
         completed = subprocess.run(
             command,
@@ -445,12 +450,12 @@ def _run_gh_context_command(*, item: WorkItem, command: list[str]) -> dict[str, 
         )
     except FileNotFoundError as error:
         raise RuntimeError(
-            "Failed to gather launch context with gh: gh CLI is not installed or not on PATH."
+            f"Failed to gather {context_label} with gh: gh CLI is not installed or not on PATH."
         ) from error
     except subprocess.CalledProcessError as error:
         stderr = (error.stderr or "").strip()
         raise RuntimeError(
-            f"Failed to gather launch context for {item.item_type.value} "
+            f"Failed to gather {context_label} for {item.item_type.value} "
             f"{item.repo}#{item.number}: "
             f"{stderr or f'process exited with code {error.returncode}'}"
         ) from error
@@ -458,12 +463,12 @@ def _run_gh_context_command(*, item: WorkItem, command: list[str]) -> dict[str, 
         payload = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
         raise RuntimeError(
-            f"Failed to parse launch context JSON for {item.item_type.value} "
+            f"Failed to parse {context_label} JSON for {item.item_type.value} "
             f"{item.repo}#{item.number}: {error.msg}"
         ) from error
     if not isinstance(payload, dict):
         raise RuntimeError(
-            f"Invalid launch context payload for {item.item_type.value} "
+            f"Invalid {context_label} payload for {item.item_type.value} "
             f"{item.repo}#{item.number}: expected a JSON object."
         )
     return payload
@@ -631,7 +636,7 @@ def launch_terminal_context(repo_path: str) -> ZellijPaneLaunch:
     )
 
 
-def launch_branchdiff_context(repo_path: str) -> ZellijPaneLaunch:
+def launch_branchdiff_context(repo_path: str, item: WorkItem | None = None) -> ZellijPaneLaunch:
     """Open branchdiff TUI in zellij rooted at the given repository path.
 
     This launches the `workdash branchdiff` command as a standalone subprocess
@@ -641,12 +646,45 @@ def launch_branchdiff_context(repo_path: str) -> ZellijPaneLaunch:
     if not isinstance(repo_path, str) or not repo_path.strip():
         raise ValueError("Repository path must be a non-empty string.")
 
-    # Run workdash branchdiff command in the repo directory
+    branchdiff_command = ["workdash", "branchdiff"]
+    if item is not None and item.item_type == WorkItemType.PR:
+        branchdiff_command.append(_resolve_branchdiff_pr_base_ref(item))
+
     user_shell = os.environ.get("SHELL", "/bin/sh")
-    command = [user_shell, "-ic", "workdash branchdiff"]
+    command = [user_shell, "-ic", shlex.join(branchdiff_command)]
     return _launch_zellij_command(
         repo_path,
         command,
         context="Failed to launch branchdiff in zellij",
         work_action="diff",
     )
+
+
+def _resolve_branchdiff_pr_base_ref(item: WorkItem) -> str:
+    payload = _run_gh_context_command(
+        item=item,
+        command=[
+            "gh",
+            "pr",
+            "view",
+            str(item.number),
+            "--repo",
+            item.repo,
+            "--json",
+            "baseRefName,headRepository,headRepositoryOwner",
+        ],
+        context_label="branchdiff base branch",
+    )
+    base_ref_name = payload.get("baseRefName")
+    if not isinstance(base_ref_name, str) or not base_ref_name.strip():
+        raise RuntimeError(
+            f"Invalid branchdiff base branch payload for {item.item_type.value} "
+            f"{item.repo}#{item.number}: expected a non-empty baseRefName."
+        )
+    head_repo_owner = payload.get("headRepositoryOwner", {})
+    head_repo_info = payload.get("headRepository", {})
+    owner_login = head_repo_owner.get("login", "") if isinstance(head_repo_owner, dict) else ""
+    repo_name = head_repo_info.get("name", "") if isinstance(head_repo_info, dict) else ""
+    head_repo = f"{owner_login}/{repo_name}" if owner_login and repo_name else item.repo
+    remote = "origin" if head_repo == item.repo else "upstream"
+    return f"{remote}/{base_ref_name.strip()}"

@@ -9,6 +9,7 @@ from workdash.launcher import (
     build_launch_agent_prompt,
     exec_zellij_wrapped_workdash,
     launch_agent_context,
+    launch_branchdiff_context,
     launch_terminal_context,
     launch_vscode_context,
     list_workdash_sessions,
@@ -541,6 +542,134 @@ def test_launch_terminal_context_uses_new_zellij_pane_when_in_zellij(
         "--",
         "/bin/bash",
         "-i",
+    ]
+
+
+def test_launch_branchdiff_context_targets_origin_for_same_repo_pr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        captured.append((command, kwargs))
+        if command[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=(
+                    '{"baseRefName":"release/2026",'
+                    '"headRepository":{"name":"repo"},'
+                    '"headRepositoryOwner":{"login":"owner"}}'
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/zellij" if name == "zellij" else None
+    )
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launch_branchdiff_context("/tmp/amol-_repoze.who_52", make_work_item(WorkItemType.PR))
+
+    assert captured[0][0] == [
+        "gh",
+        "pr",
+        "view",
+        "42",
+        "--repo",
+        "owner/repo",
+        "--json",
+        "baseRefName,headRepository,headRepositoryOwner",
+    ]
+    assert captured[0][1]["check"] is True
+    assert captured[0][1]["capture_output"] is True
+    assert captured[0][1]["text"] is True
+    assert captured[1][0][-1] == "workdash branchdiff origin/release/2026"
+
+
+def test_launch_branchdiff_context_targets_upstream_for_fork_pr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[list[str]] = []
+
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        captured.append(command)
+        if command[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=(
+                    '{"baseRefName":"main",'
+                    '"headRepository":{"name":"repo"},'
+                    '"headRepositoryOwner":{"login":"contributor"}}'
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/zellij" if name == "zellij" else None
+    )
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launch_branchdiff_context("/tmp/amol-_repoze.who_52", make_work_item(WorkItemType.PR))
+
+    assert captured[-1] == [
+        "/usr/bin/zellij",
+        "action",
+        "new-pane",
+        "--name",
+        "diff_amol-_repoze.who_52",
+        "--cwd",
+        "/tmp/amol-_repoze.who_52",
+        "--",
+        "/bin/bash",
+        "-ic",
+        "workdash branchdiff upstream/main",
+    ]
+
+
+def test_launch_branchdiff_context_omits_target_for_non_pr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[list[str]] = []
+
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        captured.append(command)
+        assert command[0] not in {"gh", "git"}
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/zellij" if name == "zellij" else None
+    )
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launch_branchdiff_context("/tmp/amol-_repoze.who_52", make_work_item(WorkItemType.ISSUE))
+
+    assert captured == [
+        [
+            "/usr/bin/zellij",
+            "action",
+            "new-pane",
+            "--name",
+            "diff_amol-_repoze.who_52",
+            "--cwd",
+            "/tmp/amol-_repoze.who_52",
+            "--",
+            "/bin/bash",
+            "-ic",
+            "workdash branchdiff",
+        ]
     ]
 
 

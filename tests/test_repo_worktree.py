@@ -136,10 +136,10 @@ def test_ensure_worktree_clones_fetches_and_creates_for_pr(
     ] in config_cmds
 
 
-def test_ensure_worktree_fork_pr_clones_from_fork(
+def test_ensure_worktree_fork_pr_clones_from_fork_and_fetches_upstream(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fork PR: clone from fork repo (contributor/repo), not base repo (owner/repo)."""
+    """Fork PR: clone from fork repo and fetch the base repo as upstream."""
     calls: list[list[str]] = []
 
     def fake_run(*args, **kwargs):
@@ -152,6 +152,10 @@ def test_ensure_worktree_fork_pr_clones_from_fork(
             (tmp_path / "contributor_repo").mkdir(exist_ok=True)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "fetch":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "remote", "get-url", "upstream"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if cmd == ["git", "remote", "add", "upstream", "https://github.com/owner/repo.git"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "prune":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -173,6 +177,8 @@ def test_ensure_worktree_fork_pr_clones_from_fork(
     assert result == str(tmp_path / "contributor_repo_42")
     clone_cmd = [c for c in calls if c[0] == "gh" and c[1] == "repo" and c[2] == "clone"][0]
     assert "contributor/repo" in clone_cmd
+    assert ["git", "remote", "add", "upstream", "https://github.com/owner/repo.git"] in calls
+    assert ["git", "fetch", "upstream"] in calls
 
 
 def test_ensure_worktree_clones_and_creates_for_issue(
@@ -685,6 +691,8 @@ def test_ensure_worktree_finds_fork_worktree_with_upstream_without_gh_call(
             )
         if cmd == ["git", "pull", "--ff-only"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "fetch", "upstream"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         raise AssertionError(f"Unexpected command: {cmd}")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -697,6 +705,7 @@ def test_ensure_worktree_finds_fork_worktree_with_upstream_without_gh_call(
         ["git", "config", "--local", "--get", "remote.origin.url"],
         ["git", "config", "--local", "--get", "remote.upstream.url"],
         ["git", "pull", "--ff-only"],
+        ["git", "fetch", "upstream"],
     ]
 
 

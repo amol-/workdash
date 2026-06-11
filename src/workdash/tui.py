@@ -521,7 +521,7 @@ class WorkdashApp(App[None]):
         try:
             await self._run_with_busy_screen(
                 message="Opening diff viewer...",
-                callback=lambda: launch_branchdiff_context(repo_path),
+                callback=lambda: launch_branchdiff_context(repo_path, selected_item),
             )
         except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
             self._update_status(f"Failed to open diff: {error}")

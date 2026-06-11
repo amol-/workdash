@@ -65,7 +65,13 @@ def _install_fake_git(
             target = Path(cmd[-1])
             target.mkdir(parents=True, exist_ok=True)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        if cmd[:3] == ["git", "fetch", "origin"]:
+        if cmd[:2] == ["git", "fetch"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "remote", "get-url", "upstream"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if cmd[:3] == ["git", "remote", "add"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:3] == ["git", "remote", "set-url"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[:3] == ["git", "worktree", "prune"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -198,6 +204,13 @@ def _clone_from_fork(scenario_state: dict[str, Any]) -> None:
     recorded = scenario_state["_recorded_git_calls"]
     clone_cmd = next(cmd for cmd in recorded if cmd[:3] == ["gh", "repo", "clone"])
     assert "contributor/repo" in clone_cmd, clone_cmd
+
+
+@then("the fork worktree has an upstream remote for the pull request's base repository")
+def _fork_worktree_has_upstream_remote(scenario_state: dict[str, Any]) -> None:
+    recorded = scenario_state["_recorded_git_calls"]
+    assert ["git", "remote", "add", "upstream", "https://github.com/owner/repo.git"] in recorded
+    assert ["git", "fetch", "upstream"] in recorded
 
 
 # --------------------------------------------------------------------------
