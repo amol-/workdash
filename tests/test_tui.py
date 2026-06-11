@@ -631,7 +631,7 @@ def test_workdash_app_shows_command_hint_bar() -> None:
             command_bar = app.query_one("#command-footer", Static)
             assert (
                 command_bar.render().plain
-                == "(o)pen (r)efresh (a)nalyze (c)ode (t)erminal (i)nclude (q)uit"
+                == "(o)pen (r)efresh (a)nalyze (c)ode (d)iff (t)erminal (i)nclude (q)uit"
             )
             await pilot.press("q")
 

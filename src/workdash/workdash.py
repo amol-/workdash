@@ -26,7 +26,6 @@ from .control import (
     WorkdashControlServer,
     WorkdashSession,
     format_work_item_id,
-    resolve_work_item_target,
     show_config_payload,
 )
 from .launcher import (
@@ -56,17 +55,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.command in {"list", "info", "analyze", "code", "read", "write"}:
         return _run_server_backed_command(commands, options)
     if options.command == "branchdiff":
-        # branchdiff is a standalone subcommand that needs to parse its own args
-        # Re-execute as a subprocess so it gets its own sys.argv
-        import subprocess
+        from .branchdiff import run_branchdiff
 
-        args = ["python", "-m", "workdash.branchdiff"]
-        if options.target is not None:
-            args.append(options.target)
-        try:
-            return subprocess.run(args, check=True).returncode
-        except subprocess.CalledProcessError as error:
-            return error.returncode
+        return run_branchdiff(target=options.target)
     if options.command == "show-config":
         return commands.show_config(json_output=options.json_output)
 
@@ -355,17 +346,6 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             raw=options.raw,
             json_output=options.json_output,
         )
-    if options.command == "branchdiff":
-        # Spawn branchdiff as subprocess so it can parse its own args
-        import subprocess
-
-        args = ["python", "-m", "workdash.branchdiff"]
-        if options.target is not None:
-            args.append(options.target)
-        try:
-            return subprocess.run(args, check=True).returncode
-        except subprocess.CalledProcessError as error:
-            return error.returncode
     raise AssertionError(f"Unsupported server-backed command: {options.command}")
 
 

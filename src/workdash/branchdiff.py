@@ -2,8 +2,8 @@
 
 This module provides the `workdash branchdiff` CLI command that displays a
 side-by-side diff viewer for the current git repository. It compares the current
-branch against its upstream (or a specified target) and shows both committed
-and uncommitted changes.
+branch against its upstream (or a specified target) and shows committed,
+working-tree, and untracked changes.
 
 The command is spawned by workdash's TUI when the user presses 'd'.
 Workdash only needs to ensure the worktree exists and spawn this command.
@@ -13,24 +13,19 @@ Uses textual-diff-view for the actual side-by-side diff rendering.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
-# Textual UI components
-try:
-    from textual.app import App, ComposeResult
-    from textual.containers import Grid
-    from textual.screen import Screen
-    from textual.widgets import DataTable, Footer
-    from textual_diff_view import DiffView
-
-    HAS_TEXTUAL = True
-    HAS_DIFF_VIEW = True
-except ModuleNotFoundError as error:
-    HAS_TEXTUAL = False
-    HAS_DIFF_VIEW = False
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.color import Color
+from textual.containers import Container, Horizontal
+from textual.screen import Screen
+from textual.style import Style
+from textual.widgets import DataTable, Footer, Static
+from textual_diff_view import DiffView
 
 
 def get_upstream_branch(repo_path: Path | None = None) -> str:
@@ -40,8 +35,6 @@ def get_upstream_branch(repo_path: Path | None = None) -> str:
 
     original_cwd = Path.cwd()
     try:
-        import os
-
         os.chdir(repo_path)
 
         # Try to get upstream branch
@@ -81,8 +74,6 @@ def get_merge_base(base_branch: str, repo_path: Path | None = None) -> str:
 
     original_cwd = Path.cwd()
     try:
-        import os
-
         os.chdir(repo_path)
         result = subprocess.run(
             ["git", "merge-base", "HEAD", base_branch],
@@ -101,7 +92,7 @@ def get_changed_files(
     base_branch: str | None,
     repo_path: Path | None = None,
 ) -> list[str]:
-    """Get list of changed files (both committed and uncommitted)."""
+    """Get list of committed, working-tree, and untracked changed files."""
     if repo_path is None:
         repo_path = Path.cwd()
 
@@ -110,15 +101,13 @@ def get_changed_files(
 
     original_cwd = Path.cwd()
     try:
-        import os
-
         os.chdir(repo_path)
 
         # Get diff against merge base (only our changes, not upstream changes)
         merge_base = get_merge_base(base_branch, repo_path)
         try:
             result = subprocess.run(
-                ["git", "diff", "--name-only", f"{merge_base}..."],
+                ["git", "diff", "--name-only", merge_base],
                 capture_output=True,
                 text=True,
                 check=True,
@@ -150,8 +139,6 @@ def get_file_content_at_ref(filepath: str, ref: str, repo_path: Path) -> str:
     """Get file content at a specific git reference."""
     original_cwd = Path.cwd()
     try:
-        import os
-
         os.chdir(repo_path)
 
         try:
@@ -193,186 +180,228 @@ def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str
     return old_content, new_content
 
 
-if HAS_TEXTUAL:
 
-    class BranchDiffScreen(Screen[None]):
-        """Textual screen for displaying branch diff with file navigation.
+class WorkdashDiffView(DiffView):
+    """DiffView with stronger added/removed line highlighting."""
 
-        Two-panel layout:
-        - Left: List of changed files
-        - Right: textual-diff-view.DiffView showing side-by-side diff
-        """
-
-        BINDINGS = [
-            ("j", "next_file", "Next file"),
-            ("k", "previous_file", "Previous file"),
-            ("q", "dismiss", "Close"),
-            ("enter", "view_file", "View file"),
-        ]
-
-        def __init__(self, files: list[str], repo_path: Path, base_branch: str) -> None:
-            super().__init__()
-            self._files = files
-            self._repo_path = repo_path
-            self._base_branch = base_branch
-            self._selected_index = 0
-            self._cache: dict[str, tuple[str, str]] = {}
-            self._temp_files: list[str] = []
-
-        def on_unmount(self) -> None:
-            """Clean up temporary files."""
-            for temp_path in self._temp_files:
-                try:
-                    Path(temp_path).unlink()
-                except FileNotFoundError:
-                    pass
-            self._temp_files.clear()
-
-        def compose(self) -> ComposeResult:
-            with Grid(columns="1fr 3fr", rows="1fr", id="diff-grid"):
-                yield DataTable(id="file-list")
-                if HAS_DIFF_VIEW:
-                    # Use textual-diff-view for proper side-by-side rendering
-                    yield DiffView(id="diff-view")
-                else:
-                    # Fallback if textual-diff-view is not available
-                    from textual.widgets import Static
-
-                    yield Static(id="diff-view")
-                yield Footer()
-
-        def on_mount(self) -> None:
-            file_list = self.query_one("#file-list", DataTable)
-            file_list.add_column("Changed Files", key="filename")
-            for filepath in self._files:
-                file_list.add_row(filepath)
-            if self._files:
-                file_list.cursor_row = 0
-                self._selected_index = 0
-                self._update_diff_view()
-
-        def action_next_file(self) -> None:
-            file_list = self.query_one("#file-list", DataTable)
-            if file_list.cursor_row is not None and file_list.cursor_row < len(self._files) - 1:
-                file_list.cursor_row += 1
-                self._selected_index = file_list.cursor_row
-                self._update_diff_view()
-
-        def action_previous_file(self) -> None:
-            file_list = self.query_one("#file-list", DataTable)
-            if file_list.cursor_row is not None and file_list.cursor_row > 0:
-                file_list.cursor_row -= 1
-                self._selected_index = file_list.cursor_row
-                self._update_diff_view()
-
-        def action_view_file(self) -> None:
-            self._update_diff_view()
-
-        # TODO(EVO-002): Handle binary files and encoding errors gracefully
-        # Why: Some files cannot be displayed as text (binary, encoding issues).
-        # Done: get_file_diff handles FileNotFoundError and UnicodeDecodeError by returning empty strings.
-        # Non-Goals: Do not add file type detection or conversion - just skip unreadable files.
-
-        def _get_file_diff_cached(self, filepath: str) -> tuple[str, str]:
-            if filepath not in self._cache:
-                self._cache[filepath] = get_file_diff(filepath, self._base_branch, self._repo_path)
-            return self._cache[filepath]
-
-        def _update_diff_view(self) -> None:
-            """Update the diff view for the currently selected file."""
-            if 0 <= self._selected_index < len(self._files):
-                filepath = self._files[self._selected_index]
-                old_content, new_content = self._get_file_diff_cached(filepath)
-
-                if HAS_DIFF_VIEW:
-                    # Use textual-diff-view.DiffView with file paths
-                    # textual-diff-view expects to read from file paths
-                    diff_view = self.query_one("#diff-view", DiffView)
-                    
-                    # Create temp files for old and new content
-                    # so DiffView can read from paths as it expects
-                    with tempfile.NamedTemporaryFile(
-                        mode="w", suffix=".old", delete=False
-                    ) as old_file:
-                        old_file.write(old_content)
-                        old_path = old_file.name
-                    
-                    with tempfile.NamedTemporaryFile(
-                        mode="w", suffix=".new", delete=False
-                    ) as new_file:
-                        new_file.write(new_content)
-                        new_path = new_file.name
-                    
-                    # Store temp file paths for cleanup
-                    if not hasattr(self, "_temp_files"):
-                        self._temp_files: list[str] = []
-                    self._temp_files.extend([old_path, new_path])
-                    
-                    # Load diff from temp file paths
-                    diff_view.path_original = old_path
-                    diff_view.path_modified = new_path
-                    # Clear any cached code to force reload from paths
-                    diff_view.code_original = ""
-                    diff_view.code_modified = ""
-                    # Refresh to load from the new paths
-                    diff_view.refresh()
-                else:
-                    # Fallback to Static widget
-                    from textual.widgets import Static
-
-                    diff_view = self.query_one("#diff-view", Static)
-                    old_lines = old_content.splitlines()
-                    new_lines = new_content.splitlines()
-
-                    max_lines = 50
-                    old_display = "\n".join(old_lines[:max_lines])
-                    new_display = "\n".join(new_lines[:max_lines])
-
-                    diff_view.update(
-                        f"[bold]Diff: {filepath}[/bold]\n\n"
-                        f"[dim]OLD[/dim]                          [dim]NEW[/dim]\n"
-                        f"{'-' * 38}    {'-' * 38}\n"
-                        f"{old_display[:2000]}\n"
-                        f"{new_display[:2000]}"
-                    )
+    def _update_styles(self) -> None:
+        super()._update_styles()
+        self._line_styles["+"] = Style.parse("white on #143f24")
+        self._line_styles["-"] = Style.parse("white on #680000")
+        self._annotation_styles["+"] = Style(
+            foreground=Color.parse("#7ee787"),
+            bold=True,
+        )
+        self._annotation_styles["-"] = Style(
+            foreground=Color.parse("#ff7b72"),
+            bold=True,
+        )
 
 
-    class BranchDiffApp(App[None]):
-        """Standalone Textual app for branch diff viewing."""
+class BranchDiffScreen(Screen[None]):
+    """Textual screen for displaying branch diff with file navigation.
 
-        TITLE = "workdash branchdiff"
+    Two-panel layout:
+    - Left: List of changed files
+    - Right: textual-diff-view.DiffView showing side-by-side diff
+    """
 
-        def __init__(self, files: list[str], repo_path: Path, base_branch: str) -> None:
-            super().__init__()
-            self._files = files
-            self._repo_path = repo_path
-            self._base_branch = base_branch
+    DEFAULT_CSS = """
+    #diff-layout {
+        width: 1fr;
+        height: 1fr;
+    }
 
-        def on_mount(self) -> None:
-            self.push_screen(BranchDiffScreen(self._files, self._repo_path, self._base_branch))
+    #file-list {
+        width: 1fr;
+        height: 1fr;
+    }
+
+    #diff-pane {
+        width: 4fr;
+        height: 1fr;
+        overflow-y: auto;
+    }
+
+    #diff-view {
+        width: 1fr;
+        height: 1fr;
+    }
+    """
+
+    BINDINGS = [
+        ("k", "next_file", "Next file"),
+        ("j", "previous_file", "Previous file"),
+        Binding("down", "scroll_diff_down", "Scroll diff down", priority=True),
+        Binding("up", "scroll_diff_up", "Scroll diff up", priority=True),
+        Binding("space", "scroll_diff_page_down", "Scroll diff page", priority=True),
+        ("r", "refresh_diff", "Refresh"),
+        ("q", "quit", "Close"),
+        ("enter", "view_file", "View file"),
+    ]
+
+    def __init__(self, files: list[str], repo_path: Path, base_branch: str) -> None:
+        super().__init__()
+        self._files = files
+        self._repo_path = repo_path
+        self._base_branch = base_branch
+        self._selected_index = 0
+        self._cache: dict[str, tuple[str, str]] = {}
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="diff-layout"):
+            yield DataTable(id="file-list")
+            with Container(id="diff-pane"):
+                yield self._make_diff_view(0)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        file_list = self.query_one("#file-list", DataTable)
+        file_list.add_column("Changed Files", key="filename")
+        for filepath in self._files:
+            file_list.add_row(filepath)
+        file_list.focus()
+        if self._files:
+            file_list.move_cursor(row=0)
+
+    async def action_next_file(self) -> None:
+        file_list = self.query_one("#file-list", DataTable)
+        if file_list.cursor_row is not None and file_list.cursor_row < len(self._files) - 1:
+            next_row = file_list.cursor_row + 1
+            file_list.move_cursor(row=next_row)
+            await self._select_file(next_row)
+
+    async def action_previous_file(self) -> None:
+        file_list = self.query_one("#file-list", DataTable)
+        if file_list.cursor_row is not None and file_list.cursor_row > 0:
+            previous_row = file_list.cursor_row - 1
+            file_list.move_cursor(row=previous_row)
+            await self._select_file(previous_row)
+
+    async def action_view_file(self) -> None:
+        file_list = self.query_one("#file-list", DataTable)
+        if file_list.cursor_row is not None:
+            await self._select_file(file_list.cursor_row)
+
+    def action_scroll_diff_down(self) -> None:
+        diff_view = self._diff_view()
+        if diff_view is not None:
+            diff_view.scroll_down(animate=False, force=True)
+
+    def action_scroll_diff_up(self) -> None:
+        diff_view = self._diff_view()
+        if diff_view is not None:
+            diff_view.scroll_up(animate=False, force=True)
+
+    def action_scroll_diff_page_down(self) -> None:
+        diff_view = self._diff_view()
+        if diff_view is not None:
+            diff_view.scroll_page_down(animate=False, force=True)
+
+    async def action_refresh_diff(self) -> None:
+        previous_file = self._files[self._selected_index] if self._files else None
+        self._files = get_changed_files(self._base_branch, self._repo_path)
+        self._cache.clear()
+
+        file_list = self.query_one("#file-list", DataTable)
+        file_list.clear(columns=False)
+        for filepath in self._files:
+            file_list.add_row(filepath)
+
+        if previous_file in self._files:
+            next_index = self._files.index(previous_file)
+        else:
+            next_index = min(self._selected_index, len(self._files) - 1)
+        self._selected_index = max(next_index, 0)
+
+        if self._files:
+            file_list.move_cursor(row=self._selected_index)
+        file_list.focus()
+        await self._replace_diff_view(self._selected_index)
+
+    async def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id == "file-list":
+            await self._select_file(event.cursor_row)
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id == "file-list":
+            await self._select_file(event.cursor_row)
+
+    async def on_data_table_cell_highlighted(self, event: DataTable.CellHighlighted) -> None:
+        if event.data_table.id == "file-list":
+            await self._select_file(event.coordinate.row)
+
+    async def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
+        if event.data_table.id == "file-list":
+            await self._select_file(event.coordinate.row)
+
+    def action_quit(self) -> None:
+        self.app.exit()
+
+    # TODO(EVO-002): Handle binary files and encoding errors gracefully
+    # Why: Some files cannot be displayed as text (binary, encoding issues).
+    # Done: get_file_diff handles FileNotFoundError and UnicodeDecodeError by returning empty strings.
+    # Non-Goals: Do not add file type detection or conversion - just skip unreadable files.
+
+    def _get_file_diff_cached(self, filepath: str) -> tuple[str, str]:
+        if filepath not in self._cache:
+            self._cache[filepath] = get_file_diff(filepath, self._base_branch, self._repo_path)
+        return self._cache[filepath]
+
+    def _diff_view(self) -> DiffView | None:
+        widget = self.query_one("#diff-view")
+        return widget if isinstance(widget, DiffView) else None
+
+    def _make_diff_view(self, index: int) -> DiffView | Static:
+        if not self._files:
+            return Static(id="diff-view")
+
+        filepath = self._files[index]
+        old_content, new_content = self._get_file_diff_cached(filepath)
+
+        return WorkdashDiffView(
+            filepath,
+            filepath,
+            old_content,
+            new_content,
+            annotations=True,
+            id="diff-view",
+        )
+
+    async def _select_file(self, index: int) -> None:
+        """Display the diff for a file-list row."""
+        if not 0 <= index < len(self._files):
+            return
+        if index == self._selected_index:
+            return
+
+        self._selected_index = index
+        await self._replace_diff_view(index)
+
+    async def _replace_diff_view(self, index: int) -> None:
+        diff_pane = self.query_one("#diff-pane", Container)
+        await diff_pane.remove_children()
+        await diff_pane.mount(self._make_diff_view(index))
 
 
-else:
-    BranchDiffScreen = None  # type: ignore[misc, assignment]
+class BranchDiffApp(App[None]):
+    """Standalone Textual app for branch diff viewing."""
+
+    TITLE = "workdash branchdiff"
+
+    def __init__(self, files: list[str], repo_path: Path, base_branch: str) -> None:
+        os.environ.setdefault("COLORTERM", "truecolor")
+        super().__init__()
+        self._files = files
+        self._repo_path = repo_path
+        self._base_branch = base_branch
+
+    def on_mount(self) -> None:
+        self.push_screen(BranchDiffScreen(self._files, self._repo_path, self._base_branch))
 
 
-def main() -> int:
-    """CLI entrypoint. Parses sys.argv directly."""
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        prog="workdash branchdiff",
-        description="Show side-by-side diff of current branch vs upstream (or target).",
-    )
-    parser.add_argument(
-        "target",
-        nargs="?",
-        default=None,
-        help="Branch to compare against (default: upstream).",
-    )
-
-    args = parser.parse_args()
-
+def run_branchdiff(target: str | None = None) -> int:
+    """Run the branchdiff TUI for the current git repository."""
     repo_path = Path.cwd()
 
     # Verify this is a git repository
@@ -387,10 +416,8 @@ def main() -> int:
             print("Error: Not a git repository.", file=sys.stderr)
             return 1
 
-    if args.target is None:
+    if target is None:
         target = get_upstream_branch(repo_path)
-    else:
-        target = args.target
 
     files = get_changed_files(target, repo_path)
 
@@ -398,14 +425,6 @@ def main() -> int:
         print("No changes found.")
         return 0
 
-    if not HAS_TEXTUAL:
-        print("Error: textual is required. Install with: pip install textual", file=sys.stderr)
-        return 1
-
     app = BranchDiffApp(files, repo_path, target)
     app.run()
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

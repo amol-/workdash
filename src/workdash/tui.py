@@ -550,7 +550,7 @@ else:
 
             try:
                 repo_path = await self._run_with_busy_screen(
-                    message=f"Preparing worktree for diff...",
+                    message="Preparing worktree for diff...",
                     callback=lambda: self._worktree_callback(selected_item),
                 )
             except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
