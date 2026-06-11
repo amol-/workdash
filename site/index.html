@@ -281,6 +281,14 @@
         order: 2;
       }
 
+      .tour-step.image-left {
+        grid-template-columns: 3fr 2fr;
+      }
+
+      .tour-step.image-left .tour-shot {
+        order: 0;
+      }
+
       .tour-shot {
         margin: 0;
         background: #0b0f14;
@@ -761,44 +769,6 @@
           </div>
         </div>
 
-        <div class="workflow" id="changes">
-          <div class="workflow-header">
-            <h3>See what changed in a pull request</h3>
-            <p class="workflow-lead">
-              Review the actual diff before you decide whether a PR needs your
-              next reply, another commit, or a deeper review.
-            </p>
-          </div>
-          <div class="tour-step">
-            <figure class="tour-shot" data-full="workdash_diff.png">
-              <img
-                src="workdash_diff.png"
-                alt="workdash showing the current diff for a pull request in the terminal"
-              />
-            </figure>
-            <div class="tour-text">
-              <h4>Why it helps</h4>
-              <ul class="benefit-list">
-                <li>
-                  <strong>Check authored PRs without context switching.</strong>
-                  See your current branch changes from the same dashboard you
-                  use to track review feedback.
-                </li>
-                <li>
-                  <strong>Review incoming PRs with the diff nearby.</strong>
-                  Move from the queue to the code changes without hunting
-                  through GitHub tabs.
-                </li>
-                <li>
-                  <strong>Decide the next action faster.</strong>
-                  When the diff is visible, it is easier to choose between
-                  replying, requesting changes, or opening a worktree.
-                </li>
-              </ul>
-            </div>
-          </div>
-        </div>
-
         <div class="workflow" id="tackle">
           <div class="workflow-header">
             <h3>Tackle an issue</h3>
@@ -836,6 +806,44 @@
                   analysis as context.
                 </li>
               </ol>
+            </div>
+          </div>
+        </div>
+
+        <div class="workflow" id="changes">
+          <div class="workflow-header">
+            <h3>See what changed in a pull request</h3>
+            <p class="workflow-lead">
+              Review the actual diff before you decide whether a PR needs your
+              next reply, another commit, or a deeper review.
+            </p>
+          </div>
+          <div class="tour-step image-left">
+            <figure class="tour-shot" data-full="workdash_diff.png">
+              <img
+                src="workdash_diff.png"
+                alt="workdash showing the current diff for a pull request in the terminal"
+              />
+            </figure>
+            <div class="tour-text">
+              <h4>Why it helps</h4>
+              <ul class="benefit-list">
+                <li>
+                  <strong>Check authored PRs without context switching.</strong>
+                  See your current branch changes from the same dashboard you
+                  use to track review feedback.
+                </li>
+                <li>
+                  <strong>Review incoming PRs with the diff nearby.</strong>
+                  Move from the queue to the code changes without hunting
+                  through GitHub tabs.
+                </li>
+                <li>
+                  <strong>Decide the next action faster.</strong>
+                  When the diff is visible, it is easier to choose between
+                  replying, requesting changes, or opening a worktree.
+                </li>
+              </ul>
             </div>
           </div>
         </div>
