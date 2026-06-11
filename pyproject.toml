@@ -31,6 +31,7 @@ dependencies = [
   "markdown>=3.6",
   "TurboGears2>=2.5.0",
   "textual>=0.58",
+  "textual-diff-view>=0.1.0",
 ]
 
 [project.urls]

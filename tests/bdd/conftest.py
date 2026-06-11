@@ -19,6 +19,9 @@ from .steps import (
     api as _api,
 )
 from .steps import (
+    branchdiff as _branchdiff,
+)
+from .steps import (
     browse as _browse,
 )
 from .steps import (
@@ -52,6 +55,7 @@ from .steps import (
 for _step_module in (
     _common,
     _api,
+    _branchdiff,
     _cli_orchestration,
     _triage,
     _worktrees,

@@ -230,6 +230,7 @@ def _reports_worktree_error_details(scenario_state: dict[str, Any]) -> None:
         scenario_state.get("coding_status")
         or scenario_state.get("terminal_status")
         or scenario_state.get("analyze_status")
+        or scenario_state.get("branchdiff_status")
     )
     assert status is not None, scenario_state
     assert "Worktree setup failed: worktree failed" in status

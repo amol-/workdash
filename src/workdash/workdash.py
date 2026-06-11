@@ -54,6 +54,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands = WorkdashCommands()
     if options.command in {"list", "info", "analyze", "code", "read", "write"}:
         return _run_server_backed_command(commands, options)
+    if options.command == "branchdiff":
+        from .branchdiff import run_branchdiff
+
+        return run_branchdiff(target=options.target)
     if options.command == "show-config":
         return commands.show_config(json_output=options.json_output)
 
@@ -514,6 +518,16 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         action="store_true",
         default=argparse.SUPPRESS,
         help="Emit machine-readable JSON.",
+    )
+    branchdiff_parser = subparsers.add_parser(
+        "branchdiff",
+        help="Show side-by-side diff of current branch vs upstream.",
+    )
+    branchdiff_parser.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        help="Branch to compare against (default: upstream).",
     )
     namespace = parser.parse_args(argv) if argv is not None else parser.parse_args()
     return CLIOptions(

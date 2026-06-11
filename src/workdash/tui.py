@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 from .backend import IncludeResult, compute_suggestion_markers
 from .config import WorkdashAgentChoice
-from .launcher import open_markdown
+from .launcher import launch_branchdiff_context, open_markdown
 from .models import WorkItem, WorkItemType, format_type_label
 
 SuggestionMarkers = dict[tuple[WorkItemType, str, int], str]
@@ -267,12 +267,13 @@ else:
             padding: 0 1;
         }
         """
-        COMMAND_HINT_TEXT = "(o)pen (r)efresh (a)nalyze (c)ode (t)erminal (i)nclude (q)uit"
+        COMMAND_HINT_TEXT = "(o)pen (r)efresh (a)nalyze (c)ode (d)iff (t)erminal (i)nclude (q)uit"
         BINDINGS = [
             ("o", "open_link", "Open"),
             ("r", "refresh_items", "Refresh"),
             ("a", "analyze_item", "Analyze"),
             ("c", "launch_code", "Code"),
+            ("d", "show_branchdiff", "Diff"),
             ("t", "open_terminal", "Terminal"),
             ("i", "include_item", "Include"),
             ("q", "quit_app", "Quit"),
@@ -530,6 +531,48 @@ else:
                 self._update_status(f"Opened analysis for {item_label}.")
             else:
                 self._update_status(f"Analyzed {item_label} with {tool_label}.")
+
+        async def action_show_branchdiff(self) -> None:
+            """Launch branchdiff command in a new zellij pane for the selected item.
+
+            Ensures the worktree exists, then spawns `workdash branchdiff`
+            as a standalone command. Workdash doesn't handle the diff itself.
+            """
+            selected_item = self._selected_item()
+            if selected_item is None:
+                self._update_status("No item selected for diff.")
+                return
+
+            # Ensure worktree exists
+            if self._worktree_callback is None:
+                self._update_status("Worktree not configured.")
+                return
+
+            try:
+                repo_path = await self._run_with_busy_screen(
+                    message="Preparing worktree for diff...",
+                    callback=lambda: self._worktree_callback(selected_item),
+                )
+            except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
+                self._update_status(f"Worktree setup failed: {error}")
+                self.notify(f"Worktree setup failed: {error}", severity="error", timeout=10)
+                return
+
+            # Launch branchdiff in a new zellij pane
+            try:
+                await self._run_with_busy_screen(
+                    message="Opening diff viewer...",
+                    callback=lambda: launch_branchdiff_context(repo_path),
+                )
+            except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
+                self._update_status(f"Failed to open diff: {error}")
+                self.notify(f"Failed to open diff: {error}", severity="error", timeout=10)
+                return
+
+            self._update_status(
+                f"Opened diff for {selected_item.item_type.value} "
+                f"{selected_item.repo}#{selected_item.number}."
+            )
 
         async def action_launch_code(self) -> None:
             selected_item = self._selected_item()

@@ -10,6 +10,7 @@ Shared steps that appear in more than one feature file live in ``common``.
 
 from . import (
     analysis,  # noqa: F401
+    branchdiff,  # noqa: F401
     browse,  # noqa: F401
     coding,  # noqa: F401
     common,  # noqa: F401 - shared step defs and fixtures
