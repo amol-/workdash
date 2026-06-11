@@ -668,7 +668,6 @@ def _print_code_result(result: dict[str, object]) -> None:
     print(f"Pane id: {result['pane_id'] or '-'}")
 
 
-
 def _print_pane_info(info: dict[str, object]) -> None:
     print(f"Session: {info['session']}")
     panes = info["panes"]

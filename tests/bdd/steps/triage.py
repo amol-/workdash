@@ -1136,6 +1136,15 @@ def _user_presses_key(
         from . import terminal as terminal_mod
 
         terminal_mod.run_terminal_scenario(scenario_state, work_items, monkeypatch, tmp_path)
+    elif key == "d":
+        from . import branchdiff as branchdiff_mod
+
+        branchdiff_mod.run_branchdiff_tui_scenario(
+            scenario_state,
+            work_items,
+            monkeypatch,
+            tmp_path,
+        )
     else:
         raise AssertionError(f"Unhandled key press in BDD step: {key!r}")
 

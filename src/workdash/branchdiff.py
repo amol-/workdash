@@ -180,7 +180,6 @@ def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str
     return old_content, new_content
 
 
-
 class WorkdashDiffView(DiffView):
     """DiffView with stronger added/removed line highlighting."""
 

@@ -24,6 +24,7 @@ Feature: View branch diff in standalone TUI command
   @id:F-BRANCHDIFF-S002
   Scenario: Branchdiff with target branch specification
     Given the current directory is a git repository
+    And the repository has changes compared to its upstream branch
     When the user runs "workdash branchdiff main"
     Then the diff viewer displays a meaningful side-by-side diff
 

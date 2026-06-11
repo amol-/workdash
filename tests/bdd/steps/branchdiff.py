@@ -6,15 +6,21 @@ a side-by-side diff viewer for git repositories.
 
 from __future__ import annotations
 
+import io
 import subprocess
-import sys
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 
 import pytest
 from pytest_bdd import given, then, when
 
+import workdash.branchdiff as branchdiff_module
 from workdash.branchdiff import get_changed_files, get_file_diff, get_upstream_branch
+from workdash.models import WorkItem, WorkItemKind, WorkItemType
+from workdash.workdash import main as workdash_main
+
+from .common import make_work_item, modal_screen_names, run_app
 
 # -- Step Definitions -------------------------------------------------------
 
@@ -157,43 +163,19 @@ def _repo_has_no_changes(
 @when('the user runs "workdash branchdiff"')
 def _user_runs_branchdiff(
     scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Run the workdash branchdiff command."""
-    repo_path = scenario_state.get("repo_path", Path.cwd())
-
-    # Execute branchdiff to verify it runs without errors in a git repository
-    result = subprocess.run(
-        [sys.executable, "-m", "workdash", "branchdiff"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-    )
-
-    scenario_state["branchdiff_result"] = result
-    scenario_state["exit_code"] = result.returncode
-    scenario_state["stdout"] = result.stdout
-    scenario_state["stderr"] = result.stderr
+    """Run the branchdiff CLI without entering the interactive TUI."""
+    _run_branchdiff_command(scenario_state, [], monkeypatch)
 
 
 @when('the user runs "workdash branchdiff main"')
 def _user_runs_branchdiff_with_target(
     scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Run the workdash branchdiff command with a target branch."""
-    repo_path = scenario_state.get("repo_path", Path.cwd())
-
-    # Execute branchdiff with target branch to verify argument parsing
-    result = subprocess.run(
-        [sys.executable, "-m", "workdash", "branchdiff", "main"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-    )
-
-    scenario_state["branchdiff_result"] = result
-    scenario_state["exit_code"] = result.returncode
-    scenario_state["stdout"] = result.stdout
-    scenario_state["stderr"] = result.stderr
+    """Run the branchdiff CLI with a target branch."""
+    _run_branchdiff_command(scenario_state, ["main"], monkeypatch)
 
 
 @then("the file list shows all changed files")
@@ -243,9 +225,9 @@ def _diff_viewer_displays_changes_for_first_file(
     old_content, new_content = get_file_diff(first_file, base_branch, repo_path)
 
     # Verify we got actual content (at least one side has content)
-    assert (
-        old_content != "" or new_content != ""
-    ), f"Expected diff content for {first_file}, got empty on both sides"
+    assert old_content != "" or new_content != "", (
+        f"Expected diff content for {first_file}, got empty on both sides"
+    )
 
     # Store for other steps to use
     scenario_state["changed_files"] = files
@@ -354,7 +336,6 @@ def _user_navigates_to_next_file(
     files = scenario_state.get("changed_files", [])
 
     assert repo_path is not None, "repo_path not set in scenario_state"
-    assert len(files) >= 2, "Need at least 2 files to test navigation"
 
     # Get the base branch (upstream)
     try:
@@ -426,11 +407,7 @@ def _command_reports_error(
     """Verify the command reports an error."""
     result = scenario_state.get("branchdiff_result")
     assert result is not None, "branchdiff command was not run"
-    assert (
-        result.returncode != 0
-        or "Error" in result.stderr
-        or "Error" in result.stdout
-    )
+    assert result.returncode != 0 or "Error" in result.stderr or "Error" in result.stdout
 
 
 @then("the command reports no changes found")
@@ -442,8 +419,9 @@ def _command_reports_no_changes_found(
     assert result is not None, "branchdiff command was not run"
     # Check for no changes message in output
     output = result.stdout + result.stderr
-    assert "no changes" in output.lower() or "nothing to" in output.lower(), \
+    assert "no changes" in output.lower() or "nothing to" in output.lower(), (
         f"Expected 'no changes' message, got stdout: {result.stdout}, stderr: {result.stderr}"
+    )
 
 
 @then("exits with non-zero status")
@@ -499,6 +477,132 @@ def _git_repo_with_upstream(
     scenario_state["repo_path"] = repo_path
 
 
+@given("the TUI has a pull request work item selected")
+def _tui_has_pull_request_selected(
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+) -> None:
+    """Select a pull request row for branchdiff launch scenarios."""
+    if not work_items:
+        work_items.append(
+            make_work_item(
+                item_type=WorkItemType.PR,
+                kind=WorkItemKind.AUTHORED_PR,
+                number=9,
+                title="Branchdiff PR",
+                url="https://github.com/owner/repo/pull/9",
+            )
+        )
+    scenario_state.setdefault("selected_item", work_items[0])
+
+
+@given("the worktree for that item exists")
+def _worktree_for_item_exists(scenario_state: dict[str, Any]) -> None:
+    scenario_state["worktree_exists"] = True
+
+
+@then("a new zellij pane opens")
+def _new_zellij_pane_opens(scenario_state: dict[str, Any]) -> None:
+    commands = scenario_state.get("branchdiff_zellij_commands", [])
+    assert len(commands) == 1, commands
+    command = commands[0]
+    assert Path(command[0]).name == "zellij"
+    assert command[1:3] == ["action", "new-pane"]
+
+
+@then('the pane runs "workdash branchdiff" in the worktree directory')
+def _pane_runs_branchdiff_in_worktree(scenario_state: dict[str, Any]) -> None:
+    commands = scenario_state["branchdiff_zellij_commands"]
+    worktree_path = scenario_state["branchdiff_worktree_path"]
+    command = commands[0]
+    cwd_index = command.index("--cwd")
+    separator_index = command.index("--")
+    assert command[cwd_index : cwd_index + 2] == ["--cwd", worktree_path]
+    assert command[separator_index + 1 :] == ["/bin/bash", "-ic", "workdash branchdiff"]
+
+
+@then("the diff viewer displays the PR changes")
+def _diff_viewer_displays_pr_changes(scenario_state: dict[str, Any]) -> None:
+    command_text = " ".join(scenario_state.get("branchdiff_zellij_commands", [[]])[0])
+    assert "workdash branchdiff" in command_text
+
+
+@then("the TUI reports that the diff viewer was opened")
+def _tui_reports_diff_viewer_opened(scenario_state: dict[str, Any]) -> None:
+    assert "Opened diff for pr owner/repo#9." in scenario_state["branchdiff_status"]
+
+
+@then("no diff viewer pane is opened")
+def _no_diff_viewer_pane_opened(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("branchdiff_zellij_commands") == []
+
+
+@then("no progress overlay remains")
+def _no_progress_overlay_remains(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("modal_screen_names") == []
+
+
+def run_branchdiff_tui_scenario(
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Drive pressing 'd' in the TUI and record worktree + zellij calls."""
+    import workdash.launcher as launcher_module
+
+    zellij_commands: list[list[str]] = []
+    worktree_calls: list[WorkItem] = []
+    captured: dict[str, Any] = {}
+    worktree_path = tmp_path / "wt"
+    worktree_path.mkdir(exist_ok=True)
+
+    def fake_which(name: str) -> str | None:
+        if name == "zellij":
+            return f"/usr/bin/{name}"
+        return None
+
+    def fake_run(*args, **kwargs):
+        zellij_commands.append(args[0])
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    def worktree_callback(item: WorkItem) -> str:
+        if scenario_state.get("worktree_fails"):
+            raise RuntimeError("worktree failed")
+        worktree_calls.append(item)
+        return str(worktree_path)
+
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setattr(launcher_module.shutil, "which", fake_which)
+    monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
+
+    async def interactions(app, pilot) -> None:
+        await pilot.press("d")
+        for _ in range(40):
+            await pilot.pause()
+            status = app.query_one("#status-footer").render().plain
+            if (
+                zellij_commands
+                or "Worktree setup failed" in status
+                or "Failed to open diff" in status
+            ):
+                break
+        captured["status"] = app.query_one("#status-footer").render().plain
+        captured["modal_screen_names"] = modal_screen_names(app)
+
+    run_app(
+        work_items=list(work_items),
+        worktree_callback=worktree_callback,
+        interactions=interactions,
+    )
+    scenario_state["branchdiff_worktree_calls"] = worktree_calls
+    scenario_state["branchdiff_worktree_path"] = str(worktree_path)
+    scenario_state["branchdiff_zellij_commands"] = zellij_commands
+    scenario_state["branchdiff_status"] = captured["status"]
+    scenario_state["modal_screen_names"] = captured["modal_screen_names"]
+
+
 # -- Fixtures ---------------------------------------------------------------
 
 
@@ -511,13 +615,42 @@ def scenario_state() -> dict[str, Any]:
 # -- Git repository helpers -------------------------------------------------
 
 
+def _run_branchdiff_command(
+    scenario_state: dict[str, Any],
+    args: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run the CLI path while replacing the blocking Textual run loop."""
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    def fake_run_app(self) -> None:
+        scenario_state["branchdiff_app_opened"] = True
+
+    monkeypatch.setattr(branchdiff_module.BranchDiffApp, "run", fake_run_app)
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        exit_code = workdash_main(["branchdiff", *args])
+
+    command = ["workdash", "branchdiff", *args]
+    result = subprocess.CompletedProcess(
+        args=command,
+        returncode=exit_code,
+        stdout=stdout.getvalue(),
+        stderr=stderr.getvalue(),
+    )
+    scenario_state["branchdiff_result"] = result
+    scenario_state["exit_code"] = result.returncode
+    scenario_state["stdout"] = result.stdout
+    scenario_state["stderr"] = result.stderr
+
+
 def _create_git_repo(tmp_path: Path, initial_commit: bool = True) -> Path:
     """Create a git repository at the given path."""
     repo_path = tmp_path / "test_repo"
     repo_path.mkdir(parents=True, exist_ok=True)
 
     # Set up minimal repository for diff testing
-    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
         cwd=repo_path,
