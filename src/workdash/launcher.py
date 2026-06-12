@@ -430,7 +430,7 @@ def _format_zellij_pane_id(pane_id: object) -> str | None:
 def collect_launch_github_context(item: WorkItem) -> dict[str, Any]:
     """Collect key GitHub context for launching an interactive Codex session."""
 
-    return GithubHelper().fetch_item_context(item)
+    return GithubHelper().fetch_launch_context(item)
 
 
 def build_launch_agent_prompt(
@@ -588,6 +588,6 @@ def launch_branchdiff_context(repo_path: str, item: WorkItem | None = None) -> Z
 
 
 def _resolve_branchdiff_pr_base_ref(item: WorkItem) -> str:
-    base_ref_name, head_repo = GithubHelper().fetch_base_metadata(item)
+    base_ref_name, head_repo = GithubHelper().fetch_branchdiff_base(item)
     remote = "origin" if head_repo == item.repo else "upstream"
     return f"{remote}/{base_ref_name}"

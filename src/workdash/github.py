@@ -29,46 +29,21 @@ _BASE_METADATA_JSON_FIELDS = "baseRefName,headRepository,headRepositoryOwner"
 class GithubHelper:
     """Run GitHub CLI commands and translate command/JSON failures."""
 
-    def fetch_item_context(
-        self,
-        item: WorkItem,
-        *,
-        include_discussion: bool = False,
-        context_label: str = "launch context",
-    ) -> dict[str, Any]:
-        if item.item_type == WorkItemType.ISSUE:
-            fields = (
-                _ANALYSIS_ISSUE_CONTEXT_JSON_FIELDS
-                if include_discussion
-                else _LAUNCH_ISSUE_CONTEXT_JSON_FIELDS
-            )
-            command = [
-                "gh",
-                "issue",
-                "view",
-                str(item.number),
-                "--repo",
-                item.repo,
-                "--json",
-                fields,
-            ]
-        else:
-            fields = (
-                _ANALYSIS_PR_CONTEXT_JSON_FIELDS
-                if include_discussion
-                else _LAUNCH_PR_CONTEXT_JSON_FIELDS
-            )
-            command = [
-                "gh",
-                "pr",
-                "view",
-                str(item.number),
-                "--repo",
-                item.repo,
-                "--json",
-                fields,
-            ]
-        return self._run_json_command(item=item, command=command, context_label=context_label)
+    def fetch_launch_context(self, item: WorkItem) -> dict[str, Any]:
+        return self._fetch_item_context(
+            item,
+            issue_fields=_LAUNCH_ISSUE_CONTEXT_JSON_FIELDS,
+            pr_fields=_LAUNCH_PR_CONTEXT_JSON_FIELDS,
+            context_label="launch context",
+        )
+
+    def fetch_analysis_context(self, item: WorkItem) -> dict[str, Any]:
+        return self._fetch_item_context(
+            item,
+            issue_fields=_ANALYSIS_ISSUE_CONTEXT_JSON_FIELDS,
+            pr_fields=_ANALYSIS_PR_CONTEXT_JSON_FIELDS,
+            context_label="gh context",
+        )
 
     def fetch_diff(self, item: WorkItem) -> str:
         command = ["gh", "pr", "diff", str(item.number), "--repo", item.repo]
@@ -88,7 +63,7 @@ class GithubHelper:
             ) from error
         return completed.stdout
 
-    def fetch_head_metadata(self, item: WorkItem) -> tuple[str, str]:
+    def fetch_worktree_head(self, item: WorkItem) -> tuple[str, str]:
         payload = self._run_json_command(
             item=item,
             command=[
@@ -110,7 +85,7 @@ class GithubHelper:
             )
         return head_ref, self._head_repo_from_payload(payload, item.repo)
 
-    def fetch_base_metadata(self, item: WorkItem) -> tuple[str, str]:
+    def fetch_branchdiff_base(self, item: WorkItem) -> tuple[str, str]:
         payload = self._run_json_command(
             item=item,
             command=[
@@ -150,6 +125,38 @@ class GithubHelper:
             raise RuntimeError(
                 f"Failed to clone {repo}: {stderr or f'exit code {exc.returncode}'}"
             ) from exc
+
+    def _fetch_item_context(
+        self,
+        item: WorkItem,
+        *,
+        issue_fields: str,
+        pr_fields: str,
+        context_label: str,
+    ) -> dict[str, Any]:
+        if item.item_type == WorkItemType.ISSUE:
+            command = [
+                "gh",
+                "issue",
+                "view",
+                str(item.number),
+                "--repo",
+                item.repo,
+                "--json",
+                issue_fields,
+            ]
+        else:
+            command = [
+                "gh",
+                "pr",
+                "view",
+                str(item.number),
+                "--repo",
+                item.repo,
+                "--json",
+                pr_fields,
+            ]
+        return self._run_json_command(item=item, command=command, context_label=context_label)
 
     def _run_json_command(
         self,

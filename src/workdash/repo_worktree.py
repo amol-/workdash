@@ -69,7 +69,7 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
         return str(existing)
 
     if item.item_type == WorkItemType.PR:
-        head_ref, head_repo = GithubHelper().fetch_head_metadata(item)
+        head_ref, head_repo = GithubHelper().fetch_worktree_head(item)
         repo = head_repo
     else:
         repo = item.repo

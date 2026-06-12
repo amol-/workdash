@@ -805,7 +805,7 @@ def test_ensure_worktree_clone_failure_raises(
         ensure_worktree(str(tmp_path), make_pr())
 
 
-def test_fetch_head_metadata_missing_gh_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_worktree_head_missing_gh_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """When gh CLI is not installed, GithubHelper raises RuntimeError."""
 
     def fake_run(*args, **kwargs):
@@ -814,7 +814,7 @@ def test_fetch_head_metadata_missing_gh_raises(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="gh CLI"):
-        GithubHelper().fetch_head_metadata(make_pr())
+        GithubHelper().fetch_worktree_head(make_pr())
 
 
 def test_ensure_worktree_creates_workdir_if_missing(

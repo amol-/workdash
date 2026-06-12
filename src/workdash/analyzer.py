@@ -35,11 +35,7 @@ class Analyzer:
         )
 
     def _collect_github_context(self, item: WorkItem) -> dict[str, Any]:
-        return GithubHelper().fetch_item_context(
-            item,
-            include_discussion=True,
-            context_label="gh context",
-        )
+        return GithubHelper().fetch_analysis_context(item)
 
     def _fetch_pr_diff(self, item: WorkItem) -> str:
         """Fetch the unified diff for a pull request via ``gh pr diff``."""

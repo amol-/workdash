@@ -22,7 +22,7 @@ def make_work_item(item_type: WorkItemType) -> WorkItem:
     )
 
 
-def test_fetch_item_context_builds_pr_view_command(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_launch_context_builds_pr_view_command(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def fake_run(*args, **kwargs):
@@ -31,7 +31,7 @@ def test_fetch_item_context_builds_pr_view_command(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    assert GithubHelper().fetch_item_context(make_work_item(WorkItemType.PR)) == {"state": "OPEN"}
+    assert GithubHelper().fetch_launch_context(make_work_item(WorkItemType.PR)) == {"state": "OPEN"}
     assert calls == [
         (
             [
@@ -53,7 +53,7 @@ def test_fetch_item_context_builds_pr_view_command(monkeypatch: pytest.MonkeyPat
     ]
 
 
-def test_fetch_item_context_analysis_issue_includes_discussion(
+def test_fetch_analysis_context_for_issue_includes_discussion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: list[str] = []
@@ -64,25 +64,21 @@ def test_fetch_item_context_analysis_issue_includes_discussion(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    GithubHelper().fetch_item_context(
-        make_work_item(WorkItemType.ISSUE),
-        include_discussion=True,
-        context_label="gh context",
-    )
+    GithubHelper().fetch_analysis_context(make_work_item(WorkItemType.ISSUE))
 
     assert captured == [
         "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,comments"
     ]
 
 
-def test_fetch_item_context_rejects_non_object_json(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_launch_context_rejects_non_object_json(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(*args, **kwargs):
         return subprocess.CompletedProcess(args[0], 0, stdout="[]", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="expected a JSON object"):
-        GithubHelper().fetch_item_context(make_work_item(WorkItemType.PR))
+        GithubHelper().fetch_launch_context(make_work_item(WorkItemType.PR))
 
 
 def test_fetch_diff_reports_missing_gh(monkeypatch: pytest.MonkeyPatch) -> None:
