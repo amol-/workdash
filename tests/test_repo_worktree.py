@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from workdash.git import GitHelper
+from workdash.github import GithubHelper
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.repo_worktree import (
-    _find_worktree_for_branch,
-    _get_pr_head_info,
     ensure_worktree,
     existing_worktree_path,
     main_repo_path,
@@ -805,8 +805,8 @@ def test_ensure_worktree_clone_failure_raises(
         ensure_worktree(str(tmp_path), make_pr())
 
 
-def test_get_pr_head_info_missing_gh_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When gh CLI is not installed, _get_pr_head_info raises RuntimeError."""
+def test_fetch_head_metadata_missing_gh_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When gh CLI is not installed, GithubHelper raises RuntimeError."""
 
     def fake_run(*args, **kwargs):
         raise FileNotFoundError("gh")
@@ -814,7 +814,7 @@ def test_get_pr_head_info_missing_gh_raises(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="gh CLI"):
-        _get_pr_head_info(make_pr())
+        GithubHelper().fetch_head_metadata(make_pr())
 
 
 def test_ensure_worktree_creates_workdir_if_missing(
@@ -910,11 +910,11 @@ def test_find_worktree_for_branch_returns_none_when_no_match(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    result = _find_worktree_for_branch(tmp_path / "repo", "feature-branch")
+    result = GitHelper().find_worktree_for_branch(tmp_path / "repo", "feature-branch")
     assert result is None
 
 
 def test_find_worktree_for_branch_returns_none_when_main_missing() -> None:
     """If the main repo directory doesn't exist, returns None without running git."""
-    result = _find_worktree_for_branch(Path("/nonexistent"), "feature-branch")
+    result = GitHelper().find_worktree_for_branch(Path("/nonexistent"), "feature-branch")
     assert result is None

@@ -16,6 +16,7 @@ from typing import Any, NoReturn
 import markdown
 
 from .config import LOCAL_BIN_PATH
+from .github import GithubHelper
 from .models import WorkItem, WorkItemKind, WorkItemType
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -34,15 +35,6 @@ class ZellijPaneLaunch:
 
 def _load_prompt_template(name: str) -> str:
     return (_PROMPTS_DIR / name).read_text(encoding="utf-8")
-
-
-_ISSUE_CONTEXT_JSON_FIELDS = (
-    "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt"
-)
-_PR_CONTEXT_JSON_FIELDS = (
-    "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,"
-    "isDraft,reviewDecision,additions,deletions,changedFiles,headRefName,baseRefName"
-)
 
 
 def _resolve_browser_open_command() -> str:
@@ -435,75 +427,10 @@ def _format_zellij_pane_id(pane_id: object) -> str | None:
     return f"terminal_{pane_id_text}"
 
 
-def _run_gh_context_command(
-    *,
-    item: WorkItem,
-    command: list[str],
-    context_label: str = "launch context",
-) -> dict[str, Any]:
-    try:
-        completed = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except FileNotFoundError as error:
-        raise RuntimeError(
-            f"Failed to gather {context_label} with gh: gh CLI is not installed or not on PATH."
-        ) from error
-    except subprocess.CalledProcessError as error:
-        stderr = (error.stderr or "").strip()
-        raise RuntimeError(
-            f"Failed to gather {context_label} for {item.item_type.value} "
-            f"{item.repo}#{item.number}: "
-            f"{stderr or f'process exited with code {error.returncode}'}"
-        ) from error
-    try:
-        payload = json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
-        raise RuntimeError(
-            f"Failed to parse {context_label} JSON for {item.item_type.value} "
-            f"{item.repo}#{item.number}: {error.msg}"
-        ) from error
-    if not isinstance(payload, dict):
-        raise RuntimeError(
-            f"Invalid {context_label} payload for {item.item_type.value} "
-            f"{item.repo}#{item.number}: expected a JSON object."
-        )
-    return payload
-
-
 def collect_launch_github_context(item: WorkItem) -> dict[str, Any]:
     """Collect key GitHub context for launching an interactive Codex session."""
 
-    if item.item_type == WorkItemType.ISSUE:
-        return _run_gh_context_command(
-            item=item,
-            command=[
-                "gh",
-                "issue",
-                "view",
-                str(item.number),
-                "--repo",
-                item.repo,
-                "--json",
-                _ISSUE_CONTEXT_JSON_FIELDS,
-            ],
-        )
-    return _run_gh_context_command(
-        item=item,
-        command=[
-            "gh",
-            "pr",
-            "view",
-            str(item.number),
-            "--repo",
-            item.repo,
-            "--json",
-            _PR_CONTEXT_JSON_FIELDS,
-        ],
-    )
+    return GithubHelper().fetch_item_context(item)
 
 
 def build_launch_agent_prompt(
@@ -661,30 +588,6 @@ def launch_branchdiff_context(repo_path: str, item: WorkItem | None = None) -> Z
 
 
 def _resolve_branchdiff_pr_base_ref(item: WorkItem) -> str:
-    payload = _run_gh_context_command(
-        item=item,
-        command=[
-            "gh",
-            "pr",
-            "view",
-            str(item.number),
-            "--repo",
-            item.repo,
-            "--json",
-            "baseRefName,headRepository,headRepositoryOwner",
-        ],
-        context_label="branchdiff base branch",
-    )
-    base_ref_name = payload.get("baseRefName")
-    if not isinstance(base_ref_name, str) or not base_ref_name.strip():
-        raise RuntimeError(
-            f"Invalid branchdiff base branch payload for {item.item_type.value} "
-            f"{item.repo}#{item.number}: expected a non-empty baseRefName."
-        )
-    head_repo_owner = payload.get("headRepositoryOwner", {})
-    head_repo_info = payload.get("headRepository", {})
-    owner_login = head_repo_owner.get("login", "") if isinstance(head_repo_owner, dict) else ""
-    repo_name = head_repo_info.get("name", "") if isinstance(head_repo_info, dict) else ""
-    head_repo = f"{owner_login}/{repo_name}" if owner_login and repo_name else item.repo
+    base_ref_name, head_repo = GithubHelper().fetch_base_metadata(item)
     remote = "origin" if head_repo == item.repo else "upstream"
-    return f"{remote}/{base_ref_name.strip()}"
+    return f"{remote}/{base_ref_name}"

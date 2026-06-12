@@ -11,19 +11,12 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .github import GithubHelper
 from .models import WorkItem, WorkItemType
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_AGENT_COMMAND_TOKENS = ("codex", "exec")
-_ISSUE_CONTEXT_JSON_FIELDS = (
-    "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,comments"
-)
-_PR_CONTEXT_JSON_FIELDS = (
-    "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,"
-    "isDraft,reviewDecision,additions,deletions,changedFiles,headRefName,baseRefName,"
-    "comments,reviews,latestReviews"
-)
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 
@@ -41,96 +34,17 @@ class Analyzer:
             else list(_DEFAULT_AGENT_COMMAND_TOKENS)
         )
 
-    def _run_gh_context_command(
-        self,
-        *,
-        item: WorkItem,
-        command: list[str],
-    ) -> dict[str, Any]:
-        try:
-            completed = subprocess.run(
-                command,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError as error:
-            raise RuntimeError(
-                "Failed to gather GitHub context with gh: gh CLI is not installed or not on PATH."
-            ) from error
-        except subprocess.CalledProcessError as error:
-            stderr = (error.stderr or "").strip()
-            raise RuntimeError(
-                f"Failed to gather gh context for {item.item_type.value} "
-                f"{item.repo}#{item.number}: "
-                f"{stderr or f'process exited with code {error.returncode}'}"
-            ) from error
-        try:
-            payload = json.loads(completed.stdout)
-        except json.JSONDecodeError as error:
-            raise RuntimeError(
-                f"Failed to parse gh context JSON for {item.item_type.value} "
-                f"{item.repo}#{item.number}: {error.msg}"
-            ) from error
-        if not isinstance(payload, dict):
-            raise RuntimeError(
-                f"Invalid gh context payload for {item.item_type.value} "
-                f"{item.repo}#{item.number}: expected a JSON object."
-            )
-        return payload
-
     def _collect_github_context(self, item: WorkItem) -> dict[str, Any]:
-        if item.item_type == WorkItemType.ISSUE:
-            command = [
-                "gh",
-                "issue",
-                "view",
-                str(item.number),
-                "--repo",
-                item.repo,
-                "--json",
-                _ISSUE_CONTEXT_JSON_FIELDS,
-            ]
-            return self._run_gh_context_command(item=item, command=command)
-
-        return self._run_gh_context_command(
-            item=item,
-            command=[
-                "gh",
-                "pr",
-                "view",
-                str(item.number),
-                "--repo",
-                item.repo,
-                "--json",
-                _PR_CONTEXT_JSON_FIELDS,
-            ],
+        return GithubHelper().fetch_item_context(
+            item,
+            include_discussion=True,
+            context_label="gh context",
         )
 
     def _fetch_pr_diff(self, item: WorkItem) -> str:
         """Fetch the unified diff for a pull request via ``gh pr diff``."""
 
-        command = ["gh", "pr", "diff", str(item.number), "--repo", item.repo]
-        try:
-            completed = subprocess.run(
-                command,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError as error:
-            raise RuntimeError(
-                "Failed to gather GitHub diff context with gh: "
-                "gh CLI is not installed or not on PATH."
-            ) from error
-        except subprocess.CalledProcessError as error:
-            stderr = (error.stderr or "").strip()
-            raise RuntimeError(
-                f"Failed to gather gh diff context for {item.item_type.value} "
-                f"{item.repo}#{item.number}: "
-                f"{stderr or f'process exited with code {error.returncode}'}"
-            ) from error
-        return completed.stdout
+        return GithubHelper().fetch_diff(item)
 
     def _build_agent_prompt(
         self,
