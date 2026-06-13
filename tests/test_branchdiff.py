@@ -183,6 +183,40 @@ def test_branchdiff_file_list_keeps_horizontal_scroll_when_clicking_files(
     asyncio.run(run_smoke())
 
 
+def test_branchdiff_refresh_keeps_one_diff_view_when_selected_file_is_replaced(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    files = ["a.py", "b.py"]
+    contents = {
+        "a.py": ("old a\n", "new a\n"),
+        "b.py": ("old b\n", "new b\n"),
+    }
+
+    def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
+        return contents[filepath]
+
+    monkeypatch.setattr(branchdiff, "get_file_diff", get_file_diff)
+    monkeypatch.setattr(branchdiff, "get_changed_files", lambda base_branch, repo_path: files)
+    app = branchdiff.BranchDiffApp(files, tmp_path, "main")
+
+    async def run_smoke() -> None:
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause()
+            await pilot.press("k")
+            await pilot.pause()
+
+            await pilot.press("r")
+            await pilot.pause()
+
+            diff_views = list(app.screen.query("#diff-view"))
+            assert len(diff_views) == 1
+            diff_view = app.screen.query_one("#diff-view", DiffView)
+            assert diff_view.code_modified == "new b\n"
+
+    asyncio.run(run_smoke())
+
+
 def test_branchdiff_file_list_keeps_horizontal_scroll_when_switching_files(
     monkeypatch,
     tmp_path: Path,

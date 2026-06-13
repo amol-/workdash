@@ -13,6 +13,7 @@ Uses textual-diff-view for the actual side-by-side diff rendering.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -307,6 +308,7 @@ class BranchDiffScreen(Screen[None]):
         self._base_branch = base_branch
         self._selected_index = 0
         self._cache: dict[str, tuple[str, str]] = {}
+        self._replace_diff_view_lock = asyncio.Lock()
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="diff-layout"):
@@ -468,9 +470,10 @@ class BranchDiffScreen(Screen[None]):
         await self._replace_diff_view(index)
 
     async def _replace_diff_view(self, index: int) -> None:
-        diff_pane = self.query_one("#diff-pane", Container)
-        await diff_pane.remove_children()
-        await diff_pane.mount(self._make_diff_view(index))
+        async with self._replace_diff_view_lock:
+            diff_pane = self.query_one("#diff-pane", Container)
+            await diff_pane.remove_children()
+            await diff_pane.mount(self._make_diff_view(index))
 
 
 class BranchDiffApp(App[None]):
