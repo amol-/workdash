@@ -27,6 +27,26 @@ from textual.style import Style
 from textual.widgets import DataTable, Footer, Static
 from textual_diff_view import DiffView
 
+_SCROLL_DIFF_BINDING_GROUP = Binding.Group("Scroll diff", compact=True)
+
+
+def get_repo_root(repo_path: Path | None = None) -> Path:
+    """Get the repository root for any path inside a git worktree."""
+    if repo_path is None:
+        repo_path = Path.cwd()
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError("Not a git repository.") from error
+    return Path(result.stdout.strip())
+
 
 def get_upstream_branch(repo_path: Path | None = None) -> str:
     """Get the upstream branch for the current branch."""
@@ -231,9 +251,40 @@ class BranchDiffScreen(Screen[None]):
     BINDINGS = [
         ("k", "next_file", "Next file"),
         ("j", "previous_file", "Previous file"),
-        Binding("down", "scroll_diff_down", "Scroll diff down", priority=True),
-        Binding("up", "scroll_diff_up", "Scroll diff up", priority=True),
+        Binding(
+            "up",
+            "scroll_diff_up",
+            "Scroll diff",
+            key_display="↑",
+            priority=True,
+            group=_SCROLL_DIFF_BINDING_GROUP,
+        ),
+        Binding(
+            "down",
+            "scroll_diff_down",
+            "Scroll diff",
+            key_display="↓",
+            priority=True,
+            group=_SCROLL_DIFF_BINDING_GROUP,
+        ),
+        Binding(
+            "left",
+            "scroll_diff_left",
+            "Scroll diff",
+            key_display="←",
+            priority=True,
+            group=_SCROLL_DIFF_BINDING_GROUP,
+        ),
+        Binding(
+            "right",
+            "scroll_diff_right",
+            "Scroll diff",
+            key_display="→",
+            priority=True,
+            group=_SCROLL_DIFF_BINDING_GROUP,
+        ),
         Binding("space", "scroll_diff_page_down", "Scroll diff page", priority=True),
+        Binding("ctrl+c", "screen.copy_text", "Copy selected text"),
         ("r", "refresh_diff", "Refresh"),
         ("q", "quit", "Close"),
         ("enter", "view_file", "View file"),
@@ -267,14 +318,18 @@ class BranchDiffScreen(Screen[None]):
         file_list = self.query_one("#file-list", DataTable)
         if file_list.cursor_row is not None and file_list.cursor_row < len(self._files) - 1:
             next_row = file_list.cursor_row + 1
+            scroll_x = file_list.scroll_x
             file_list.move_cursor(row=next_row)
+            self._restore_file_list_scroll_x(file_list, scroll_x)
             await self._select_file(next_row)
 
     async def action_previous_file(self) -> None:
         file_list = self.query_one("#file-list", DataTable)
         if file_list.cursor_row is not None and file_list.cursor_row > 0:
             previous_row = file_list.cursor_row - 1
+            scroll_x = file_list.scroll_x
             file_list.move_cursor(row=previous_row)
+            self._restore_file_list_scroll_x(file_list, scroll_x)
             await self._select_file(previous_row)
 
     async def action_view_file(self) -> None:
@@ -292,6 +347,12 @@ class BranchDiffScreen(Screen[None]):
         if diff_view is not None:
             diff_view.scroll_up(animate=False, force=True)
 
+    def action_scroll_diff_right(self) -> None:
+        self._scroll_diff_horizontally(1)
+
+    def action_scroll_diff_left(self) -> None:
+        self._scroll_diff_horizontally(-1)
+
     def action_scroll_diff_page_down(self) -> None:
         diff_view = self._diff_view()
         if diff_view is not None:
@@ -303,6 +364,7 @@ class BranchDiffScreen(Screen[None]):
         self._cache.clear()
 
         file_list = self.query_one("#file-list", DataTable)
+        scroll_x = file_list.scroll_x
         file_list.clear(columns=False)
         for filepath in self._files:
             file_list.add_row(filepath)
@@ -315,6 +377,7 @@ class BranchDiffScreen(Screen[None]):
 
         if self._files:
             file_list.move_cursor(row=self._selected_index)
+            self._restore_file_list_scroll_x(file_list, scroll_x)
         file_list.focus()
         await self._replace_diff_view(self._selected_index)
 
@@ -341,6 +404,23 @@ class BranchDiffScreen(Screen[None]):
     # Why: Some files cannot be displayed as text (binary, encoding issues).
     # Done: get_file_diff handles FileNotFoundError and UnicodeDecodeError by returning empty strings.
     # Non-Goals: Do not add file type detection or conversion - just skip unreadable files.
+
+    def _scroll_diff_horizontally(self, delta: int) -> None:
+        diff_view = self._diff_view()
+        if diff_view is None:
+            return
+
+        scroll_containers = list(diff_view.query("DiffScrollContainer"))
+        if not scroll_containers:
+            return
+
+        scroll_x = max(container.scroll_x for container in scroll_containers) + delta
+        for container in scroll_containers:
+            container.scroll_to(x=scroll_x, animate=False, force=True)
+
+    def _restore_file_list_scroll_x(self, file_list: DataTable, scroll_x: float) -> None:
+        file_list.scroll_x = scroll_x
+        file_list.call_after_refresh(setattr, file_list, "scroll_x", scroll_x)
 
     def _get_file_diff_cached(self, filepath: str) -> tuple[str, str]:
         if filepath not in self._cache:
@@ -401,19 +481,11 @@ class BranchDiffApp(App[None]):
 
 def run_branchdiff(target: str | None = None) -> int:
     """Run the branchdiff TUI for the current git repository."""
-    repo_path = Path.cwd()
-
-    # Verify this is a git repository
-    if not (repo_path / ".git").is_dir():
-        try:
-            subprocess.run(
-                ["git", "rev-parse", "--is-inside-work-tree"],
-                capture_output=True,
-                check=True,
-            )
-        except subprocess.CalledProcessError:
-            print("Error: Not a git repository.", file=sys.stderr)
-            return 1
+    try:
+        repo_path = get_repo_root()
+    except RuntimeError:
+        print("Error: Not a git repository.", file=sys.stderr)
+        return 1
 
     if target is None:
         target = get_upstream_branch(repo_path)

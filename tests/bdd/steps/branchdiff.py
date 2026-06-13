@@ -6,6 +6,7 @@ a side-by-side diff viewer for git repositories.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import subprocess
@@ -81,6 +82,41 @@ def _repo_has_changes(
         check=True,
         capture_output=True,
     )
+
+
+@given("the repository has modified files under a subdirectory")
+def _repo_has_modified_files_under_subdirectory(
+    scenario_state: dict[str, Any],
+) -> None:
+    repo_path = scenario_state["repo_path"]
+    nested_dir = repo_path / "pkg" / "module"
+    nested_dir.mkdir(parents=True)
+    changed_file = nested_dir / "command.py"
+    changed_file.write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Add nested command"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "-b", "feature"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "branch", "--set-upstream-to", "main"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+    )
+    changed_file.write_text("base\nchanged\n", encoding="utf-8")
+
+    scenario_state["branchdiff_subdir"] = nested_dir
+    scenario_state["branchdiff_expected_file"] = "pkg/module/command.py"
+    scenario_state["branchdiff_expected_diff"] = ("base\n", "base\nchanged\n")
 
 
 @given("there are committed changes, modified working-tree files, and untracked files")
@@ -179,6 +215,15 @@ def _user_runs_branchdiff_with_target(
     _run_branchdiff_command(scenario_state, ["main"], monkeypatch)
 
 
+@when('the user runs "workdash branchdiff" from that subdirectory')
+def _user_runs_branchdiff_from_subdirectory(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(scenario_state["branchdiff_subdir"])
+    _run_branchdiff_command(scenario_state, [], monkeypatch)
+
+
 @then("the file list shows all changed files")
 def _file_list_shows_all_changed_files(
     scenario_state: dict[str, Any],
@@ -234,6 +279,23 @@ def _diff_viewer_displays_changes_for_first_file(
     scenario_state["changed_files"] = files
     scenario_state["first_file"] = first_file
     scenario_state["first_file_diff"] = (old_content, new_content)
+
+
+@then("the diff viewer compares against the modified working-tree content")
+def _diff_viewer_compares_against_modified_working_tree_content(
+    scenario_state: dict[str, Any],
+) -> None:
+    repo_path = scenario_state["repo_path"]
+    expected_file = scenario_state["branchdiff_expected_file"]
+
+    assert scenario_state["branchdiff_app_opened"] is True
+    assert scenario_state["branchdiff_app_repo_path"] == repo_path
+    assert scenario_state["branchdiff_app_files"] == [expected_file]
+    assert scenario_state["branchdiff_app_base_branch"] == "main"
+    assert (
+        get_file_diff(expected_file, "main", repo_path)
+        == scenario_state["branchdiff_expected_diff"]
+    )
 
 
 @then("the diff viewer displays a meaningful side-by-side diff")
@@ -328,6 +390,43 @@ def _diff_viewer_open_with_multiple_files(
     monkeypatch.chdir(repo_path)
 
 
+@given("the diff viewer is open with wide changed lines")
+def _diff_viewer_open_with_wide_changed_lines(
+    scenario_state: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    scenario_state["repo_path"] = tmp_path
+    scenario_state["changed_files"] = ["wide.py"]
+    scenario_state["file_diff_contents"] = {
+        "wide.py": (
+            "old = 'short'\n",
+            f"new = '{'x' * 200}'\n",
+        ),
+    }
+
+
+@given("the diff viewer is open with long changed file names")
+def _diff_viewer_open_with_long_file_names(
+    scenario_state: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    long_files = [
+        "src/workdash/very/long/path/that/needs/horizontal/scroll/a.py",
+        "src/workdash/very/long/path/that/needs/horizontal/scroll/b.py",
+    ]
+    scenario_state["repo_path"] = tmp_path
+    scenario_state["changed_files"] = long_files
+    scenario_state["file_diff_contents"] = {
+        long_files[0]: ("old a\n", "new a\n"),
+        long_files[1]: ("old b\n", "new b\n"),
+    }
+
+
+@when("the user scrolls the file list horizontally")
+def _user_scrolls_file_list_horizontally(scenario_state: dict[str, Any]) -> None:
+    scenario_state["file_list_scroll_x"] = 12
+
+
 @when("the user navigates to the next file")
 def _user_navigates_to_next_file(
     scenario_state: dict[str, Any],
@@ -385,6 +484,144 @@ def _diff_viewer_displays_file_changes(
         old_content_2,
         new_content_2,
     ), "Expected different diffs for different files"
+
+
+@when("the user scrolls the diff right")
+def _user_scrolls_diff_right(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = scenario_state["repo_path"]
+    files = scenario_state["changed_files"]
+    contents = scenario_state["file_diff_contents"]
+
+    def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
+        return contents[filepath]
+
+    monkeypatch.setattr(branchdiff_module, "get_file_diff", get_file_diff)
+    app = branchdiff_module.BranchDiffApp(files, repo_path, "main")
+
+    async def run_smoke() -> None:
+        async with app.run_test(size=(50, 20)) as pilot:
+            await pilot.pause()
+            diff_view = app.screen.query_one("#diff-view", branchdiff_module.DiffView)
+            scroll_container = diff_view.query("DiffScrollContainer").first()
+            scenario_state["diff_scroll_before_right"] = scroll_container.scroll_x
+            await pilot.press("right")
+            await pilot.pause()
+            scenario_state["diff_scroll_after_right"] = scroll_container.scroll_x
+
+    asyncio.run(run_smoke())
+
+
+@when("the user scrolls the diff left")
+def _user_scrolls_diff_left(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = scenario_state["repo_path"]
+    files = scenario_state["changed_files"]
+    contents = scenario_state["file_diff_contents"]
+
+    def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
+        return contents[filepath]
+
+    monkeypatch.setattr(branchdiff_module, "get_file_diff", get_file_diff)
+    app = branchdiff_module.BranchDiffApp(files, repo_path, "main")
+
+    async def run_smoke() -> None:
+        async with app.run_test(size=(50, 20)) as pilot:
+            await pilot.pause()
+            diff_view = app.screen.query_one("#diff-view", branchdiff_module.DiffView)
+            scroll_container = diff_view.query("DiffScrollContainer").first()
+            await pilot.press("right")
+            await pilot.pause()
+            scenario_state["diff_scroll_before_left"] = scroll_container.scroll_x
+            await pilot.press("left")
+            await pilot.pause()
+            scenario_state["diff_scroll_after_left"] = scroll_container.scroll_x
+
+    asyncio.run(run_smoke())
+
+
+@then("the diff view moves right")
+def _diff_view_moves_right(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["diff_scroll_before_right"] == 0
+    assert scenario_state["diff_scroll_after_right"] > 0
+
+
+@then("the diff view moves left")
+def _diff_view_moves_left(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["diff_scroll_before_left"] > 0
+    assert scenario_state["diff_scroll_after_left"] == 0
+
+
+@then("the footer advertises the selected-text copy shortcut")
+def _footer_advertises_copy_shortcut() -> None:
+    bindings = branchdiff_module.BranchDiffScreen.BINDINGS
+
+    assert any(
+        getattr(binding, "key", None) == "ctrl+c"
+        and getattr(binding, "action", None) == "screen.copy_text"
+        and getattr(binding, "description", None) == "Copy selected text"
+        and getattr(binding, "show", None) is True
+        for binding in bindings
+    )
+
+
+@then("the footer groups the diff scroll arrow bindings")
+def _footer_groups_diff_scroll_arrow_bindings() -> None:
+    bindings_by_action = {
+        binding.action: binding
+        for binding in branchdiff_module.BranchDiffScreen.BINDINGS
+        if hasattr(binding, "action")
+    }
+    scroll_bindings = [
+        bindings_by_action["scroll_diff_up"],
+        bindings_by_action["scroll_diff_down"],
+        bindings_by_action["scroll_diff_left"],
+        bindings_by_action["scroll_diff_right"],
+    ]
+
+    assert [binding.key_display for binding in scroll_bindings] == ["↑", "↓", "←", "→"]
+    assert {binding.description for binding in scroll_bindings} == {"Scroll diff"}
+    assert {binding.group.description for binding in scroll_bindings} == {"Scroll diff"}
+    assert {binding.group.compact for binding in scroll_bindings} == {True}
+
+
+@then("the file list keeps its horizontal scroll position")
+def _file_list_keeps_horizontal_scroll_position(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = scenario_state["repo_path"]
+    files = scenario_state["changed_files"]
+    contents = scenario_state["file_diff_contents"]
+    expected_scroll_x = scenario_state["file_list_scroll_x"]
+
+    def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
+        return contents[filepath]
+
+    monkeypatch.setattr(branchdiff_module, "get_file_diff", get_file_diff)
+    app = branchdiff_module.BranchDiffApp(files, repo_path, "main")
+
+    async def run_smoke() -> None:
+        async with app.run_test(size=(50, 20)) as pilot:
+            await pilot.pause()
+            table = app.screen.query_one("#file-list", branchdiff_module.DataTable)
+            table.scroll_x = expected_scroll_x
+            await pilot.pause()
+
+            previous_scroll_x = table.scroll_x
+            assert previous_scroll_x == expected_scroll_x
+
+            await pilot.press("k")
+            await pilot.pause()
+
+            assert table.cursor_row == scenario_state["next_file_index"]
+            assert table.scroll_x == previous_scroll_x
+
+    asyncio.run(run_smoke())
 
 
 @given("the current directory is not a git repository")
@@ -691,6 +928,9 @@ def _run_branchdiff_command(
 
     def fake_run_app(self) -> None:
         scenario_state["branchdiff_app_opened"] = True
+        scenario_state["branchdiff_app_files"] = self._files
+        scenario_state["branchdiff_app_repo_path"] = self._repo_path
+        scenario_state["branchdiff_app_base_branch"] = self._base_branch
 
     monkeypatch.setattr(branchdiff_module.BranchDiffApp, "run", fake_run_app)
     with redirect_stdout(stdout), redirect_stderr(stderr):
