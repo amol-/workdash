@@ -427,6 +427,11 @@ def _user_scrolls_file_list_horizontally(scenario_state: dict[str, Any]) -> None
     scenario_state["file_list_scroll_x"] = 12
 
 
+@when("the user clicks the next file")
+def _user_clicks_next_file(scenario_state: dict[str, Any]) -> None:
+    scenario_state["next_file_index"] = 1
+
+
 @when("the user navigates to the next file")
 def _user_navigates_to_next_file(
     scenario_state: dict[str, Any],
@@ -587,6 +592,43 @@ def _footer_groups_diff_scroll_arrow_bindings() -> None:
     assert {binding.description for binding in scroll_bindings} == {"Scroll diff"}
     assert {binding.group.description for binding in scroll_bindings} == {"Scroll diff"}
     assert {binding.group.compact for binding in scroll_bindings} == {True}
+
+
+@then("the file list keeps its horizontal scroll position and displays the clicked file")
+def _file_list_keeps_horizontal_scroll_position_and_displays_clicked_file(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = scenario_state["repo_path"]
+    files = scenario_state["changed_files"]
+    contents = scenario_state["file_diff_contents"]
+    expected_scroll_x = scenario_state["file_list_scroll_x"]
+
+    def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
+        return contents[filepath]
+
+    monkeypatch.setattr(branchdiff_module, "get_file_diff", get_file_diff)
+    app = branchdiff_module.BranchDiffApp(files, repo_path, "main")
+
+    async def run_smoke() -> None:
+        async with app.run_test(size=(50, 20)) as pilot:
+            await pilot.pause()
+            table = app.screen.query_one("#file-list", branchdiff_module.DataTable)
+            table.scroll_x = expected_scroll_x
+            await pilot.pause()
+
+            previous_scroll_x = table.scroll_x
+            assert previous_scroll_x == expected_scroll_x
+
+            await pilot.click("#file-list", offset=(2, 2))
+            await pilot.pause()
+
+            assert table.cursor_row == scenario_state["next_file_index"]
+            assert table.scroll_x == previous_scroll_x
+            diff_view = app.screen.query_one("#diff-view", branchdiff_module.DiffView)
+            assert diff_view.code_modified == "new b\n"
+
+    asyncio.run(run_smoke())
 
 
 @then("the file list keeps its horizontal scroll position")

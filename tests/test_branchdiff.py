@@ -145,6 +145,44 @@ def test_branchdiff_left_and_right_arrows_scroll_wide_diff(
     asyncio.run(run_smoke())
 
 
+def test_branchdiff_file_list_keeps_horizontal_scroll_when_clicking_files(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    long_a = "src/workdash/very/long/path/that/needs/horizontal/scroll/a.py"
+    long_b = "src/workdash/very/long/path/that/needs/horizontal/scroll/b.py"
+    contents = {
+        long_a: ("old a\n", "new a\n"),
+        long_b: ("old b\n", "new b\n"),
+    }
+
+    def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
+        return contents[filepath]
+
+    monkeypatch.setattr(branchdiff, "get_file_diff", get_file_diff)
+    app = branchdiff.BranchDiffApp([long_a, long_b], tmp_path, "main")
+
+    async def run_smoke() -> None:
+        async with app.run_test(size=(50, 20)) as pilot:
+            await pilot.pause()
+            table = app.screen.query_one("#file-list", DataTable)
+            table.scroll_x = 12
+            await pilot.pause()
+
+            previous_scroll_x = table.scroll_x
+            assert previous_scroll_x > 0
+
+            await pilot.click("#file-list", offset=(2, 2))
+            await pilot.pause()
+
+            assert table.cursor_row == 1
+            assert table.scroll_x == previous_scroll_x
+            diff_view = app.screen.query_one("#diff-view", DiffView)
+            assert diff_view.code_modified == "new b\n"
+
+    asyncio.run(run_smoke())
+
+
 def test_branchdiff_file_list_keeps_horizontal_scroll_when_switching_files(
     monkeypatch,
     tmp_path: Path,

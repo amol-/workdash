@@ -14,6 +14,7 @@ Feature: View branch diff in standalone TUI command
     - Navigation uses vim-style keybindings (j/k for file list, Enter to view, q to quit).
     - The footer advertises the selected-text copy shortcut.
     - The file list keeps its horizontal scroll position when switching files.
+    - The file list keeps its horizontal scroll position when clicking files.
     - Left and Right arrows horizontally scroll wide diff content.
     - Diff scroll arrow bindings appear as one grouped footer entry.
     - Added lines are highlighted in green, removed lines in red.
@@ -64,6 +65,13 @@ Feature: View branch diff in standalone TUI command
     When the user scrolls the file list horizontally
     And the user navigates to the next file
     Then the file list keeps its horizontal scroll position
+
+  @id:F-BRANCHDIFF-S012
+  Scenario: File list keeps horizontal scroll while clicking files
+    Given the diff viewer is open with long changed file names
+    When the user scrolls the file list horizontally
+    And the user clicks the next file
+    Then the file list keeps its horizontal scroll position and displays the clicked file
 
   @id:F-BRANCHDIFF-S009
   Scenario: Horizontally scroll wide diff content

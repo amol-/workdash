@@ -217,6 +217,16 @@ class WorkdashDiffView(DiffView):
         )
 
 
+class FileListTable(DataTable):
+    """File list table that keeps long path scroll while changing rows."""
+
+    def _scroll_cursor_into_view(self, animate: bool = False) -> None:
+        scroll_x = self.scroll_x
+        super()._scroll_cursor_into_view(animate=False)
+        self.scroll_x = scroll_x
+        self.call_after_refresh(setattr, self, "scroll_x", scroll_x)
+
+
 class BranchDiffScreen(Screen[None]):
     """Textual screen for displaying branch diff with file navigation.
 
@@ -300,7 +310,7 @@ class BranchDiffScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="diff-layout"):
-            yield DataTable(id="file-list")
+            yield FileListTable(id="file-list")
             with Container(id="diff-pane"):
                 yield self._make_diff_view(0)
         yield Footer()
