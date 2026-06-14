@@ -6,6 +6,7 @@
   [`features/`](features/). Every change to existing behavior must update
   the relevant `.feature` file **before** any implementation or test code
   is modified.
+- **BDD is for user-facing behavior only.** Scenarios describe behavior that a user, API client, or external observer can verify. Implementation details, corner cases, and internal mechanisms belong in normal unit/integration tests, not in BDD feature files.
 - **Tests must pass.** Run `PYTHONPATH=src pytest` from the repository root.
 - **Match the existing style.** Run `ruff check src tests` and
   `ruff format src tests` before submitting.
