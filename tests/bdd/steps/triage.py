@@ -1901,8 +1901,8 @@ def _no_url_persisted(scenario_state: dict[str, Any]) -> None:
     assert store.load() == []
 
 
-@then("the URL remains persisted in the included-items store")
-def _url_remains_persisted(scenario_state: dict[str, Any]) -> None:
+@then("the system retries the included item on the next refresh")
+def _system_retries_included_item_on_next_refresh(scenario_state: dict[str, Any]) -> None:
     store: IncludedItemsStore = scenario_state["included_store"]
     assert _INCLUDE_PR_URL in store.load()
 

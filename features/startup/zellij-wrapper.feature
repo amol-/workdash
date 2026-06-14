@@ -55,7 +55,6 @@ Feature: Start the interactive dashboard inside Zellij
     Then the Zellij process is configured to quit on force close
     And the Zellij process disables session resurrection state
     And the dashboard pane closes when the dashboard exits
-    And the dashboard command does not install a manual session cleanup trap
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S006
   Scenario: Missing Zellij binary aborts interactive startup

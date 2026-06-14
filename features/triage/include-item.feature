@@ -17,7 +17,7 @@ Feature: Include a work item by URL
     - Included items are a fetch-time source; downstream sorting, suggestion, and recent-activity rules treat them like any other item.
     - On every refresh the included-items store is re-read and its URLs are re-fetched; items that are no longer open are removed from the store.
     - Invalid URLs and non-GitHub URLs are reported to the user and not persisted.
-    - A transient fetch failure during refresh keeps the URL in the store so the next refresh can retry.
+    - A transient fetch failure during refresh retries the included item on the next refresh.
     - A missing or empty included-items store is not an error: the dashboard loads normally with no included items.
 
   @id:F-TRIAGE-INCLUDE-S001
@@ -77,11 +77,11 @@ Feature: Include a work item by URL
     And no URL is persisted in the included-items store
 
   @id:F-TRIAGE-INCLUDE-S009
-  Scenario: A transient fetch failure keeps the URL persisted for the next refresh
+  Scenario: A transient fetch failure retries the included item on the next refresh
     Given the included-items store contains a URL
     And the next fetch for that URL will fail transiently
     When the user opens the dashboard
-    Then the URL remains persisted in the included-items store
+    Then the system retries the included item on the next refresh
 
   @id:F-TRIAGE-INCLUDE-S010
   Scenario: A missing or empty included-items store loads normally
