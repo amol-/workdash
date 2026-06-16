@@ -23,7 +23,7 @@ jobs:
         run: pip install ruff
 
       - name: Ruff check (lint)
-        run: ruff check src tests
+        run: ruff check
 
       - name: Ruff format (check only)
-        run: ruff format --check src tests
+        run: ruff format --check

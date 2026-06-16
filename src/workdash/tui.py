@@ -676,8 +676,7 @@ class WorkdashApp(App[None]):
             existing = fetched_item
         self._render_table(focus_item=existing)
         self._update_status(
-            f"Included {fetched_item.item_type.value} "
-            f"{fetched_item.repo}#{fetched_item.number}."
+            f"Included {fetched_item.item_type.value} {fetched_item.repo}#{fetched_item.number}."
         )
 
     def action_quit_app(self) -> None:
