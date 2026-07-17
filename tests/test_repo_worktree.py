@@ -101,6 +101,8 @@ def test_ensure_worktree_clones_fetches_and_creates_for_pr(
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "fetch":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "merge", "--ff-only", "origin/HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "prune":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "show-ref":
@@ -123,6 +125,11 @@ def test_ensure_worktree_clones_fetches_and_creates_for_pr(
     assert calls[1][:3] == ["gh", "repo", "clone"]
     assert calls[2] == ["git", "fetch", "origin"]
     wt_add = [c for c in calls if c[0] == "git" and c[1] == "worktree" and c[2] == "add"][0]
+    assert (
+        calls.index(["git", "fetch", "origin"])
+        < calls.index(["git", "merge", "--ff-only", "origin/HEAD"])
+        < calls.index(wt_add)
+    )
     assert "-b" in wt_add
     assert "feature-branch" in wt_add
     assert "origin/feature-branch" in wt_add
@@ -152,6 +159,8 @@ def test_ensure_worktree_fork_pr_clones_from_fork_and_fetches_upstream(
             (tmp_path / "contributor_repo").mkdir(exist_ok=True)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "fetch":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "merge", "--ff-only", "origin/HEAD"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd == ["git", "remote", "get-url", "upstream"]:
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
@@ -195,6 +204,8 @@ def test_ensure_worktree_clones_and_creates_for_issue(
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "fetch":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "merge", "--ff-only", "origin/HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "prune":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "show-ref":
@@ -237,6 +248,8 @@ def test_ensure_worktree_fetches_existing_main_for_pr(
             return subprocess.CompletedProcess(cmd, 0, stdout=_SAME_REPO_HEAD_INFO, stderr="")
         if cmd[0] == "git" and cmd[1] == "fetch":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "merge", "--ff-only", "origin/HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "prune":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "show-ref":
@@ -271,6 +284,8 @@ def test_ensure_worktree_fetches_existing_main_for_issue(
         cmd = args[0]
         calls.append(cmd)
         if cmd[0] == "git" and cmd[1] == "fetch":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "merge", "--ff-only", "origin/HEAD"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "prune":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -576,6 +591,8 @@ def test_ensure_worktree_does_not_pull_unrelated_direct_worktree(
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "fetch":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "merge", "--ff-only", "origin/HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "prune":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "show-ref":
@@ -618,6 +635,8 @@ def test_ensure_worktree_does_not_pull_unrelated_number_suffix_dir(
             (tmp_path / "owner_repo").mkdir(exist_ok=True)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "fetch":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "merge", "--ff-only", "origin/HEAD"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "prune":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -749,6 +768,8 @@ def test_ensure_worktree_pr_with_existing_local_branch(
             return subprocess.CompletedProcess(cmd, 0, stdout=_SAME_REPO_HEAD_INFO, stderr="")
         if cmd[0] == "git" and cmd[1] == "fetch":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "merge", "--ff-only", "origin/HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "prune":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "show-ref":
@@ -829,6 +850,8 @@ def test_ensure_worktree_creates_workdir_if_missing(
             Path(nested_workdir, "owner_repo").mkdir(exist_ok=True)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "fetch":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "merge", "--ff-only", "origin/HEAD"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "prune":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -918,3 +941,50 @@ def test_find_worktree_for_branch_returns_none_when_main_missing() -> None:
     """If the main repo directory doesn't exist, returns None without running git."""
     result = GitHelper().find_worktree_for_branch(Path("/nonexistent"), "feature-branch")
     assert result is None
+
+
+def test_ensure_new_issue_worktree_fast_forwards_parent_and_child_to_origin_default(
+    tmp_path: Path,
+) -> None:
+    """A fresh issue worktree and its reserved clone use the fetched default commit."""
+    origin = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    workdir = tmp_path / "workdir"
+    main = workdir / "owner_repo"
+
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "-b", "main", str(seed)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=seed, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=seed, check=True)
+    (seed / "README.md").write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=seed, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=seed, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=seed, check=True)
+    subprocess.run(
+        ["git", "push", "-u", "origin", "main"], cwd=seed, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "symbolic-ref", "HEAD", "refs/heads/main"],
+        cwd=origin,
+        check=True,
+    )
+    workdir.mkdir()
+    subprocess.run(["git", "clone", str(origin), str(main)], check=True, capture_output=True)
+
+    (seed / "README.md").write_text("updated\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "updated"], cwd=seed, check=True, capture_output=True)
+    subprocess.run(["git", "push"], cwd=seed, check=True, capture_output=True)
+    latest = subprocess.run(
+        ["git", "rev-parse", "main"], cwd=origin, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    child = Path(ensure_worktree(str(workdir), make_issue()))
+
+    parent_ref = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=main, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    child_ref = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=child, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    assert parent_ref == latest
+    assert child_ref == latest

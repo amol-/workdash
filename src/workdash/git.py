@@ -89,6 +89,26 @@ class GitHelper:
                 f"Failed to fetch {remote}: {stderr or f'exit code {exc.returncode}'}"
             ) from exc
 
+    def fast_forward_default_branch(self, main_path: Path) -> None:
+        try:
+            subprocess.run(
+                ["git", "merge", "--ff-only", "origin/HEAD"],
+                cwd=main_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "Failed to fast-forward the default branch: git is not installed or not on PATH."
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            raise RuntimeError(
+                "Failed to fast-forward the default branch: "
+                f"{stderr or f'exit code {exc.returncode}'}"
+            ) from exc
+
     def ensure_upstream_remote(self, main_path: Path, repo: str) -> None:
         upstream_url = f"https://github.com/{repo}.git"
         try:

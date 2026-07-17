@@ -94,6 +94,7 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
     if not main.exists():
         GithubHelper().clone_repository(repo, main)
     git.fetch_remote(main, "origin")
+    git.fast_forward_default_branch(main)
     if item.item_type == WorkItemType.PR:
         if head_repo != item.repo:
             git.ensure_upstream_remote(main, item.repo)

@@ -42,3 +42,24 @@ def test_fetch_remote_reports_git_failure(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     with pytest.raises(RuntimeError, match="Failed to fetch upstream: no such remote"):
         GitHelper().fetch_remote(tmp_path, "upstream")
+
+
+def test_fast_forward_default_branch_merges_fetched_origin_head(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args[0], kwargs))
+        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    GitHelper().fast_forward_default_branch(tmp_path)
+
+    assert calls == [
+        (
+            ["git", "merge", "--ff-only", "origin/HEAD"],
+            {"cwd": tmp_path, "check": True, "capture_output": True, "text": True},
+        )
+    ]
