@@ -9,7 +9,7 @@ Feature: List work items
     - The list includes open pull requests the user authored, open pull requests where the user is a REVIEW item, open issues assigned to the user, open issues and pull requests across tracked repositories, and items the user has explicitly included by URL.
     - A pull request is a REVIEW item when the user is directly requested as a reviewer, or when the user has already reviewed it.
     - Review requests addressed only to a team the user belongs to do not make the pull request a REVIEW item; only direct user review requests do.
-    - Each entry shows its item type (ISSUE, PR, or REVIEW), the owning repository, the item number, the last update date, the item's age, and the title.
+    - Each TUI entry's Type column shows its item type (ISSUE, PR, or REVIEW) followed immediately by its GitHub number (for example, `ISSUE#123`), alongside the owning repository, last update date, item's age, and title.
     - Entries are sorted by last update, most recently updated first.
     - The same GitHub issue or pull request never appears twice in the list.
     - When the same item qualifies for multiple sources, the strongest relationship wins in this order: authored pull request, then REVIEW pull request, then assigned issue, then plain tracked item.
@@ -25,6 +25,12 @@ Feature: List work items
     And pull requests requiring the user's review appear as REVIEW items
     And issues assigned to the user appear as ISSUE items
     And other open issues and pull requests in tracked repositories appear as ISSUE or PR items
+
+  @id:F-TRIAGE-LIST-S008
+  Scenario: Type column shows the GitHub number
+    Given the dashboard has issue, pull request, and review work items
+    When the user opens the dashboard
+    Then the Type column shows `ISSUE#1`, `PR#2`, and `REVIEW#3`
 
   @id:F-TRIAGE-LIST-S002
   Scenario: Only direct user review requests are treated as REVIEW items

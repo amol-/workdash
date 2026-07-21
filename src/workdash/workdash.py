@@ -273,6 +273,8 @@ class WorkdashCommands:
                 ensure_worktree(config.workdir, item)
             ),
             include_callback=lambda url, _identities: session.include_item_by_url(url),
+            focus_callback=session.focus_pane,
+            list_agent_panes_callback=session.get_agent_panes_for_item,
             session=session,
         )
         if server:

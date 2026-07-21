@@ -180,6 +180,19 @@ def _tracked_items_carry_expected_type(scenario_state: dict[str, Any]) -> None:
         assert item.item_type == expected
 
 
+@then("the Type column shows `ISSUE#1`, `PR#2`, and `REVIEW#3`")
+def _type_column_shows_github_numbers(scenario_state: dict[str, Any]) -> None:
+    captured: list[str] = []
+
+    async def interactions(app, pilot) -> None:
+        table = app.query_one("#work-items", DataTable)
+        captured.extend(str(table.get_row_at(index)[0]) for index in range(table.row_count))
+
+    run_app(work_items=scenario_state["work_items"], interactions=interactions)
+
+    assert set(captured) == {"ISSUE#1", "PR#2", "REVIEW#3"}
+
+
 # -- S002: direct vs team review requests ---------------------------------
 
 
@@ -1789,19 +1802,19 @@ def _work_item_appears_once(scenario_state: dict[str, Any]) -> None:
     assert len(matches) == 1, matches
 
 
-@then('the included pull request\'s type column reads "PR+"')
+@then('the included pull request\'s type column reads "PR+#111"')
 def _pr_plus_label(scenario_state: dict[str, Any]) -> None:
-    _assert_type_column(scenario_state, number=111, expected="PR+")
+    _assert_type_column(scenario_state, number=111, expected="PR+#111")
 
 
-@then('the included issue\'s type column reads "ISSUE+"')
+@then('the included issue\'s type column reads "ISSUE+#222"')
 def _issue_plus_label(scenario_state: dict[str, Any]) -> None:
-    _assert_type_column(scenario_state, number=222, expected="ISSUE+")
+    _assert_type_column(scenario_state, number=222, expected="ISSUE+#222")
 
 
-@then('the included review-requested pull request\'s type column reads "REVIEW+"')
+@then('the included review-requested pull request\'s type column reads "REVIEW+#333"')
 def _review_plus_label(scenario_state: dict[str, Any]) -> None:
-    _assert_type_column(scenario_state, number=333, expected="REVIEW+")
+    _assert_type_column(scenario_state, number=333, expected="REVIEW+#333")
     # The merged row must keep the REVIEW_REQUESTED_PR kind so the "+" suffix
     # genuinely comes from the `included` flag layered onto a REVIEW row,
     # not a fallback that infers "REVIEW" from some other signal.

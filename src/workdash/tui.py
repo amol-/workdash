@@ -131,7 +131,7 @@ class AnalyzeDialog(ModalScreen[str | None]):
 
 
 class CodeDialog(ModalScreen[str | None]):
-    """Modal dialog for choosing a coding tool to launch."""
+    """Modal dialog for choosing a coding tool to launch or focusing an active agent."""
 
     DEFAULT_CSS = """
         #code-shell {
@@ -149,15 +149,24 @@ class CodeDialog(ModalScreen[str | None]):
         """
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, *, choices: Sequence[WorkdashAgentChoice]) -> None:
+    def __init__(
+        self,
+        *,
+        choices: Sequence[WorkdashAgentChoice],
+        active_agent_panes: Sequence[dict[str, object]] | None = None,
+    ) -> None:
         super().__init__()
         self._choices = tuple(choices)
         self._choices_by_key = {choice.key: choice for choice in self._choices}
+        self._active_agent_panes = list(active_agent_panes or [])
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="code-shell"):
             yield Static("Launch coding session:", classes="code-line")
             yield Static("")
+            # Show focus option if there are active agent panes
+            if self._active_agent_panes:
+                yield Static("(0) Focus active agent", classes="code-line")
             for choice in self._choices:
                 yield Static(f"({choice.key}) {choice.label}", classes="code-line")
             if not self._choices:
@@ -166,6 +175,10 @@ class CodeDialog(ModalScreen[str | None]):
             yield Static("(Esc) Cancel", classes="code-line")
 
     def on_key(self, event) -> None:
+        # Handle focus active agent (key "0")
+        if event.key == "0" and self._active_agent_panes:
+            event.stop()
+            self.dismiss("__focus_active_agent__")
         choice = self._choices_by_key.get(event.key)
         if choice is not None:
             event.stop()
@@ -255,6 +268,8 @@ class WorkdashApp(App[None]):
         ) = None,
         session: WorkdashSession | None = None,
         now_utc: datetime | None = None,
+        focus_callback: Callable[[str], None] | None = None,
+        list_agent_panes_callback: Callable[[WorkItem], list[dict[str, object]]] | None = None,
     ) -> None:
         super().__init__()
         self._session = session
@@ -271,6 +286,8 @@ class WorkdashApp(App[None]):
         self._terminal_callback = terminal_callback
         self._include_callback = include_callback
         self._now_utc = now_utc or datetime.now(UTC)
+        self._focus_callback = focus_callback
+        self._list_agent_panes_callback = list_agent_panes_callback
         self._status_message = "Ready."
 
     def compose(self) -> ComposeResult:
@@ -320,7 +337,7 @@ class WorkdashApp(App[None]):
         for item in self._sorted_work_items:
             age_days = max(0, (self._now_utc - _to_utc(item.created_at)).days)
             update_days = max(0, (self._now_utc - _to_utc(item.updated_at)).days)
-            type_label = format_type_label(item)
+            type_label = f"{format_type_label(item)}#{item.number}"
             title = self._title_with_suggestion_marker(item)
             row_key = f"{item.item_type.value}:{item.repo}#{item.number}"
             if _to_utc(item.updated_at) >= cutoff:
@@ -538,11 +555,29 @@ class WorkdashApp(App[None]):
         if selected_item is None or self._launch_callback is None:
             self._update_status("Code launch skipped.")
             return
-        dialog = CodeDialog(choices=self._code_choices)
+        # Get active agent panes for this item
+        active_panes = []
+        if self._list_agent_panes_callback is not None:
+            try:
+                active_panes = self._list_agent_panes_callback(selected_item)
+            except Exception as error:
+                self._update_status(f"Failed to check active panes: {error}")
+                self.notify(f"Failed to check active panes: {error}", severity="error", timeout=10)
+                return
+        dialog = CodeDialog(
+            choices=self._code_choices,
+            active_agent_panes=active_panes,
+        )
 
         def _on_dialog_result(choice: str | None) -> None:
-            if choice is not None:
-                self._run_after_dialog(lambda: self._perform_launch(selected_item, choice))
+            if choice is None:
+                return
+            if choice == "__focus_active_agent__":
+                self._run_after_dialog(
+                    lambda: self._handle_focus_active_agent(selected_item, active_panes)
+                )
+                return
+            self._run_after_dialog(lambda: self._perform_launch(selected_item, choice))
 
         await self.push_screen(dialog, callback=_on_dialog_result)
 
@@ -572,6 +607,30 @@ class WorkdashApp(App[None]):
         self._update_status(
             f"Launched {tool_label} for {item.item_type.value} {item.repo}#{item.number}."
         )
+
+    async def _handle_focus_active_agent(
+        self, item: WorkItem, active_panes: list[dict[str, object]]
+    ) -> None:
+        """Handle focusing an active agent pane - picks first if multiple exist."""
+        if not active_panes:
+            self._update_status("No active agent panes found.")
+            return
+        await self._focus_pane(active_panes[0].get("pane_id", ""))
+
+    async def _focus_pane(self, pane_id: str) -> None:
+        """Focus a Zellij pane by its ID."""
+        if not pane_id or self._focus_callback is None:
+            self._update_status("Cannot focus pane: no pane ID or callback.")
+            return
+        try:
+            await self._run_with_busy_screen(
+                message="Focusing agent pane...",
+                callback=lambda: self._focus_callback(pane_id),
+            )
+            self._update_status(f"Focused pane {pane_id}.")
+        except Exception as error:
+            self._update_status(f"Failed to focus pane: {error}")
+            self.notify(f"Failed to focus pane: {error}", severity="error", timeout=10)
 
     async def action_open_terminal(self) -> None:
         selected_item = self._selected_item()

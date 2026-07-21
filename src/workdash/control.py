@@ -286,6 +286,34 @@ class WorkdashSession:
             )
         return item
 
+    def get_agent_panes_for_item(self, item: WorkItem) -> list[dict[str, object]]:
+        """Return live agent panes for the given work item.
+
+        Reuses the same live-pane data and item mapping used by info().
+        Returns a list of pane dicts, each containing pane_id, title, cwd, etc.
+        """
+        if not self.zellij_session:
+            return []
+        item_id = format_work_item_id(item)
+        with self._lock:
+            return _agent_panes_for_item(
+                self.zellij_session,
+                self.config.workdir,
+                self.work_items,
+                item_id,
+            )
+
+    def focus_pane(self, pane_id: str) -> None:
+        """Focus a Zellij pane by its ID.
+
+        Raises RuntimeError if the focus command fails.
+        """
+        if not self.zellij_session:
+            raise RuntimeError("No Zellij session available for focusing panes.")
+        from .launcher import focus_zellij_pane
+
+        focus_zellij_pane(self.zellij_session, pane_id)
+
 
 class WorkdashControlServer:
     """Background localhost HTTP server for a server-backed Workdash session."""
@@ -715,3 +743,46 @@ def _format_pane_id(pane_id: object) -> str:
 
 def _normalized_path(path: os.PathLike[str] | str) -> str:
     return os.path.realpath(os.path.expanduser(os.fspath(path)))
+
+
+def _agent_panes_for_item(
+    session: str,
+    workdir: str | None,
+    work_items: Sequence[WorkItem],
+    item_id: str,
+) -> list[dict[str, object]]:
+    """Return live agent panes mapped to a specific work item."""
+    # Build the cwd -> item_id mapping for all work items
+    item_by_cwd = {}
+    if workdir is not None:
+        for item in work_items:
+            item_path = existing_worktree_path(workdir, item)
+            if item_path is not None:
+                item_by_cwd[_normalized_path(item_path)] = format_work_item_id(item)
+
+    # Collect agent panes that match our target item
+    agent_panes = []
+    for pane in load_zellij_panes(session):
+        if not _is_workdash_work_pane(pane):
+            continue
+        title = pane.get("title")
+        if not isinstance(title, str) or not title.startswith("code_"):
+            continue
+
+        # Map pane to item via cwd
+        cwd = pane.get("pane_cwd")
+        mapped_item = None
+        if isinstance(cwd, str) and cwd:
+            normalized_cwd = _normalized_path(cwd)
+            matches = [
+                (root, iid)
+                for root, iid in item_by_cwd.items()
+                if normalized_cwd == root or normalized_cwd.startswith(root + os.sep)
+            ]
+            if matches:
+                mapped_item = max(matches, key=lambda match: len(match[0]))[1]
+
+        if mapped_item == item_id:
+            agent_panes.append(_pane_payload(session, pane, item_by_cwd, kind="agent"))
+
+    return agent_panes

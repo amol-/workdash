@@ -591,3 +591,32 @@ def _resolve_branchdiff_pr_base_ref(item: WorkItem) -> str:
     base_ref_name, head_repo = GithubHelper().fetch_branchdiff_base(item)
     remote = "origin" if head_repo == item.repo else "upstream"
     return f"{remote}/{base_ref_name}"
+
+
+def focus_zellij_pane(session: str, pane_id: str) -> None:
+    """Focus a Zellij pane by its ID using zellij action focus-pane-id.
+
+    :param session: Zellij session name
+    :param pane_id: Pane ID to focus
+    :raises RuntimeError: If the focus command fails
+    """
+    zellij = _resolve_zellij_binary()
+    try:
+        subprocess.run(
+            [
+                zellij,
+                "--session",
+                session,
+                "action",
+                "focus-pane-id",
+                pane_id,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        details = (error.stderr or "").strip() or (error.stdout or "").strip()
+        raise RuntimeError(
+            f"Failed to focus Zellij pane {pane_id} in {session}: {details or error.returncode}"
+        ) from error

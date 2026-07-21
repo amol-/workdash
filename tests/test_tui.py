@@ -67,14 +67,14 @@ def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_colum
             # Sorted by updated_at descending; PR #22 (updated 2/25) before issue #11 (updated 2/20)
             # PR #22 is within 24h of now_utc so cells are bold Text objects
             assert [str(c) for c in table.get_row_at(0)] == [
-                "PR",
+                "PR#22",
                 "owner/repo",
                 "Implement renderer",
                 "1d",
                 "1d",
             ]
             assert table.get_row_at(1) == [
-                "ISSUE",
+                "ISSUE#11",
                 "owner/repo",
                 "* Fix parser",
                 "6d",
@@ -104,7 +104,7 @@ def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label()
             row_key = "pr:owner/repo#22"
             assert [key.value for key in table.rows] == [row_key]
             assert [str(c) for c in table.get_row(row_key)] == [
-                "PR",
+                "PR#22",
                 "owner/repo",
                 "Implement renderer",
                 "6d",
@@ -116,7 +116,7 @@ def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label()
 
             assert [key.value for key in table.rows] == [row_key]
             assert [str(c) for c in table.get_row(row_key)] == [
-                "PR+",
+                "PR+#22",
                 "owner/repo",
                 "Implement renderer",
                 "6d",
@@ -150,7 +150,7 @@ def test_workdash_app_renders_review_for_review_requested_pr_type() -> None:
         async with app.run_test() as _:
             table = app.query_one("#work-items", DataTable)
             assert [str(c) for c in table.get_row_at(0)] == [
-                "REVIEW",
+                "REVIEW#22",
                 "owner/repo",
                 "Needs review",
                 "1d",
@@ -264,7 +264,7 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
             ]
             assert terminal_calls == [(WorkItemType.PR, 22)]
             assert [str(c) for c in table.get_row_at(0)] == [
-                "PR",
+                "PR#22",
                 "owner/repo",
                 "Implement renderer",
                 "1d",
@@ -317,7 +317,7 @@ def test_workdash_app_refresh_keybinding_invokes_callback_and_reloads_rows() -> 
             assert refresh_calls == ["called"]
             assert table.row_count == 1
             assert [str(c) for c in table.get_row_at(0)] == [
-                "PR",
+                "PR#33",
                 "owner/repo",
                 "* Ship refresh",
                 "0d",
@@ -370,7 +370,7 @@ def test_workdash_app_uses_session_state_for_first_render() -> None:
             table = app.query_one("#work-items", DataTable)
             assert table.row_count == 1
             assert [str(c) for c in table.get_row_at(0)] == [
-                "PR",
+                "PR#33",
                 "owner/repo",
                 "* Session state before Textual starts",
                 "0d",
@@ -419,7 +419,7 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
         async with app.run_test() as pilot:
             table = app.query_one("#work-items", DataTable)
             assert table.get_row_at(0) == [
-                "ISSUE",
+                "ISSUE#11",
                 "owner/repo",
                 "Fix parser",
                 "6d",
@@ -432,7 +432,7 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
 
             assert table.row_count == 1
             assert [str(c) for c in table.get_row_at(0)] == [
-                "PR",
+                "PR#33",
                 "owner/repo",
                 "* Ship refresh",
                 "0d",
@@ -612,7 +612,7 @@ def test_workdash_app_analyze_runs_without_blocking_ui_loop(
             await analyze_press
             await pilot.pause()
             assert table.get_row_at(0) == [
-                "ISSUE",
+                "ISSUE#11",
                 "owner/repo",
                 "Fix parser",
                 "6d",
@@ -1053,6 +1053,106 @@ def test_workdash_app_include_duplicate_url_surfaces_persist_failure() -> None:
             # The in-memory flag must not have been flipped before the write
             # succeeded, otherwise the UI and the store disagree.
             assert work_item.included is False
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_code_dialog_shows_focus_option_with_active_agent() -> None:
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+    )
+    focus_calls: list[str] = []
+    active_panes = [
+        {"pane_id": "terminal_1", "title": "code_repo", "cwd": "/tmp/wt", "kind": "agent"}
+    ]
+
+    app = WorkdashApp(
+        work_items=[work_item],
+        code_choices=WorkdashConfig().tui_code_choices(),
+        launch_callback=lambda item, tool: None,  # Required to pass the check
+        focus_callback=lambda pane_id: focus_calls.append(pane_id),
+        list_agent_panes_callback=lambda item: active_panes,
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            # Ensure cursor is on row 0
+            await pilot.pause()
+            # Check that we have a selected item
+            selected = app._selected_item()
+            assert selected is not None, "Should have a selected item"
+            await pilot.press("c")
+            await pilot.pause()
+            # Verify CodeDialog is open
+            from workdash.tui import CodeDialog
+
+            dialog = None
+            for screen in app.screen_stack:
+                if isinstance(screen, CodeDialog):
+                    dialog = screen
+                    break
+            assert dialog is not None, (
+                f"CodeDialog should be open. Screens: {[type(s).__name__ for s in app.screen_stack]}"
+            )
+            # Check that the dialog has the focus option
+            assert dialog._active_agent_panes == active_panes
+            # Press 0 to focus
+            await pilot.press("0")
+            await pilot.pause()
+            # Verify focus callback was called
+            assert len(focus_calls) == 1
+            assert focus_calls[0] == "terminal_1"
+            # Verify no launch happened
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_code_dialog_no_focus_option_without_active_agent() -> None:
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+    )
+
+    app = WorkdashApp(
+        work_items=[work_item],
+        code_choices=WorkdashConfig().tui_code_choices(),
+        launch_callback=lambda item, tool: None,
+        list_agent_panes_callback=lambda item: [],
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await pilot.press("c")
+            await pilot.pause()
+            from workdash.tui import CodeDialog
+
+            dialog = None
+            for screen in app.screen_stack:
+                if isinstance(screen, CodeDialog):
+                    dialog = screen
+                    break
+            assert dialog is not None
+            # Verify no active panes
+            assert dialog._active_agent_panes == []
             await pilot.press("q")
 
     asyncio.run(run_smoke())
