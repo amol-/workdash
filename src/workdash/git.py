@@ -73,7 +73,7 @@ class GitHelper:
     def fetch_remote(self, main_path: Path, remote: str) -> None:
         try:
             subprocess.run(
-                ["git", "fetch", remote],
+                ["git", "fetch", "--prune", remote],
                 cwd=main_path,
                 check=True,
                 capture_output=True,
@@ -90,7 +90,27 @@ class GitHelper:
             ) from exc
 
     def fast_forward_default_branch(self, main_path: Path) -> None:
+        """Switch the root clone to its default branch and fast-forward it.
+
+        The root clone is exclusively managed by Workdash and must always stay
+        on the default branch; item branches live in dedicated worktrees.
+        """
         try:
+            origin_head = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
+                cwd=main_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            default_branch = origin_head.partition("/")[2]
+            subprocess.run(
+                ["git", "switch", default_branch],
+                cwd=main_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             subprocess.run(
                 ["git", "merge", "--ff-only", "origin/HEAD"],
                 cwd=main_path,

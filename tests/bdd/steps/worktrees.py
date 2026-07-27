@@ -145,7 +145,7 @@ def _branch_from_default(scenario_state: dict[str, Any]) -> None:
     recorded = scenario_state["_recorded_git_calls"]
     add_cmd = next(cmd for cmd in recorded if cmd[:3] == ["git", "worktree", "add"])
     assert "origin/HEAD" in add_cmd, add_cmd
-    assert any(cmd[:3] == ["git", "fetch", "origin"] for cmd in recorded), (
+    assert any(cmd[:4] == ["git", "fetch", "--prune", "origin"] for cmd in recorded), (
         "expected git fetch origin before branch creation"
     )
 
@@ -212,7 +212,7 @@ def _clone_from_fork(scenario_state: dict[str, Any]) -> None:
 def _fork_worktree_has_upstream_remote(scenario_state: dict[str, Any]) -> None:
     recorded = scenario_state["_recorded_git_calls"]
     assert ["git", "remote", "add", "upstream", "https://github.com/owner/repo.git"] in recorded
-    assert ["git", "fetch", "upstream"] in recorded
+    assert ["git", "fetch", "--prune", "upstream"] in recorded
 
 
 # --------------------------------------------------------------------------
