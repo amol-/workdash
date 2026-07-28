@@ -872,7 +872,7 @@ def _run_list_command(
         def __init__(self, **kwargs) -> None:  # pragma: no cover - sanity
             raise AssertionError("TUI should not be constructed for list command")
 
-        def run(self) -> None:  # pragma: no cover - sanity
+        def run(self, *, mouse: bool) -> None:  # pragma: no cover - sanity
             raise AssertionError("TUI should not run for list command")
 
     monkeypatch.setattr(workdash_module, "WorkdashApp", UnreachableApp)

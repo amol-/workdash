@@ -185,7 +185,7 @@ def _user_starts_workdash_with_server(
             scenario_state["tui_work_items"] = kwargs["work_items"]
             scenario_state["tui_suggestion_markers"] = kwargs["suggestion_markers"]
 
-        def run(self) -> None:
+        def run(self, *, mouse: bool) -> None:
             scenario_state["tui_started"] = True
 
     monkeypatch.setenv("ZELLIJ", "0")

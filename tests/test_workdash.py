@@ -63,7 +63,7 @@ def _issue(repo: str = "owner/repo", number: int = 1) -> WorkItem:
 def test_main_prints_loading_message_before_tui_start(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    calls: dict[str, bool] = {"load": False, "run": False}
+    calls: dict[str, bool] = {"load": False, "run": False, "mouse": True}
 
     class FakeBackend:
         def __init__(self, config=None, **kwargs) -> None:
@@ -85,8 +85,9 @@ def test_main_prints_loading_message_before_tui_start(
             assert kwargs["work_items"] == []
             assert kwargs["suggestion_markers"] == {}
 
-        def run(self) -> None:
+        def run(self, *, mouse: bool) -> None:
             calls["run"] = True
+            calls["mouse"] = mouse
 
     monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
@@ -98,7 +99,7 @@ def test_main_prints_loading_message_before_tui_start(
     exit_code = workdash_module.main([])
 
     assert exit_code == 0
-    assert calls == {"load": True, "run": True}
+    assert calls == {"load": True, "run": True, "mouse": False}
     captured = capsys.readouterr()
     assert captured.out.startswith("Loading work items from GitHub...\n")
 
@@ -153,7 +154,7 @@ def test_main_server_refresh_before_tui_run_updates_session_and_repaints_when_ru
             session = captured["app_session"]
             captured["app_refreshed_ids"] = [item.number for item in session.work_items]
 
-        def run(self) -> None:
+        def run(self, *, mouse: bool) -> None:
             self.is_running = True
             session = captured["app_session"]
             session.list_items(refresh=True)
@@ -217,7 +218,7 @@ def test_main_server_refresh_callback_reraises_unrelated_runtime_errors(
         def refresh_from_session(self) -> None:
             raise AssertionError("refresh should be reached through call_from_thread")
 
-        def run(self) -> None:
+        def run(self, *, mouse: bool) -> None:
             session = captured["app_session"]
             session.items_changed_callback()
 
@@ -262,7 +263,7 @@ def test_main_passes_configured_agent_choices_to_tui(
         def __init__(self, **kwargs) -> None:
             captured_kwargs.update(kwargs)
 
-        def run(self) -> None:
+        def run(self, *, mouse: bool) -> None:
             return None
 
     monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
@@ -308,7 +309,7 @@ def test_main_tui_analyze_callback_uses_worktree_and_backend(
         def __init__(self, **kwargs) -> None:
             captured_callback["analyze"] = kwargs["analyze_callback"]
 
-        def run(self) -> None:
+        def run(self, *, mouse: bool) -> None:
             return None
 
     def fake_ensure_worktree(workdir, item):
@@ -1177,7 +1178,7 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
         def __init__(self, **kwargs) -> None:
             captured_callback["launch"] = kwargs["launch_callback"]
 
-        def run(self) -> None:
+        def run(self, *, mouse: bool) -> None:
             return None
 
     monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
@@ -1252,7 +1253,7 @@ def test_main_launch_callback_raises_on_unknown_tool(
         def __init__(self, **kwargs) -> None:
             captured_callback["launch"] = kwargs["launch_callback"]
 
-        def run(self) -> None:
+        def run(self, *, mouse: bool) -> None:
             return None
 
     monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")

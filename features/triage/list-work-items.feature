@@ -15,7 +15,8 @@ Feature: List work items
     - When the same item qualifies for multiple sources, the strongest relationship wins in this order: authored pull request, then REVIEW pull request, then assigned issue, then plain tracked item.
     - When GitHub denies access to a repository while loading a specific work source because further repository authorization is required, the system warns the user, skips that inaccessible repository or item, and keeps loading other work.
     - When no work items match, the system reports that no work items were found.
-    - Scrolling or hovering the TUI list keeps each visual row tied to the same GitHub issue or pull request; included items may show a "+" type suffix but must not create stale, duplicate, or empty visual rows.
+    - Scrolling the TUI list keeps each visual row tied to the same GitHub issue or pull request; included items may show a "+" type suffix but must not create stale, duplicate, or empty visual rows.
+    - The dashboard is keyboard-driven: it never captures mouse input, so mouse behavior (text selection, wheel scrolling) stays with the terminal.
 
   @id:F-TRIAGE-LIST-S001
   Scenario: Authored, review, assigned, and tracked items appear together

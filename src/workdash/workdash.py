@@ -297,7 +297,9 @@ class WorkdashCommands:
                 print(f"Error: {error}", file=sys.stderr, flush=True)
                 return 1
         try:
-            app.run()
+            # Keyboard-only dashboard: never enable terminal mouse tracking so
+            # the terminal keeps native mouse behavior (selection, scrolling).
+            app.run(mouse=False)
         finally:
             if control_server is not None:
                 control_server.stop()

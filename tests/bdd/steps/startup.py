@@ -174,7 +174,7 @@ def _install_direct_start_fakes(
         def __init__(self, **kwargs) -> None:
             pass
 
-        def run(self) -> None:
+        def run(self, *, mouse: bool) -> None:
             scenario_state["dashboard_started"] = True
 
     monkeypatch.setattr(
