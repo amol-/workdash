@@ -25,6 +25,14 @@ AnalyzeCallbackResult = str | None
 _CallbackResult = TypeVar("_CallbackResult")
 # The Repo column is capped at this reference name so the title keeps more room.
 _MAX_REPO_WIDTH = len("posit-dev/rsconnect-python")
+# One-character CI symbols, keyed by the GraphQL status check rollup states.
+_CI_SYMBOLS = {
+    "SUCCESS": ("✓", "green"),
+    "FAILURE": ("✗", "red"),
+    "ERROR": ("✗", "red"),
+    "PENDING": ("●", "yellow"),
+    "EXPECTED": ("●", "yellow"),
+}
 
 if TYPE_CHECKING:
     from .control import WorkdashSession
@@ -34,6 +42,26 @@ def _to_utc(dt: datetime) -> datetime:
     if dt.tzinfo is not None:
         return dt.astimezone(UTC)
     return dt.replace(tzinfo=UTC)
+
+
+def _type_column(item: WorkItem, *, bold: bool) -> Text:
+    """Return the Type column cell, prefixed with the item's CI symbol.
+
+    An item without a CI result keeps a blank prefix so every Type label stays
+    aligned under the ones that carry a symbol.
+
+    :param WorkItem item: the work item whose type is shown.
+    :param bool bold: whether the whole row is highlighted as recently updated.
+    """
+
+    symbol, color = _CI_SYMBOLS.get(item.ci_state or "", (" ", None))
+    cell = Text(
+        f"{symbol}{format_type_label(item)}#{item.number}",
+        style="bold" if bold else "",
+    )
+    if color is not None:
+        cell.stylize(color, 0, 1)
+    return cell
 
 
 def _repo_column(item: WorkItem) -> str:
@@ -442,8 +470,9 @@ class WorkdashApp(App[None]):
             table.add_column("Age", key="age")
             table.add_column("Last Update", key="last_update")
         needle = self._search_filter.lower()
-        # Match the rendered Type/Repo/Title text. The raw title is used so the
-        # "* " suggestion marker is never searchable.
+        # Match the rendered Type/Repo/Title text. The raw title and the
+        # unprefixed type label are used so neither the "* " suggestion marker
+        # nor the CI symbol is ever searchable.
         matched_items = [
             item
             for item in self._work_items
@@ -465,12 +494,11 @@ class WorkdashApp(App[None]):
         for item in self._sorted_work_items:
             age_days = max(0, (self._now_utc - _to_utc(item.created_at)).days)
             update_days = max(0, (self._now_utc - _to_utc(item.updated_at)).days)
-            type_label = f"{format_type_label(item)}#{item.number}"
             title = self._title_with_suggestion_marker(item)
             row_key = f"{item.item_type.value}:{item.repo}#{item.number}"
             if _to_utc(item.updated_at) >= cutoff:
                 table.add_row(
-                    Text(type_label, style="bold"),
+                    _type_column(item, bold=True),
                     Text(_repo_column(item), style="bold"),
                     Text(title, style="bold"),
                     Text(f"{age_days}d", style="bold"),
@@ -479,7 +507,7 @@ class WorkdashApp(App[None]):
                 )
             else:
                 table.add_row(
-                    type_label,
+                    _type_column(item, bold=False),
                     _repo_column(item),
                     title,
                     f"{age_days}d",

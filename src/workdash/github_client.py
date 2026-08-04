@@ -72,6 +72,15 @@ def parse_github_item_url(url: str) -> ParsedGitHubItemURL | None:
 _DEFAULT_PR_SEARCH_LIMIT = 1000
 _DEFAULT_ASSIGNED_ISSUE_LIMIT = 20
 _PR_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,isDraft,repository"
+# GraphQL selection matching `_PR_JSON_FIELDS` field for field, plus the CI
+# result of the head commit, which `gh search prs` cannot report at all.
+_AUTHORED_PR_SELECTION = (
+    "id number title url createdAt updatedAt isDraft repository { nameWithOwner } "
+    "commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }"
+)
+# GraphQL search returns at most 100 nodes per page, and nobody triages more
+# open authored pull requests than that.
+_AUTHORED_PR_SEARCH_LIMIT = 100
 # GraphQL selection listing the reviewers a pull request asked for, so a
 # direct user request can be told apart from a team-wide one.
 _REVIEW_REQUESTS_SELECTION = (
@@ -142,6 +151,25 @@ def _is_transient_gh_error(error: subprocess.CalledProcessError) -> bool:
 def _is_repository_authorization_error(message: str) -> bool:
     message_lower = message.lower()
     return any(needle in message_lower for needle in _REPOSITORY_AUTHORIZATION_SUBSTRINGS)
+
+
+def _extract_ci_state(entry: dict[str, object]) -> str | None:
+    """Return the CI result GitHub rolled up for a pull request's head commit.
+
+    Only the GraphQL authored search asks for it, so every other payload yields
+    no result at all, as does a pull request whose checks GitHub has not rolled
+    up or that has no checks configured.
+
+    :param dict entry: One raw pull request payload.
+    """
+
+    commits = entry.get("commits")
+    if commits is None:
+        return None
+    # A pull request always has a head commit, but GitHub reports no rollup at
+    # all when it has no checks configured or has not rolled them up yet.
+    rollup = commits["nodes"][0]["commit"]["statusCheckRollup"]
+    return rollup["state"] if rollup else None
 
 
 def _is_unresolvable_item_error(message: str) -> bool:
@@ -233,6 +261,7 @@ class AuthoredPullRequest(TypedDict):
     created_at: str
     updated_at: str
     is_draft: bool
+    ci_state: str | None
 
 
 class ReviewRequestedPullRequest(TypedDict):
@@ -246,6 +275,7 @@ class ReviewRequestedPullRequest(TypedDict):
     created_at: str
     updated_at: str
     is_draft: bool
+    ci_state: str | None
 
 
 class RecentTrackedItem(TypedDict):
@@ -310,6 +340,7 @@ def normalize_authored_pull_request(item: AuthoredPullRequest) -> WorkItem:
         created_at=parse_github_datetime(item["created_at"]),
         updated_at=parse_github_datetime(item["updated_at"]),
         url=item["url"],
+        ci_state=item["ci_state"],
     )
 
 
@@ -518,6 +549,7 @@ class GitHubClient:
                     created_at=created_at,
                     updated_at=updated_at,
                     is_draft=is_draft,
+                    ci_state=_extract_ci_state(entry),
                 )
             )
         return pull_requests
@@ -593,25 +625,24 @@ class GitHubClient:
     def list_open_authored_prs(
         self,
         author_login: str,
-        limit: int = _DEFAULT_PR_SEARCH_LIMIT,
+        limit: int = _AUTHORED_PR_SEARCH_LIMIT,
     ) -> list[AuthoredPullRequest]:
         """List open authored PRs across accessible repositories.
 
-        This intentionally does not filter out draft PRs or fork PRs.
+        This runs on GraphQL rather than `gh search prs` only because the CI
+        result shown next to each authored pull request is unavailable to the
+        search endpoint. It intentionally does not filter out draft PRs or fork
+        PRs.
         """
 
+        search_query = f"author:{author_login} is:pr is:open"
         command = [
             "gh",
-            "search",
-            "prs",
-            "--author",
-            author_login,
-            "--state",
-            "open",
-            "--limit",
-            str(limit),
-            "--json",
-            _PR_JSON_FIELDS,
+            "api",
+            "graphql",
+            "-f",
+            f"query={{ search(query: {json.dumps(search_query)}, type: ISSUE, first: {limit}) "
+            f"{{ nodes {{ ... on PullRequest {{ {_AUTHORED_PR_SELECTION} }} }} }} }}",
         ]
         completed = _run_gh_command_with_retry(
             command,
@@ -628,8 +659,18 @@ class GitHubClient:
             raise RuntimeError(
                 f"Failed to parse gh authored PR JSON for {author_login!r}: {error.msg}"
             ) from error
+        # A response without the search nodes is a whole-query failure such as
+        # expired credentials, which must not be mistaken for "no authored PRs".
+        data = payload.get("data") if isinstance(payload, dict) else None
+        search = data.get("search") if isinstance(data, dict) else None
+        nodes = search.get("nodes") if isinstance(search, dict) else None
+        if nodes is None:
+            raise RuntimeError(
+                f"Failed to list open authored PRs for {author_login!r} via gh: "
+                f"{completed.stderr.strip() or 'response contained no search results'}"
+            )
         return self._parse_open_pull_request_payload(
-            payload,
+            nodes,
             context=f"authored for {author_login!r}",
         )
 

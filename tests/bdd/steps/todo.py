@@ -38,6 +38,7 @@ from workdash.tui import TodoDialog
 
 from .api import _api_result, _call_api
 from .common import NOW_UTC, api_config, ensure_api_session, make_work_item, run_app
+from .triage import type_column_label
 from .worktrees import _install_fake_git
 
 TODO_TEXT = "Fix the flaky test"
@@ -358,7 +359,7 @@ def _new_todo_appears_as_item_of_todo_repository(scenario_state: dict[str, Any])
     rows = scenario_state["todo_rows"]
     row = next((entry for entry in rows if entry[1] == TODO_REPOSITORY), None)
     assert row is not None, rows
-    assert row[0] == f"ISSUE#{TODO_ISSUE_NUMBER}", row
+    assert type_column_label(row[0]) == f"ISSUE#{TODO_ISSUE_NUMBER}", row
     assert TODO_TEXT in row[2], row
     assert (
         _listed_todo(scenario_state, TODO_ISSUE_NUMBER)["id"]

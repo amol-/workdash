@@ -78,6 +78,12 @@ def test_parse_github_item_url_rejects_invalid_inputs(url: str) -> None:
     assert parse_github_item_url(url) is None
 
 
+def _authored_search_stdout(nodes: list[dict[str, object]] | None = None) -> str:
+    """Return a GraphQL authored-search response wrapping ``nodes``."""
+
+    return json.dumps({"data": {"search": {"nodes": nodes or []}}})
+
+
 def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -92,13 +98,42 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
         return subprocess.CompletedProcess(
             args=command,
             returncode=0,
-            stdout=(
-                '[{"id":"A","number":10,"title":"draft pr","url":"https://example.com/pull/10",'
-                '"createdAt":"2026-02-01T00:00:00Z","updatedAt":"2026-02-02T00:00:00Z","isDraft":true,'
-                '"repository":{"name":"fork-repo","nameWithOwner":"someone/fork-repo"}},'
-                '{"id":"B","number":11,"title":"ready pr","url":"https://example.com/pull/11",'
-                '"createdAt":"2026-02-03T00:00:00Z","updatedAt":"2026-02-04T00:00:00Z","isDraft":false,'
-                '"repository":{"name":"main-repo","nameWithOwner":"upstream/main-repo"}}]'
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "search": {
+                            "nodes": [
+                                {
+                                    "id": "A",
+                                    "number": 10,
+                                    "title": "draft pr",
+                                    "url": "https://example.com/pull/10",
+                                    "createdAt": "2026-02-01T00:00:00Z",
+                                    "updatedAt": "2026-02-02T00:00:00Z",
+                                    "isDraft": True,
+                                    "repository": {"nameWithOwner": "someone/fork-repo"},
+                                    "commits": {
+                                        "nodes": [
+                                            {"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}
+                                        ]
+                                    },
+                                },
+                                {
+                                    "id": "B",
+                                    "number": 11,
+                                    "title": "ready pr",
+                                    "url": "https://example.com/pull/11",
+                                    "createdAt": "2026-02-03T00:00:00Z",
+                                    "updatedAt": "2026-02-04T00:00:00Z",
+                                    "isDraft": False,
+                                    "repository": {"nameWithOwner": "upstream/main-repo"},
+                                    # A pull request with no checks configured.
+                                    "commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]},
+                                },
+                            ]
+                        }
+                    }
+                }
             ),
             stderr="",
         )
@@ -110,20 +145,12 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
     assert captured["check"] is True
     assert captured["capture_output"] is True
     assert captured["text"] is True
-    assert captured["command"] == [
-        "gh",
-        "search",
-        "prs",
-        "--author",
-        "testuser",
-        "--state",
-        "open",
-        "--limit",
-        "1000",
-        "--json",
-        "id,number,title,url,createdAt,updatedAt,isDraft,repository",
-    ]
-    assert "--draft" not in captured["command"]
+    assert captured["command"][:4] == ["gh", "api", "graphql", "-f"]
+    query = captured["command"][4]
+    assert 'search(query: "author:testuser is:pr is:open", type: ISSUE, first: 100)' in query
+    assert "statusCheckRollup { state }" in query
+    # Drafts and fork pull requests are deliberately not filtered out.
+    assert "draft:" not in query
     assert result == [
         {
             "id": "A",
@@ -134,6 +161,7 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
             "created_at": "2026-02-01T00:00:00Z",
             "updated_at": "2026-02-02T00:00:00Z",
             "is_draft": True,
+            "ci_state": "SUCCESS",
         },
         {
             "id": "B",
@@ -144,6 +172,7 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
             "created_at": "2026-02-03T00:00:00Z",
             "updated_at": "2026-02-04T00:00:00Z",
             "is_draft": False,
+            "ci_state": None,
         },
     ]
 
@@ -158,7 +187,7 @@ def test_list_open_authored_prs_accepts_custom_author_and_limit(
         return subprocess.CompletedProcess(
             args=args[0],
             returncode=0,
-            stdout="[]",
+            stdout=_authored_search_stdout(),
             stderr="",
         )
 
@@ -166,8 +195,10 @@ def test_list_open_authored_prs_accepts_custom_author_and_limit(
     result = GitHubClient().list_open_authored_prs(author_login="octocat", limit=25)
 
     assert result == []
-    assert captured["command"][4] == "octocat"
-    assert captured["command"][8] == "25"
+    assert (
+        'search(query: "author:octocat is:pr is:open", type: ISSUE, first: 25)'
+        in (captured["command"][4])
+    )
 
 
 def test_list_open_authored_prs_raises_clear_error_when_gh_missing(
@@ -220,7 +251,7 @@ def test_list_open_authored_prs_retries_on_transient_http_5xx(
         return subprocess.CompletedProcess(
             args=args[0],
             returncode=0,
-            stdout="[]",
+            stdout=_authored_search_stdout(),
             stderr="",
         )
 
@@ -256,13 +287,32 @@ def test_list_open_authored_prs_raises_error_for_invalid_payload_entry(
         return subprocess.CompletedProcess(
             args=args[0],
             returncode=0,
-            stdout='[{"id":"A","number":"not-an-int"}]',
+            stdout=_authored_search_stdout([{"id": "A", "number": "not-an-int"}]),
             stderr="",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="entry 0 has missing or invalid repository"):
+        GitHubClient().list_open_authored_prs("testuser")
+
+
+def test_list_open_authored_prs_raises_when_the_response_carries_no_search_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Expired credentials answer with a message instead of data, which must not
+    # be mistaken for "this user authored no open pull requests".
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout='{"message":"Bad credentials","status":"401"}',
+            stderr="Bad credentials",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Bad credentials"):
         GitHubClient().list_open_authored_prs("testuser")
 
 
@@ -372,6 +422,8 @@ def test_list_open_review_requested_prs_returns_directly_requested_prs_in_one_gr
             "created_at": "2026-02-05T00:00:00Z",
             "updated_at": "2026-02-06T00:00:00Z",
             "is_draft": False,
+            # The review selectors do not ask for CI state.
+            "ci_state": None,
         }
     ]
 
@@ -734,6 +786,8 @@ def test_list_open_reviewed_prs_returns_open_prs_reviewed_by_user(
             "created_at": "2026-03-01T00:00:00Z",
             "updated_at": "2026-03-02T00:00:00Z",
             "is_draft": False,
+            # The review selectors do not ask for CI state.
+            "ci_state": None,
         }
     ]
 

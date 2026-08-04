@@ -55,6 +55,7 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
                     "created_at": "2026-02-01T00:00:00Z",
                     "updated_at": "2026-02-01T01:00:00Z",
                     "is_draft": False,
+                    "ci_state": None,
                 }
             ]
 

@@ -69,6 +69,7 @@ def _has_open_work_all_sources(work_items: list[WorkItem]) -> None:
             "created_at": "2026-04-26T12:00:00Z",
             "updated_at": "2026-04-28T12:00:00Z",
             "is_draft": False,
+            "ci_state": None,
         }
     ]
     review_raw = [
@@ -180,13 +181,72 @@ def _tracked_items_carry_expected_type(scenario_state: dict[str, Any]) -> None:
         assert item.item_type == expected
 
 
+def type_column_label(cell: object) -> str:
+    """Return a Type cell without its leading CI symbol.
+
+    Every Type cell reserves its first character for the CI symbol, so a step
+    about the type label itself has to look past it.
+
+    :param object cell: the rendered Type cell.
+    """
+
+    return str(cell)[1:]
+
+
+@given("the user has authored pull requests whose CI is passing, failing, and still running")
+def _authored_prs_with_ci_results(
+    scenario_state: dict[str, Any], work_items: list[WorkItem]
+) -> None:
+    scenario_state["ci_states"] = {41: "SUCCESS", 42: "FAILURE", 43: "PENDING"}
+    work_items[:] = [
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.AUTHORED_PR,
+            number=number,
+            title=f"Authored {ci_state}",
+            ci_state=ci_state,
+        )
+        for number, ci_state in scenario_state["ci_states"].items()
+    ] + [make_work_item(number=11, title="An issue")]
+
+
+@then("each authored pull request's Type column carries the symbol for its CI result")
+def _authored_prs_carry_ci_symbols(scenario_state: dict[str, Any]) -> None:
+    expected_symbols = {"SUCCESS": "✓", "FAILURE": "✗", "PENDING": "●"}
+    type_cells = _rendered_type_cells(scenario_state)
+    for number, ci_state in scenario_state["ci_states"].items():
+        assert type_cells[f"PR#{number}"] == expected_symbols[ci_state], (number, type_cells)
+
+
+@then("an issue's Type column carries no CI symbol")
+def _issue_carries_no_ci_symbol(scenario_state: dict[str, Any]) -> None:
+    assert _rendered_type_cells(scenario_state)["ISSUE#11"] == " "
+
+
+def _rendered_type_cells(scenario_state: dict[str, Any]) -> dict[str, str]:
+    """Return each rendered Type label mapped to its leading CI symbol."""
+
+    captured: dict[str, str] = {}
+
+    async def interactions(app, pilot) -> None:
+        table = app.query_one("#work-items", DataTable)
+        for index in range(table.row_count):
+            cell = table.get_row_at(index)[0]
+            captured[type_column_label(cell)] = str(cell)[0]
+
+    run_app(work_items=scenario_state["work_items"], interactions=interactions)
+    return captured
+
+
 @then("the Type column shows `ISSUE#1`, `PR#2`, and `REVIEW#3`")
 def _type_column_shows_github_numbers(scenario_state: dict[str, Any]) -> None:
     captured: list[str] = []
 
     async def interactions(app, pilot) -> None:
         table = app.query_one("#work-items", DataTable)
-        captured.extend(str(table.get_row_at(index)[0]) for index in range(table.row_count))
+        captured.extend(
+            type_column_label(table.get_row_at(index)[0]) for index in range(table.row_count)
+        )
 
     run_app(work_items=scenario_state["work_items"], interactions=interactions)
 
@@ -343,6 +403,7 @@ def _authored_also_tracked(scenario_state: dict[str, Any]) -> None:
             "created_at": "2026-04-01T00:00:00Z",
             "updated_at": "2026-04-20T00:00:00Z",
             "is_draft": False,
+            "ci_state": None,
         }
     ]
     tracked_raw = [
@@ -1112,8 +1173,10 @@ def _rendered_bold(work_items: list[WorkItem], scenario_state: dict[str, Any]) -
 def _rendered_normal(work_items: list[WorkItem], scenario_state: dict[str, Any]) -> None:
     captured = _capture_rendered_row(work_items, scenario_state["target_item"])
     for cell in captured:
-        # Non-bold rows use plain str cells in the DataTable
-        assert not isinstance(cell, Text), f"expected plain str, got Text: {cell}"
+        # The Type cell always carries Text so its CI symbol can be colored, so
+        # normal weight is the absence of bold rather than the absence of Text.
+        if isinstance(cell, Text):
+            assert "bold" not in str(cell.style)
 
 
 def _capture_rendered_row(work_items: list[WorkItem], target: WorkItem) -> list:
@@ -1911,7 +1974,7 @@ def _assert_type_column(scenario_state: dict[str, Any], *, number: int, expected
     )
     for row, item in zip(captured["rows"], captured["sorted_items"], strict=True):
         if item.number == number:
-            assert row[0] == expected, (row, item)
+            assert type_column_label(row[0]) == expected, (row, item)
             return
     raise AssertionError(f"No row for number {number}: {captured['rows']}")
 
@@ -2212,7 +2275,10 @@ def _only_matching_titles_listed(scenario_state: dict[str, Any]) -> None:
 def _only_that_work_item_listed(scenario_state: dict[str, Any]) -> None:
     target = scenario_state["search_target"]
     assert _listed_titles(scenario_state) == [target.title]
-    assert scenario_state["search_rows"][0][0] == f"{format_type_label(target)}#{target.number}"
+    assert (
+        type_column_label(scenario_state["search_rows"][0][0])
+        == f"{format_type_label(target)}#{target.number}"
+    )
 
 
 @then("only the work items from that repository are listed")
@@ -2259,9 +2325,9 @@ def _all_refreshed_items_listed(scenario_state: dict[str, Any]) -> None:
 
 @then("the included work item is listed")
 def _included_work_item_listed(scenario_state: dict[str, Any]) -> None:
-    assert any(row[0] == "PR+#111" for row in scenario_state["search_rows"]), scenario_state[
-        "search_rows"
-    ]
+    assert any(type_column_label(row[0]) == "PR+#111" for row in scenario_state["search_rows"]), (
+        scenario_state["search_rows"]
+    )
 
 
 @then("the action bar lists the search action first")

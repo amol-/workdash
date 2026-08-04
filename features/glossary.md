@@ -11,6 +11,7 @@ Canonical product vocabulary used by the feature files.
 - Item type: The category of a work item. One of `ISSUE`, `PR`, or `REVIEW`.
 - REVIEW item: A pull request where the user is directly requested as a reviewer, or has already reviewed.
 - Authored PR: A pull request whose author is the user.
+- CI result: The combined state of the checks GitHub last ran on an authored pull request's most recent commit, shown as a one-character symbol in the Type column. A pull request with no checks configured has no CI result.
 - Assigned issue: An open issue where the user is an assignee.
 - Tracked item: An open issue or pull request that appears in a tracked repository regardless of the user's direct involvement.
 - Tracked repository: A repository listed in the user's configuration, either as `owner/repo` or expanded from an `owner/*` selector.

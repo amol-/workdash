@@ -40,6 +40,7 @@ class WorkItem:
     analyzed_at: datetime | None = None
     included: bool = False
     todo_target: str | None = None
+    ci_state: str | None = None
 
 
 def format_type_label(item: WorkItem) -> str:

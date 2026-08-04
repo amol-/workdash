@@ -38,6 +38,7 @@ def make_work_item(
     created_at: datetime | None = None,
     updated_at: datetime | None = None,
     url: str | None = None,
+    ci_state: str | None = None,
 ) -> WorkItem:
     """Build a ``WorkItem`` with sensible defaults for BDD scenarios."""
 
@@ -52,6 +53,7 @@ def make_work_item(
         created_at=created,
         updated_at=updated,
         url=url or f"https://github.com/{repo}/{item_type.value}/{number}",
+        ci_state=ci_state,
     )
 
 

@@ -67,14 +67,14 @@ def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_colum
             # Sorted by updated_at descending; PR #22 (updated 2/25) before issue #11 (updated 2/20)
             # PR #22 is within 24h of now_utc so cells are bold Text objects
             assert [str(c) for c in table.get_row_at(0)] == [
-                "PR#22",
+                " PR#22",
                 "owner/repo",
                 "Implement renderer",
                 "1d",
                 "1d",
             ]
-            assert table.get_row_at(1) == [
-                "ISSUE#11",
+            assert [str(c) for c in table.get_row_at(1)] == [
+                " ISSUE#11",
                 "owner/repo",
                 "* Fix parser",
                 "6d",
@@ -121,6 +121,54 @@ def test_workdash_app_truncates_a_long_repo_column_on_the_left() -> None:
     asyncio.run(run_smoke())
 
 
+@pytest.mark.parametrize(
+    ("ci_state", "expected_symbol", "expected_color"),
+    [
+        ("SUCCESS", "✓", "green"),
+        ("FAILURE", "✗", "red"),
+        ("ERROR", "✗", "red"),
+        ("PENDING", "●", "yellow"),
+        ("EXPECTED", "●", "yellow"),
+        # A pull request with no checks, and a state GitHub may add later, both
+        # fall back to the blank prefix rather than inventing a symbol.
+        (None, " ", None),
+        ("SOMETHING_NEW", " ", None),
+    ],
+)
+def test_workdash_app_colors_the_ci_symbol_in_the_type_column(
+    ci_state: str | None,
+    expected_symbol: str,
+    expected_color: str | None,
+) -> None:
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_item = WorkItem(
+        kind=WorkItemKind.AUTHORED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        # Older than the 24h bold cutoff, so only the CI symbol carries a style.
+        created_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+        ci_state=ci_state,
+    )
+    app = WorkdashApp(work_items=[work_item], now_utc=now_utc)
+
+    async def run_smoke() -> None:
+        async with app.run_test() as _:
+            table = app.query_one("#work-items", DataTable)
+            cell = table.get_row_at(0)[0]
+
+            assert cell.plain == f"{expected_symbol}PR#22"
+            if expected_color is None:
+                assert cell.spans == []
+            else:
+                assert [(s.start, s.end, s.style) for s in cell.spans] == [(0, 1, expected_color)]
+
+    asyncio.run(run_smoke())
+
+
 def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label() -> None:
     now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
     work_item = WorkItem(
@@ -141,7 +189,7 @@ def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label()
             row_key = "pr:owner/repo#22"
             assert [key.value for key in table.rows] == [row_key]
             assert [str(c) for c in table.get_row(row_key)] == [
-                "PR#22",
+                " PR#22",
                 "owner/repo",
                 "Implement renderer",
                 "6d",
@@ -153,7 +201,7 @@ def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label()
 
             assert [key.value for key in table.rows] == [row_key]
             assert [str(c) for c in table.get_row(row_key)] == [
-                "PR+#22",
+                " PR+#22",
                 "owner/repo",
                 "Implement renderer",
                 "6d",
@@ -187,7 +235,7 @@ def test_workdash_app_renders_review_for_review_requested_pr_type() -> None:
         async with app.run_test() as _:
             table = app.query_one("#work-items", DataTable)
             assert [str(c) for c in table.get_row_at(0)] == [
-                "REVIEW#22",
+                " REVIEW#22",
                 "owner/repo",
                 "Needs review",
                 "1d",
@@ -301,7 +349,7 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
             ]
             assert terminal_calls == [(WorkItemType.PR, 22)]
             assert [str(c) for c in table.get_row_at(0)] == [
-                "PR#22",
+                " PR#22",
                 "owner/repo",
                 "Implement renderer",
                 "1d",
@@ -354,7 +402,7 @@ def test_workdash_app_refresh_keybinding_invokes_callback_and_reloads_rows() -> 
             assert refresh_calls == ["called"]
             assert table.row_count == 1
             assert [str(c) for c in table.get_row_at(0)] == [
-                "PR#33",
+                " PR#33",
                 "owner/repo",
                 "* Ship refresh",
                 "0d",
@@ -407,7 +455,7 @@ def test_workdash_app_uses_session_state_for_first_render() -> None:
             table = app.query_one("#work-items", DataTable)
             assert table.row_count == 1
             assert [str(c) for c in table.get_row_at(0)] == [
-                "PR#33",
+                " PR#33",
                 "owner/repo",
                 "* Session state before Textual starts",
                 "0d",
@@ -455,8 +503,8 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
             table = app.query_one("#work-items", DataTable)
-            assert table.get_row_at(0) == [
-                "ISSUE#11",
+            assert [str(c) for c in table.get_row_at(0)] == [
+                " ISSUE#11",
                 "owner/repo",
                 "Fix parser",
                 "6d",
@@ -469,7 +517,7 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
 
             assert table.row_count == 1
             assert [str(c) for c in table.get_row_at(0)] == [
-                "PR#33",
+                " PR#33",
                 "owner/repo",
                 "* Ship refresh",
                 "0d",
@@ -648,8 +696,8 @@ def test_workdash_app_analyze_runs_without_blocking_ui_loop(
             allow_finish.set()
             await analyze_press
             await pilot.pause()
-            assert table.get_row_at(0) == [
-                "ISSUE#11",
+            assert [str(c) for c in table.get_row_at(0)] == [
+                " ISSUE#11",
                 "owner/repo",
                 "Fix parser",
                 "6d",
