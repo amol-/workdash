@@ -10,6 +10,7 @@ Feature: List work items
     - A pull request is a REVIEW item when the user is directly requested as a reviewer, or when the user has already reviewed it.
     - Review requests addressed only to a team the user belongs to do not make the pull request a REVIEW item; only direct user review requests do.
     - Each TUI entry's Type column shows its item type (ISSUE, PR, or REVIEW) followed immediately by its GitHub number (for example, `ISSUE#123`), alongside the owning repository, last update date, item's age, and title.
+    - Tracked repositories can hold years of open work, so the number of discovered work items is capped and the oldest ones beyond that cap are dropped. Todo items and items the user included by URL are asked for by hand, so they are always listed even when they are older than everything else.
     - An authored pull request's Type column is prefixed with a one-character symbol for the latest CI result GitHub reports on it: passing, failing, or still running. Every other row, including issues and pull requests the user did not author, is prefixed with a blank instead so the Type labels stay aligned.
     - The Repo column is capped at the width of `posit-dev/rsconnect-python`, leaving the title more room. A longer repository is truncated on its left so the repository name itself stays readable, and the leading character is replaced with an ellipsis to show the owner was cut.
     - Entries are sorted by last update, most recently updated first.

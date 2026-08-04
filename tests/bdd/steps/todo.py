@@ -243,7 +243,9 @@ def _todo_captured_in_earlier_session(
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps(stored_issues), stderr="")
 
     monkeypatch.setattr(github_client_module.subprocess, "run", fake_run)
-    scenario_state["expected_todo_targets"] = [target, None]
+    # Keyed by issue number: the list order is owned by the most-recently-updated
+    # rule, not by this scenario.
+    scenario_state["expected_todo_targets"] = {TODO_ISSUE_NUMBER: target, 111: None}
 
 
 @when("the user asks the TUI to capture a todo")
@@ -436,16 +438,18 @@ def _open_todo_issues_recognized(label: str, scenario_state: dict[str, Any]) -> 
     assert _flag_value(command, "--repo") == TODO_REPOSITORY, command
     assert _flag_value(command, "--label") == label, command
     items = scenario_state["refreshed_todo_items"]
-    assert [(item.repo, item.number) for item in items] == [
+    assert {(item.repo, item.number) for item in items} == {
         (TODO_REPOSITORY, TODO_ISSUE_NUMBER),
         (TODO_REPOSITORY, 111),
-    ], items
+    }, items
 
 
 @then("each todo item's target is read from its issue body metadata")
 def _todo_targets_read_from_body(scenario_state: dict[str, Any]) -> None:
     items = scenario_state["refreshed_todo_items"]
-    assert [item.todo_target for item in items] == scenario_state["expected_todo_targets"]
+    assert {item.number: item.todo_target for item in items} == scenario_state[
+        "expected_todo_targets"
+    ]
 
 
 # ----- F-TODO-TARGET -----

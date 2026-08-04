@@ -1,5 +1,5 @@
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -7,7 +7,12 @@ import pytest
 
 import workdash.backend as backend_module
 import workdash.github_client as github_client_module
-from workdash.backend import IncludeResult, WorkdashBackend, compute_suggestion_markers
+from workdash.backend import (
+    _MAX_WORK_ITEMS,
+    IncludeResult,
+    WorkdashBackend,
+    compute_suggestion_markers,
+)
 from workdash.config import AgentConfig, WorkdashConfig, WorkdashConfigValidationError
 from workdash.github_client import GitHubClient, TransientFetchError
 from workdash.included_items import IncludedItemsStore
@@ -214,6 +219,140 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
     assert work_items[3].analysis == "cached analysis"
     assert work_items[3].analyzed_at is None
     assert suggestion_markers == {(WorkItemType.PR, "owner/repo", 10): "*"}
+
+
+def test_load_items_keeps_only_the_most_recently_updated_items(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # One more tracked issue than the dashboard shows, oldest last, so the cap
+    # has to drop the oldest one rather than the tail of the fetch order.
+    overflow = _MAX_WORK_ITEMS + 1
+    tracked_payload = [
+        {
+            "id": f"ISSUE-{number}",
+            "repo": "owner/repo",
+            "number": number,
+            "title": f"Tracked {number}",
+            "url": f"https://example.com/{number}",
+            "created_at": "2026-02-01T00:00:00Z",
+            "updated_at": (datetime(2026, 2, 1, tzinfo=UTC) + timedelta(minutes=number)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+            "is_pull_request": False,
+            "state": "OPEN",
+        }
+        for number in range(overflow)
+    ]
+
+    class FakeGitHubClient:
+        def list_open_authored_prs(self, login):
+            return []
+
+        def list_open_review_requested_prs(self, login, progress_callback=None):
+            return []
+
+        def list_open_reviewed_prs(self, login):
+            return []
+
+        def list_open_assigned_issues(self, login):
+            return []
+
+        def list_open_todo_issues(self, repository, progress_callback=None):
+            return []
+
+        def list_recent_tracked_items(self, repositories, progress_callback=None):
+            return tracked_payload
+
+    monkeypatch.setattr(backend_module, "resolve_repositories", lambda selectors: ["owner/repo"])
+    backend = WorkdashBackend(
+        github_client=FakeGitHubClient(),
+        config=WorkdashConfig(repositories=("owner/repo",)),
+        cache_root=tmp_path / "cache",
+        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+    )
+
+    work_items, _markers = backend.load_items(progress_callback=lambda _: None)
+
+    assert len(work_items) == _MAX_WORK_ITEMS
+    # Most recently updated first, and the single oldest item is the one dropped.
+    assert [item.number for item in work_items] == list(range(overflow - 1, 0, -1))
+
+
+def test_load_items_keeps_a_hand_picked_item_older_than_every_discovered_item(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The user asked for these two by hand, so a full dashboard must not hide
+    # them even though they are older than everything the selectors found.
+    stale_timestamp = "2020-01-01T00:00:00Z"
+    todo_payload = [
+        {
+            "id": "ISSUE-777",
+            "repo": "testuser/todos",
+            "number": 777,
+            "title": "An ancient todo",
+            "url": "https://github.com/testuser/todos/issues/777",
+            "created_at": stale_timestamp,
+            "updated_at": stale_timestamp,
+            "target": None,
+        }
+    ]
+    tracked_payload = [
+        {
+            "id": f"ISSUE-{number}",
+            "repo": "owner/repo",
+            "number": number,
+            "title": f"Tracked {number}",
+            "url": f"https://example.com/{number}",
+            "created_at": "2026-02-01T00:00:00Z",
+            "updated_at": (datetime(2026, 2, 1, tzinfo=UTC) + timedelta(minutes=number)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+            "is_pull_request": False,
+            "state": "OPEN",
+        }
+        for number in range(_MAX_WORK_ITEMS + 10)
+    ]
+    included_item = make_work_item(
+        item_type=WorkItemType.ISSUE,
+        kind=WorkItemKind.TRACKED_ISSUE,
+        number=888,
+        created_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    included_item.included = True
+
+    class FakeGitHubClient:
+        def list_open_authored_prs(self, login):
+            return []
+
+        def list_open_review_requested_prs(self, login, progress_callback=None):
+            return []
+
+        def list_open_reviewed_prs(self, login):
+            return []
+
+        def list_open_assigned_issues(self, login):
+            return []
+
+        def list_open_todo_issues(self, repository, progress_callback=None):
+            return todo_payload
+
+        def list_recent_tracked_items(self, repositories, progress_callback=None):
+            return tracked_payload
+
+    monkeypatch.setattr(backend_module, "resolve_repositories", lambda selectors: ["owner/repo"])
+    backend = WorkdashBackend(
+        github_client=FakeGitHubClient(),
+        config=WorkdashConfig(repositories=("owner/repo",), todo_repository="testuser/todos"),
+        cache_root=tmp_path / "cache",
+        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+    )
+    monkeypatch.setattr(backend, "_load_included_items", lambda report_progress: [included_item])
+
+    work_items, _markers = backend.load_items(progress_callback=lambda _: None)
+
+    numbers = [item.number for item in work_items]
+    assert 777 in numbers, "the todo item was dropped by the row cap"
+    assert 888 in numbers, "the included item was dropped by the row cap"
 
 
 def test_load_items_keeps_the_todo_target_when_the_same_issue_is_also_assigned(

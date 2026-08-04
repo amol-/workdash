@@ -1204,6 +1204,12 @@ class GitHubClient:
             "--include-prs",
             "--state",
             "open",
+            # Without this gh ranks by best match, so the limit would drop items
+            # arbitrarily instead of keeping the ones that moved most recently.
+            "--sort",
+            "updated",
+            "--order",
+            "desc",
             "--limit",
             str(limit),
             "--json",

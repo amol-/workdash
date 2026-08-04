@@ -45,6 +45,8 @@ class IncludeResult:
 
 
 _SUGGESTION_MARKER = "*"
+# Rows the dashboard shows; the oldest discovered work beyond this is dropped.
+_MAX_WORK_ITEMS = 100
 _DEFAULT_CACHE_ROOT = Path.home() / ".config" / "workdash" / "cache"
 _DEFAULT_INCLUDED_STORE_PATH = Path.home() / ".config" / "workdash" / "included.json"
 
@@ -168,6 +170,18 @@ class WorkdashBackend:
             merged_items,
             normalize_recent_tracked_items(recent_tracked_items),
         )
+        # Tracked repositories can hold years of open work, so only the most
+        # recently updated discovered items are kept. Todo and included items
+        # are merged after the cap because the user asked for those by hand and
+        # must not lose them to a busy week elsewhere.
+        if len(merged_items) > _MAX_WORK_ITEMS:
+            report_progress(
+                f"Keeping the {_MAX_WORK_ITEMS} most recently updated "
+                f"of {len(merged_items)} discovered work item(s)."
+            )
+            merged_items = sorted(merged_items, key=lambda item: item.updated_at, reverse=True)[
+                :_MAX_WORK_ITEMS
+            ]
         # Todo records go first so the target they carry survives dedupe against
         # the same issue found through the assigned-issue source.
         merged_items = merge_normalized_work_items(
