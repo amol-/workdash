@@ -34,7 +34,7 @@ def make_work_item(
 
 
 def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     captured: dict[str, object] = {}
 
@@ -188,6 +188,7 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
         analysis_cache=FakeAnalysisCache(),
         analyzer=FakeAnalyzer(),
         config=config,
+        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
     )
 
     work_items, suggestion_markers = backend.load_items(progress_callback=lambda _: None)
