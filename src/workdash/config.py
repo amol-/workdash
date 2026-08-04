@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 
+from .todo import is_repository_name
+
 CONFIG_PATH = Path.home() / ".config" / "workdash" / "config.json"
 LOCAL_BIN_PATH = CONFIG_PATH.parent / "bin"
 ZELLIJ_INSTALL_PATH = LOCAL_BIN_PATH / "zellij"
@@ -77,10 +79,15 @@ class WorkdashConfig:
     pi: AgentConfig = field(default_factory=AgentConfig)
     repositories: tuple[str, ...] = ()
     workdir: str = ""
+    todo_repository: str = ""
 
     def require_valid(self) -> WorkdashConfig:
         missing = validate_config(self)
         invalid = _invalid_config_command_fields(self)
+        # A hand-edited todo repository that is present but not owner/repo is
+        # invalid rather than missing, so the message tells the user what to fix.
+        if self.todo_repository and not is_repository_name(self.todo_repository):
+            invalid.append("todo_repository: expected owner/repo")
         if missing or invalid:
             raise WorkdashConfigValidationError(missing, invalid)
         return self
@@ -158,6 +165,7 @@ def _config_to_json(config: WorkdashConfig) -> str:
                 },
                 "repositories": list(config.repositories),
                 "workdir": config.workdir,
+                "todo_repository": config.todo_repository,
             },
             indent=2,
             ensure_ascii=True,
@@ -220,6 +228,7 @@ def load_config(path: Path = CONFIG_PATH) -> WorkdashConfig:
         pi=pi_config,
         repositories=repositories,
         workdir=raw.get("workdir", "") or raw.get("source_directory", ""),
+        todo_repository=raw.get("todo_repository", ""),
     )
 
 
@@ -240,6 +249,8 @@ def validate_config(config: WorkdashConfig) -> list[str]:
         missing.append("repositories")
     if not config.workdir:
         missing.append("workdir")
+    if not config.todo_repository:
+        missing.append("todo_repository")
     return missing
 
 
@@ -595,6 +606,14 @@ def configure(
         repositories = (f"{github_username}/*",)
         print(f"Repositories set to: {github_username}/*")
 
+    todo_repository = config.todo_repository
+    # An empty or hand-broken value is prompted for again, so --configure can
+    # always bring a locked-out configuration back to a usable todo repository.
+    if not is_repository_name(todo_repository):
+        todo_repository = _prompt_with_default(
+            input_fn, "Todo repository", f"{github_username}/todos"
+        )
+
     new_config = WorkdashConfig(
         github_username=github_username,
         claude=claude,
@@ -602,6 +621,7 @@ def configure(
         pi=pi,
         repositories=repositories,
         workdir=workdir,
+        todo_repository=todo_repository,
     )
     save_config(new_config, path)
     print(f"Configuration saved to {path}")

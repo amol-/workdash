@@ -1221,3 +1221,123 @@ def test_fetch_item_by_url_classifies_errors_and_states(
             GitHubClient().fetch_item_by_url(parsed)
     else:
         assert GitHubClient().fetch_item_by_url(parsed) is None
+
+
+def test_list_open_todo_issues_reads_targets_from_issue_body_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    payload = [
+        {
+            "id": "I110",
+            "number": 110,
+            "title": "Fix the flaky test",
+            "url": "https://github.com/testuser/todos/issues/110",
+            "createdAt": "2026-02-01T00:00:00Z",
+            "updatedAt": "2026-02-02T00:00:00Z",
+            "body": '```json\n{"workdash_todo_version": 1, "target": "owner/repo"}\n```\n',
+        },
+        {
+            "id": "I111",
+            "number": 111,
+            "title": "Buy milk",
+            "url": "https://github.com/testuser/todos/issues/111",
+            "createdAt": "2026-02-03T00:00:00Z",
+            "updatedAt": "2026-02-03T00:00:00Z",
+            "body": "someone replaced the metadata by hand",
+        },
+    ]
+
+    def fake_run(*args, **kwargs):
+        captured["command"] = args[0]
+        return subprocess.CompletedProcess(args[0], 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = GitHubClient().list_open_todo_issues("testuser/todos")
+
+    assert captured["command"] == [
+        "gh",
+        "issue",
+        "list",
+        "--repo",
+        "testuser/todos",
+        "--state",
+        "open",
+        "--label",
+        "workdash-todo",
+        "--limit",
+        "200",
+        "--json",
+        "id,number,title,url,createdAt,updatedAt,body",
+    ]
+    assert [(issue["repo"], issue["number"], issue["target"]) for issue in result] == [
+        ("testuser/todos", 110, "owner/repo"),
+        ("testuser/todos", 111, None),
+    ]
+
+
+def test_list_open_todo_issues_rejects_a_malformed_gh_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout='[{"number":"110"}]', stderr=""
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="entry 0 has missing or invalid id"):
+        GitHubClient().list_open_todo_issues("testuser/todos")
+
+
+@pytest.mark.parametrize(
+    ("stderr", "tolerated"),
+    [
+        ("GraphQL: Could not resolve to a Repository with the name 'testuser/todos'.", True),
+        # `gh issue list` resolves the repository over GraphQL, so the REST 404 shape
+        # is deliberate defensive coverage of the classifier shared with label creation.
+        ("HTTP 404: Not Found (https://api.github.com/repos/testuser/todos/issues)", True),
+        ("HTTP 401: Bad credentials", False),
+        ("HTTP 403: Resource not accessible by integration", False),
+        # Incidental mentions of 404 or a not-found reference are other failures.
+        ("HTTP 422: Validation Failed (label not found), see 404 handling docs", False),
+    ],
+)
+def test_list_open_todo_issues_tolerates_only_a_todo_repository_that_is_missing(
+    stderr: str, tolerated: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The todo repository may not exist yet, but every other gh failure is real."""
+
+    def fake_run(command, **kwargs):
+        raise subprocess.CalledProcessError(1, command, stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    progress: list[str] = []
+
+    if not tolerated:
+        with pytest.raises(RuntimeError, match="Failed to list open todo issues"):
+            GitHubClient().list_open_todo_issues("testuser/todos")
+        return
+    assert (
+        GitHubClient().list_open_todo_issues("testuser/todos", progress_callback=progress.append)
+        == []
+    )
+    assert progress == ["Todo repository testuser/todos does not exist yet."]
+
+
+def test_list_open_todo_issues_keeps_a_transient_failure_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry-exhausted GitHub outage must not be read as a missing repository."""
+
+    def fake_run(command, **kwargs):
+        raise subprocess.CalledProcessError(
+            1, command, stderr="HTTP 503: Service Unavailable (not found in cache)"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("workdash.github_client.time.sleep", lambda _: None)
+
+    with pytest.raises(TransientFetchError, match="Failed to list open todo issues"):
+        GitHubClient().list_open_todo_issues("testuser/todos")

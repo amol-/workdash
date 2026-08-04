@@ -1,3 +1,4 @@
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -5,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import workdash.backend as backend_module
+import workdash.github_client as github_client_module
 from workdash.backend import IncludeResult, WorkdashBackend, compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig, WorkdashConfigValidationError
 from workdash.github_client import GitHubClient, TransientFetchError
@@ -157,6 +159,10 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
                 },
             ]
 
+        def list_open_todo_issues(self, todo_repository, progress_callback=None):
+            captured["todo_repository"] = todo_repository
+            return []
+
     class FakeAnalysisCache:
         def is_valid(self, item: WorkItem) -> bool:
             return item.number == 11
@@ -208,6 +214,105 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
     assert suggestion_markers == {(WorkItemType.PR, "owner/repo", 10): "*"}
 
 
+def test_load_items_keeps_the_todo_target_when_the_same_issue_is_also_assigned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    issue_payload = {
+        "id": "ISSUE-110",
+        "repo": "testuser/todos",
+        "number": 110,
+        "title": "Fix the flaky test",
+        "url": "https://github.com/testuser/todos/issues/110",
+        "created_at": "2026-02-01T00:00:00Z",
+        "updated_at": "2026-02-01T01:00:00Z",
+    }
+
+    class FakeGitHubClient:
+        def list_open_authored_prs(self, login):
+            return []
+
+        def list_open_review_requested_prs(self, login, progress_callback=None):
+            return []
+
+        def list_open_reviewed_prs(self, login):
+            return []
+
+        def list_open_assigned_issues(self, login):
+            return [dict(issue_payload)]
+
+        def list_recent_tracked_items(self, repositories, progress_callback=None):
+            return []
+
+        def list_open_todo_issues(self, todo_repository, progress_callback=None):
+            return [dict(issue_payload, target="owner/repo")]
+
+    monkeypatch.setattr(backend_module, "resolve_repositories", lambda selectors: [])
+    backend = WorkdashBackend(
+        github_client=FakeGitHubClient(),
+        analysis_cache=MagicMock(),
+        config=WorkdashConfig(repositories=("owner/repo",), todo_repository="testuser/todos"),
+        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+    )
+
+    work_items, _markers = backend.load_items(progress_callback=lambda _: None)
+
+    assert [(item.repo, item.number, item.todo_target) for item in work_items] == [
+        ("testuser/todos", 110, "owner/repo")
+    ]
+
+
+def test_load_items_survives_a_todo_repository_that_does_not_exist_yet(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A fresh user has no todo repository yet, so the dashboard must still load."""
+
+    assigned_issue = {
+        "id": "ISSUE-11",
+        "repo": "owner/repo",
+        "number": 11,
+        "title": "Broken renderer",
+        "url": "https://github.com/owner/repo/issues/11",
+        "created_at": "2026-02-01T00:00:00Z",
+        "updated_at": "2026-02-01T01:00:00Z",
+    }
+    monkeypatch.setattr(GitHubClient, "list_open_authored_prs", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_open_review_requested_prs",
+        lambda self, login, progress_callback=None: [],
+    )
+    monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient, "list_open_assigned_issues", lambda self, login: [assigned_issue]
+    )
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_recent_tracked_items",
+        lambda self, repositories, progress_callback=None: [],
+    )
+
+    def fake_run(command, **kwargs):
+        assert command[:3] == ["gh", "issue", "list"], command
+        raise subprocess.CalledProcessError(
+            1,
+            command,
+            stderr="GraphQL: Could not resolve to a Repository with the name 'testuser/todos'.",
+        )
+
+    monkeypatch.setattr(github_client_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(backend_module, "resolve_repositories", lambda selectors: [])
+    backend = WorkdashBackend(
+        github_client=GitHubClient(),
+        analysis_cache=MagicMock(),
+        config=WorkdashConfig(repositories=("owner/repo",), todo_repository="testuser/todos"),
+        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+    )
+
+    work_items, _markers = backend.load_items(progress_callback=lambda _: None)
+
+    assert [(item.repo, item.number) for item in work_items] == [("owner/repo", 11)]
+
+
 def test_load_items_submits_independent_github_fetches_before_waiting(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -226,7 +331,7 @@ def test_load_items_submits_independent_github_fetches_before_waiting(
 
     class FakeThreadPoolExecutor:
         def __init__(self, max_workers) -> None:
-            assert max_workers == 5
+            assert max_workers == 6
 
         def __enter__(self):
             return self
@@ -254,6 +359,9 @@ def test_load_items_submits_independent_github_fetches_before_waiting(
         def list_recent_tracked_items(self, repositories, progress_callback=None):
             return []
 
+        def list_open_todo_issues(self, todo_repository, progress_callback=None):
+            return []
+
     monkeypatch.setattr(backend_module, "ThreadPoolExecutor", FakeThreadPoolExecutor)
     backend = WorkdashBackend(
         github_client=FakeGitHubClient(),
@@ -270,11 +378,12 @@ def test_load_items_submits_independent_github_fetches_before_waiting(
         "list_open_reviewed_prs",
         "list_open_assigned_issues",
         "list_recent_tracked_items",
+        "list_open_todo_issues",
     ]
     assert work_items == []
     assert suggestion_markers == {}
-    assert events[:5] == [("submit", name) for name in expected_fetches]
-    assert events[5] == ("result", "list_open_authored_prs")
+    assert events[:6] == [("submit", name) for name in expected_fetches]
+    assert events[6] == ("result", "list_open_authored_prs")
 
 
 def test_compute_suggestion_markers_prefers_pr_when_age_is_tied() -> None:

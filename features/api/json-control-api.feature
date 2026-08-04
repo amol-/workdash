@@ -15,7 +15,7 @@ Feature: Local JSON control API
     - V0 has no authentication because the server is localhost-only.
     - V0 exposes JSON APIs only, not an HTML browser UI.
     - API requests and responses use JSON objects.
-    - V0 capabilities are exposed as `POST /api/v0/list`, `POST /api/v0/info`, `POST /api/v0/analyze`, `POST /api/v0/code`, `POST /api/v0/show-config`, `POST /api/v0/pane/content`, and `POST /api/v0/pane/send`.
+    - V0 capabilities are exposed as `POST /api/v0/list`, `POST /api/v0/info`, `POST /api/v0/analyze`, `POST /api/v0/code`, `POST /api/v0/todo`, `POST /api/v0/show-config`, `POST /api/v0/pane/content`, and `POST /api/v0/pane/send`.
     - Successful API responses use `{ "ok": true, "result": ... }`.
     - Failed API responses use an appropriate HTTP error status and `{ "ok": false, "error": { "code": ..., "message": ... } }`.
     - Work item actions accept Workdash item IDs exactly as emitted by `workdash list`.
@@ -97,6 +97,21 @@ Feature: Local JSON control API
     When a client requests code for `owner/repo#ISSUE-1` with agent `pi`
     Then the server launches the selected configured terminal-backed agent for the known item
     And the API returns the item ID, selected agent, selected session, cwd, pane title, and pane ID
+
+  @id:F-API-JSON-CONTROL-S015
+  Scenario: Todo API captures a todo in the configured todo repository
+    Given a server-backed Workdash session has loaded dashboard items
+    When a client requests a todo with text `Fix the flaky test` and target `owner/repo`
+    Then the server creates the todo issue in the configured todo repository
+    And the new todo becomes part of the shared dashboard state
+    And the API returns the Workdash item ID, todo repository, target, issue number, and issue URL
+
+  @id:F-API-JSON-CONTROL-S016
+  Scenario: Todo API rejects invalid input
+    Given a server-backed Workdash session has loaded dashboard items
+    When a client requests a todo with an invalid target
+    Then the API returns an error saying the target must be in `owner/repo` form
+    And the server does not create a GitHub issue
 
   @id:F-API-JSON-CONTROL-S010
   Scenario: Pane content API returns the visible viewport by default

@@ -17,6 +17,7 @@ from . import (
     setup,  # noqa: F401
     startup,  # noqa: F401
     terminal,  # noqa: F401
+    todo,  # noqa: F401
     triage,  # noqa: F401
     worktrees,  # noqa: F401
 )

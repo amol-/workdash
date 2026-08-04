@@ -21,15 +21,17 @@ def main_repo_path(workdir: str, repo: str) -> Path:
     return Path(workdir).expanduser() / f"{parts[0]}_{parts[1]}"
 
 
-def worktree_path(workdir: str, repo: str, number: int) -> Path:
+def worktree_path(workdir: str, repo: str, number: int, *, todo: bool = False) -> Path:
     """Return the worktree directory for a work item in the given repo.
 
     :param str workdir: Base working directory (may use ~ for home).
     :param str repo: Repository in "owner/repo" format.
     :param int number: The issue or PR number.
+    :param bool todo: Return the targeted todo worktree instead of the
+        repository's own worktree for that number.
     """
     main = main_repo_path(workdir, repo)
-    return main.parent / f"{main.name}_{number}"
+    return main.parent / GitHelper().worktree_name(repo, number, todo=todo)
 
 
 def existing_worktree_path(workdir: str, item: WorkItem) -> Path | None:
@@ -68,17 +70,24 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
                 git.fetch_remote(existing, "upstream")
         return str(existing)
 
-    if item.item_type == WorkItemType.PR:
+    todo_target = item.todo_target
+    if todo_target is not None:
+        # A targeted todo is work on the target repository; the issue itself
+        # stays in the todo repository, so the branch needs no GitHub lookup.
+        repo = head_repo = todo_target
+        head_ref = ""
+        branch = f"wt-{item.number}"
+    elif item.item_type == WorkItemType.PR:
         head_ref, head_repo = GithubHelper().fetch_worktree_head(item)
         repo = head_repo
+        branch = head_ref
     else:
-        repo = item.repo
+        repo = head_repo = item.repo
         head_ref = ""
-        head_repo = item.repo
+        branch = f"issue-{item.number}"
 
-    wt = worktree_path(workdir, repo, item.number)
+    wt = worktree_path(workdir, repo, item.number, todo=todo_target is not None)
     main = main_repo_path(workdir, repo)
-    branch = head_ref if item.item_type == WorkItemType.PR else f"issue-{item.number}"
 
     # Check if git already tracks a worktree for this branch before creating another one.
     git_existing = git.find_worktree_for_branch(main, branch)
@@ -101,7 +110,7 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
             git.fetch_remote(main, "upstream")
         git.create_worktree(main, wt, head_ref, f"origin/{head_ref}")
     else:
-        git.create_worktree(main, wt, f"issue-{item.number}", "origin/HEAD")
+        git.create_worktree(main, wt, branch, "origin/HEAD")
     return str(wt)
 
 

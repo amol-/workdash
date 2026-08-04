@@ -2,8 +2,9 @@
 Feature: First-time configuration
 
   Before the system can triage work, the user must have a configuration file
-  that identifies them on GitHub, lists the repositories to track, and points
-  at a local work directory. Agent commands are optional configuration: when a
+  that identifies them on GitHub, lists the repositories to track, points
+  at a local work directory, and names the repository where todos are
+  captured. Agent commands are optional configuration: when a
   command is present it must be valid and enables that agent/action. The
   system ships an interactive wizard that fills in whatever is missing and
   can install local Zellij and GitHub CLI binaries when global binaries are
@@ -11,7 +12,9 @@ Feature: First-time configuration
 
   Rules:
     - The configuration lives at ~/.config/workdash/config.json.
-    - Required configuration fields are the GitHub username, at least one repository selector, and the work directory.
+    - Required configuration fields are the GitHub username, at least one repository selector, the work directory, and the todo repository.
+    - Every required field must be present for the system to start; the wizard backfills missing required fields, using a default when one exists.
+    - When the todo repository is empty or not in "owner/repo" form, the wizard prompts for it with the default "<username>/todos"; the repository does not have to exist yet.
     - Present agent command fields must be valid command lines; each valid command enables that agent action.
     - The wizard only prompts for fields that are currently empty; previously filled fields are left untouched.
     - When a supported coding agent's command-line tool is detected on PATH, the wizard fills in its commands automatically and tells the user what was detected.
@@ -72,6 +75,14 @@ Feature: First-time configuration
     When the configuration wizard completes
     Then the repositories list contains "<username>/*"
     And the system tells the user what was set
+
+  @id:F-SETUP-CONFIGURE-S009
+  Scenario: Missing todo repository is prompted with the user's todos default
+    Given the user provides a GitHub username during configuration
+    And the configuration has no todo repository
+    When the configuration wizard completes
+    Then the system prompts for the todo repository with the default "<username>/todos"
+    And submitting an empty response stores "<username>/todos"
 
   @id:F-SETUP-CONFIGURE-S004
   Scenario: Re-running the wizard only prompts for empty fields

@@ -48,8 +48,8 @@ for bullets) and leave a blank line before the first list item.
 Whenever you mention a specific struct, type, class, interface, function, method,
 or file from the repository — in ANY section of the document — wrap it in a
 Markdown link that points to the definition on GitHub using the default branch.
-- Preferred format: [`StructName`](https://github.com/{repo}/blob/main/path/to/file.go#L42)
-- For file+line references: [`path/to/file.py:123`](https://github.com/{repo}/blob/main/path/to/file.py#L123)
+- Preferred format: [`StructName`](https://github.com/{code_repo}/blob/main/path/to/file.go#L42)
+- For file+line references: [`path/to/file.py:123`](https://github.com/{code_repo}/blob/main/path/to/file.py#L123)
 - For line ranges: `#L10-L20`
 - Keep backtick formatting around the symbol name — the link wraps the backticked text.
 - Only link symbols whose file path and location are evident from the issue

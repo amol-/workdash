@@ -13,6 +13,12 @@ class GitHelper:
         if not self.is_worktree_root(candidate):
             return False
         origin_repo = self.remote_repo(candidate, "origin")
+        if item.todo_target is not None:
+            # A targeted todo works on the target's code, so its worktree is a
+            # clone of the target under a name of its own.
+            return origin_repo == item.todo_target and candidate.name == self.worktree_name(
+                item.todo_target, item.number, todo=True
+            )
         if origin_repo == item.repo:
             return candidate.name == self.worktree_name(origin_repo, item.number)
         if item.item_type == WorkItemType.PR and origin_repo is not None:
@@ -42,11 +48,18 @@ class GitHelper:
             return None
         return self.repo_from_remote_url(remote_url) or None
 
-    def worktree_name(self, repo: str, number: int) -> str:
+    def worktree_name(self, repo: str, number: int, *, todo: bool = False) -> str:
+        """Return the Workdash-owned worktree directory name for a work item.
+
+        :param str repo: Repository the worktree is a clone of, as ``owner/repo``.
+        :param int number: Issue or pull request number.
+        :param bool todo: Name a targeted todo worktree, which must not collide
+            with the target repository's own worktree for the same number.
+        """
         owner, _, name = repo.partition("/")
         if not owner or not name:
             return ""
-        return f"{owner}_{name}_{number}"
+        return f"{owner}_{name}_todo_{number}" if todo else f"{owner}_{name}_{number}"
 
     def remote_url(self, candidate: Path, remote_name: str) -> str | None:
         try:

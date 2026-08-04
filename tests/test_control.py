@@ -1,6 +1,7 @@
 import base64
 import json
 from datetime import UTC, datetime
+from unittest.mock import MagicMock
 
 import workdash.control as control_module
 from workdash.backend import IncludeResult
@@ -107,6 +108,37 @@ def test_session_include_notifies_items_changed_callback() -> None:
         "owner/repo#PR-2",
     ]
     assert repainted_item_ids == [["owner/repo#ISSUE-1", "owner/repo#PR-2"]]
+
+
+def test_todo_notifies_the_live_tui_after_capturing(monkeypatch) -> None:
+    """A captured todo must reach a running TUI without waiting for the next refresh."""
+
+    initial_item = _work_item(number=1, title="Initial")
+    todo_item = _work_item(number=10, title="Fix the flaky test")
+    todo_item.repo = "testuser/todos"
+    todo_item.todo_target = "owner/repo"
+    create_todo = MagicMock(return_value=todo_item)
+    monkeypatch.setattr(control_module, "create_todo", create_todo)
+    repainted_item_ids: list[list[str]] = []
+
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="testuser/todos"),
+        backend=object(),  # type: ignore[arg-type]
+        work_items=[initial_item],
+        suggestion_markers={},
+        zellij_session=None,
+        items_changed_callback=lambda: repainted_item_ids.append(
+            [format_work_item_id(item) for item in session.work_items]
+        ),
+    )
+
+    result = session.todo(text="  Fix the flaky test  ", target="owner/repo")
+
+    create_todo.assert_called_once_with(
+        todo_repository="testuser/todos", text="Fix the flaky test", target="owner/repo"
+    )
+    assert result["item_id"] == "owner/repo#ISSUE-WT10"
+    assert repainted_item_ids == [["owner/repo#ISSUE-1", "owner/repo#ISSUE-WT10"]]
 
 
 def test_session_analyze_returns_cached_analysis_without_configured_agents(tmp_path) -> None:

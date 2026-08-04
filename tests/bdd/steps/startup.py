@@ -51,6 +51,7 @@ def _config_has_malformed_agent_command(scenario_state: dict[str, Any]) -> None:
         pi=AgentConfig(launch="pi 'broken"),
         repositories=("owner/repo",),
         workdir="~/wrk",
+        todo_repository="testuser/todos",
     )
 
 
@@ -100,6 +101,7 @@ def _run_system(
                 pi=AgentConfig(launch="pi"),
                 repositories=("owner/repo",),
                 workdir="~/wrk",
+                todo_repository="testuser/todos",
             ),
         )
     elif scenario_state.get("_gh_unauthenticated"):
@@ -121,6 +123,7 @@ def _run_system(
                 pi=AgentConfig(launch="pi"),
                 repositories=("owner/repo",),
                 workdir="~/wrk",
+                todo_repository="testuser/todos",
             ),
         )
     elif "_incomplete_config" in scenario_state or "_malformed_config" in scenario_state:
@@ -187,6 +190,7 @@ def _install_direct_start_fakes(
             pi=AgentConfig(launch="pi"),
             repositories=("owner/repo",),
             workdir="~/wrk",
+            todo_repository="testuser/todos",
         ),
     )
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
@@ -339,6 +343,7 @@ def _user_starts_list_command(
             pi=AgentConfig(launch="pi"),
             repositories=("owner/repo",),
             workdir="~/wrk",
+            todo_repository="testuser/todos",
         ),
     )
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)

@@ -35,6 +35,7 @@ def _no_config(scenario_state: dict[str, Any], config_path: Path) -> None:
             "pi",  # pi launch
             "octocat",  # github username
             "~/projects",  # workdir
+            "",  # todo repository default
         ],
     )
 
@@ -43,13 +44,15 @@ def _no_config(scenario_state: dict[str, Any], config_path: Path) -> None:
 def _agent_on_path(scenario_state: dict[str, Any]) -> None:
     # Expose 'claude' only; codex will be prompted interactively.
     scenario_state.setdefault("on_path_tools", set()).add("claude")
-    # Interactive inputs: codex analyze, codex launch, pi launch, username, workdir.
+    # Interactive inputs: codex analyze, codex launch, pi launch, username,
+    # workdir, todo repository.
     scenario_state["input_responses"] = [
         "codex exec",
         "codex",
         "pi",
         "octocat",
         "~/projects",
+        "",
     ]
 
 
@@ -87,7 +90,8 @@ def _partial_configuration(scenario_state: dict[str, Any], config_path: Path) ->
     )
     scenario_state["config_path"] = config_path
     scenario_state["on_path_tools"] = {"zellij", "gh"}
-    scenario_state["input_responses"] = ["~/src"]  # only workdir will be prompted
+    # Only the workdir and the todo repository are still empty.
+    scenario_state["input_responses"] = ["~/src", ""]
     scenario_state["prior_config"] = load_config(config_path)
 
 
@@ -103,6 +107,7 @@ def _empty_defaults_then_username(scenario_state: dict[str, Any]) -> None:
         "",  # username has no default, prompt again
         "octocat",
         "",  # workdir default
+        "",  # todo repository default
     ]
 
 
@@ -185,6 +190,7 @@ def _wizard_completes(
         "my-pi",  # pi launch
         scenario_state["provided_username"],
         "~/projects",
+        "",  # todo repository default
     ]
     _run_configure_with_fakes(scenario_state, config_path, monkeypatch, capsys)
 
@@ -267,9 +273,10 @@ def _tells_user_what_was_set(scenario_state: dict[str, Any]) -> None:
 @then("the system only prompts for fields that were empty")
 def _only_prompts_empty(scenario_state: dict[str, Any]) -> None:
     prompts = scenario_state["prompts"]
-    # Only the workdir should have been prompted because everything else was filled.
-    assert len(prompts) == 1, prompts
+    # Only the workdir and the todo repository were empty in the partial configuration.
+    assert len(prompts) == 2, prompts
     assert "Work directory" in prompts[0]
+    assert "Todo repository" in prompts[1]
 
 
 @then("previously set fields are preserved in the saved configuration")

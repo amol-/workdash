@@ -21,6 +21,7 @@ _VALID_CONFIG = WorkdashConfig(
     pi=AgentConfig(launch="pi --no-tips"),
     repositories=("owner/*",),
     workdir="~/wrk",
+    todo_repository="testuser/todos",
 )
 
 
@@ -247,6 +248,7 @@ def test_main_passes_configured_agent_choices_to_tui(
         codex=AgentConfig(analyze="codex exec"),
         repositories=("owner/*",),
         workdir="~/wrk",
+        todo_repository="testuser/todos",
     )
 
     class FakeBackend:
@@ -418,6 +420,7 @@ def test_main_exits_with_config_guidance_when_startup_config_command_is_malforme
         pi=AgentConfig(launch="pi 'broken"),
         repositories=("owner/repo",),
         workdir="~/wrk",
+        todo_repository="testuser/todos",
     )
 
     class FakeBackend:

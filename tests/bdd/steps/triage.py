@@ -432,6 +432,11 @@ def _another_tracked_repository_has_open_work(
     )
     monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
     monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_open_todo_issues",
+        lambda self, todo_repository, progress_callback=None: [],
+    )
 
     def fake_run(command, **kwargs):
         repositories = [
@@ -469,6 +474,7 @@ def _another_tracked_repository_has_open_work(
             pi=AgentConfig(launch="pi"),
             repositories=(unauthorized_repository, accessible_repository),
             workdir=str(tmp_path / "wrk"),
+            todo_repository="testuser/todos",
         )
         backend = WorkdashBackend(
             cache_root=tmp_path / "cache",
@@ -540,6 +546,11 @@ def _another_review_requested_pr_has_direct_request(
         "list_recent_tracked_items",
         lambda self, repositories, progress_callback=None: [],
     )
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_open_todo_issues",
+        lambda self, todo_repository, progress_callback=None: [],
+    )
 
     def fake_run(command, **kwargs):
         if command[:3] == ["gh", "search", "prs"] and "--review-requested" in command:
@@ -584,6 +595,7 @@ def _another_review_requested_pr_has_direct_request(
             pi=AgentConfig(launch="pi"),
             repositories=("owner/repo",),
             workdir=str(tmp_path / "wrk"),
+            todo_repository="testuser/todos",
         )
         backend = WorkdashBackend(
             cache_root=tmp_path / "cache",
@@ -1407,6 +1419,11 @@ def _install_empty_github_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
         "list_recent_tracked_items",
         lambda self, repositories, progress_callback=None: [],
     )
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_open_todo_issues",
+        lambda self, todo_repository, progress_callback=None: [],
+    )
 
 
 def _make_tmp_store(scenario_state: dict[str, Any], tmp_path: Path) -> IncludedItemsStore:
@@ -1430,6 +1447,7 @@ def _make_backend(
         pi=AgentConfig(launch="pi"),
         repositories=("owner/repo",),
         workdir=str(tmp_path / "wrk"),
+        todo_repository="testuser/todos",
     )
     return WorkdashBackend(
         cache_root=tmp_path / "cache",
@@ -1547,6 +1565,11 @@ def _seed_three_included_items(
     )
     monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
     monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_open_todo_issues",
+        lambda self, todo_repository, progress_callback=None: [],
+    )
     # Seed one non-included tracked PR so the list-command assertion can verify
     # that format_type_label does not spuriously append "+" to regular rows.
     monkeypatch.setattr(

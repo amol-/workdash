@@ -24,8 +24,9 @@ from .launcher import (
     prepare_launch_agent_prompt,
     send_zellij_pane_input,
 )
-from .models import WorkItem, format_type_label
+from .models import WorkItem, display_repo, format_type_label
 from .repo_worktree import ensure_worktree, existing_worktree_path, get_merge_base
+from .todo import create_todo, is_repository_name
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8765
@@ -122,6 +123,41 @@ class WorkdashSession:
         if notify_items_changed:
             self._notify_items_changed()
         return result
+
+    def todo(self, *, text: str, target: str | None = None) -> dict[str, object]:
+        """Capture a todo as an issue in the configured todo repository.
+
+        :param str text: Todo text, used as the issue title.
+        :param str | None target: Optional repository the todo is about.
+        """
+
+        todo_text = text.strip()
+        if not todo_text:
+            raise WorkdashControlError(
+                "bad_request",
+                "The todo text is required.",
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        if target is not None and not is_repository_name(target):
+            raise WorkdashControlError(
+                "bad_request",
+                f"The todo target {target!r} must be in owner/repo form.",
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        item = create_todo(
+            todo_repository=self.config.todo_repository, text=todo_text, target=target
+        )
+        with self._lock:
+            self.work_items.append(item)
+            self.suggestion_markers = compute_suggestion_markers(self.work_items)
+        self._notify_items_changed()
+        return {
+            "item_id": format_work_item_id(item),
+            "todo_repository": item.repo,
+            "target": item.todo_target,
+            "number": item.number,
+            "url": item.url,
+        }
 
     def analyze(
         self, *, target: str, agent: str | None = None, prefer_cache: bool = True
@@ -396,6 +432,10 @@ def format_work_item_id(item: WorkItem) -> str:
     """Return the copy/paste identifier accepted by work-item commands."""
 
     item_type = format_type_label(item).removesuffix("+")
+    if item.todo_target is not None:
+        # A targeted todo is listed under its target, so the ID is marked to
+        # never collide with the target's own issue of the same number.
+        return f"{item.todo_target}#{item_type}-WT{item.number}"
     return f"{item.repo}#{item_type}-{item.number}"
 
 
@@ -437,7 +477,7 @@ def _work_items_payload(
                 "type": item.item_type.value,
                 "display_type": format_type_label(item),
                 "kind": item.kind.value,
-                "repo": item.repo,
+                "repo": display_repo(item),
                 "number": item.number,
                 "title": item.title,
                 "url": item.url,
@@ -558,6 +598,17 @@ def _make_turbogears_app(session: WorkdashSession):
                 lambda payload: self._session.code(
                     target=_required_text(payload, "target"),
                     agent=_optional_text(payload, "agent"),
+                ),
+            )
+
+        @expose("json")
+        def todo(self):
+            return _handle_json_request(
+                request,
+                response,
+                lambda payload: self._session.todo(
+                    text=_required_text(payload, "text"),
+                    target=_optional_text(payload, "target"),
                 ),
             )
 

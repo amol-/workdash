@@ -46,6 +46,9 @@ from .steps import (
     terminal as _terminal,
 )
 from .steps import (
+    todo as _todo,
+)
+from .steps import (
     triage as _triage,
 )
 from .steps import (
@@ -66,6 +69,7 @@ for _step_module in (
     _browse,
     _terminal,
     _show_config,
+    _todo,
 ):
     for _name in dir(_step_module):
         if _name.startswith("pytestbdd_stepdef_") or _name in {

@@ -17,7 +17,7 @@ from textual.widgets import DataTable, Input, Static
 from .backend import IncludeResult, compute_suggestion_markers
 from .config import WorkdashAgentChoice
 from .launcher import launch_branchdiff_context, open_markdown
-from .models import WorkItem, WorkItemType, format_type_label
+from .models import WorkItem, WorkItemType, display_repo, format_type_label
 
 SuggestionMarkers = dict[tuple[WorkItemType, str, int], str]
 RefreshCallbackResult = Sequence[WorkItem] | tuple[Sequence[WorkItem], SuggestionMarkers]
@@ -223,6 +223,48 @@ class IncludeDialog(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class TodoDialog(ModalScreen[tuple[str, str] | None]):
+    """Modal dialog that accepts a todo text and an optional target repository."""
+
+    DEFAULT_CSS = """
+        #todo-shell {
+            align: center middle;
+            width: 70;
+            height: auto;
+            max-height: 13;
+            border: solid $accent;
+            background: $surface;
+            padding: 1 2;
+        }
+        #todo-text, #todo-target {
+            width: 100%;
+        }
+        """
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="todo-shell"):
+            yield Static("What do you want to remember?")
+            yield Input(placeholder="Fix the flaky test", id="todo-text")
+            yield Static("Target repository (optional):")
+            yield Input(placeholder="owner/repo", id="todo-target")
+            yield Static("(Enter to confirm, Esc to cancel)")
+
+    def on_mount(self) -> None:
+        self.query_one("#todo-text", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(
+            (
+                self.query_one("#todo-text", Input).value.strip(),
+                self.query_one("#todo-target", Input).value.strip(),
+            )
+        )
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class WorkdashApp(App[None]):
     """Main Textual app shell."""
 
@@ -239,7 +281,9 @@ class WorkdashApp(App[None]):
             padding: 0 1;
         }
         """
-    COMMAND_HINT_TEXT = "(o)pen (r)efresh (a)nalyze (c)ode (d)iff (t)erminal (i)nclude (q)uit"
+    COMMAND_HINT_TEXT = (
+        "(o)pen (r)efresh (a)nalyze (c)ode (d)iff (t)erminal (i)nclude (w)todo (q)uit"
+    )
     BINDINGS = [
         ("o", "open_link", "Open"),
         ("r", "refresh_items", "Refresh"),
@@ -248,6 +292,7 @@ class WorkdashApp(App[None]):
         ("d", "show_branchdiff", "Diff"),
         ("t", "open_terminal", "Terminal"),
         ("i", "include_item", "Include"),
+        ("w", "capture_todo", "Todo"),
         ("q", "quit_app", "Quit"),
     ]
 
@@ -266,6 +311,7 @@ class WorkdashApp(App[None]):
         include_callback: (
             Callable[[str, set[tuple[WorkItemType, str, int]]], IncludeResult] | None
         ) = None,
+        todo_callback: Callable[[str, str | None], dict[str, object]] | None = None,
         session: WorkdashSession | None = None,
         now_utc: datetime | None = None,
         focus_callback: Callable[[str], None] | None = None,
@@ -285,6 +331,7 @@ class WorkdashApp(App[None]):
         self._code_choices = tuple(code_choices or ())
         self._terminal_callback = terminal_callback
         self._include_callback = include_callback
+        self._todo_callback = todo_callback
         self._now_utc = now_utc or datetime.now(UTC)
         self._focus_callback = focus_callback
         self._list_agent_panes_callback = list_agent_panes_callback
@@ -343,7 +390,7 @@ class WorkdashApp(App[None]):
             if _to_utc(item.updated_at) >= cutoff:
                 table.add_row(
                     Text(type_label, style="bold"),
-                    Text(item.repo, style="bold"),
+                    Text(display_repo(item), style="bold"),
                     Text(title, style="bold"),
                     Text(f"{age_days}d", style="bold"),
                     Text(f"{update_days}d", style="bold"),
@@ -352,7 +399,7 @@ class WorkdashApp(App[None]):
             else:
                 table.add_row(
                     type_label,
-                    item.repo,
+                    display_repo(item),
                     title,
                     f"{age_days}d",
                     f"{update_days}d",
@@ -737,6 +784,34 @@ class WorkdashApp(App[None]):
         self._update_status(
             f"Included {fetched_item.item_type.value} {fetched_item.repo}#{fetched_item.number}."
         )
+
+    async def action_capture_todo(self) -> None:
+        if self._todo_callback is None:
+            self._update_status("Todo skipped.")
+            return
+        dialog = TodoDialog()
+
+        def _on_dialog_result(entry: tuple[str, str] | None) -> None:
+            if entry is not None:
+                self._run_after_dialog(lambda: self._perform_todo(entry[0], entry[1]))
+
+        await self.push_screen(dialog, callback=_on_dialog_result)
+
+    async def _perform_todo(self, text: str, target: str) -> None:
+        """Capture a todo and fold the new item into the visible list."""
+
+        try:
+            result = await self._run_with_busy_screen(
+                message="Capturing todo...",
+                callback=lambda: self._todo_callback(text, target or None),
+            )
+        except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
+            message = f"Todo failed: {error}"
+            self._update_status(message)
+            self.notify(message, severity="error", timeout=10)
+            return
+        self.refresh_from_session()
+        self._update_status(f"Captured todo {result['item_id']}.")
 
     def action_quit_app(self) -> None:
         self.exit()

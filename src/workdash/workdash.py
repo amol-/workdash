@@ -52,7 +52,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     commands = WorkdashCommands()
-    if options.command in {"list", "info", "analyze", "code", "read", "write"}:
+    if options.command in {"list", "info", "analyze", "code", "read", "write", "todo"}:
         return _run_server_backed_command(commands, options)
     if options.command == "branchdiff":
         from .branchdiff import run_branchdiff
@@ -169,6 +169,20 @@ class WorkdashCommands:
             _print_code_result(result)
         return 0
 
+    def todo_cli(self, *, text: str, target: str | None, json_output: bool) -> int:
+        """Capture a todo through the local Workdash server."""
+
+        try:
+            result = self._client.request("todo", {"text": text, "target": target})
+        except WorkdashControlError as error:
+            _print_control_error(error)
+            return 1
+        if json_output:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        else:
+            _print_todo_result(result)
+        return 0
+
     def read_pane(self, *, pane_id: str, full: bool, json_output: bool) -> int:
         """Read pane content through the local Workdash server."""
 
@@ -273,6 +287,7 @@ class WorkdashCommands:
                 ensure_worktree(config.workdir, item)
             ),
             include_callback=lambda url, _identities: session.include_item_by_url(url),
+            todo_callback=lambda text, target: session.todo(text=text, target=target),
             focus_callback=session.focus_pane,
             list_agent_panes_callback=session.get_agent_panes_for_item,
             session=session,
@@ -335,6 +350,12 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
         return commands.code_cli(
             target=options.target or "",
             agent=options.agent,
+            json_output=options.json_output,
+        )
+    if options.command == "todo":
+        return commands.todo_cli(
+            text=options.text or "",
+            target=options.target,
             json_output=options.json_output,
         )
     if options.command == "read":
@@ -467,6 +488,23 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         help="Configured terminal-backed coding agent to launch.",
     )
     code_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Emit machine-readable JSON.",
+    )
+    todo_parser = subparsers.add_parser(
+        "todo",
+        help="Capture a todo in the configured todo repository.",
+    )
+    todo_parser.add_argument("text", metavar="TEXT", help="Todo text used as the issue title.")
+    todo_parser.add_argument(
+        "--target",
+        default=argparse.SUPPRESS,
+        help="Repository the todo is about, as owner/repo.",
+    )
+    todo_parser.add_argument(
         "--json",
         dest="json_output",
         action="store_true",
@@ -661,6 +699,13 @@ def _print_analysis_result(result: dict[str, object]) -> None:
     print(f"Agent: {result['agent']}")
     print(f"Status: {result['status']}")
     print(f"Analysis path: {result['analysis_path']}")
+
+
+def _print_todo_result(result: dict[str, object]) -> None:
+    print(f"Item: {result['item_id']}")
+    print(f"Todo repository: {result['todo_repository']}")
+    print(f"Target: {result['target'] or '-'}")
+    print(f"Issue: {result['url']}")
 
 
 def _print_code_result(result: dict[str, object]) -> None:

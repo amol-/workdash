@@ -60,6 +60,20 @@ def make_issue(number: int = 42, repo: str = "owner/repo") -> WorkItem:
     )
 
 
+def make_targeted_todo(number: int = 110, target: str = "owner/repo") -> WorkItem:
+    return WorkItem(
+        kind=WorkItemKind.ASSIGNED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="testuser/todos",
+        number=number,
+        title="Test todo",
+        created_at=datetime(2026, 2, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 1, tzinfo=UTC),
+        url=f"https://github.com/testuser/todos/issues/{number}",
+        todo_target=target,
+    )
+
+
 def _git_show_toplevel(cmd: list[str], cwd: Path | str) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(cmd, 0, stdout=f"{Path(cwd).resolve()}\n", stderr="")
 
@@ -328,6 +342,65 @@ def test_ensure_worktree_fetches_existing_main_for_issue(
     assert not any(c[0] == "gh" and c[1] == "repo" for c in calls)
     wt_add = [c for c in calls if c[0] == "git" and c[1] == "worktree" and c[2] == "add"][0]
     assert "issue-42" in wt_add
+    assert "origin/HEAD" in wt_add
+
+
+def test_existing_worktree_path_finds_the_targeted_todo_worktree_of_the_target_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The target repository's own issue-110 worktree must not be mistaken for
+    # the todo's worktree even though both end with the same number.
+    todo_worktree = tmp_path / "owner_repo_todo_110"
+    todo_worktree.mkdir()
+    (tmp_path / "owner_repo_110").mkdir()
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert existing_worktree_path(str(tmp_path), make_targeted_todo()) == todo_worktree
+    assert existing_worktree_path(str(tmp_path), make_issue(110)) == tmp_path / "owner_repo_110"
+
+
+def test_ensure_worktree_creates_a_target_clone_branch_for_a_targeted_todo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        calls.append(list(cmd))
+        if cmd[:3] == ["gh", "repo", "clone"]:
+            Path(cmd[-1]).mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="origin/main\n", stderr="")
+        if cmd[:3] == ["git", "worktree", "add"]:
+            Path(cmd[cmd.index("-b") + 2]).mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:2] == ["git", "show-ref"] or cmd[:3] == ["git", "worktree", "list"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if cmd[0] == "git":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = ensure_worktree(str(tmp_path), make_targeted_todo())
+
+    assert result == str(tmp_path / "owner_repo_todo_110")
+    assert ["gh", "repo", "clone", "owner/repo", str(tmp_path / "owner_repo")] in calls
+    assert not any(cmd[:3] == ["gh", "issue", "view"] for cmd in calls)
+    wt_add = next(cmd for cmd in calls if cmd[:3] == ["git", "worktree", "add"])
+    assert "wt-110" in wt_add
     assert "origin/HEAD" in wt_add
 
 

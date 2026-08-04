@@ -631,7 +631,7 @@ def test_workdash_app_shows_command_hint_bar() -> None:
             command_bar = app.query_one("#command-footer", Static)
             assert (
                 command_bar.render().plain
-                == "(o)pen (r)efresh (a)nalyze (c)ode (d)iff (t)erminal (i)nclude (q)uit"
+                == "(o)pen (r)efresh (a)nalyze (c)ode (d)iff (t)erminal (i)nclude (w)todo (q)uit"
             )
             await pilot.press("q")
 
@@ -1053,6 +1053,46 @@ def test_workdash_app_include_duplicate_url_surfaces_persist_failure() -> None:
             # The in-memory flag must not have been flipped before the write
             # succeeded, otherwise the UI and the store disagree.
             assert work_item.included is False
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_capture_todo_reports_the_failure_and_keeps_the_app_alive() -> None:
+    """A gh failure while capturing must reach the footer instead of tearing down the TUI."""
+
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://github.com/owner/repo/pull/22",
+    )
+
+    def failing_todo_callback(_text: str, _target: str | None) -> dict[str, object]:
+        raise RuntimeError("Failed to create the todo issue in testuser/todos: HTTP 401")
+
+    app = WorkdashApp(
+        work_items=[work_item],
+        todo_callback=failing_todo_callback,
+        now_utc=now_utc,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await app._perform_todo("Fix the flaky test", "")
+            await _wait_for_footer(
+                app.query_one("#status-footer", Static),
+                "Todo failed: Failed to create the todo issue in testuser/todos: HTTP 401",
+                pilot,
+            )
+            assert app.is_running
+            _assert_no_modal_screens(app)
             await pilot.press("q")
 
     asyncio.run(run_smoke())

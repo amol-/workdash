@@ -65,6 +65,8 @@ The wizard fills in:
   is still handled by `gh`; run `gh auth login` if startup reports that `gh` is
   not authenticated.
 - The list of repositories to track (see *Repository selectors* below).
+- The todo repository where captured todos are created (defaults to
+  `<username>/todos`, see *Todos* below).
 - A working directory where per-item git worktrees will live.
 - The analyze and launch commands for Claude and Codex (auto-detected when the
   tools are on your `PATH`).
@@ -94,6 +96,7 @@ workdash list --json         # list items as machine-readable JSON
 workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
 workdash analyze ITEM [--agent NAME] [--json]  # analyze a current server item
 workdash code ITEM [--agent NAME] [--json]  # launch a terminal-backed coding agent
+workdash todo TEXT [--target owner/repo] [--json]  # capture a todo
 workdash read PANE_ID [--full] [--json]  # read text from a live pane
 workdash write PANE_ID TEXT [--raw] [--json]  # send text to a live pane
 workdash show-config [--json] # show configured agents and fixed server address
@@ -135,7 +138,23 @@ The `repositories` list in `config.json` accepts:
   worktree for the item and starts the chosen tool in it, preloaded with
   context about the issue or PR.
 - `t` — open a terminal in the selected item's worktree (no agent launched).
+- `w` — capture a todo. Opens a dialog asking for the todo text and an
+  optional target repository.
 - `q` — quit.
+
+## Todos
+
+Ideas and chores that show up while triaging can be captured as todos with `w`
+in the TUI, `workdash todo TEXT`, or the JSON API. A todo is an ordinary GitHub
+issue created in the single `todo_repository` from `config.json`, assigned to
+you and labeled `workdash-todo`, so it shows up on the dashboard like any other
+assigned issue. Create the repository on GitHub yourself; the label is created
+on first use.
+
+A todo may name a target repository (`--target owner/repo`). The issue still
+lives in the todo repository, but the item is listed under its target and its
+coding, terminal, and analysis actions run in a worktree of the target checked
+out on a `wt-<number>` branch.
 
 ## Worktrees
 
@@ -148,7 +167,7 @@ disturbing other in-progress work.
 
 `workdash --server` starts the normal TUI and a localhost JSON control API in the
 same process. V0 listens on `127.0.0.1:8765`, accepts JSON only, and stops when
-the TUI exits. Client commands such as `list`, `info`, `analyze`, `code`,
+the TUI exits. Client commands such as `list`, `info`, `analyze`, `code`, `todo`,
 `read`, and `write` connect to this server instead of loading GitHub or Zellij
 state themselves.
 
@@ -162,9 +181,9 @@ TYPE   repo#TYPE-N   YYYY-MM-DD   title
 ```
 
 `TYPE` is `ISSUE`, `PR`, or `REVIEW` (for review-requested PRs). The row ID is
-copy/paste-friendly: `repo#ISSUE-N`, `repo#PR-N`, or `repo#REVIEW-N`. The suggested
-item's title is prefixed with `* `. If nothing matches, the output is
-`No work items found.`.
+copy/paste-friendly: `repo#ISSUE-N`, `repo#PR-N`, `repo#REVIEW-N`, or
+`<target>#ISSUE-WT<n>` for a targeted todo. The suggested item's title is
+prefixed with `* `. If nothing matches, the output is `No work items found.`.
 
 Use `workdash list --refresh` to ask the server to refresh GitHub data before
 listing. Use `workdash list --json` to emit the same list as JSON records with

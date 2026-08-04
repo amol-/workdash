@@ -19,6 +19,7 @@ from .github_client import (
     normalize_authored_pull_requests,
     normalize_recent_tracked_items,
     normalize_review_requested_pull_requests,
+    normalize_todo_issues,
     parse_github_item_url,
 )
 from .included_items import IncludedItemsStore
@@ -106,7 +107,7 @@ class WorkdashBackend:
         for repository in repositories:
             report_progress(f"  - {repository}")
         github_username = self.config.github_username
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=6) as executor:
             report_progress("Fetching open authored pull requests...")
             authored_future = executor.submit(
                 self.github_client.list_open_authored_prs, github_username
@@ -131,6 +132,12 @@ class WorkdashBackend:
                 repositories,
                 progress_callback=report_progress,
             )
+            report_progress("Fetching open todo issues...")
+            todo_future = executor.submit(
+                self.github_client.list_open_todo_issues,
+                self.config.todo_repository,
+                progress_callback=report_progress,
+            )
 
             authored_pull_requests = authored_future.result()
             report_progress(f"Fetched {len(authored_pull_requests)} open authored pull request(s).")
@@ -143,6 +150,8 @@ class WorkdashBackend:
             assigned_issues = assigned_future.result()
             report_progress(f"Fetched {len(assigned_issues)} open assigned issue(s).")
             recent_tracked_items = tracked_future.result()
+            todo_issues = todo_future.result()
+            report_progress(f"Fetched {len(todo_issues)} open todo issue(s).")
         merged_review_items = merge_normalized_work_items(
             normalize_review_requested_pull_requests(review_requested_pull_requests),
             normalize_review_requested_pull_requests(reviewed_pull_requests),
@@ -158,6 +167,12 @@ class WorkdashBackend:
         merged_items = merge_normalized_work_items(
             merged_items,
             normalize_recent_tracked_items(recent_tracked_items),
+        )
+        # Todo records go first so the target they carry survives dedupe against
+        # the same issue found through the assigned-issue source.
+        merged_items = merge_normalized_work_items(
+            normalize_todo_issues(todo_issues),
+            merged_items,
         )
         included_work_items = self._load_included_items(report_progress)
         if included_work_items:

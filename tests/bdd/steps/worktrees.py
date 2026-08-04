@@ -67,6 +67,10 @@ def _install_fake_git(
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[:2] == ["git", "fetch"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="origin/main\n", stderr="")
+        if cmd[:2] == ["git", "switch"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd == ["git", "merge", "--ff-only", "origin/HEAD"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd == ["git", "remote", "get-url", "upstream"]:

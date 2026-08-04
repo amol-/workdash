@@ -923,6 +923,32 @@ def test_build_launch_agent_prompt_uses_issue_template_for_issues() -> None:
     assert "- type: issue" in prompt
 
 
+def test_build_launch_agent_prompt_names_the_target_as_the_checkout_of_a_targeted_todo() -> None:
+    """The identity triple must name the todo issue while the checkout names the target.
+
+    An agent told ``repo: owner/repo`` plus ``number: 110`` would run
+    ``gh issue view 110 --repo owner/repo`` and plan an unrelated issue's work.
+    """
+
+    item = make_work_item(WorkItemType.ISSUE, kind=WorkItemKind.ASSIGNED_ISSUE)
+    item.repo = "testuser/todos"
+    item.number = 110
+    item.url = "https://github.com/testuser/todos/issues/110"
+    item.todo_target = "owner/repo"
+
+    prompt = build_launch_agent_prompt(
+        item=item,
+        repo_path="/tmp/owner_repo_todo_110",
+        github_context={"state": "OPEN"},
+    )
+
+    assert "- repo: testuser/todos" in prompt
+    assert "- number: 110" in prompt
+    assert "- url: https://github.com/testuser/todos/issues/110" in prompt
+    assert "confirm this checkout corresponds to owner/repo" in prompt
+    assert "- repo: owner/repo" not in prompt
+
+
 def test_prepare_launch_agent_prompt_collects_gh_context_and_builds_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

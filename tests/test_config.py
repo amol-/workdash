@@ -99,6 +99,7 @@ def test_save_config_creates_parent_dirs_and_writes_json(tmp_path):
         pi=AgentConfig(launch="pi"),
         repositories=("owner/repo",),
         workdir="~/src",
+        todo_repository="octocat/todos",
     )
 
     save_config(config, config_path)
@@ -113,6 +114,7 @@ def test_save_config_creates_parent_dirs_and_writes_json(tmp_path):
         },
         "repositories": ["owner/repo"],
         "workdir": "~/src",
+        "todo_repository": "octocat/todos",
     }
 
 
@@ -124,6 +126,7 @@ def test_validate_config_returns_empty_for_complete_config():
         pi=AgentConfig(launch="pi"),
         repositories=("owner/repo",),
         workdir="~/src",
+        todo_repository="octocat/todos",
     )
 
     assert validate_config(config) == []
@@ -136,6 +139,7 @@ def test_require_valid_accepts_partial_agent_config():
         codex=AgentConfig(analyze="codex exec"),
         repositories=("owner/repo",),
         workdir="~/src",
+        todo_repository="octocat/todos",
     )
 
     assert validate_config(config) == []
@@ -168,6 +172,7 @@ def test_require_valid_rejects_malformed_command_strings():
         pi=AgentConfig(launch="pi 'broken"),
         repositories=("owner/repo",),
         workdir="~/src",
+        todo_repository="octocat/todos",
     )
 
     with pytest.raises(WorkdashConfigValidationError) as error:
@@ -217,7 +222,7 @@ def test_require_valid_rejects_blank_command_tokens(command: str):
 
 
 def test_validate_config_returns_all_missing_fields():
-    expected_missing = ["github_username", "repositories", "workdir"]
+    expected_missing = ["github_username", "repositories", "workdir", "todo_repository"]
 
     assert validate_config(WorkdashConfig()) == expected_missing
     with pytest.raises(WorkdashConfigValidationError) as error:
@@ -226,18 +231,38 @@ def test_validate_config_returns_all_missing_fields():
     assert str(error.value) == "missing configuration fields: " + ", ".join(expected_missing)
 
 
+def test_require_valid_rejects_a_todo_repository_that_is_not_owner_slash_repo():
+    """A hand-edited todo repository must fail at the config edge, not later in gh."""
+
+    config = WorkdashConfig(
+        github_username="octocat",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        repositories=("owner/repo",),
+        workdir="~/src",
+        todo_repository="todos",
+    )
+
+    # The value is present, so the user must be told it is wrong, not absent.
+    assert validate_config(config) == []
+    with pytest.raises(WorkdashConfigValidationError) as error:
+        config.require_valid()
+
+    assert error.value.missing_fields == ()
+    assert str(error.value) == "invalid configuration fields: todo_repository: expected owner/repo"
+
+
 def test_validate_config_returns_subset_of_missing_fields():
     config = WorkdashConfig(
         github_username="octocat",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
     )
 
-    assert validate_config(config) == ["repositories", "workdir"]
+    assert validate_config(config) == ["repositories", "workdir", "todo_repository"]
 
 
 def test_configure_fresh_auto_detects_and_asks_username(tmp_path, capsys):
     config_path = tmp_path / "config.json"
-    inputs = iter(["octocat", "~/projects"])
+    inputs = iter(["octocat", "~/projects", ""])  # username, workdir, todo repository default
 
     config = configure(
         config_path,
@@ -274,6 +299,7 @@ def test_configure_asks_interactively_when_commands_not_on_path(tmp_path):
             "my-pi",  # pi launch
             "octocat",  # username
             "~/code",  # source_directory
+            "octocat/notes",  # todo repository
         ]
     )
 
@@ -288,6 +314,7 @@ def test_configure_asks_interactively_when_commands_not_on_path(tmp_path):
     assert config.codex.launch == "my-codex"
     assert config.pi.launch == "my-pi"
     assert config.workdir == "~/code"
+    assert config.todo_repository == "octocat/notes"
     assert config.github_username == "octocat"
     assert config.repositories == ("octocat/*",)
 
@@ -303,6 +330,7 @@ def test_configure_accepts_defaults_for_empty_optional_responses(tmp_path):
             "",  # pi launch default
             "octocat",
             "",  # workdir default
+            "",  # todo repository default
         ]
     )
 
@@ -318,13 +346,15 @@ def test_configure_accepts_defaults_for_empty_optional_responses(tmp_path):
     assert config.pi.launch == "pi"
     assert config.github_username == "octocat"
     assert config.workdir == "~/wrk"
+    assert config.todo_repository == "octocat/todos"
     assert config.repositories == ("octocat/*",)
 
 
 def test_configure_reprompts_for_required_fields_without_defaults(tmp_path):
     config_path = tmp_path / "config.json"
     prompts: list[str] = []
-    inputs = iter(["", "octocat", ""])  # username retry, workdir default
+    # Username retry, then the workdir and todo repository defaults.
+    inputs = iter(["", "octocat", "", ""])
 
     config = configure(
         config_path,
@@ -360,7 +390,7 @@ def test_configure_fills_only_missing_fields(tmp_path):
         ),
         encoding="utf-8",
     )
-    inputs = iter(["~/src"])  # only workdir prompted
+    inputs = iter(["~/src", ""])  # only the workdir and todo repository are empty
 
     config = configure(
         config_path,
@@ -377,6 +407,44 @@ def test_configure_fills_only_missing_fields(tmp_path):
     assert config.repositories == ("existing-user/*",)
 
 
+def test_configure_reprompts_for_a_malformed_todo_repository(tmp_path):
+    """A hand-broken todo repository would lock the user out, so the wizard asks again."""
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "github_username": "octocat",
+                "agents": {
+                    "claude": {"analyze": "claude -p", "launch": "claude"},
+                    "codex": {"analyze": "codex exec", "launch": "codex"},
+                    "pi": {"launch": "pi"},
+                },
+                "repositories": ["specific/repo"],
+                "workdir": "~/src",
+                "todo_repository": "todos",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    prompts = []
+
+    def input_fn(prompt: str) -> str:
+        prompts.append(prompt)
+        return ""
+
+    config = configure(
+        config_path,
+        input_fn=input_fn,
+        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "gh") else None,
+    )
+
+    assert prompts == ["Todo repository [octocat/todos]: "]
+    assert config.todo_repository == "octocat/todos"
+    assert config.require_valid() is config
+
+
 def test_configure_preserves_existing_repositories(tmp_path):
     config_path = tmp_path / "config.json"
     config_path.write_text(
@@ -390,6 +458,7 @@ def test_configure_preserves_existing_repositories(tmp_path):
                 },
                 "repositories": ["specific/repo"],
                 "workdir": "~/src",
+                "todo_repository": "octocat/todos",
             }
         ),
         encoding="utf-8",
@@ -416,6 +485,7 @@ def test_configure_installs_zellij_when_not_on_path(tmp_path, capsys):
             "",  # pi launch default
             "octocat",
             "",  # workdir default
+            "",  # todo repository default
         ]
     )
     install_calls: list[str] = []
@@ -451,6 +521,7 @@ def test_configure_redownloads_zellij_when_no_global_binary_exists(tmp_path):
                 },
                 "repositories": ["specific/repo"],
                 "workdir": "~/src",
+                "todo_repository": "octocat/todos",
             }
         ),
         encoding="utf-8",
@@ -485,6 +556,7 @@ def test_configure_installs_gh_when_not_on_path(tmp_path, capsys):
             "",  # pi launch default
             "octocat",
             "",  # workdir default
+            "",  # todo repository default
         ]
     )
     install_calls: list[str] = []
@@ -520,6 +592,7 @@ def test_configure_redownloads_gh_when_no_global_binary_exists(tmp_path):
                 },
                 "repositories": ["specific/repo"],
                 "workdir": "~/src",
+                "todo_repository": "octocat/todos",
             }
         ),
         encoding="utf-8",

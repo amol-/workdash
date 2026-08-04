@@ -14,7 +14,7 @@ WORK ITEM:
 
 LOCAL REPOSITORY:
 - expected local checkout path: {repo_path}
-- confirm this checkout corresponds to {repo} before any code changes.{merge_base_section}
+- confirm this checkout corresponds to {code_repo} before any code changes.{merge_base_section}
 {analysis_section}
 GITHUB CONTEXT (from gh):
 {github_context_json}

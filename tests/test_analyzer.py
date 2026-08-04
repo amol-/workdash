@@ -140,6 +140,44 @@ def test_analyze_for_issue_uses_issue_template_and_no_diff(
     assert calls[1][:2] == ["/bin/sh", "-ic"]
 
 
+def test_analyze_for_a_targeted_todo_links_sources_in_the_target_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Source links point at the code analyzed, while the item stays the todo issue."""
+
+    item = make_work_item(WorkItemType.ISSUE, kind=WorkItemKind.ASSIGNED_ISSUE)
+    item.repo = "testuser/todos"
+    item.number = 110
+    item.url = "https://github.com/testuser/todos/issues/110"
+    item.todo_target = "owner/repo"
+    calls: list[list[str]] = []
+
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        calls.append(command)
+        if command[:2] == ["gh", "issue"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout='{"number":110,"title":"Fix the flaky test","body":""}',
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="# done\n", stderr="")
+
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert Analyzer().analyze(item) == "# done"
+    # Context still comes from the todo issue, which lives in the todo repository.
+    assert "testuser/todos" in calls[0]
+    prompt = calls[1][2]
+    assert "https://github.com/owner/repo/blob/main/" in prompt
+    assert "https://github.com/testuser/todos/blob" not in prompt
+    # The analysis header must name the issue it was written from.
+    assert "[testuser/todos#110](https://github.com/testuser/todos/issues/110)" in prompt
+    assert "- repo: testuser/todos" in prompt
+
+
 def test_analyze_for_review_requested_pr_also_fetches_diff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

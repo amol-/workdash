@@ -33,6 +33,7 @@ def _cli_config(
         pi=AgentConfig(launch="pi"),
         repositories=("owner/repo",),
         workdir=workdir,
+        todo_repository="testuser/todos",
     )
 
 
@@ -52,6 +53,7 @@ def _run_workdash(
             codex=AgentConfig(analyze=scenario_state.get("codex_analyze", "codex exec")),
             repositories=("owner/repo",),
             workdir=workdir,
+            todo_repository="testuser/todos",
         )
     else:
         config = _cli_config(
@@ -879,6 +881,7 @@ def _show_config_reports_only_codex_analyze(scenario_state: dict[str, Any]) -> N
         codex=AgentConfig(analyze="codex exec"),
         repositories=("owner/repo",),
         workdir=scenario_state.get("workdir", "/tmp/workdash-bdd"),
+        todo_repository="testuser/todos",
     )
     scenario_state["api_session"].config = config
 

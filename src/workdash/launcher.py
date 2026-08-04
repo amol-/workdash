@@ -17,7 +17,7 @@ import markdown
 
 from .config import LOCAL_BIN_PATH
 from .github import GithubHelper
-from .models import WorkItem, WorkItemKind, WorkItemType
+from .models import WorkItem, WorkItemKind, WorkItemType, display_repo
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _BROWSER_OPEN_COMMANDS = ("xdg-open", "open")
@@ -477,6 +477,9 @@ def build_launch_agent_prompt(
         item_type=item.item_type.value,
         kind=item.kind.value,
         repo=item.repo,
+        # The checkout holds the code being worked on, which for a targeted todo
+        # is the target and not the repository the todo issue itself lives in.
+        code_repo=display_repo(item),
         number=item.number,
         title=item.title,
         url=item.url,

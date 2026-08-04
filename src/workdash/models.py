@@ -39,6 +39,7 @@ class WorkItem:
     analysis: str | None = None
     analyzed_at: datetime | None = None
     included: bool = False
+    todo_target: str | None = None
 
 
 def format_type_label(item: WorkItem) -> str:
@@ -48,3 +49,13 @@ def format_type_label(item: WorkItem) -> str:
         "REVIEW" if item.kind == WorkItemKind.REVIEW_REQUESTED_PR else item.item_type.value.upper()
     )
     return f"{base}+" if item.included else base
+
+
+def display_repo(item: WorkItem) -> str:
+    """Return the repository column value for ``item``.
+
+    A targeted todo is work on its target even though the issue itself lives
+    in the todo repository, so the target is what the user should see.
+    """
+
+    return item.todo_target or item.repo

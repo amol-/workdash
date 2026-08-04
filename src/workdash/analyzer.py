@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .github import GithubHelper
-from .models import WorkItem, WorkItemType
+from .models import WorkItem, WorkItemType, display_repo
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,9 @@ class Analyzer:
             "item_type": item.item_type.value,
             "kind": item.kind.value,
             "repo": item.repo,
+            # Source links must point at the code being analyzed, which for a
+            # targeted todo is the target and not the todo repository.
+            "code_repo": display_repo(item),
             "number": item.number,
             "title": item.title,
             "url": item.url,

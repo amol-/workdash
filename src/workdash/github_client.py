@@ -13,6 +13,7 @@ from typing import TypedDict, cast
 from urllib.parse import urlsplit
 
 from .models import WorkItem, WorkItemKind, WorkItemType
+from .todo import TODO_LABEL, is_missing_repository_error, todo_target_from_body
 
 _GITHUB_HOSTS = {"github.com", "www.github.com"}
 _ITEM_SEGMENT_TYPES = {"pull": WorkItemType.PR, "issues": WorkItemType.ISSUE}
@@ -72,6 +73,10 @@ _DEFAULT_PR_SEARCH_LIMIT = 1000
 _DEFAULT_ASSIGNED_ISSUE_LIMIT = 20
 _PR_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,isDraft,repository"
 _ISSUE_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,repository"
+# `gh issue list` runs inside one repository and cannot report `repository`,
+# but it can report the body that carries the todo target metadata.
+_TODO_ISSUE_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,body"
+_DEFAULT_TODO_ISSUE_LIMIT = 200
 _DEFAULT_RECENT_SEARCH_LIMIT = 1000
 _RECENT_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,state,isPullRequest,repository"
 _RECENT_QUALIFIER_BATCH_SIZE = 20
@@ -239,6 +244,19 @@ class AssignedIssue(TypedDict):
     updated_at: str
 
 
+class TodoIssue(TypedDict):
+    """Raw todo issue record from gh, with its target already decoded."""
+
+    id: str | int
+    repo: str
+    number: int
+    title: str
+    url: str
+    created_at: str
+    updated_at: str
+    target: str | None
+
+
 def parse_github_datetime(timestamp: str) -> datetime:
     """Parse a GitHub ISO-8601 timestamp into a timezone-aware datetime."""
 
@@ -309,6 +327,32 @@ def normalize_assigned_issue(item: AssignedIssue) -> WorkItem:
         updated_at=parse_github_datetime(item["updated_at"]),
         url=item["url"],
     )
+
+
+def normalize_todo_issue(item: TodoIssue) -> WorkItem:
+    """Convert one raw todo issue payload into the internal WorkItem model.
+
+    A todo issue is assigned to the user, so it belongs to the same work
+    category as any other assigned issue; only its target sets it apart.
+    """
+
+    return WorkItem(
+        kind=WorkItemKind.ASSIGNED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo=item["repo"],
+        number=item["number"],
+        title=item["title"],
+        created_at=parse_github_datetime(item["created_at"]),
+        updated_at=parse_github_datetime(item["updated_at"]),
+        url=item["url"],
+        todo_target=item["target"],
+    )
+
+
+def normalize_todo_issues(items: list[TodoIssue]) -> list[WorkItem]:
+    """Convert todo issue records into internal WorkItems."""
+
+    return [normalize_todo_issue(item) for item in items]
 
 
 def normalize_assigned_issues(items: list[AssignedIssue]) -> list[WorkItem]:
@@ -757,6 +801,102 @@ class GitHubClient:
             payload,
             context=f"assigned for {assignee_login!r}",
         )
+
+    def list_open_todo_issues(
+        self,
+        todo_repository: str,
+        limit: int = _DEFAULT_TODO_ISSUE_LIMIT,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> list[TodoIssue]:
+        """List the open todo issues of the todo repository with their targets.
+
+        A todo repository only has to exist once the user captures their first
+        todo, so one that is not on GitHub yet simply holds no todo issues.
+        """
+
+        report_progress = (
+            progress_callback if progress_callback is not None else _noop_progress_callback
+        )
+        command = [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            todo_repository,
+            "--state",
+            "open",
+            "--label",
+            TODO_LABEL,
+            "--limit",
+            str(limit),
+            "--json",
+            _TODO_ISSUE_JSON_FIELDS,
+        ]
+        try:
+            completed = _run_gh_command_with_retry(
+                command,
+                not_found_message=(
+                    "Failed to run gh todo issue list: gh CLI is not installed or not on PATH."
+                ),
+                failure_message_prefix=(
+                    f"Failed to list open todo issues in {todo_repository} via gh"
+                ),
+            )
+        except TransientFetchError:
+            # A retry-exhausted failure says nothing about the repository existing.
+            raise
+        except RuntimeError as error:
+            if not is_missing_repository_error(str(error)):
+                raise
+            report_progress(f"Todo repository {todo_repository} does not exist yet.")
+            return []
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                f"Failed to parse gh todo issue JSON for {todo_repository}: {error.msg}"
+            ) from error
+        return self._parse_todo_issue_payload(payload, todo_repository=todo_repository)
+
+    @staticmethod
+    def _parse_todo_issue_payload(
+        payload: object,
+        *,
+        todo_repository: str,
+    ) -> list[TodoIssue]:
+        context = f"Invalid gh todo issue payload for {todo_repository}"
+        if not isinstance(payload, list):
+            raise RuntimeError(f"{context}: expected a JSON array.")
+        issues: list[TodoIssue] = []
+        for index, entry in enumerate(payload):
+            if not isinstance(entry, dict):
+                raise RuntimeError(f"{context}: entry {index} is not an object.")
+            values: dict[str, object] = {}
+            for key, expected_types in (
+                ("id", (str, int)),
+                ("number", (int,)),
+                ("title", (str,)),
+                ("url", (str,)),
+                ("createdAt", (str,)),
+                ("updatedAt", (str,)),
+            ):
+                value = entry.get(key)
+                if not isinstance(value, expected_types):
+                    raise RuntimeError(f"{context}: entry {index} has missing or invalid {key}.")
+                values[key] = value
+            issues.append(
+                TodoIssue(
+                    id=cast(str | int, values["id"]),
+                    repo=todo_repository,
+                    number=cast(int, values["number"]),
+                    title=cast(str, values["title"]),
+                    url=cast(str, values["url"]),
+                    created_at=cast(str, values["createdAt"]),
+                    updated_at=cast(str, values["updatedAt"]),
+                    target=todo_target_from_body(entry.get("body")),
+                )
+            )
+        return issues
 
     def list_recent_tracked_items(
         self,

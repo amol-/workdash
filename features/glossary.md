@@ -7,13 +7,16 @@ Canonical product vocabulary used by the feature files.
 - User: The developer using `workdash` to triage their GitHub work.
 - System: `workdash`, the text-based GitHub work triage dashboard.
 - Work item: An issue or pull request surfaced by the system for triage.
-- Workdash item ID: A copy/paste identifier for a work item, formatted as `<repo>#ISSUE-<number>`, `<repo>#PR-<number>`, or `<repo>#REVIEW-<number>`.
+- Workdash item ID: A copy/paste identifier for a work item, formatted as `<repo>#ISSUE-<number>`, `<repo>#PR-<number>`, `<repo>#REVIEW-<number>`, or `<target>#ISSUE-WT<number>` for a targeted todo item.
 - Item type: The category of a work item. One of `ISSUE`, `PR`, or `REVIEW`.
 - REVIEW item: A pull request where the user is directly requested as a reviewer, or has already reviewed.
 - Authored PR: A pull request whose author is the user.
 - Assigned issue: An open issue where the user is an assignee.
 - Tracked item: An open issue or pull request that appears in a tracked repository regardless of the user's direct involvement.
 - Tracked repository: A repository listed in the user's configuration, either as `owner/repo` or expanded from an `owner/*` selector.
+- Todo item: A work item the user captured as an issue in the todo repository, assigned to themselves and labeled `workdash-todo`.
+- Todo repository: The single configured `owner/repo` where captured todos are created as issues.
+- Todo target: The optional repository a todo is about. A targeted todo is listed under its target and its work actions use a worktree of the target.
 - Included item: A work item the user has explicitly added by pasting its GitHub URL. Persisted across sessions, participates in every list source alongside authored pull requests, review-requested pull requests, assigned issues, and tracked items, and removed automatically when it closes, merges, or is resolved.
 - Repository selector: An entry in the `repositories` configuration list. Either `owner/repo` or `owner/*`.
 - Suggested item: The single work item the system highlights as the recommended next thing to pick up.

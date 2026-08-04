@@ -78,6 +78,7 @@ def make_valid_config() -> WorkdashConfig:
         pi=AgentConfig(launch="pi"),
         repositories=("owner/repo",),
         workdir="/tmp/workdash-bdd",
+        todo_repository="testuser/todos",
     ).require_valid()
 
 
@@ -108,6 +109,8 @@ def run_app(
     worktree_callback=None,
     terminal_callback=None,
     include_callback=None,
+    todo_callback=None,
+    session: WorkdashSession | None = None,
     busy_messages: list[str] | None = None,
     config: WorkdashConfig | None = None,
 ) -> None:
@@ -140,6 +143,8 @@ def run_app(
         code_choices=config.tui_code_choices(),
         terminal_callback=terminal_callback,
         include_callback=include_callback,
+        todo_callback=todo_callback,
+        session=session,
         now_utc=now_utc,
     )
     if busy_messages is not None:
@@ -305,6 +310,7 @@ def api_config(tmp_path: Path) -> WorkdashConfig:
         pi=AgentConfig(launch="pi"),
         repositories=("owner/repo",),
         workdir=str(tmp_path / "wrk"),
+        todo_repository="testuser/todos",
     ).require_valid()
 
 
