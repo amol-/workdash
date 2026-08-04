@@ -72,6 +72,12 @@ def parse_github_item_url(url: str) -> ParsedGitHubItemURL | None:
 _DEFAULT_PR_SEARCH_LIMIT = 1000
 _DEFAULT_ASSIGNED_ISSUE_LIMIT = 20
 _PR_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,isDraft,repository"
+# GraphQL selection listing the reviewers a pull request asked for, so a
+# direct user request can be told apart from a team-wide one.
+_REVIEW_REQUESTS_SELECTION = (
+    "reviewRequests(first: 100) "
+    "{ nodes { requestedReviewer { __typename ... on User { login } } } }"
+)
 _ISSUE_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,repository"
 # `gh issue list` runs inside one repository and cannot report `repository`,
 # but it can report the body that carries the todo target metadata.
@@ -86,6 +92,7 @@ _TRANSIENT_RETRY_DELAY_SECONDS = 2.0
 #   - "HTTP 5xx: ..." / "non-200 OK status code: 5xx ..." (5xx server errors)
 #   - "HTTP 429" / "API rate limit exceeded" / "abuse detection" (rate limiting)
 #   - "dial tcp ... no such host" / "connection reset" / "i/o timeout" ... (network)
+#   - "result of a timeout" (GraphQL execution timeout, sometimes with HTTP 200)
 # Each of these can succeed on a later retry, so the caller should retain the
 # URL in the included-items store and retry on the next refresh.
 _TRANSIENT_HTTP_STATUS_RE = re.compile(r"(?:HTTP |status code:?\s*)5\d{2}", re.IGNORECASE)
@@ -98,6 +105,7 @@ _TRANSIENT_SUBSTRINGS = (
     "connection reset",
     "no such host",
     "i/o timeout",
+    "result of a timeout",
     "context deadline exceeded",
     "eof",
 )
@@ -136,6 +144,17 @@ def _is_repository_authorization_error(message: str) -> bool:
     return any(needle in message_lower for needle in _REPOSITORY_AUTHORIZATION_SUBSTRINGS)
 
 
+def _is_unresolvable_item_error(message: str) -> bool:
+    """Report whether a GraphQL error says GitHub cannot resolve the queried item.
+
+    A repository that was renamed, deleted, or is no longer visible, and a pull
+    request that is gone, are all as inaccessible as an authorization denial:
+    the work item cannot be loaded, but every other item still can.
+    """
+
+    return "could not resolve to a" in message.lower()
+
+
 def _noop_progress_callback(_message: str) -> None:
     """Ignore progress updates when no reporting target is configured."""
 
@@ -148,6 +167,7 @@ def _run_gh_command_with_retry(
     report_progress: Callable[[str], None] = _noop_progress_callback,
     retry_label: str | None = None,
     classify_repository_authorization: bool = False,
+    tolerate_partial_response: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a ``gh`` subprocess with bounded retry on transient failures.
 
@@ -158,6 +178,11 @@ def _run_gh_command_with_retry(
     surface the same descriptive message they did before. Raises
     ``RepositoryAuthorizationError`` for known repository-specific denial
     shapes when ``classify_repository_authorization`` is enabled.
+
+    :param bool tolerate_partial_response: Return the output of a failed gh
+        command instead of raising when it still printed something. GraphQL
+        answers a partially denied query with both data and errors, and gh
+        reports that as a failure.
     """
 
     for attempt in range(_TRANSIENT_RETRIES + 1):
@@ -189,6 +214,10 @@ def _run_gh_command_with_retry(
                 raise TransientFetchError(message) from error
             if classify_repository_authorization and _is_repository_authorization_error(stderr):
                 raise RepositoryAuthorizationError(message) from error
+            if tolerate_partial_response and error.stdout:
+                return subprocess.CompletedProcess(
+                    command, error.returncode, stdout=error.stdout, stderr=stderr
+                )
             raise RuntimeError(message) from error
     raise AssertionError("unreachable: retry loop exited without return or raise")
 
@@ -651,69 +680,135 @@ class GitHubClient:
                 context=f"review-requested for {reviewer_login!r}",
             )
         ]
+        if not parsed_items:
+            return []
+
+        # Ask for every pull request's reviewers in a single aliased GraphQL
+        # document: one `gh pr view` per pull request cost ~10s for 15 results,
+        # this costs ~1.6s.
+        alias_selections: list[str] = []
+        for index, item in enumerate(parsed_items):
+            owner, _, name = item["repo"].partition("/")
+            alias_selections.append(
+                f"p{index}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+                f"{{ pullRequest(number: {item['number']}) {{ {_REVIEW_REQUESTS_SELECTION} }} }}"
+            )
+        review_request_command = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={{ {' '.join(alias_selections)} }}",
+        ]
+        failure_message_prefix = (
+            f"Failed to inspect review-request metadata for {reviewer_login!r} via gh"
+        )
+        review_request_completed = _run_gh_command_with_retry(
+            review_request_command,
+            not_found_message=(
+                "Failed to run gh review-request metadata lookup: "
+                "gh CLI is not installed or not on PATH."
+            ),
+            failure_message_prefix=failure_message_prefix,
+            # A query where some aliases are denied still answers for the
+            # others, and gh reports that partial answer as a failure.
+            tolerate_partial_response=True,
+        )
+        try:
+            review_request_payload = json.loads(review_request_completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                "Failed to parse gh review-request metadata JSON for "
+                f"{reviewer_login!r}: {error.msg}"
+            ) from error
+        # A response without `data` is a whole-query failure such as expired
+        # credentials, which must not be mistaken for "no direct requests".
+        repositories_by_alias = (
+            review_request_payload.get("data") if isinstance(review_request_payload, dict) else None
+        )
+        if not isinstance(repositories_by_alias, dict):
+            raise RuntimeError(
+                f"{failure_message_prefix}: "
+                f"{review_request_completed.stderr.strip() or 'response contained no data'}"
+            )
+        # Only the alias in an error's path attributes a failure to one pull
+        # request; the merged stderr concatenates every alias's message. A
+        # failure that leaves the item unreachable skips just that item, while
+        # anything else stays a hard failure.
+        errors = review_request_payload.get("errors")
+        skips_by_alias: dict[str, str] = {}
+        subjects_by_alias = {
+            f"p{index}": f"{item['repo']}#{item['number']}"
+            for index, item in enumerate(parsed_items)
+        }
+        for entry in errors if isinstance(errors, list) else []:
+            entry_fields = entry if isinstance(entry, dict) else {}
+            message = entry_fields.get("message")
+            path = entry_fields.get("path")
+            alias = path[0] if isinstance(path, list) and path else None
+            # A failure we cannot attribute to one alias would drop that pull
+            # request without warning, so it stays a hard failure.
+            subject = subjects_by_alias.get(alias)
+            if subject is None:
+                raise RuntimeError(f"{failure_message_prefix}: {message or 'unknown error'}")
+            # One stderr covers every alias, so naming the subject is the only
+            # way the operator learns which pull request broke.
+            if not isinstance(message, str) or not (
+                _is_repository_authorization_error(message) or _is_unresolvable_item_error(message)
+            ):
+                raise RuntimeError(
+                    f"{failure_message_prefix} ({subject}): {message or 'unknown error'}"
+                )
+            skips_by_alias[alias] = message
+
         direct_review_requested_items: list[ReviewRequestedPullRequest] = []
         normalized_reviewer_login = reviewer_login.strip().lower()
-        for item in parsed_items:
-            review_request_command = [
-                "gh",
-                "pr",
-                "view",
-                str(item["number"]),
-                "--repo",
-                item["repo"],
-                "--json",
-                "reviewRequests",
-            ]
-            try:
-                review_request_completed = _run_gh_command_with_retry(
-                    review_request_command,
-                    not_found_message=(
-                        "Failed to run gh review-request metadata lookup: "
-                        "gh CLI is not installed or not on PATH."
-                    ),
-                    failure_message_prefix=(
-                        "Failed to inspect review-request metadata for "
-                        f"{item['repo']}#{item['number']} via gh"
-                    ),
-                    classify_repository_authorization=True,
-                )
-            except RepositoryAuthorizationError as error:
+        for index, item in enumerate(parsed_items):
+            alias = f"p{index}"
+            subject = subjects_by_alias[alias]
+            skip_reason = skips_by_alias.get(alias)
+            if skip_reason is not None:
                 report_progress(
-                    "Warning: skipped review-requested pull request "
-                    f"{item['repo']}#{item['number']} because GitHub denied access: {error}"
+                    f"Warning: skipped review-requested pull request {subject}: {skip_reason}"
                 )
                 continue
-            try:
-                review_request_payload = json.loads(review_request_completed.stdout)
-            except json.JSONDecodeError as error:
-                raise RuntimeError(
-                    "Failed to parse gh review-request metadata JSON for "
-                    f"{item['repo']}#{item['number']}: {error.msg}"
-                ) from error
-            if not isinstance(review_request_payload, dict):
-                raise RuntimeError(
-                    "Invalid gh review-request metadata payload for "
-                    f"{item['repo']}#{item['number']}: expected an object."
-                )
-            review_requests = review_request_payload.get("reviewRequests")
-            if not isinstance(review_requests, list):
-                raise RuntimeError(
-                    "Invalid gh review-request metadata payload for "
-                    f"{item['repo']}#{item['number']}: missing or invalid reviewRequests."
-                )
-            has_direct_request = False
-            for request in review_requests:
-                if not isinstance(request, dict):
-                    continue
-                if request.get("__typename") != "User":
-                    continue
-                login = request.get("login")
-                if isinstance(login, str) and login.strip().lower() == normalized_reviewer_login:
-                    has_direct_request = True
-                    break
-            if has_direct_request:
+            if normalized_reviewer_login in self._direct_review_requesters(
+                repositories_by_alias.get(alias),
+                subject=subject,
+            ):
                 direct_review_requested_items.append(item)
         return direct_review_requested_items
+
+    @staticmethod
+    def _direct_review_requesters(repository_node: object, *, subject: str) -> set[str]:
+        """Collect the normalized logins whose review one pull request requested.
+
+        Team requests and reviewers GitHub no longer resolves are ignored, so
+        only a pull request that named the user keeps its REVIEW item.
+
+        :param object repository_node: One aliased ``repository`` GraphQL node.
+        :param str subject: ``owner/repo#number`` used in error messages.
+        """
+
+        context = f"Invalid gh review-request metadata payload for {subject}"
+        if not isinstance(repository_node, dict):
+            raise RuntimeError(f"{context}: expected an object.")
+        pull_request = repository_node.get("pullRequest")
+        if not isinstance(pull_request, dict):
+            raise RuntimeError(f"{context}: expected an object.")
+        review_requests = pull_request.get("reviewRequests")
+        nodes = review_requests.get("nodes") if isinstance(review_requests, dict) else None
+        if not isinstance(nodes, list):
+            raise RuntimeError(f"{context}: missing or invalid reviewRequests.")
+        logins: set[str] = set()
+        for node in nodes:
+            reviewer = node.get("requestedReviewer") if isinstance(node, dict) else None
+            if not isinstance(reviewer, dict) or reviewer.get("__typename") != "User":
+                continue
+            login = reviewer.get("login")
+            if isinstance(login, str):
+                logins.add(login.strip().lower())
+        return logins
 
     def list_open_reviewed_prs(
         self,

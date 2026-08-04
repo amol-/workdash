@@ -266,7 +266,7 @@ def test_list_open_authored_prs_raises_error_for_invalid_payload_entry(
         GitHubClient().list_open_authored_prs("testuser")
 
 
-def test_list_open_review_requested_prs_returns_open_prs_for_requested_reviewer(
+def test_list_open_review_requested_prs_returns_directly_requested_prs_in_one_graphql_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_commands: list[list[str]] = []
@@ -281,53 +281,87 @@ def test_list_open_review_requested_prs_returns_open_prs_for_requested_reviewer(
                 stdout=(
                     '[{"id":"R1","number":42,"title":"needs review","url":"https://example.com/pull/42",'
                     '"createdAt":"2026-02-05T00:00:00Z","updatedAt":"2026-02-06T00:00:00Z","isDraft":false,'
-                    '"repository":{"name":"repo","nameWithOwner":"owner/repo"}}]'
+                    '"repository":{"name":"repo","nameWithOwner":"owner/repo"}},'
+                    '{"id":"R2","number":43,"title":"team review","url":"https://example.com/pull/43",'
+                    '"createdAt":"2026-02-05T00:00:00Z","updatedAt":"2026-02-06T00:00:00Z","isDraft":false,'
+                    '"repository":{"name":"other","nameWithOwner":"owner/other"}}]'
                 ),
                 stderr="",
             )
-        if command[:3] == ["gh", "pr", "view"]:
+        if command[:3] == ["gh", "api", "graphql"]:
+            assert 'repository(owner: "owner", name: "repo")' in command[4]
+            assert "pullRequest(number: 42)" in command[4]
+            assert 'repository(owner: "owner", name: "other")' in command[4]
+            assert "pullRequest(number: 43)" in command[4]
             return subprocess.CompletedProcess(
                 args=command,
                 returncode=0,
-                stdout='{"reviewRequests":[{"__typename":"User","login":"testuser"}]}',
+                stdout=json.dumps(
+                    {
+                        "data": {
+                            "p0": {
+                                "pullRequest": {
+                                    "reviewRequests": {
+                                        "nodes": [
+                                            # GitHub emits a null reviewer for a
+                                            # request it can no longer resolve.
+                                            {"requestedReviewer": None},
+                                            {
+                                                "requestedReviewer": {
+                                                    "__typename": "User",
+                                                    "login": "testuser",
+                                                }
+                                            },
+                                        ]
+                                    },
+                                }
+                            },
+                            "p1": {
+                                "pullRequest": {
+                                    "reviewRequests": {
+                                        "nodes": [
+                                            {
+                                                "requestedReviewer": {
+                                                    "__typename": "Team",
+                                                    "slug": "owner/reviewers",
+                                                }
+                                            }
+                                        ]
+                                    },
+                                }
+                            },
+                        }
+                    }
+                ),
                 stderr="",
             )
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout="[]",
-            stderr="",
-        )
+        raise AssertionError(f"Unexpected command: {command}")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     result = GitHubClient().list_open_review_requested_prs("testuser")
 
-    assert captured_commands == [
-        [
-            "gh",
-            "search",
-            "prs",
-            "--review-requested",
-            "testuser",
-            "--state",
-            "open",
-            "--limit",
-            "1000",
-            "--json",
-            "id,number,title,url,createdAt,updatedAt,isDraft,repository",
-        ],
-        [
-            "gh",
-            "pr",
-            "view",
-            "42",
-            "--repo",
-            "owner/repo",
-            "--json",
-            "reviewRequests",
-        ],
+    assert captured_commands[0] == [
+        "gh",
+        "search",
+        "prs",
+        "--review-requested",
+        "testuser",
+        "--state",
+        "open",
+        "--limit",
+        "1000",
+        "--json",
+        "id,number,title,url,createdAt,updatedAt,isDraft,repository",
     ]
+    # Every pull request's reviewers come from one aliased query, no matter how
+    # many pull requests the search returned.
+    assert [
+        command for command in captured_commands if command[:3] == ["gh", "api", "graphql"]
+    ] == [captured_commands[1]]
+    assert captured_commands[1][3] == "-f"
+    # Only the pull request that named the reviewer survives; the team-only one
+    # is dropped.
     assert result == [
         {
             "id": "R1",
@@ -342,51 +376,29 @@ def test_list_open_review_requested_prs_returns_open_prs_for_requested_reviewer(
     ]
 
 
-def test_list_open_review_requested_prs_filters_out_team_only_requests(
+@pytest.mark.parametrize(
+    ("error_type", "skip_error", "expected_fragment"),
+    [
+        (
+            "FORBIDDEN",
+            "GraphQL: Resource protected by organization SAML enforcement. "
+            "You must grant your OAuth token access to this organization.",
+            "SAML enforcement",
+        ),
+        (
+            "NOT_FOUND",
+            "Could not resolve to a Repository with the name 'protected-org/protected-repo'.",
+            "Could not resolve to a Repository",
+        ),
+    ],
+)
+def test_list_open_review_requested_prs_warns_and_skips_an_unreachable_pull_request(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_run(*args, **kwargs):
-        command = args[0]
-        if command[:3] == ["gh", "search", "prs"]:
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
-                stdout=(
-                    '[{"id":"R1","number":42,"title":"needs review","url":"https://example.com/pull/42",'
-                    '"createdAt":"2026-02-05T00:00:00Z","updatedAt":"2026-02-06T00:00:00Z","isDraft":false,'
-                    '"repository":{"name":"repo","nameWithOwner":"owner/repo"}}]'
-                ),
-                stderr="",
-            )
-        if command[:3] == ["gh", "pr", "view"]:
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
-                stdout='{"reviewRequests":[{"__typename":"Team","slug":"owner/reviewers"}]}',
-                stderr="",
-            )
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout="[]",
-            stderr="",
-        )
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    result = GitHubClient().list_open_review_requested_prs("testuser")
-
-    assert result == []
-
-
-def test_list_open_review_requested_prs_warns_and_skips_saml_metadata_failure(
-    monkeypatch: pytest.MonkeyPatch,
+    error_type: str,
+    skip_error: str,
+    expected_fragment: str,
 ) -> None:
     warnings: list[str] = []
-    saml_error = (
-        "GraphQL: Resource protected by organization SAML enforcement. "
-        "You must grant your OAuth token access to this organization."
-    )
 
     def fake_run(*args, **kwargs):
         command = args[0]
@@ -408,18 +420,41 @@ def test_list_open_review_requested_prs_warns_and_skips_saml_metadata_failure(
                 ),
                 stderr="",
             )
-        if command[:3] == ["gh", "pr", "view"] and command[3] == "860":
+        if command[:3] == ["gh", "api", "graphql"]:
+            # GitHub answers the readable aliases and reports the denied one as
+            # an error, which gh surfaces as a non-zero exit.
             raise subprocess.CalledProcessError(
                 returncode=1,
                 cmd=command,
-                stderr=saml_error,
-            )
-        if command[:3] == ["gh", "pr", "view"] and command[3] == "42":
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
-                stdout='{"reviewRequests":[{"__typename":"User","login":"testuser"}]}',
-                stderr="",
+                output=json.dumps(
+                    {
+                        "data": {
+                            "p0": None,
+                            "p1": {
+                                "pullRequest": {
+                                    "reviewRequests": {
+                                        "nodes": [
+                                            {
+                                                "requestedReviewer": {
+                                                    "__typename": "User",
+                                                    "login": "testuser",
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            },
+                        },
+                        "errors": [
+                            {
+                                "type": error_type,
+                                "path": ["p0"],
+                                "message": skip_error,
+                            }
+                        ],
+                    }
+                ),
+                stderr=skip_error,
             )
         raise AssertionError(f"Unexpected command: {command}")
 
@@ -433,7 +468,7 @@ def test_list_open_review_requested_prs_warns_and_skips_saml_metadata_failure(
     assert [item["number"] for item in result] == [42]
     assert any(
         "Warning: skipped review-requested pull request protected-org/protected-repo#860" in warning
-        and "SAML enforcement" in warning
+        and expected_fragment in warning
         for warning in warnings
     )
 
@@ -458,7 +493,7 @@ def test_list_open_review_requested_prs_reraises_non_auth_metadata_failure(
                 ),
                 stderr="",
             )
-        if command[:3] == ["gh", "pr", "view"]:
+        if command[:3] == ["gh", "api", "graphql"]:
             raise subprocess.CalledProcessError(
                 returncode=1,
                 cmd=command,
@@ -477,6 +512,135 @@ def test_list_open_review_requested_prs_reraises_non_auth_metadata_failure(
     assert not any(
         "Warning: skipped review-requested pull request" in warning for warning in warnings
     )
+
+
+def test_list_open_review_requested_prs_retries_a_graphql_execution_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A batched query that times out comes back as a partial answer plus this
+    # error, which one retry usually cures; the dashboard must keep the previous
+    # REVIEW list instead of failing the whole refresh.
+    timeout_error = (
+        "Something went wrong while executing your query. This may be the result "
+        "of a timeout, or it could be a GitHub bug. Please include "
+        "`AB12:CD34:5678` when reporting this issue."
+    )
+    graphql_attempts = 0
+
+    def fake_run(*args, **kwargs):
+        nonlocal graphql_attempts
+        command = args[0]
+        if command[:3] == ["gh", "search", "prs"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=(
+                    '[{"id":"R1","number":42,"title":"needs review",'
+                    '"url":"https://example.com/pull/42",'
+                    '"createdAt":"2026-02-05T00:00:00Z",'
+                    '"updatedAt":"2026-02-06T00:00:00Z","isDraft":false,'
+                    '"repository":{"name":"repo","nameWithOwner":"owner/repo"}}]'
+                ),
+                stderr="",
+            )
+        if command[:3] == ["gh", "api", "graphql"]:
+            graphql_attempts += 1
+            raise subprocess.CalledProcessError(
+                returncode=1,
+                cmd=command,
+                output=json.dumps({"data": {"p0": None}, "errors": [{"message": timeout_error}]}),
+                stderr=timeout_error,
+            )
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("workdash.github_client.time.sleep", lambda _: None)
+
+    with pytest.raises(TransientFetchError, match="result of a timeout"):
+        GitHubClient().list_open_review_requested_prs("testuser")
+
+    # One attempt plus the two retries the retry budget allows.
+    assert graphql_attempts == 3
+
+
+@pytest.mark.parametrize(
+    ("metadata_stdout", "metadata_stderr", "expected_message"),
+    [
+        # A whole-query failure must not be read as "nobody requested a review".
+        ('{"message":"Bad credentials","status":"401"}', "Bad credentials", "Bad credentials"),
+        # The payload gate fires on its own, even with nothing on stderr to echo.
+        ('{"message":"Bad credentials","status":"401"}', "", "response contained no data"),
+        # An error that leaves the pull request reachable is not a reason to
+        # skip it, so it stays a hard failure that names the pull request.
+        (
+            '{"data":{"p0":null},"errors":[{"type":"INTERNAL","path":["p0"],'
+            '"message":"Something went wrong."}]}',
+            "Something went wrong",
+            r"\(owner/repo#42\): Something went wrong",
+        ),
+        # A skip with no path, or with an alias this query never asked for,
+        # cannot be attributed to one pull request: dropping it silently would
+        # hide the pull request from the REVIEW section.
+        (
+            '{"data":{"p0":null},"errors":[{"type":"FORBIDDEN",'
+            '"message":"Resource protected by organization SAML enforcement."}]}',
+            "SAML enforcement",
+            "SAML enforcement",
+        ),
+        (
+            '{"data":{"p0":null},"errors":[{"type":"FORBIDDEN","path":["p7"],'
+            '"message":"Resource protected by organization SAML enforcement."}]}',
+            "SAML enforcement",
+            "SAML enforcement",
+        ),
+        # Output gh printed but we cannot parse is not "no direct request"
+        # either.
+        ("not json", "not json", "Failed to parse gh review-request metadata JSON"),
+        # A nulled alias with no error to explain it, and a reviewRequests object
+        # missing its nodes, are both unreadable metadata rather than "no direct
+        # request".
+        ('{"data":{"p0":null}}', "", "owner/repo#42: expected an object"),
+        (
+            '{"data":{"p0":{"pullRequest":{"reviewRequests":{}}}}}',
+            "",
+            "owner/repo#42: missing or invalid reviewRequests",
+        ),
+    ],
+)
+def test_list_open_review_requested_prs_raises_on_unusable_metadata_response(
+    monkeypatch: pytest.MonkeyPatch,
+    metadata_stdout: str,
+    metadata_stderr: str,
+    expected_message: str,
+) -> None:
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        if command[:3] == ["gh", "search", "prs"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=(
+                    '[{"id":"R1","number":42,"title":"needs review",'
+                    '"url":"https://example.com/pull/42",'
+                    '"createdAt":"2026-02-07T00:00:00Z",'
+                    '"updatedAt":"2026-02-08T00:00:00Z","isDraft":false,'
+                    '"repository":{"name":"repo","nameWithOwner":"owner/repo"}}]'
+                ),
+                stderr="",
+            )
+        if command[:3] == ["gh", "api", "graphql"]:
+            raise subprocess.CalledProcessError(
+                returncode=1,
+                cmd=command,
+                output=metadata_stdout,
+                stderr=metadata_stderr,
+            )
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match=expected_message):
+        GitHubClient().list_open_review_requested_prs("testuser")
 
 
 def test_list_open_review_requested_prs_accepts_custom_reviewer_and_limit(

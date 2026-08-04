@@ -230,10 +230,8 @@ def _pr_direct_request(scenario_state: dict[str, Any], work_items: list[WorkItem
             "repository": {"nameWithOwner": "owner/repo"},
         },
     ]
-    team_only_review_requests = {
-        "reviewRequests": [{"__typename": "Team", "name": "team-reviewers"}]
-    }
-    direct_review_requests = {"reviewRequests": [{"__typename": "User", "login": "testuser"}]}
+    team_only_reviewer = {"requestedReviewer": {"__typename": "Team", "name": "team-reviewers"}}
+    direct_reviewer = {"requestedReviewer": {"__typename": "User", "login": "testuser"}}
 
     def fake_run(command, **kwargs):
         import json
@@ -242,9 +240,15 @@ def _pr_direct_request(scenario_state: dict[str, Any], work_items: list[WorkItem
             return subprocess.CompletedProcess(
                 command, 0, stdout=json.dumps(team_only_search), stderr=""
             )
-        if command[:3] == ["gh", "pr", "view"]:
-            number = command[3]
-            payload = team_only_review_requests if number == "201" else direct_review_requests
+        if command[:3] == ["gh", "api", "graphql"]:
+            # Aliases are positional to the search order defined above.
+            assert "number: 201" in command[4] and "number: 202" in command[4]
+            payload = {
+                "data": {
+                    "p0": {"pullRequest": {"reviewRequests": {"nodes": [team_only_reviewer]}}},
+                    "p1": {"pullRequest": {"reviewRequests": {"nodes": [direct_reviewer]}}},
+                }
+            }
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
         raise AssertionError(f"Unexpected gh command in scenario: {command}")
 
@@ -577,11 +581,34 @@ def _another_review_requested_pr_has_direct_request(
                 },
             ]
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
-        if command[:3] == ["gh", "pr", "view"] and command[3] == str(unauthorized_number):
-            raise subprocess.CalledProcessError(1, command, stderr=saml_error)
-        if command[:3] == ["gh", "pr", "view"] and command[3] == str(authorized_number):
-            payload = {"reviewRequests": [{"__typename": "User", "login": "testuser"}]}
-            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+        if command[:3] == ["gh", "api", "graphql"]:
+            # GitHub answers the readable alias and reports the denied one as an
+            # error, which gh surfaces as a non-zero exit.
+            assert f"number: {unauthorized_number}" in command[4]
+            assert f"number: {authorized_number}" in command[4]
+            payload = {
+                "data": {
+                    "p0": None,
+                    "p1": {
+                        "pullRequest": {
+                            "reviewRequests": {
+                                "nodes": [
+                                    {
+                                        "requestedReviewer": {
+                                            "__typename": "User",
+                                            "login": "testuser",
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                },
+                "errors": [{"type": "FORBIDDEN", "path": ["p0"], "message": saml_error}],
+            }
+            raise subprocess.CalledProcessError(
+                1, command, output=json.dumps(payload), stderr=saml_error
+            )
         raise AssertionError(f"Unexpected gh command in review auth scenario: {command}")
 
     monkeypatch.setattr("workdash.github_client.subprocess.run", fake_run)
