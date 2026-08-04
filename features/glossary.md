@@ -20,6 +20,7 @@ Canonical product vocabulary used by the feature files.
 - Included item: A work item the user has explicitly added by pasting its GitHub URL. Persisted across sessions, participates in every list source alongside authored pull requests, review-requested pull requests, assigned issues, and tracked items, and removed automatically when it closes, merges, or is resolved.
 - Repository selector: An entry in the `repositories` configuration list. Either `owner/repo` or `owner/*`.
 - Suggested item: The single work item the system highlights as the recommended next thing to pick up.
+- Search filter: Text the user typed in the TUI to narrow the listed work items to those whose Type, Repo, or Title column contains it. Lives only in the TUI and lasts until it is cleared or the loaded list changes.
 - Work directory: The local directory where the system keeps per-repository clones and per-item worktrees.
 - Main clone: The local clone of a tracked repository that lives directly under the work directory.
 - Worktree: A per-work-item git worktree used for analysis and coding sessions, rooted under the work directory.

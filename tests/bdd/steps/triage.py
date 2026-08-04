@@ -1,7 +1,7 @@
 """Step definitions for the triage domain feature files.
 
-Covers list-work-items, list-command, recent-activity, refresh, suggested-item,
-and include-item scenarios. Each step exercises real
+Covers list-work-items, list-command, recent-activity, refresh, search-items,
+suggested-item, and include-item scenarios. Each step exercises real
 ``WorkdashApp``/``WorkdashBackend`` code — only the external GitHub and
 browser-open boundaries are faked.
 """
@@ -24,8 +24,8 @@ from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession, _work_items_payload
 from workdash.github_client import GitHubClient
 from workdash.included_items import IncludedItemsStore
-from workdash.models import WorkItem, WorkItemKind, WorkItemType
-from workdash.tui import IncludeDialog
+from workdash.models import WorkItem, WorkItemKind, WorkItemType, format_type_label
+from workdash.tui import IncludeDialog, SearchDialog
 from workdash.workdash import _print_work_items_result, format_work_item_id
 
 from .common import (
@@ -1123,7 +1123,19 @@ def _tui_open_with_items(work_items: list[WorkItem], scenario_state: dict[str, A
                     title="Preexisting one",
                     updated_at=NOW_UTC - timedelta(days=2),
                     created_at=NOW_UTC - timedelta(days=5),
-                )
+                ),
+                make_work_item(
+                    number=2,
+                    title="Fix the parser",
+                    updated_at=NOW_UTC - timedelta(days=3),
+                    created_at=NOW_UTC - timedelta(days=6),
+                ),
+                make_work_item(
+                    number=33,
+                    title="Polish the docs",
+                    updated_at=NOW_UTC - timedelta(days=4),
+                    created_at=NOW_UTC - timedelta(days=7),
+                ),
             ]
         )
     scenario_state["initial_items"] = list(work_items)
@@ -1161,6 +1173,8 @@ def _user_presses_key(
         from . import terminal as terminal_mod
 
         terminal_mod.run_terminal_scenario(scenario_state, work_items, monkeypatch, tmp_path)
+    elif key == "/":
+        _run_search_clear_scenario(scenario_state, work_items)
     elif key == "d":
         from . import branchdiff as branchdiff_mod
 
@@ -1194,6 +1208,8 @@ def _run_refresh_scenario(scenario_state: dict[str, Any], work_items: list[WorkI
     busy_messages: list[str] = []
 
     async def interactions(app, pilot) -> None:
+        if scenario_state.get("search_query"):
+            await _apply_search_filter(app, pilot, scenario_state["search_query"])
         await pilot.press("r")
         for _ in range(20):
             await pilot.pause()
@@ -1952,3 +1968,309 @@ def _dashboard_loads(scenario_state: dict[str, Any]) -> None:
 def _no_included_items(scenario_state: dict[str, Any]) -> None:
     items = scenario_state["work_items"]
     assert not any(item.included for item in items), items
+
+
+# --------------------------------------------------------------------------
+# F-TRIAGE-SEARCH
+# --------------------------------------------------------------------------
+
+_SEARCH_TITLE_FRAGMENT = "parser"
+_SEARCH_UNMATCHED_TEXT = "nothing-here-matches-this"
+_SEARCH_ACTION_HINT = "(/)search"
+_FULL_ACTION_BAR = (
+    "(/)search (o)pen (r)efresh (a)nalyze (c)ode (d)iff (t)erminal (i)nclude (w)todo (q)uit"
+)
+
+
+async def _apply_search_filter(app, pilot, query: str) -> None:
+    """Press "/" and submit ``query`` through the real search dialog."""
+
+    await pilot.press("/")
+    dialog = None
+    for _ in range(20):
+        await pilot.pause()
+        dialog = next(
+            (screen for screen in app.screen_stack if isinstance(screen, SearchDialog)), None
+        )
+        if dialog is not None:
+            break
+    assert dialog is not None, "SearchDialog did not appear after pressing '/'"
+    dialog.query_one("#search-text", Input).value = query
+    await pilot.press("enter")
+    for _ in range(20):
+        await pilot.pause()
+        if not any(isinstance(screen, SearchDialog) for screen in app.screen_stack):
+            break
+
+
+def _capture_listing(app, captured: dict[str, Any]) -> None:
+    table = app.query_one("#work-items", DataTable)
+    hint = app.query_one("#command-footer", Static).render()
+    captured["search_rows"] = [
+        [str(cell) for cell in table.get_row_at(index)] for index in range(table.row_count)
+    ]
+    captured["search_status"] = app.query_one("#status-footer", Static).render().plain
+    captured["search_hint"] = hint.plain
+    captured["search_hint_spans"] = [(span.start, span.end, str(span.style)) for span in hint.spans]
+    captured["search_modal_names"] = modal_screen_names(app)
+
+
+def _listed_titles(scenario_state: dict[str, Any]) -> list[str]:
+    return sorted(row[2].lstrip("* ") for row in scenario_state["search_rows"])
+
+
+def _run_search_scenario(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], query: str
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def interactions(app, pilot) -> None:
+        await _apply_search_filter(app, pilot, query)
+        _capture_listing(app, captured)
+
+    run_app(work_items=list(work_items), interactions=interactions)
+    scenario_state["search_query"] = query
+    scenario_state["loaded_items"] = list(work_items)
+    scenario_state.update(captured)
+
+
+def _run_search_clear_scenario(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
+    captured: dict[str, Any] = {}
+
+    async def interactions(app, pilot) -> None:
+        await _apply_search_filter(app, pilot, scenario_state["search_query"])
+        table = app.query_one("#work-items", DataTable)
+        assert table.row_count < len(work_items), "the filter did not narrow the list"
+        await pilot.press("/")
+        for _ in range(20):
+            await pilot.pause()
+            if table.row_count == len(work_items):
+                break
+        _capture_listing(app, captured)
+
+    run_app(work_items=list(work_items), interactions=interactions)
+    scenario_state["loaded_items"] = list(work_items)
+    scenario_state.update(captured)
+
+
+# ----- F-TRIAGE-SEARCH: Given steps -----
+
+
+@given("the TUI is open with work items from two repositories")
+def _tui_open_with_two_repositories(
+    work_items: list[WorkItem], scenario_state: dict[str, Any]
+) -> None:
+    # Titles deliberately avoid the repository names so a repo match cannot be
+    # mistaken for a title match.
+    work_items.extend(
+        [
+            make_work_item(
+                repo="owner/alpha",
+                number=1,
+                title="First task",
+                updated_at=NOW_UTC - timedelta(days=2),
+            ),
+            make_work_item(
+                repo="owner/alpha",
+                number=2,
+                title="Second task",
+                updated_at=NOW_UTC - timedelta(days=3),
+            ),
+            make_work_item(
+                repo="owner/beta",
+                number=3,
+                title="Third task",
+                updated_at=NOW_UTC - timedelta(days=4),
+            ),
+        ]
+    )
+    scenario_state["search_repo"] = "owner/alpha"
+
+
+@given("the TUI is open with an active search filter")
+def _tui_open_with_active_search_filter(
+    work_items: list[WorkItem], scenario_state: dict[str, Any]
+) -> None:
+    _tui_open_with_items(work_items, scenario_state)
+    scenario_state["search_query"] = _SEARCH_TITLE_FRAGMENT
+
+
+# ----- F-TRIAGE-SEARCH: When steps -----
+
+
+@when("the user searches for a fragment of one item's title")
+def _search_for_title_fragment(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
+    _run_search_scenario(scenario_state, work_items, _SEARCH_TITLE_FRAGMENT)
+
+
+@when("the user searches for one item's number")
+def _search_for_item_number(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
+    target = max(work_items, key=lambda item: item.number)
+    scenario_state["search_target"] = target
+    _run_search_scenario(scenario_state, work_items, str(target.number))
+
+
+@when("the user searches for one repository's name")
+def _search_for_repository_name(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
+    repo = scenario_state["search_repo"]
+    _run_search_scenario(scenario_state, work_items, repo.split("/")[1])
+
+
+@when("the user searches for text that no work item contains")
+def _search_for_unmatched_text(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
+    _run_search_scenario(scenario_state, work_items, _SEARCH_UNMATCHED_TEXT)
+
+
+@when("the user includes a work item by URL")
+def _include_work_item_by_url_while_filtered(
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_gh_fetch_fake(
+        monkeypatch,
+        responses={
+            ("pr", "111"): subprocess.CompletedProcess(
+                [], 0, stdout=_fake_gh_view_response("pr", 111), stderr=""
+            ),
+        },
+    )
+    backend = _make_backend(scenario_state, tmp_path)
+    captured: dict[str, Any] = {}
+
+    async def interactions(app, pilot) -> None:
+        await _apply_search_filter(app, pilot, scenario_state["search_query"])
+        await pilot.press("i")
+        for _ in range(20):
+            await pilot.pause()
+            dialog = next(
+                (screen for screen in app.screen_stack if isinstance(screen, IncludeDialog)), None
+            )
+            if dialog is not None:
+                dialog.query_one("#include-url", Input).value = _INCLUDE_PR_URL
+                await pilot.press("enter")
+                break
+        for _ in range(40):
+            await pilot.pause()
+            if app.query_one("#status-footer", Static).render().plain.startswith("Included"):
+                break
+        _capture_listing(app, captured)
+
+    run_app(
+        work_items=list(work_items),
+        include_callback=backend.include_item_by_url,
+        interactions=interactions,
+    )
+    # The included item joins the loaded list, so it belongs to the expected listing.
+    scenario_state["added_titles"] = [json.loads(_fake_gh_view_response("pr", 111))["title"]]
+    scenario_state.update(captured)
+
+
+# ----- F-TRIAGE-SEARCH: Then steps -----
+
+
+@then("only the work items whose title contains that fragment are listed")
+def _only_matching_titles_listed(scenario_state: dict[str, Any]) -> None:
+    fragment = scenario_state["search_query"].lower()
+    expected = sorted(
+        item.title for item in scenario_state["loaded_items"] if fragment in item.title.lower()
+    )
+    assert expected, scenario_state["loaded_items"]
+    assert len(expected) < len(scenario_state["loaded_items"]), "fixture cannot prove filtering"
+    assert _listed_titles(scenario_state) == expected
+
+
+@then("only that work item is listed")
+def _only_that_work_item_listed(scenario_state: dict[str, Any]) -> None:
+    target = scenario_state["search_target"]
+    assert _listed_titles(scenario_state) == [target.title]
+    assert scenario_state["search_rows"][0][0] == f"{format_type_label(target)}#{target.number}"
+
+
+@then("only the work items from that repository are listed")
+def _only_items_from_repository_listed(scenario_state: dict[str, Any]) -> None:
+    repo = scenario_state["search_repo"]
+    expected = sorted(item.title for item in scenario_state["loaded_items"] if item.repo == repo)
+    assert len(expected) < len(scenario_state["loaded_items"]), "fixture cannot prove filtering"
+    assert _listed_titles(scenario_state) == expected
+    assert {row[1] for row in scenario_state["search_rows"]} == {repo}
+
+
+@then("the system reports how many of the loaded work items matched")
+def _reports_matched_count(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
+    # The expected count comes from the seeded items and the query, never from the
+    # rendered rows, so the report is proved even if the list were not filtered.
+    fragment = scenario_state["search_query"].lower()
+    matched = sum(1 for item in work_items if fragment in item.title.lower())
+    assert 0 < matched < len(work_items), "fixture cannot prove the reported count"
+    assert scenario_state["search_status"] == (
+        f"Search matched {matched} of {len(work_items)} item(s)."
+    ), scenario_state["search_status"]
+
+
+@then("no search box is shown")
+def _no_search_box_shown(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["search_modal_names"] == [], scenario_state["search_modal_names"]
+
+
+@then("all loaded work items are listed again")
+def _all_loaded_items_listed_again(
+    scenario_state: dict[str, Any], work_items: list[WorkItem]
+) -> None:
+    # Seeded items plus anything the scenario added while the filter was active.
+    expected = sorted([item.title for item in work_items] + scenario_state.get("added_titles", []))
+    assert len(expected) > 1, "fixture cannot prove the filter was cleared"
+    assert _listed_titles(scenario_state) == expected
+
+
+@then("all refreshed work items are listed")
+def _all_refreshed_items_listed(scenario_state: dict[str, Any]) -> None:
+    listed = sorted(row[2].lstrip("* ") for row in scenario_state["refresh_rows"])
+    assert listed == sorted(item.title for item in scenario_state["refreshed_items"])
+
+
+@then("the included work item is listed")
+def _included_work_item_listed(scenario_state: dict[str, Any]) -> None:
+    assert any(row[0] == "PR+#111" for row in scenario_state["search_rows"]), scenario_state[
+        "search_rows"
+    ]
+
+
+@then("the action bar lists the search action first")
+def _action_bar_lists_search_first(work_items: list[WorkItem]) -> None:
+    captured: dict[str, Any] = {}
+
+    async def interactions(app, pilot) -> None:
+        captured["hint"] = app.query_one("#command-footer", Static).render()
+
+    run_app(work_items=list(work_items), interactions=interactions)
+    hint = captured["hint"]
+    assert hint.plain.startswith(_SEARCH_ACTION_HINT), hint.plain
+    # No filter is active yet, so nothing in the bar is emphasized.
+    assert hint.spans == [], hint.spans
+
+
+@then("the action bar emphasizes the search action")
+def _action_bar_emphasizes_search(scenario_state: dict[str, Any]) -> None:
+    spans = scenario_state["search_hint_spans"]
+    assert [(start, end) for start, end, _ in spans] == [(0, len(_SEARCH_ACTION_HINT))], spans
+    assert all("bold" in style for _, _, style in spans), spans
+
+
+@then("the action bar does not show the filter text")
+def _action_bar_hides_filter_text(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["search_hint"] == _FULL_ACTION_BAR
+
+
+@then("no work items are listed")
+def _no_work_items_listed(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["search_rows"] == []
+
+
+@then("the system reports that no work items matched")
+def _reports_no_matches(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
+    # The total comes from the seeded items, not from what the table happened to show.
+    assert scenario_state["search_status"] == (f"Search matched 0 of {len(work_items)} item(s)."), (
+        scenario_state["search_status"]
+    )

@@ -8,13 +8,13 @@ import pytest
 pytest.importorskip("textual")
 
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Input, Static
 
 from workdash.backend import IncludeResult
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
-from workdash.tui import AnalyzeDialog, CodeDialog, WorkdashApp
+from workdash.tui import AnalyzeDialog, CodeDialog, SearchDialog, WorkdashApp
 
 _DEFAULT_TUI_CONFIG = WorkdashConfig(
     claude=AgentConfig(analyze="claude -p", launch="claude"),
@@ -80,6 +80,43 @@ def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_colum
                 "6d",
                 "6d",
             ]
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_truncates_a_long_repo_column_on_the_left() -> None:
+    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+    work_items = [
+        WorkItem(
+            kind=WorkItemKind.TRACKED_PR,
+            item_type=WorkItemType.PR,
+            repo="posit-dev/rsconnect-python",  # exactly the column width
+            number=22,
+            title="Implement renderer",
+            created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+            url="https://example.com/pull/22",
+        ),
+        WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE,
+            item_type=WorkItemType.ISSUE,
+            repo="posit-dev/rsconnect-python-longer",
+            number=11,
+            title="Fix parser",
+            created_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+            url="https://example.com/issues/11",
+        ),
+    ]
+    app = WorkdashApp(work_items=work_items, now_utc=now_utc)
+
+    async def run_smoke() -> None:
+        async with app.run_test() as _:
+            table = app.query_one("#work-items", DataTable)
+            assert str(table.get_row_at(0)[1]) == "posit-dev/rsconnect-python"
+            # The owner is cut, the repository name itself stays readable.
+            assert str(table.get_row_at(1)[1]) == "…v/rsconnect-python-longer"
+            assert len(str(table.get_row_at(1)[1])) == len("posit-dev/rsconnect-python")
 
     asyncio.run(run_smoke())
 
@@ -629,9 +666,9 @@ def test_workdash_app_shows_command_hint_bar() -> None:
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
             command_bar = app.query_one("#command-footer", Static)
-            assert (
-                command_bar.render().plain
-                == "(o)pen (r)efresh (a)nalyze (c)ode (d)iff (t)erminal (i)nclude (w)todo (q)uit"
+            assert command_bar.render().plain == (
+                "(/)search (o)pen (r)efresh (a)nalyze (c)ode (d)iff "
+                "(t)erminal (i)nclude (w)todo (q)uit"
             )
             await pilot.press("q")
 
@@ -1193,6 +1230,437 @@ def test_workdash_app_code_dialog_no_focus_option_without_active_agent() -> None
             assert dialog is not None
             # Verify no active panes
             assert dialog._active_agent_panes == []
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+_SEARCH_NOW_UTC = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+
+
+def _search_work_items() -> list[WorkItem]:
+    """Three items whose Type/Repo/Title columns are pairwise distinguishable."""
+
+    return [
+        WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE,
+            item_type=WorkItemType.ISSUE,
+            repo="owner/repo",
+            number=11,
+            title="Fix the parser",
+            created_at=datetime(2026, 2, 1, 0, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+            url="https://github.com/owner/repo/issues/11",
+        ),
+        WorkItem(
+            kind=WorkItemKind.TRACKED_PR,
+            item_type=WorkItemType.PR,
+            repo="owner/other",
+            number=22,
+            title="Ship the docs",
+            created_at=datetime(2026, 2, 10, 0, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 2, 21, 0, 0, 0, tzinfo=UTC),
+            url="https://github.com/owner/other/pull/22",
+        ),
+        WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE,
+            item_type=WorkItemType.ISSUE,
+            repo="owner/repo",
+            number=33,
+            title="Unrelated chore",
+            created_at=datetime(2026, 2, 15, 0, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 2, 22, 0, 0, 0, tzinfo=UTC),
+            url="https://github.com/owner/repo/issues/33",
+        ),
+    ]
+
+
+async def _submit_search(app: WorkdashApp, pilot, query: str) -> None:
+    """Open the search box and submit ``query``; no filter may be active."""
+
+    await pilot.press("/")
+    await pilot.pause()
+    assert isinstance(app.screen, SearchDialog)
+    app.screen.query_one("#search-text", Input).value = query
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+def _listed_titles(app: WorkdashApp) -> list[str]:
+    table = app.query_one("#work-items", DataTable)
+    return [str(table.get_row_at(index)[2]) for index in range(table.row_count)]
+
+
+# The unfiltered listing of _search_work_items(), newest update first.
+_ALL_SEARCH_TITLES = ["Unrelated chore", "Ship the docs", "Fix the parser"]
+
+
+def test_workdash_app_search_matches_the_owner_cut_from_the_repo_column() -> None:
+    work_items = _search_work_items()
+    work_items[0].repo = "a-very-long-owner-name/some-repository"
+    app = WorkdashApp(work_items=work_items, now_utc=_SEARCH_NOW_UTC)
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await _submit_search(app, pilot, "a-very-long-owner-name")
+            assert _listed_titles(app) == ["Fix the parser"]
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_search_matches_rendered_columns_ignoring_case() -> None:
+    work_items = _search_work_items()
+    app = WorkdashApp(
+        work_items=work_items,
+        # The oldest item carries the suggestion marker, so its rendered title
+        # is "* Fix the parser".
+        suggestion_markers={(WorkItemType.ISSUE, "owner/repo", 11): "*"},
+        now_utc=_SEARCH_NOW_UTC,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+            command_bar = app.query_one("#command-footer", Static)
+
+            # Case is ignored and internal spaces must match literally.
+            await _submit_search(app, pilot, "fix the PARSER")
+            assert _listed_titles(app) == ["* Fix the parser"]
+            assert footer.render().plain == "Search matched 1 of 3 item(s)."
+
+            await pilot.press("/")
+            await pilot.pause()
+            # The same words in reversed order carry no match: the needle is one
+            # literal substring, not a set of independently matched words.
+            await _submit_search(app, pilot, "parser fix")
+            assert _listed_titles(app) == []
+
+            await pilot.press("/")
+            await pilot.pause()
+            assert _listed_titles(app) == ["Unrelated chore", "Ship the docs", "* Fix the parser"]
+            assert footer.render().plain == "Search cleared; 3 item(s) shown."
+            # The search action is emphasized only while a filter is active.
+            assert command_bar.render().spans == []
+
+            await _submit_search(app, pilot, "OWNER/OTHER")
+            assert _listed_titles(app) == ["Ship the docs"]
+
+            await pilot.press("/")
+            await pilot.pause()
+            await _submit_search(app, pilot, "issue#33")
+            assert _listed_titles(app) == ["Unrelated chore"]
+
+            await pilot.press("/")
+            await pilot.pause()
+            # The Age and Last Update columns are never searched: "6d" is the
+            # rendered Last Update of the parser issue (and part of the "16d"
+            # age of the docs PR).
+            await _submit_search(app, pilot, "6d")
+            assert _listed_titles(app) == []
+
+            await pilot.press("/")
+            await pilot.pause()
+            # The suggestion marker is decoration, not searchable content.
+            await _submit_search(app, pilot, "*")
+            assert _listed_titles(app) == []
+            assert footer.render().plain == "Search matched 0 of 3 item(s)."
+
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_search_box_dismissed_without_text_leaves_the_list_unchanged() -> None:
+    app = WorkdashApp(work_items=_search_work_items(), now_utc=_SEARCH_NOW_UTC)
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await pilot.press("/")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            assert _listed_titles(app) == _ALL_SEARCH_TITLES
+
+            await _submit_search(app, pilot, "")
+            assert _listed_titles(app) == _ALL_SEARCH_TITLES
+
+            await _submit_search(app, pilot, "   ")
+            assert _listed_titles(app) == _ALL_SEARCH_TITLES
+
+            _assert_no_modal_screens(app)
+            assert app.query_one("#status-footer", Static).render().plain == "Ready."
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_actions_use_the_row_selected_in_the_filtered_list() -> None:
+    work_items = _search_work_items()
+    opened: list[WorkItem] = []
+    app = WorkdashApp(
+        work_items=work_items,
+        open_callback=opened.append,
+        now_utc=_SEARCH_NOW_UTC,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            table = app.query_one("#work-items", DataTable)
+            # Sorted by updated_at descending the parser issue is last; after
+            # filtering the cursor must clamp onto it as the only row.
+            await _submit_search(app, pilot, "parser")
+            assert table.cursor_row == 0
+            assert app._selected_item() is work_items[0]
+            await pilot.press("o")
+            await _wait_for_footer(
+                app.query_one("#status-footer", Static),
+                "Opened issue owner/repo#11.",
+                pilot,
+            )
+            assert opened == [work_items[0]]
+
+            await pilot.press("/")
+            await pilot.pause()
+            await _submit_search(app, pilot, "no-such-item")
+            assert app._selected_item() is None
+            await pilot.press("o")
+            await _wait_for_footer(app.query_one("#status-footer", Static), "Open skipped.", pilot)
+            assert opened == [work_items[0]]
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_capture_todo_clears_the_search_filter() -> None:
+    work_items = _search_work_items()
+    app = WorkdashApp(
+        work_items=work_items,
+        session=MagicMock(work_items=work_items, suggestion_markers={}),
+        todo_callback=lambda _text, _target: {"item_id": "issue owner/todos#7"},
+        now_utc=_SEARCH_NOW_UTC,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await _submit_search(app, pilot, "parser")
+            assert _listed_titles(app) == ["Fix the parser"]
+
+            # The captured todo joins the loaded list, so it must not stay hidden.
+            await app._perform_todo("Write the changelog", "")
+            await _wait_for_footer(
+                app.query_one("#status-footer", Static),
+                "Captured todo issue owner/todos#7.",
+                pilot,
+            )
+            assert _listed_titles(app) == _ALL_SEARCH_TITLES
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_include_of_an_already_tracked_item_clears_the_search_filter() -> None:
+    work_items = _search_work_items()
+    duplicate = work_items[1]
+    app = WorkdashApp(
+        work_items=work_items,
+        include_callback=lambda _url, _identities: IncludeResult(
+            duplicate_identity=(duplicate.item_type, duplicate.repo, duplicate.number)
+        ),
+        now_utc=_SEARCH_NOW_UTC,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await _submit_search(app, pilot, "parser")
+            assert _listed_titles(app) == ["Fix the parser"]
+
+            await app._perform_include(duplicate.url)
+            await pilot.pause()
+            assert _listed_titles(app) == _ALL_SEARCH_TITLES
+            assert app._selected_item() is duplicate
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_failed_include_keeps_the_search_filter_active() -> None:
+    app = WorkdashApp(
+        work_items=_search_work_items(),
+        include_callback=MagicMock(
+            side_effect=[IncludeResult(invalid=True), IncludeResult(transient_failure=True)]
+        ),
+        now_utc=_SEARCH_NOW_UTC,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            command_bar = app.query_one("#command-footer", Static)
+            await _submit_search(app, pilot, "parser")
+
+            # A failed include leaves the loaded list unchanged, so the filter stays on.
+            for _ in range(2):
+                await app._perform_include("https://github.com/owner/repo/issues/44")
+                await pilot.pause()
+                assert _listed_titles(app) == ["Fix the parser"]
+                spans = command_bar.render().spans
+                assert [(s.start, s.end, str(s.style)) for s in spans] == [(0, 9, "bold")]
+
+            # The filter is still live, so "/" clears it instead of reopening search.
+            await pilot.press("/")
+            await pilot.pause()
+            _assert_no_modal_screens(app)
+            assert _listed_titles(app) == _ALL_SEARCH_TITLES
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_analyze_keeps_the_active_search_filter() -> None:
+    app = WorkdashApp(
+        work_items=_search_work_items(),
+        analyze_callback=lambda _item, _choice="codex": None,
+        analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
+        now_utc=_SEARCH_NOW_UTC,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await _submit_search(app, pilot, "parser")
+            assert _listed_titles(app) == ["Fix the parser"]
+
+            # A fresh analysis re-renders the table to show the new suggestion
+            # markers, but it does not change the loaded list, so the filter stays.
+            await pilot.press("a")
+            await pilot.pause()
+            await pilot.press("1")
+            await _wait_for_footer(
+                app.query_one("#status-footer", Static),
+                "Analyzed issue owner/repo#11 with Claude.",
+                pilot,
+            )
+            assert _listed_titles(app) == ["Fix the parser"]
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def _cursor_anchor_work_items() -> list[WorkItem]:
+    """Five items where the "parser" matches land on different rows once unfiltered."""
+
+    def _item(number: int, title: str, updated_day: int) -> WorkItem:
+        return WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE,
+            item_type=WorkItemType.ISSUE,
+            repo="owner/repo",
+            number=number,
+            title=title,
+            created_at=datetime(2026, 2, 1, 0, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 2, updated_day, 0, 0, 0, tzinfo=UTC),
+            url=f"https://github.com/owner/repo/issues/{number}",
+        )
+
+    # Listed newest first: epsilon, beta, gamma, delta, alpha.
+    return [
+        _item(1, "epsilon parser", 25),
+        _item(2, "beta docs", 24),
+        _item(3, "gamma parser", 23),
+        _item(4, "delta chore", 22),
+        _item(5, "alpha parser", 21),
+    ]
+
+
+# The unfiltered listing of _cursor_anchor_work_items(), newest update first.
+_ALL_CURSOR_ANCHOR_TITLES = [
+    "epsilon parser",
+    "beta docs",
+    "gamma parser",
+    "delta chore",
+    "alpha parser",
+]
+
+
+def test_workdash_app_clearing_the_search_filter_keeps_the_selected_item() -> None:
+    work_items = _cursor_anchor_work_items()
+    opened: list[WorkItem] = []
+    app = WorkdashApp(
+        work_items=work_items,
+        open_callback=opened.append,
+        now_utc=_SEARCH_NOW_UTC,
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            table = app.query_one("#work-items", DataTable)
+            await _submit_search(app, pilot, "parser")
+            assert _listed_titles(app) == ["epsilon parser", "gamma parser", "alpha parser"]
+
+            await pilot.press("down", "down")
+            await pilot.pause()
+            assert app._selected_item() is work_items[4]
+
+            # Clearing the filter must keep the same item selected, not row 2 of
+            # the full list ("gamma parser").
+            await pilot.press("/")
+            await pilot.pause()
+            assert _listed_titles(app) == _ALL_CURSOR_ANCHOR_TITLES
+            assert app._selected_item() is work_items[4]
+            assert table.cursor_row == 4
+
+            await pilot.press("o")
+            await _wait_for_footer(
+                app.query_one("#status-footer", Static),
+                "Opened issue owner/repo#5.",
+                pilot,
+            )
+            assert opened == [work_items[4]]
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_session_refresh_keeps_the_selected_item_while_filtered() -> None:
+    work_items = _cursor_anchor_work_items()
+    session = MagicMock(work_items=work_items, suggestion_markers={})
+    app = WorkdashApp(work_items=work_items, session=session, now_utc=_SEARCH_NOW_UTC)
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await _submit_search(app, pilot, "parser")
+            await pilot.press("down", "down")
+            await pilot.pause()
+            assert app._selected_item() is work_items[4]
+
+            # A control-server push clears the filter and re-renders with no keypress.
+            app.refresh_from_session()
+            await pilot.pause()
+            assert _listed_titles(app) == _ALL_CURSOR_ANCHOR_TITLES
+            assert app._selected_item() is work_items[4]
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_session_refresh_dropping_the_selected_item_clamps_the_cursor() -> None:
+    """With no search involved, a shorter refreshed list must pull the cursor back in range."""
+
+    work_items = _cursor_anchor_work_items()
+    session = MagicMock(work_items=work_items, suggestion_markers={})
+    app = WorkdashApp(work_items=work_items, session=session, now_utc=_SEARCH_NOW_UTC)
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            table = app.query_one("#work-items", DataTable)
+            await pilot.press("down", "down", "down", "down")
+            await pilot.pause()
+            assert app._selected_item() is work_items[4]
+
+            session.work_items = work_items[:2]
+            app.refresh_from_session()
+            await pilot.pause()
+            assert _listed_titles(app) == ["epsilon parser", "beta docs"]
+            assert table.cursor_row == 1
+            assert app._selected_item() is work_items[1]
             await pilot.press("q")
 
     asyncio.run(run_smoke())

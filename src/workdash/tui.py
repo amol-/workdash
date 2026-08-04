@@ -23,6 +23,8 @@ SuggestionMarkers = dict[tuple[WorkItemType, str, int], str]
 RefreshCallbackResult = Sequence[WorkItem] | tuple[Sequence[WorkItem], SuggestionMarkers]
 AnalyzeCallbackResult = str | None
 _CallbackResult = TypeVar("_CallbackResult")
+# The Repo column is capped at this reference name so the title keeps more room.
+_MAX_REPO_WIDTH = len("posit-dev/rsconnect-python")
 
 if TYPE_CHECKING:
     from .control import WorkdashSession
@@ -32,6 +34,18 @@ def _to_utc(dt: datetime) -> datetime:
     if dt.tzinfo is not None:
         return dt.astimezone(UTC)
     return dt.replace(tzinfo=UTC)
+
+
+def _repo_column(item: WorkItem) -> str:
+    """Return the Repo column text, cutting a long owner off the left.
+
+    :param WorkItem item: the work item whose repository is shown.
+    """
+
+    repo = display_repo(item)
+    if len(repo) <= _MAX_REPO_WIDTH:
+        return repo
+    return f"…{repo[-(_MAX_REPO_WIDTH - 1) :]}"
 
 
 class BusyScreen(ModalScreen[None]):
@@ -265,6 +279,41 @@ class TodoDialog(ModalScreen[tuple[str, str] | None]):
         self.dismiss(None)
 
 
+class SearchDialog(ModalScreen[str | None]):
+    """Modal dialog that accepts text to narrow the listed work items."""
+
+    DEFAULT_CSS = """
+        #search-shell {
+            align: center middle;
+            width: 70;
+            height: auto;
+            max-height: 9;
+            border: solid $accent;
+            background: $surface;
+            padding: 1 2;
+        }
+        #search-text {
+            width: 100%;
+        }
+        """
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="search-shell"):
+            yield Static("Filter items by type, repository, or title:")
+            yield Input(placeholder="parser", id="search-text")
+            yield Static("(Enter to confirm, Esc to cancel)")
+
+    def on_mount(self) -> None:
+        self.query_one("#search-text", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class WorkdashApp(App[None]):
     """Main Textual app shell."""
 
@@ -281,10 +330,13 @@ class WorkdashApp(App[None]):
             padding: 0 1;
         }
         """
+    SEARCH_HINT_TEXT = "(/)search"
     COMMAND_HINT_TEXT = (
-        "(o)pen (r)efresh (a)nalyze (c)ode (d)iff (t)erminal (i)nclude (w)todo (q)uit"
+        f"{SEARCH_HINT_TEXT} (o)pen (r)efresh (a)nalyze (c)ode (d)iff "
+        "(t)erminal (i)nclude (w)todo (q)uit"
     )
     BINDINGS = [
+        ("/", "search_items", "Search"),
         ("o", "open_link", "Open"),
         ("r", "refresh_items", "Refresh"),
         ("a", "analyze_item", "Analyze"),
@@ -321,6 +373,8 @@ class WorkdashApp(App[None]):
         self._session = session
         self._work_items = list(work_items or ())
         self._sorted_work_items: list[WorkItem] = []
+        # Cleared whenever the loaded list changes so new items are never hidden.
+        self._search_filter = ""
         self._suggestion_markers = dict(suggestion_markers or {})
         self._open_callback = open_callback
         self._refresh_callback = refresh_callback
@@ -340,7 +394,7 @@ class WorkdashApp(App[None]):
     def compose(self) -> ComposeResult:
         yield DataTable(id="work-items")
         yield Static(self._status_message, id="status-footer")
-        yield Static(self.COMMAND_HINT_TEXT, id="command-footer")
+        yield Static(self._command_hint(), id="command-footer")
 
     def on_mount(self) -> None:
         if self._session is not None:
@@ -351,6 +405,7 @@ class WorkdashApp(App[None]):
     def refresh_from_session(self) -> None:
         if self._session is None:
             return
+        self._search_filter = ""
         self._work_items = list(self._session.work_items)
         self._suggestion_markers = dict(self._session.suggestion_markers)
         self._render_table()
@@ -363,10 +418,21 @@ class WorkdashApp(App[None]):
         marker = self._suggestion_markers.get((item.item_type, item.repo, item.number))
         return f"* {item.title}" if marker else item.title
 
+    def _command_hint(self) -> Text:
+        hint = Text(self.COMMAND_HINT_TEXT)
+        if self._search_filter:
+            hint.stylize("bold", 0, len(self.SEARCH_HINT_TEXT))
+        return hint
+
     def _render_table(self, *, focus_item: WorkItem | None = None) -> None:
         table = self.query_one("#work-items", DataTable)
         table.cursor_type = "row"
         previous_row = table.cursor_row if table.cursor_row is not None else 0
+        # Anchor on the selected item by default: the row set changes wholesale
+        # when a search filter is applied or cleared, so keeping the row index
+        # would silently move the selection to a different work item.
+        if focus_item is None:
+            focus_item = self._selected_item()
         if table.columns:
             table.clear()
         else:
@@ -375,8 +441,23 @@ class WorkdashApp(App[None]):
             table.add_column("Title", key="title")
             table.add_column("Age", key="age")
             table.add_column("Last Update", key="last_update")
+        needle = self._search_filter.lower()
+        # Match the rendered Type/Repo/Title text. The raw title is used so the
+        # "* " suggestion marker is never searchable.
+        matched_items = [
+            item
+            for item in self._work_items
+            if any(
+                needle in value.lower()
+                for value in (
+                    f"{format_type_label(item)}#{item.number}",
+                    display_repo(item),
+                    item.title,
+                )
+            )
+        ]
         self._sorted_work_items = sorted(
-            self._work_items,
+            matched_items,
             key=lambda entry: entry.updated_at,
             reverse=True,
         )
@@ -390,7 +471,7 @@ class WorkdashApp(App[None]):
             if _to_utc(item.updated_at) >= cutoff:
                 table.add_row(
                     Text(type_label, style="bold"),
-                    Text(display_repo(item), style="bold"),
+                    Text(_repo_column(item), style="bold"),
                     Text(title, style="bold"),
                     Text(f"{age_days}d", style="bold"),
                     Text(f"{update_days}d", style="bold"),
@@ -399,7 +480,7 @@ class WorkdashApp(App[None]):
             else:
                 table.add_row(
                     type_label,
-                    display_repo(item),
+                    _repo_column(item),
                     title,
                     f"{age_days}d",
                     f"{update_days}d",
@@ -417,6 +498,7 @@ class WorkdashApp(App[None]):
                         target_row = index
                         break
             table.move_cursor(row=min(max(target_row, 0), len(self._sorted_work_items) - 1))
+        self.query_one("#command-footer", Static).update(self._command_hint())
 
     def _selected_item(self) -> WorkItem | None:
         table = self.query_one("#work-items", DataTable)
@@ -460,6 +542,24 @@ class WorkdashApp(App[None]):
     def _choice_tool_label(self, choices: Sequence[WorkdashAgentChoice], agent: str) -> str:
         return next((choice.tool_label for choice in choices if choice.agent == agent), agent)
 
+    async def action_search_items(self) -> None:
+        if self._search_filter:
+            self._search_filter = ""
+            self._render_table()
+            self._update_status(f"Search cleared; {len(self._work_items)} item(s) shown.")
+            return
+
+        def _on_dialog_result(query: str | None) -> None:
+            if not query:
+                return
+            self._search_filter = query
+            self._render_table()
+            self._update_status(
+                f"Search matched {len(self._sorted_work_items)} of {len(self._work_items)} item(s)."
+            )
+
+        await self.push_screen(SearchDialog(), callback=_on_dialog_result)
+
     async def action_open_link(self) -> None:
         selected_item = self._selected_item()
         if selected_item is None or self._open_callback is None:
@@ -496,6 +596,7 @@ class WorkdashApp(App[None]):
                 self._suggestion_markers = dict(refreshed[1])
             else:
                 self._work_items = list(refreshed)
+            self._search_filter = ""
             self._render_table()
         except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
             self._update_status(f"Refresh failed: {error}")
@@ -756,6 +857,7 @@ class WorkdashApp(App[None]):
                 if item.item_type == item_type and item.repo == repo and item.number == number
             )
             existing.included = True
+            self._search_filter = ""
             self._render_table(focus_item=existing)
             self._update_status(
                 f"Already tracking {existing.item_type.value} "
@@ -780,6 +882,7 @@ class WorkdashApp(App[None]):
             # newer/better candidate is highlighted correctly on the next render.
             self._suggestion_markers = compute_suggestion_markers(self._work_items)
             existing = fetched_item
+        self._search_filter = ""
         self._render_table(focus_item=existing)
         self._update_status(
             f"Included {fetched_item.item_type.value} {fetched_item.repo}#{fetched_item.number}."

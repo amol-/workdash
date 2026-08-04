@@ -128,6 +128,8 @@ The `repositories` list in `config.json` accepts:
 
 ## TUI keybindings
 
+- `/` — search/filter the listed items by Type, Repo, or Title. Press `/` again
+  to clear.
 - `o` — open the selected item in your browser.
 - `r` — refresh the list from GitHub.
 - `a` — analyze the selected item. Opens a dialog to open the cached analysis
