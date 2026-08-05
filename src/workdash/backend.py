@@ -112,7 +112,9 @@ class WorkdashBackend:
         with ThreadPoolExecutor(max_workers=6) as executor:
             report_progress("Fetching open authored pull requests...")
             authored_future = executor.submit(
-                self.github_client.list_open_authored_prs, github_username
+                self.github_client.list_open_authored_prs,
+                github_username,
+                progress_callback=report_progress,
             )
             report_progress("Fetching open review-requested pull requests...")
             review_requested_future = executor.submit(

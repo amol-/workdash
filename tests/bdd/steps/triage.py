@@ -489,7 +489,9 @@ def _another_tracked_repository_has_open_work(
         "You must grant your OAuth token access to this organization."
     )
 
-    monkeypatch.setattr(GitHubClient, "list_open_authored_prs", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient, "list_open_authored_prs", lambda self, login, progress_callback=None: []
+    )
     monkeypatch.setattr(
         GitHubClient,
         "list_open_review_requested_prs",
@@ -603,7 +605,9 @@ def _another_review_requested_pr_has_direct_request(
         "You must grant your OAuth token access to this organization."
     )
 
-    monkeypatch.setattr(GitHubClient, "list_open_authored_prs", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient, "list_open_authored_prs", lambda self, login, progress_callback=None: []
+    )
     monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
     monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
     monkeypatch.setattr(
@@ -719,6 +723,123 @@ def _warns_unauthorized_review_requested_pr_skipped(
     )
     assert any(
         "Warning: skipped review-requested pull request" in message
+        and item_label in message
+        and "SAML enforcement" in message
+        for message in scenario_state["progress_messages"]
+    )
+
+
+# -- S010: authored pull-request authorization failures -------------------
+
+
+@given("one authored pull request requires additional GitHub authorization")
+def _one_authored_pr_requires_authorization(scenario_state: dict[str, Any]) -> None:
+    scenario_state["unauthorized_authored_repo"] = "protected-org/protected-repo"
+    scenario_state["unauthorized_authored_number"] = 860
+
+
+@given("another authored pull request has a passing CI result")
+def _another_authored_pr_has_passing_ci(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    unauthorized_repo = scenario_state["unauthorized_authored_repo"]
+    unauthorized_number = scenario_state["unauthorized_authored_number"]
+    authorized_repo = "owner/repo"
+    authorized_number = 42
+    scenario_state["authorized_authored_repo"] = authorized_repo
+    scenario_state["authorized_authored_number"] = authorized_number
+    saml_error = "Resource protected by organization SAML enforcement."
+
+    monkeypatch.setattr(GitHubClient, "list_open_review_requested_prs", lambda *args, **kwargs: [])
+    monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda *args, **kwargs: [])
+    monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda *args, **kwargs: [])
+    monkeypatch.setattr(GitHubClient, "list_recent_tracked_items", lambda *args, **kwargs: [])
+    monkeypatch.setattr(GitHubClient, "list_open_todo_issues", lambda *args, **kwargs: [])
+
+    def fake_run(command, **kwargs):
+        if command[:3] == ["gh", "search", "prs"] and "--author" in command:
+            payload = [
+                {
+                    "id": "UNAUTHORIZED-AUTHORED",
+                    "number": unauthorized_number,
+                    "title": "Unauthorized authored pull request",
+                    "url": f"https://github.com/{unauthorized_repo}/pull/{unauthorized_number}",
+                    "createdAt": "2026-04-20T00:00:00Z",
+                    "updatedAt": "2026-04-21T00:00:00Z",
+                    "isDraft": False,
+                    "repository": {"nameWithOwner": unauthorized_repo},
+                },
+                {
+                    "id": "AUTHORIZED-AUTHORED",
+                    "number": authorized_number,
+                    "title": "Authorized authored pull request",
+                    "url": f"https://github.com/{authorized_repo}/pull/{authorized_number}",
+                    "createdAt": "2026-04-22T00:00:00Z",
+                    "updatedAt": "2026-04-23T00:00:00Z",
+                    "isDraft": False,
+                    "repository": {"nameWithOwner": authorized_repo},
+                },
+            ]
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+        if command[:3] == ["gh", "api", "graphql"]:
+            payload = {
+                "data": {
+                    "p0": None,
+                    "p1": {
+                        "pullRequest": {
+                            "commits": {
+                                "nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]
+                            }
+                        }
+                    },
+                },
+                "errors": [{"type": "FORBIDDEN", "path": ["p0"], "message": saml_error}],
+            }
+            raise subprocess.CalledProcessError(
+                1, command, output=json.dumps(payload), stderr=saml_error
+            )
+        raise AssertionError(f"Unexpected gh command in authored auth scenario: {command}")
+
+    monkeypatch.setattr("workdash.github_client.subprocess.run", fake_run)
+
+    def hook(state: dict[str, Any], items: list[WorkItem], _mp: pytest.MonkeyPatch) -> None:
+        progress_messages: list[str] = []
+        backend = WorkdashBackend(
+            cache_root=tmp_path / "cache",
+            config=WorkdashConfig(github_username="testuser", repositories=(authorized_repo,)),
+            included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+        )
+        fetched, markers = backend.load_items(progress_callback=progress_messages.append)
+        items[:] = fetched
+        state["work_items"] = fetched
+        state["suggestion_markers"] = markers
+        state["progress_messages"] = progress_messages
+
+    scenario_state["_open_dashboard_hook"] = hook
+
+
+@then("the authorized authored pull request appears with its CI result")
+def _authorized_authored_pr_appears_with_ci(scenario_state: dict[str, Any]) -> None:
+    item = next(
+        item
+        for item in scenario_state["work_items"]
+        if item.repo == scenario_state["authorized_authored_repo"]
+        and item.number == scenario_state["authorized_authored_number"]
+    )
+    assert item.kind == WorkItemKind.AUTHORED_PR
+    assert item.ci_state == "SUCCESS"
+
+
+@then("the system warns that the unauthorized authored pull request was skipped")
+def _warns_unauthorized_authored_pr_skipped(scenario_state: dict[str, Any]) -> None:
+    item_label = (
+        f"{scenario_state['unauthorized_authored_repo']}"
+        f"#{scenario_state['unauthorized_authored_number']}"
+    )
+    assert any(
+        "Warning: skipped authored pull request" in message
         and item_label in message
         and "SAML enforcement" in message
         for message in scenario_state["progress_messages"]
@@ -1512,7 +1633,9 @@ def _install_gh_fetch_fake(
 def _install_empty_github_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub every non-include GitHub client method to return empty lists."""
 
-    monkeypatch.setattr(GitHubClient, "list_open_authored_prs", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient, "list_open_authored_prs", lambda self, login, progress_callback=None: []
+    )
     monkeypatch.setattr(
         GitHubClient,
         "list_open_review_requested_prs",
@@ -1652,7 +1775,9 @@ def _seed_three_included_items(
     # PR #333 is surfaced by the review-requested source too; the backend
     # merges the included payload into the existing REVIEW row, keeping the
     # REVIEW classification while flipping `included` to True.
-    monkeypatch.setattr(GitHubClient, "list_open_authored_prs", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient, "list_open_authored_prs", lambda self, login, progress_callback=None: []
+    )
     monkeypatch.setattr(
         GitHubClient,
         "list_open_review_requested_prs",

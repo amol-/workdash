@@ -48,7 +48,7 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
         return ["owner/repo", "owner/other-repo"]
 
     class FakeGitHubClient:
-        def list_open_authored_prs(self, login):
+        def list_open_authored_prs(self, login, progress_callback=None):
             captured["authored_called"] = True
             return [
                 {
@@ -245,7 +245,7 @@ def test_load_items_keeps_only_the_most_recently_updated_items(
     ]
 
     class FakeGitHubClient:
-        def list_open_authored_prs(self, login):
+        def list_open_authored_prs(self, login, progress_callback=None):
             return []
 
         def list_open_review_requested_prs(self, login, progress_callback=None):
@@ -321,7 +321,7 @@ def test_load_items_keeps_a_hand_picked_item_older_than_every_discovered_item(
     included_item.included = True
 
     class FakeGitHubClient:
-        def list_open_authored_prs(self, login):
+        def list_open_authored_prs(self, login, progress_callback=None):
             return []
 
         def list_open_review_requested_prs(self, login, progress_callback=None):
@@ -369,7 +369,7 @@ def test_load_items_keeps_the_todo_target_when_the_same_issue_is_also_assigned(
     }
 
     class FakeGitHubClient:
-        def list_open_authored_prs(self, login):
+        def list_open_authored_prs(self, login, progress_callback=None):
             return []
 
         def list_open_review_requested_prs(self, login, progress_callback=None):
@@ -416,7 +416,9 @@ def test_load_items_survives_a_todo_repository_that_does_not_exist_yet(
         "created_at": "2026-02-01T00:00:00Z",
         "updated_at": "2026-02-01T01:00:00Z",
     }
-    monkeypatch.setattr(GitHubClient, "list_open_authored_prs", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient, "list_open_authored_prs", lambda self, login, progress_callback=None: []
+    )
     monkeypatch.setattr(
         GitHubClient,
         "list_open_review_requested_prs",
@@ -485,7 +487,7 @@ def test_load_items_submits_independent_github_fetches_before_waiting(
             return FakeFuture(callback.__name__, callback, args, kwargs)
 
     class FakeGitHubClient:
-        def list_open_authored_prs(self, login):
+        def list_open_authored_prs(self, login, progress_callback=None):
             return []
 
         def list_open_review_requested_prs(self, login, progress_callback=None):
@@ -553,7 +555,9 @@ def test_compute_suggestion_markers_returns_empty_for_no_work_items() -> None:
 
 def test_analyze_item_uses_cache_then_falls_back_to_analyzer_and_saves() -> None:
     class FakeGitHubClient:
-        def list_open_authored_prs(self, login):  # pragma: no cover - unused here
+        def list_open_authored_prs(
+            self, login, progress_callback=None
+        ):  # pragma: no cover - unused here
             raise AssertionError("list_open_authored_prs should not be called")
 
         def list_open_review_requested_prs(self, login):  # pragma: no cover - unused here
@@ -640,7 +644,9 @@ def test_analyze_item_uses_cache_then_falls_back_to_analyzer_and_saves() -> None
 
 def test_analyze_item_tool_claude_bypasses_cache() -> None:
     class FakeGitHubClient:
-        def list_open_authored_prs(self, login):  # pragma: no cover - unused here
+        def list_open_authored_prs(
+            self, login, progress_callback=None
+        ):  # pragma: no cover - unused here
             raise AssertionError("list_open_authored_prs should not be called")
 
         def list_open_review_requested_prs(self, login):  # pragma: no cover - unused here

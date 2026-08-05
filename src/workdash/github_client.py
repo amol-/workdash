@@ -72,12 +72,8 @@ def parse_github_item_url(url: str) -> ParsedGitHubItemURL | None:
 _DEFAULT_PR_SEARCH_LIMIT = 1000
 _DEFAULT_ASSIGNED_ISSUE_LIMIT = 20
 _PR_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,isDraft,repository"
-# GraphQL selection matching `_PR_JSON_FIELDS` field for field, plus the CI
-# result of the head commit, which `gh search prs` cannot report at all.
-_AUTHORED_PR_SELECTION = (
-    "id number title url createdAt updatedAt isDraft repository { nameWithOwner } "
-    "commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }"
-)
+# `gh search prs` cannot report the CI result shown next to authored PRs.
+_AUTHORED_CI_SELECTION = "commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }"
 # GraphQL search returns at most 100 nodes per page, and nobody triages more
 # open authored pull requests than that.
 _AUTHORED_PR_SEARCH_LIMIT = 100
@@ -626,23 +622,25 @@ class GitHubClient:
         self,
         author_login: str,
         limit: int = _AUTHORED_PR_SEARCH_LIMIT,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> list[AuthoredPullRequest]:
-        """List open authored PRs across accessible repositories.
+        """List open authored PRs and their CI results across accessible repositories."""
 
-        This runs on GraphQL rather than `gh search prs` only because the CI
-        result shown next to each authored pull request is unavailable to the
-        search endpoint. It intentionally does not filter out draft PRs or fork
-        PRs.
-        """
-
-        search_query = f"author:{author_login} is:pr is:open"
+        report_progress = (
+            progress_callback if progress_callback is not None else _noop_progress_callback
+        )
         command = [
             "gh",
-            "api",
-            "graphql",
-            "-f",
-            f"query={{ search(query: {json.dumps(search_query)}, type: ISSUE, first: {limit}) "
-            f"{{ nodes {{ ... on PullRequest {{ {_AUTHORED_PR_SELECTION} }} }} }} }}",
+            "search",
+            "prs",
+            "--author",
+            author_login,
+            "--state",
+            "open",
+            "--limit",
+            str(limit),
+            "--json",
+            _PR_JSON_FIELDS,
         ]
         completed = _run_gh_command_with_retry(
             command,
@@ -659,20 +657,97 @@ class GitHubClient:
             raise RuntimeError(
                 f"Failed to parse gh authored PR JSON for {author_login!r}: {error.msg}"
             ) from error
-        # A response without the search nodes is a whole-query failure such as
-        # expired credentials, which must not be mistaken for "no authored PRs".
-        data = payload.get("data") if isinstance(payload, dict) else None
-        search = data.get("search") if isinstance(data, dict) else None
-        nodes = search.get("nodes") if isinstance(search, dict) else None
-        if nodes is None:
-            raise RuntimeError(
-                f"Failed to list open authored PRs for {author_login!r} via gh: "
-                f"{completed.stderr.strip() or 'response contained no search results'}"
-            )
-        return self._parse_open_pull_request_payload(
-            nodes,
+        parsed_items = self._parse_open_pull_request_payload(
+            payload,
             context=f"authored for {author_login!r}",
         )
+        if not parsed_items:
+            return []
+
+        alias_selections: list[str] = []
+        for index, item in enumerate(parsed_items):
+            owner, _, name = item["repo"].partition("/")
+            alias_selections.append(
+                f"p{index}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+                f"{{ pullRequest(number: {item['number']}) {{ {_AUTHORED_CI_SELECTION} }} }}"
+            )
+        ci_command = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={{ {' '.join(alias_selections)} }}",
+        ]
+        failure_message_prefix = f"Failed to inspect authored PR CI for {author_login!r} via gh"
+        ci_completed = _run_gh_command_with_retry(
+            ci_command,
+            not_found_message=(
+                "Failed to run gh authored PR CI lookup: gh CLI is not installed or not on PATH."
+            ),
+            failure_message_prefix=failure_message_prefix,
+            tolerate_partial_response=True,
+        )
+        try:
+            ci_payload = json.loads(ci_completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                f"Failed to parse gh authored PR CI JSON for {author_login!r}: {error.msg}"
+            ) from error
+        ci_by_alias = ci_payload.get("data") if isinstance(ci_payload, dict) else None
+        if not isinstance(ci_by_alias, dict):
+            raise RuntimeError(
+                f"{failure_message_prefix}: "
+                f"{ci_completed.stderr.strip() or 'response contained no data'}"
+            )
+
+        errors = ci_payload.get("errors")
+        if errors is not None and not isinstance(errors, list):
+            raise RuntimeError(f"{failure_message_prefix}: response contained invalid errors.")
+        if ci_completed.returncode != 0 and not errors:
+            raise RuntimeError(
+                f"{failure_message_prefix}: "
+                f"{ci_completed.stderr.strip() or 'response contained no errors'}"
+            )
+        skips_by_alias: dict[str, str] = {}
+        subjects_by_alias = {
+            f"p{index}": f"{item['repo']}#{item['number']}"
+            for index, item in enumerate(parsed_items)
+        }
+        for entry in errors or []:
+            entry_fields = entry if isinstance(entry, dict) else {}
+            message = entry_fields.get("message")
+            path = entry_fields.get("path")
+            alias = path[0] if isinstance(path, list) and path else None
+            subject = subjects_by_alias.get(alias)
+            if subject is None:
+                raise RuntimeError(f"{failure_message_prefix}: {message or 'unknown error'}")
+            if not isinstance(message, str) or not (
+                _is_repository_authorization_error(message) or _is_unresolvable_item_error(message)
+            ):
+                raise RuntimeError(
+                    f"{failure_message_prefix} ({subject}): {message or 'unknown error'}"
+                )
+            skips_by_alias[alias] = message
+
+        authored_pull_requests: list[AuthoredPullRequest] = []
+        for index, item in enumerate(parsed_items):
+            alias = f"p{index}"
+            subject = subjects_by_alias[alias]
+            skip_reason = skips_by_alias.get(alias)
+            if skip_reason is not None:
+                report_progress(f"Warning: skipped authored pull request {subject}: {skip_reason}")
+                continue
+            repository_node = ci_by_alias.get(alias)
+            pull_request = (
+                repository_node.get("pullRequest") if isinstance(repository_node, dict) else None
+            )
+            if not isinstance(pull_request, dict):
+                raise RuntimeError(
+                    f"Invalid gh authored PR CI payload for {subject}: expected an object."
+                )
+            item["ci_state"] = _extract_ci_state(pull_request)
+            authored_pull_requests.append(item)
+        return authored_pull_requests
 
     def list_open_review_requested_prs(
         self,

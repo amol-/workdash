@@ -79,78 +79,98 @@ def test_parse_github_item_url_rejects_invalid_inputs(url: str) -> None:
 
 
 def _authored_search_stdout(nodes: list[dict[str, object]] | None = None) -> str:
-    """Return a GraphQL authored-search response wrapping ``nodes``."""
+    """Return a ``gh search prs`` response for authored pull requests."""
 
-    return json.dumps({"data": {"search": {"nodes": nodes or []}}})
+    return json.dumps(nodes or [])
 
 
 def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, object] = {}
+    captured_commands: list[list[str]] = []
 
     def fake_run(*args, **kwargs):
         command = args[0]
-        captured["command"] = command
-        captured["check"] = kwargs.get("check")
-        captured["capture_output"] = kwargs.get("capture_output")
-        captured["text"] = kwargs.get("text")
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout=json.dumps(
-                {
-                    "data": {
-                        "search": {
-                            "nodes": [
-                                {
-                                    "id": "A",
-                                    "number": 10,
-                                    "title": "draft pr",
-                                    "url": "https://example.com/pull/10",
-                                    "createdAt": "2026-02-01T00:00:00Z",
-                                    "updatedAt": "2026-02-02T00:00:00Z",
-                                    "isDraft": True,
-                                    "repository": {"nameWithOwner": "someone/fork-repo"},
+        captured_commands.append(command)
+        if command[:3] == ["gh", "search", "prs"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=_authored_search_stdout(
+                    [
+                        {
+                            "id": "A",
+                            "number": 10,
+                            "title": "draft pr",
+                            "url": "https://example.com/pull/10",
+                            "createdAt": "2026-02-01T00:00:00Z",
+                            "updatedAt": "2026-02-02T00:00:00Z",
+                            "isDraft": True,
+                            "repository": {"nameWithOwner": "someone/fork-repo"},
+                        },
+                        {
+                            "id": "B",
+                            "number": 11,
+                            "title": "ready pr",
+                            "url": "https://example.com/pull/11",
+                            "createdAt": "2026-02-03T00:00:00Z",
+                            "updatedAt": "2026-02-04T00:00:00Z",
+                            "isDraft": False,
+                            "repository": {"nameWithOwner": "upstream/main-repo"},
+                        },
+                    ]
+                ),
+                stderr="",
+            )
+        if command[:3] == ["gh", "api", "graphql"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "data": {
+                            "p0": {
+                                "pullRequest": {
                                     "commits": {
                                         "nodes": [
                                             {"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}
                                         ]
-                                    },
-                                },
-                                {
-                                    "id": "B",
-                                    "number": 11,
-                                    "title": "ready pr",
-                                    "url": "https://example.com/pull/11",
-                                    "createdAt": "2026-02-03T00:00:00Z",
-                                    "updatedAt": "2026-02-04T00:00:00Z",
-                                    "isDraft": False,
-                                    "repository": {"nameWithOwner": "upstream/main-repo"},
-                                    # A pull request with no checks configured.
-                                    "commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]},
-                                },
-                            ]
+                                    }
+                                }
+                            },
+                            "p1": {
+                                "pullRequest": {
+                                    "commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]}
+                                }
+                            },
                         }
                     }
-                }
-            ),
-            stderr="",
-        )
+                ),
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected command: {command}")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     result = GitHubClient().list_open_authored_prs("testuser")
 
-    assert captured["check"] is True
-    assert captured["capture_output"] is True
-    assert captured["text"] is True
-    assert captured["command"][:4] == ["gh", "api", "graphql", "-f"]
-    query = captured["command"][4]
-    assert 'search(query: "author:testuser is:pr is:open", type: ISSUE, first: 100)' in query
-    assert "statusCheckRollup { state }" in query
-    # Drafts and fork pull requests are deliberately not filtered out.
-    assert "draft:" not in query
+    search_command, ci_command = captured_commands
+    assert search_command == [
+        "gh",
+        "search",
+        "prs",
+        "--author",
+        "testuser",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "id,number,title,url,createdAt,updatedAt,isDraft,repository",
+    ]
+    assert "number: 10" in ci_command[4]
+    assert "number: 11" in ci_command[4]
+    assert "statusCheckRollup { state }" in ci_command[4]
     assert result == [
         {
             "id": "A",
@@ -177,6 +197,213 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
     ]
 
 
+@pytest.mark.parametrize(
+    "error_message",
+    [
+        "Resource protected by organization SAML enforcement.",
+        "Could not resolve to a Repository with the name 'protected-org/private'.",
+    ],
+)
+def test_list_open_authored_prs_skips_only_an_attributed_inaccessible_pr(
+    monkeypatch: pytest.MonkeyPatch, error_message: str
+) -> None:
+    progress_messages: list[str] = []
+
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        if command[:3] == ["gh", "search", "prs"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=_authored_search_stdout(
+                    [
+                        {
+                            "id": "PRIVATE",
+                            "number": 10,
+                            "title": "private",
+                            "url": "https://github.com/protected-org/private/pull/10",
+                            "createdAt": "2026-02-01T00:00:00Z",
+                            "updatedAt": "2026-02-02T00:00:00Z",
+                            "isDraft": False,
+                            "repository": {"nameWithOwner": "protected-org/private"},
+                        },
+                        {
+                            "id": "PUBLIC",
+                            "number": 11,
+                            "title": "public",
+                            "url": "https://github.com/owner/repo/pull/11",
+                            "createdAt": "2026-02-03T00:00:00Z",
+                            "updatedAt": "2026-02-04T00:00:00Z",
+                            "isDraft": False,
+                            "repository": {"nameWithOwner": "owner/repo"},
+                        },
+                    ]
+                ),
+                stderr="",
+            )
+        if command[:3] == ["gh", "api", "graphql"]:
+            payload = {
+                "data": {
+                    "p0": None,
+                    "p1": {
+                        "pullRequest": {
+                            "commits": {
+                                "nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]
+                            }
+                        }
+                    },
+                },
+                "errors": [{"path": ["p0"], "message": error_message}],
+            }
+            raise subprocess.CalledProcessError(
+                1, command, output=json.dumps(payload), stderr=error_message
+            )
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = GitHubClient().list_open_authored_prs(
+        "testuser", progress_callback=progress_messages.append
+    )
+
+    assert [(item["repo"], item["number"], item["ci_state"]) for item in result] == [
+        ("owner/repo", 11, "SUCCESS")
+    ]
+    assert progress_messages == [
+        f"Warning: skipped authored pull request protected-org/private#10: {error_message}"
+    ]
+
+
+def test_list_open_authored_prs_surfaces_unrelated_ci_lookup_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        if command[:3] == ["gh", "search", "prs"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=_authored_search_stdout(
+                    [
+                        {
+                            "id": "A",
+                            "number": 10,
+                            "title": "authored",
+                            "url": "https://github.com/owner/repo/pull/10",
+                            "createdAt": "2026-02-01T00:00:00Z",
+                            "updatedAt": "2026-02-02T00:00:00Z",
+                            "isDraft": False,
+                            "repository": {"nameWithOwner": "owner/repo"},
+                        }
+                    ]
+                ),
+                stderr="",
+            )
+        if command[:3] == ["gh", "api", "graphql"]:
+            payload = {
+                "data": {"p0": None},
+                "errors": [{"path": ["p0"], "message": "Something went wrong."}],
+            }
+            raise subprocess.CalledProcessError(
+                1, command, output=json.dumps(payload), stderr="Something went wrong."
+            )
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match=r"\(owner/repo#10\): Something went wrong"):
+        GitHubClient().list_open_authored_prs("testuser")
+
+
+def test_list_open_authored_prs_rejects_partial_ci_responses_without_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        if command[:3] == ["gh", "search", "prs"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=_authored_search_stdout(
+                    [
+                        {
+                            "id": "A",
+                            "number": 10,
+                            "title": "authored",
+                            "url": "https://github.com/owner/repo/pull/10",
+                            "createdAt": "2026-02-01T00:00:00Z",
+                            "updatedAt": "2026-02-02T00:00:00Z",
+                            "isDraft": False,
+                            "repository": {"nameWithOwner": "owner/repo"},
+                        }
+                    ]
+                ),
+                stderr="",
+            )
+        if command[:3] == ["gh", "api", "graphql"]:
+            raise subprocess.CalledProcessError(
+                1,
+                command,
+                output='{"message":"Bad credentials","status":"401"}',
+                stderr="Bad credentials",
+            )
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Bad credentials"):
+        GitHubClient().list_open_authored_prs("testuser")
+
+
+def test_list_open_authored_prs_rejects_ci_response_missing_authored_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    progress_messages: list[str] = []
+
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        if command[:3] == ["gh", "search", "prs"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=_authored_search_stdout(
+                    [
+                        {
+                            "id": "A",
+                            "number": 10,
+                            "title": "authored",
+                            "url": "https://github.com/owner/repo/pull/10",
+                            "createdAt": "2026-02-01T00:00:00Z",
+                            "updatedAt": "2026-02-02T00:00:00Z",
+                            "isDraft": False,
+                            "repository": {"nameWithOwner": "owner/repo"},
+                        }
+                    ]
+                ),
+                stderr="",
+            )
+        if command[:3] == ["gh", "api", "graphql"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=json.dumps({"data": {}}),
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Invalid gh authored PR CI payload for owner/repo#10: expected an object",
+    ):
+        GitHubClient().list_open_authored_prs(
+            "testuser", progress_callback=progress_messages.append
+        )
+
+    assert progress_messages == []
+
+
 def test_list_open_authored_prs_accepts_custom_author_and_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -195,10 +422,19 @@ def test_list_open_authored_prs_accepts_custom_author_and_limit(
     result = GitHubClient().list_open_authored_prs(author_login="octocat", limit=25)
 
     assert result == []
-    assert (
-        'search(query: "author:octocat is:pr is:open", type: ISSUE, first: 25)'
-        in (captured["command"][4])
-    )
+    assert captured["command"] == [
+        "gh",
+        "search",
+        "prs",
+        "--author",
+        "octocat",
+        "--state",
+        "open",
+        "--limit",
+        "25",
+        "--json",
+        "id,number,title,url,createdAt,updatedAt,isDraft,repository",
+    ]
 
 
 def test_list_open_authored_prs_raises_clear_error_when_gh_missing(
@@ -231,36 +467,49 @@ def test_list_open_authored_prs_raises_clear_error_when_gh_fails(
         GitHubClient().list_open_authored_prs("testuser")
 
 
-def test_list_open_authored_prs_retries_on_transient_http_5xx(
+def test_list_open_authored_prs_surfaces_transient_ci_lookup_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    call_count = 0
+    ci_attempts = 0
 
     def fake_run(*args, **kwargs):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
+        nonlocal ci_attempts
+        command = args[0]
+        if command[:3] == ["gh", "search", "prs"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=_authored_search_stdout(
+                    [
+                        {
+                            "id": "A",
+                            "number": 10,
+                            "title": "authored",
+                            "url": "https://github.com/owner/repo/pull/10",
+                            "createdAt": "2026-02-01T00:00:00Z",
+                            "updatedAt": "2026-02-02T00:00:00Z",
+                            "isDraft": False,
+                            "repository": {"nameWithOwner": "owner/repo"},
+                        }
+                    ]
+                ),
+                stderr="",
+            )
+        if command[:3] == ["gh", "api", "graphql"]:
+            ci_attempts += 1
             raise subprocess.CalledProcessError(
                 returncode=1,
-                cmd=args[0],
-                stderr=(
-                    "non-200 OK status code: 504 Gateway Timeout "
-                    "(https://api.github.com/search/issues?...)"
-                ),
+                cmd=command,
+                stderr="non-200 OK status code: 504 Gateway Timeout",
             )
-        return subprocess.CompletedProcess(
-            args=args[0],
-            returncode=0,
-            stdout=_authored_search_stdout(),
-            stderr="",
-        )
+        raise AssertionError(f"Unexpected command: {command}")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr("workdash.github_client.time.sleep", lambda _: None)
 
-    result = GitHubClient().list_open_authored_prs("testuser")
-    assert result == []
-    assert call_count == 2
+    with pytest.raises(TransientFetchError, match="504 Gateway Timeout"):
+        GitHubClient().list_open_authored_prs("testuser")
+    assert ci_attempts == 3
 
 
 def test_list_open_authored_prs_raises_clear_error_for_bad_json(
@@ -294,25 +543,6 @@ def test_list_open_authored_prs_raises_error_for_invalid_payload_entry(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="entry 0 has missing or invalid repository"):
-        GitHubClient().list_open_authored_prs("testuser")
-
-
-def test_list_open_authored_prs_raises_when_the_response_carries_no_search_results(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Expired credentials answer with a message instead of data, which must not
-    # be mistaken for "this user authored no open pull requests".
-    def fake_run(*args, **kwargs):
-        return subprocess.CompletedProcess(
-            args=args[0],
-            returncode=0,
-            stdout='{"message":"Bad credentials","status":"401"}',
-            stderr="Bad credentials",
-        )
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    with pytest.raises(RuntimeError, match="Bad credentials"):
         GitHubClient().list_open_authored_prs("testuser")
 
 

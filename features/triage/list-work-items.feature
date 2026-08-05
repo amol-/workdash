@@ -16,7 +16,7 @@ Feature: List work items
     - Entries are sorted by last update, most recently updated first.
     - The same GitHub issue or pull request never appears twice in the list.
     - When the same item qualifies for multiple sources, the strongest relationship wins in this order: authored pull request, then REVIEW pull request, then assigned issue, then plain tracked item.
-    - When GitHub does not return a repository or item while loading a specific work source, either because further repository authorization is required or because GitHub can no longer resolve it, the system warns the user, skips that inaccessible repository or item, and keeps loading other work.
+    - When GitHub does not return a repository or item while loading a specific work source, either because further repository authorization is required or because GitHub can no longer resolve it, the system warns the user, skips that inaccessible repository or item, and keeps loading other work. This includes an inaccessible repository found while searching authored pull requests across repositories.
     - When no work items match, the system reports that no work items were found.
     - Scrolling the TUI list keeps each visual row tied to the same GitHub issue or pull request; included items may show a "+" type suffix but must not create stale, duplicate, or empty visual rows.
     - The dashboard is keyboard-driven: it never captures mouse input, so mouse behavior (text selection, wheel scrolling) stays with the terminal.
@@ -86,3 +86,11 @@ Feature: List work items
     When the user opens the dashboard
     Then the authorized review-requested pull request appears
     And the system warns that the unauthorized review-requested pull request was skipped
+
+  @id:F-TRIAGE-LIST-S010
+  Scenario: Repository authorization failure skips one authored pull request
+    Given one authored pull request requires additional GitHub authorization
+    And another authored pull request has a passing CI result
+    When the user opens the dashboard
+    Then the authorized authored pull request appears with its CI result
+    And the system warns that the unauthorized authored pull request was skipped

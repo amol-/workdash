@@ -203,7 +203,9 @@ def _todo_captured_in_earlier_session(
 ) -> None:
     import workdash.github_client as github_client_module
 
-    monkeypatch.setattr(GitHubClient, "list_open_authored_prs", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient, "list_open_authored_prs", lambda self, login, progress_callback=None: []
+    )
     monkeypatch.setattr(
         GitHubClient,
         "list_open_review_requested_prs",
