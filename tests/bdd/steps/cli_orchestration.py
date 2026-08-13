@@ -17,7 +17,7 @@ from workdash.config import AgentConfig, WorkdashConfig
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.repo_worktree import worktree_path
 
-from .common import NOW_UTC, make_work_item
+from .common import NOW_UTC, make_work_item, set_session_items
 
 
 def _cli_config(
@@ -156,11 +156,12 @@ def _run_workdash(
             "load_zellij_panes",
             lambda _session: list(scenario_state.get("panes", [])),
         )
-        monkeypatch.setattr(
-            control_module,
-            "existing_worktree_path",
-            lambda _workdir, _item: scenario_state.get("known_worktree_path"),
-        )
+        if "known_worktree_path" in scenario_state:
+            monkeypatch.setattr(
+                control_module,
+                "existing_worktree_path",
+                lambda _workdir, _item: scenario_state["known_worktree_path"],
+            )
         monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
         monkeypatch.setattr(
             control_module,
@@ -304,6 +305,43 @@ def _session_has_agent_pane(
             "id": 1,
             "title": "code_owner_repo_1",
             "pane_cwd": cwd,
+            "pane_command": "pi",
+            "tab_id": 7,
+            "tab_name": "work",
+            "state": "Running",
+            "exited": False,
+        }
+    )
+
+
+@given(
+    "that session has an agent pane in the worktree of the issue an authored pull request closes"
+)
+def _session_has_agent_pane_in_the_linked_issue_worktree(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    # No `known_worktree_path`: the real worktree lookup must recognize the
+    # issue-numbered directory as the pull request's checkout.
+    scenario_state["workdir"] = str(tmp_path / "wrk")
+    item = make_work_item(
+        item_type=WorkItemType.PR,
+        kind=WorkItemKind.AUTHORED_PR,
+        number=42149,
+        title="Implement the issue",
+        created_at=NOW_UTC,
+        updated_at=NOW_UTC,
+    )
+    item.linked_issue = (item.repo, 41830)
+    work_items[:] = [item]
+    set_session_items(scenario_state, work_items)
+    cwd = worktree_path(scenario_state["workdir"], item.repo, 41830)
+    cwd.mkdir(parents=True, exist_ok=True)
+    scenario_state.setdefault("git_origins", {})[str(cwd)] = item.repo
+    scenario_state.setdefault("panes", []).append(
+        {
+            "id": 1,
+            "title": "code_owner_repo_41830",
+            "pane_cwd": str(cwd),
             "pane_command": "pi",
             "tab_id": 7,
             "tab_name": "work",
@@ -685,6 +723,11 @@ def _reports_terminal_pane(scenario_state: dict[str, Any]) -> None:
     assert "command=bash" in output
     assert "tab=work" in output
     assert "state=Running" in output
+
+
+@then("the pane is mapped to that authored pull request")
+def _pane_mapped_to_authored_pull_request(scenario_state: dict[str, Any]) -> None:
+    assert "item=owner/repo#PR-42149" in scenario_state["stdout"], scenario_state["stdout"]
 
 
 @then("both panes are mapped to the matching Workdash item")

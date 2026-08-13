@@ -67,7 +67,7 @@ def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_colum
             # Sorted by updated_at descending; PR #22 (updated 2/25) before issue #11 (updated 2/20)
             # PR #22 is within 24h of now_utc so cells are bold Text objects
             assert [str(c) for c in table.get_row_at(0)] == [
-                " PR#22",
+                " CHECK#22",
                 "owner/repo",
                 "Implement renderer",
                 "1d",
@@ -189,7 +189,7 @@ def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label()
             row_key = "pr:owner/repo#22"
             assert [key.value for key in table.rows] == [row_key]
             assert [str(c) for c in table.get_row(row_key)] == [
-                " PR#22",
+                " CHECK#22",
                 "owner/repo",
                 "Implement renderer",
                 "6d",
@@ -201,7 +201,7 @@ def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label()
 
             assert [key.value for key in table.rows] == [row_key]
             assert [str(c) for c in table.get_row(row_key)] == [
-                " PR+#22",
+                " CHECK+#22",
                 "owner/repo",
                 "Implement renderer",
                 "6d",
@@ -349,7 +349,7 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
             ]
             assert terminal_calls == [(WorkItemType.PR, 22)]
             assert [str(c) for c in table.get_row_at(0)] == [
-                " PR#22",
+                " CHECK#22",
                 "owner/repo",
                 "Implement renderer",
                 "1d",
@@ -402,7 +402,7 @@ def test_workdash_app_refresh_keybinding_invokes_callback_and_reloads_rows() -> 
             assert refresh_calls == ["called"]
             assert table.row_count == 1
             assert [str(c) for c in table.get_row_at(0)] == [
-                " PR#33",
+                " CHECK#33",
                 "owner/repo",
                 "* Ship refresh",
                 "0d",
@@ -455,7 +455,7 @@ def test_workdash_app_uses_session_state_for_first_render() -> None:
             table = app.query_one("#work-items", DataTable)
             assert table.row_count == 1
             assert [str(c) for c in table.get_row_at(0)] == [
-                " PR#33",
+                " CHECK#33",
                 "owner/repo",
                 "* Session state before Textual starts",
                 "0d",
@@ -517,7 +517,7 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
 
             assert table.row_count == 1
             assert [str(c) for c in table.get_row_at(0)] == [
-                " PR#33",
+                " CHECK#33",
                 "owner/repo",
                 "* Ship refresh",
                 "0d",

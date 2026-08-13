@@ -193,6 +193,34 @@ class WorkdashBackend:
         included_work_items = self._load_included_items(report_progress)
         if included_work_items:
             merged_items = merge_normalized_work_items(merged_items, included_work_items)
+        pull_request_items = [item for item in merged_items if item.item_type == WorkItemType.PR]
+        if pull_request_items:
+            report_progress(
+                f"Fetching linked issues for {len(pull_request_items)} pull request(s)..."
+            )
+            linked_issues = self.github_client.fetch_linked_issues(
+                [(item.repo, item.number) for item in pull_request_items],
+                progress_callback=report_progress,
+            )
+            for item in pull_request_items:
+                # Only an issue in the pull request's own repository can name the
+                # pull request's worktree, so a foreign closing issue is not the
+                # item's linked issue even though it is still hidden below.
+                own_repo_issues = [
+                    issue
+                    for issue in linked_issues.get((item.repo, item.number), [])
+                    if issue[0] == item.repo
+                ]
+                item.linked_issue = min(own_repo_issues, key=lambda issue: issue[1], default=None)
+            # A pull request already carries the work of the issue it closes, so
+            # listing that issue as well would show the same work twice.
+            hidden_issues = {issue for issues in linked_issues.values() for issue in issues}
+            merged_items = [
+                item
+                for item in merged_items
+                if item.item_type != WorkItemType.ISSUE
+                or (item.repo, item.number) not in hidden_issues
+            ]
         report_progress(
             f"Merged {len(merged_items)} unique work item(s); loading cached analyses..."
         )
@@ -221,7 +249,7 @@ class WorkdashBackend:
             if parsed is None:
                 continue
             try:
-                item = self.github_client.fetch_item_by_url(parsed)
+                item = self.github_client.fetch_item_by_url(parsed, self.config.github_username)
             except TransientFetchError:
                 survivors.append(parsed.canonical_url)
                 continue
@@ -258,7 +286,7 @@ class WorkdashBackend:
             self.included_items_store.add(parsed.canonical_url)
             return IncludeResult(duplicate_identity=identity)
         try:
-            item = self.github_client.fetch_item_by_url(parsed)
+            item = self.github_client.fetch_item_by_url(parsed, self.config.github_username)
         except TransientFetchError:
             return IncludeResult(transient_failure=True)
         if item is None:

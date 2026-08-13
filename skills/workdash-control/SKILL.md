@@ -32,7 +32,7 @@ workdash info --json
 
 Copy IDs exactly:
 
-- Item IDs from `workdash list`: `owner/repo#ISSUE-123`, `owner/repo#PR-123`, `owner/repo#REVIEW-123`.
+- Item IDs from `workdash list`: `owner/repo#ISSUE-123`, `owner/repo#PR-123`, `owner/repo#REVIEW-123`, `owner/repo#CHECK-123`.
 - Pane IDs from `workdash info`: usually `terminal_N`.
 
 ## Start useful work

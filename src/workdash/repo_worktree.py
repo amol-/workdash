@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .git import GitHelper
 from .github import GithubHelper
-from .models import WorkItem, WorkItemType
+from .models import WorkItem, WorkItemType, accepted_worktree_numbers, worktree_item_number
 
 
 def main_repo_path(workdir: str, repo: str) -> Path:
@@ -45,7 +45,14 @@ def existing_worktree_path(workdir: str, item: WorkItem) -> Path | None:
         for candidate in _worktree_candidates(base, item)
         if git.worktree_proves_item(candidate, item)
     ]
-    return matches[0] if len(matches) == 1 else None
+    # A checkout named after the item's own number is beyond doubt this item's,
+    # so it wins over the linked issue's directory when both exist. Anything
+    # still ambiguous after both preferences is somebody's guess, not an answer.
+    for number in (item.number, worktree_item_number(item)):
+        preferred = [candidate for candidate in matches if candidate.name.endswith(f"_{number}")]
+        if len(preferred) == 1:
+            return preferred[0]
+    return None
 
 
 def ensure_worktree(workdir: str, item: WorkItem) -> str:
@@ -58,14 +65,29 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
     :param WorkItem item: The work item to prepare a worktree for.
     """
     git = GitHelper()
+    pr_head: tuple[str, str] | None = None
+    directory_number = worktree_item_number(item)
     existing = existing_worktree_path(workdir, item)
+    if existing is not None and not existing.name.endswith(f"_{item.number}"):
+        # A checkout found under another number is the linked issue's, and
+        # adopting it is only safe while it holds this pull request's branch:
+        # pulling and committing on somebody else's branch there would push work
+        # onto the wrong pull request.
+        pr_head = GithubHelper().fetch_worktree_head(item)
+        if git.current_branch(existing) != pr_head[0]:
+            # The issue's directory belongs to that other work, so this pull
+            # request needs a checkout of its own under its own number.
+            existing = None
+            directory_number = item.number
     if existing is not None:
         # Local divergence or missing upstream shouldn't block the user.
         with contextlib.suppress(subprocess.CalledProcessError, OSError):
             git.pull_ff_only(existing)
-        if item.item_type == WorkItemType.PR and existing.name != git.worktree_name(
-            item.repo, item.number
-        ):
+        # A checkout named after another repository is a fork of item.repo, whose
+        # base branches are only reachable through the upstream remote.
+        if item.item_type == WorkItemType.PR and existing.name not in {
+            git.worktree_name(item.repo, number) for number in accepted_worktree_numbers(item)
+        }:
             with contextlib.suppress(RuntimeError):
                 git.fetch_remote(existing, "upstream")
         return str(existing)
@@ -78,7 +100,7 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
         head_ref = ""
         branch = f"wt-{item.number}"
     elif item.item_type == WorkItemType.PR:
-        head_ref, head_repo = GithubHelper().fetch_worktree_head(item)
+        head_ref, head_repo = pr_head or GithubHelper().fetch_worktree_head(item)
         repo = head_repo
         branch = head_ref
     else:
@@ -86,7 +108,7 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
         head_ref = ""
         branch = f"issue-{item.number}"
 
-    wt = worktree_path(workdir, repo, item.number, todo=todo_target is not None)
+    wt = worktree_path(workdir, repo, directory_number, todo=todo_target is not None)
     main = main_repo_path(workdir, repo)
 
     # Check if git already tracks a worktree for this branch before creating another one.
@@ -123,12 +145,12 @@ def get_merge_base(worktree: str) -> str | None:
 
 
 def _worktree_candidates(base: Path, item: WorkItem) -> list[Path]:
-    suffix = f"_{item.number}"
+    suffixes = tuple(f"_{number}" for number in accepted_worktree_numbers(item))
     return sorted(
         (
             candidate
             for candidate in base.iterdir()
-            if candidate.is_dir() and candidate.name.endswith(suffix)
+            if candidate.is_dir() and candidate.name.endswith(suffixes)
         ),
         key=lambda candidate: candidate.name,
     )

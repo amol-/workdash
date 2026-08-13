@@ -183,6 +183,84 @@ def _worktree_on_head_branch(scenario_state: dict[str, Any]) -> None:
     assert "origin/feature-branch" in add_cmd, add_cmd
 
 
+@given("the user needs a worktree for an authored pull request that closes an issue")
+def _user_needs_worktree_for_pr_closing_an_issue(
+    scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    item = make_work_item(
+        item_type=WorkItemType.PR,
+        kind=WorkItemKind.AUTHORED_PR,
+        repo="owner/repo",
+        number=42149,
+        title="Implement the issue",
+    )
+    item.linked_issue = ("owner/repo", 41830)
+    scenario_state["work_item"] = item
+    scenario_state["workdir"] = tmp_path
+    _install_fake_git(scenario_state, monkeypatch, workdir=tmp_path)
+
+
+@then("the worktree directory is named after the issue the pull request closes")
+def _worktree_named_after_linked_issue(scenario_state: dict[str, Any]) -> None:
+    item: WorkItem = scenario_state["work_item"]
+    assert item.linked_issue is not None
+    assert Path(scenario_state["worktree_path"]).name == f"owner_repo_{item.linked_issue[1]}"
+
+
+@given("the user already has a worktree opened from an issue")
+def _user_already_has_an_issue_worktree(
+    scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "owner_repo").mkdir()
+    (tmp_path / "owner_repo_41830").mkdir()
+    scenario_state["workdir"] = tmp_path
+    scenario_state["_pre_existing_worktree"] = tmp_path / "owner_repo_41830"
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=f"{Path(kwargs['cwd']).resolve()}\n", stderr=""
+            )
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="feature-branch\n", stderr="")
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps(
+                    {
+                        "headRefName": "feature-branch",
+                        "headRepository": {"name": "repo"},
+                        "headRepositoryOwner": {"login": "owner"},
+                    }
+                ),
+                stderr="",
+            )
+        if cmd[:2] == ["git", "pull"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command in linked issue reuse scenario: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+@given("the user authored a pull request that closes that issue and is checked out there")
+def _user_authored_a_pr_closing_that_issue(scenario_state: dict[str, Any]) -> None:
+    item = make_work_item(
+        item_type=WorkItemType.PR,
+        kind=WorkItemKind.AUTHORED_PR,
+        repo="owner/repo",
+        number=42149,
+        title="Implement the issue",
+    )
+    item.linked_issue = ("owner/repo", 41830)
+    scenario_state["work_item"] = item
+
+
 @given("the pull request originates in a fork of the upstream repository")
 def _pr_originates_in_fork(
     scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch

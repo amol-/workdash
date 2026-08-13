@@ -9,6 +9,7 @@ browser-open boundaries are faked.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from datetime import timedelta
 from pathlib import Path
@@ -40,6 +41,42 @@ from .common import (
     modal_screen_names,
     run_app,
 )
+
+
+def linked_issues_response(
+    command: list[str], *, closed_issues: dict[str, tuple[str, int]] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Answer the linked-issue GraphQL batch for a fake ``gh api graphql`` call.
+
+    Aliases are read back from the query the production code built, so a
+    scenario only has to name the pull requests that close an issue.
+
+    :param dict closed_issues: ``owner/repo#number`` -> closed ``(repo, number)``.
+    """
+
+    closed = closed_issues or {}
+    data: dict[str, Any] = {}
+    for alias, owner, name, number in re.findall(
+        r'\b(p\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) '
+        r"{ pullRequest\(number: (\d+)\)",
+        command[4],
+    ):
+        issue = closed.get(f"{owner}/{name}#{number}")
+        data[alias] = {
+            "pullRequest": {
+                "closingIssuesReferences": {
+                    "nodes": []
+                    if issue is None
+                    else [{"number": issue[1], "repository": {"nameWithOwner": issue[0]}}]
+                }
+            }
+        }
+    return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"data": data}), stderr="")
+
+
+def is_linked_issues_query(command: list[str]) -> bool:
+    return command[:3] == ["gh", "api", "graphql"] and "closingIssuesReferences" in command[4]
+
 
 # --------------------------------------------------------------------------
 # F-TRIAGE-LIST
@@ -646,6 +683,8 @@ def _another_review_requested_pr_has_direct_request(
                 },
             ]
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+        if is_linked_issues_query(command):
+            return linked_issues_response(command)
         if command[:3] == ["gh", "api", "graphql"]:
             # GitHub answers the readable alias and reports the denied one as an
             # error, which gh surfaces as a non-zero exit.
@@ -783,6 +822,8 @@ def _another_authored_pr_has_passing_ci(
                 },
             ]
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+        if is_linked_issues_query(command):
+            return linked_issues_response(command)
         if command[:3] == ["gh", "api", "graphql"]:
             payload = {
                 "data": {
@@ -844,6 +885,174 @@ def _warns_unauthorized_authored_pr_skipped(scenario_state: dict[str, Any]) -> N
         and "SAML enforcement" in message
         for message in scenario_state["progress_messages"]
     )
+
+
+# ----- S011/S012: CHECK items and the CHECK -> REVIEW transition -----
+
+_CHECK_PR_NUMBER = 909
+_CHECK_PR_RECORD = {
+    "id": "TRACKED-909",
+    "repo": "owner/repo",
+    "number": _CHECK_PR_NUMBER,
+    "title": "Somebody else's pull request",
+    "url": f"https://github.com/owner/repo/pull/{_CHECK_PR_NUMBER}",
+    "created_at": "2026-04-20T10:00:00Z",
+    "updated_at": "2026-04-28T10:00:00Z",
+    "is_pull_request": True,
+}
+
+
+@given("a tracked repository has an open pull request the user neither authored nor reviewed")
+def _tracked_pr_the_user_is_not_involved_in(
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install_empty_github_fakes(monkeypatch)
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_recent_tracked_items",
+        lambda self, repositories, progress_callback=None: [dict(_CHECK_PR_RECORD)],
+    )
+    monkeypatch.setattr(
+        GitHubClient,
+        "fetch_linked_issues",
+        lambda self, pull_requests, progress_callback=None: {},
+    )
+    scenario_state["_open_dashboard_hook"] = _make_open_dashboard_hook(tmp_path)
+
+
+@given("the dashboard lists a pull request as a CHECK item")
+def _dashboard_lists_a_check_item(
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _tracked_pr_the_user_is_not_involved_in(scenario_state, monkeypatch, tmp_path)
+    backend = _make_backend(scenario_state, tmp_path)
+    fetched, _markers = backend.load_items()
+    work_items[:] = list(fetched)
+    scenario_state["work_items"] = list(fetched)
+    assert [format_type_label(item) for item in fetched] == ["CHECK"], fetched
+
+
+@given("the user has since reviewed that pull request")
+def _user_has_reviewed_that_pull_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    # `gh search prs --reviewed-by` starts answering for the same pull request,
+    # and the merge order lets that stronger relationship win.
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_open_reviewed_prs",
+        lambda self, login: [
+            {
+                "id": "REVIEWED-909",
+                "repo": "owner/repo",
+                "number": _CHECK_PR_NUMBER,
+                "title": "Somebody else's pull request",
+                "url": f"https://github.com/owner/repo/pull/{_CHECK_PR_NUMBER}",
+                "created_at": "2026-04-20T10:00:00Z",
+                "updated_at": "2026-04-28T10:00:00Z",
+                "is_draft": False,
+            }
+        ],
+    )
+
+
+@when("the user refreshes the dashboard")
+def _user_refreshes_the_dashboard(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    backend = _make_backend(scenario_state, tmp_path)
+    fetched, markers = backend.load_items()
+    work_items[:] = list(fetched)
+    scenario_state["work_items"] = list(fetched)
+    scenario_state["suggestion_markers"] = dict(markers)
+
+
+@then(parsers.parse("that pull request appears as a {label} item"))
+def _that_pull_request_appears_as(scenario_state: dict[str, Any], label: str) -> None:
+    item = next(item for item in scenario_state["work_items"] if item.number == _CHECK_PR_NUMBER)
+    assert format_type_label(item) == label, item
+
+
+# ----- S013: a pull request replaces the issue it closes -----
+
+
+@given("an open pull request closes an assigned issue")
+def _pull_request_closes_an_assigned_issue(scenario_state: dict[str, Any]) -> None:
+    scenario_state["closing_pr_number"] = 42149
+    scenario_state["closed_issue_number"] = 41830
+
+
+@given("both the pull request and that issue are open work for the user")
+def _pull_request_and_issue_are_open_work(
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pr_number = scenario_state["closing_pr_number"]
+    issue_number = scenario_state["closed_issue_number"]
+    _install_empty_github_fakes(monkeypatch)
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_open_authored_prs",
+        lambda self, login, progress_callback=None: [
+            {
+                "id": f"PR-{pr_number}",
+                "repo": "owner/repo",
+                "number": pr_number,
+                "title": "Implement the assigned issue",
+                "url": f"https://github.com/owner/repo/pull/{pr_number}",
+                "created_at": "2026-04-25T10:00:00Z",
+                "updated_at": "2026-04-28T10:00:00Z",
+                "is_draft": False,
+                "ci_state": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        GitHubClient,
+        "list_open_assigned_issues",
+        lambda self, login: [
+            {
+                "id": f"ISSUE-{issue_number}",
+                "repo": "owner/repo",
+                "number": issue_number,
+                "title": "The issue the pull request closes",
+                "url": f"https://github.com/owner/repo/issues/{issue_number}",
+                "created_at": "2026-04-01T10:00:00Z",
+                "updated_at": "2026-04-27T10:00:00Z",
+            }
+        ],
+    )
+    # The linked issue is discovered by the real GraphQL batch, so the query and
+    # its per-alias parsing run for this scenario.
+    monkeypatch.setattr(
+        "workdash.github_client.subprocess.run",
+        lambda command, **kwargs: (
+            linked_issues_response(
+                command, closed_issues={f"owner/repo#{pr_number}": ("owner/repo", issue_number)}
+            )
+            if is_linked_issues_query(command)
+            else (_ for _ in ()).throw(AssertionError(f"Unexpected gh command: {command}"))
+        ),
+    )
+    scenario_state["_open_dashboard_hook"] = _make_open_dashboard_hook(tmp_path)
+
+
+@then("the pull request appears on the dashboard")
+def _the_pull_request_appears(scenario_state: dict[str, Any]) -> None:
+    pr_number = scenario_state["closing_pr_number"]
+    assert any(
+        item.item_type == WorkItemType.PR and item.number == pr_number
+        for item in scenario_state["work_items"]
+    ), scenario_state["work_items"]
+
+
+@then("the issue it closes does not appear on the dashboard")
+def _the_closed_issue_does_not_appear(scenario_state: dict[str, Any]) -> None:
+    assert not any(
+        item.item_type == WorkItemType.ISSUE
+        and item.number == scenario_state["closed_issue_number"]
+        for item in scenario_state["work_items"]
+    ), scenario_state["work_items"]
 
 
 # --------------------------------------------------------------------------
@@ -979,6 +1188,24 @@ def _server_session_has_item_types(
             created_at=NOW_UTC,
             updated_at=NOW_UTC,
         ),
+    ]
+    scenario_state["work_items"] = list(work_items)
+    ensure_api_session(scenario_state, work_items, tmp_path)
+
+
+@given("a server-backed Workdash session has a pull request the user neither authored nor reviewed")
+def _server_session_has_a_check_item(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    work_items[:] = [
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.TRACKED_PR,
+            number=4,
+            title="Somebody else's pull request",
+            created_at=NOW_UTC,
+            updated_at=NOW_UTC,
+        )
     ]
     scenario_state["work_items"] = list(work_items)
     ensure_api_session(scenario_state, work_items, tmp_path)
@@ -1220,6 +1447,19 @@ def _pr_row_copy_id(scenario_state: dict[str, Any]) -> None:
 @then("the review row can be copied as `owner/repo#REVIEW-3`")
 def _review_row_copy_id(scenario_state: dict[str, Any]) -> None:
     assert "owner/repo#REVIEW-3" in scenario_state["print_output"]
+
+
+@then("that row's item type reads `CHECK`")
+def _check_row_item_type(scenario_state: dict[str, Any]) -> None:
+    line = next(
+        line for line in scenario_state["print_output"].splitlines() if "owner/repo#CHECK-4" in line
+    )
+    assert line.startswith("CHECK   "), line
+
+
+@then("that row can be copied as `owner/repo#CHECK-4`")
+def _check_row_copy_id(scenario_state: dict[str, Any]) -> None:
+    assert "owner/repo#CHECK-4" in scenario_state["print_output"]
 
 
 @then("the system returns JSON work item records")
@@ -1623,6 +1863,8 @@ def _install_gh_fetch_fake(
                 raise result
             if result is not None:
                 return result
+        if is_linked_issues_query(command):
+            return linked_issues_response(command)
         raise AssertionError(f"Unexpected gh command in include scenario: {command}")
 
     monkeypatch.setattr(gc.subprocess, "run", fake_run)
@@ -1770,13 +2012,30 @@ def _seed_three_included_items(
             "https://github.com/owner/repo/pull/111",
             "https://github.com/owner/repo/issues/222",
             "https://github.com/owner/repo/pull/333",
+            "https://github.com/owner/repo/pull/555",
         ]
     )
     # PR #333 is surfaced by the review-requested source too; the backend
     # merges the included payload into the existing REVIEW row, keeping the
     # REVIEW classification while flipping `included` to True.
+    # PR #555 is the user's own pull request, so including it must keep the
+    # authored classification and read "PR+" rather than "CHECK+".
     monkeypatch.setattr(
-        GitHubClient, "list_open_authored_prs", lambda self, login, progress_callback=None: []
+        GitHubClient,
+        "list_open_authored_prs",
+        lambda self, login, progress_callback=None: [
+            {
+                "id": "PR-555",
+                "repo": "owner/repo",
+                "number": 555,
+                "title": "Fetched pr 555",
+                "url": "https://github.com/owner/repo/pull/555",
+                "created_at": "2026-04-20T10:00:00Z",
+                "updated_at": "2026-04-28T10:00:00Z",
+                "is_draft": False,
+                "ci_state": None,
+            }
+        ],
     )
     monkeypatch.setattr(
         GitHubClient,
@@ -1830,6 +2089,9 @@ def _seed_three_included_items(
             ),
             ("pr", "333"): subprocess.CompletedProcess(
                 [], 0, stdout=_fake_gh_view_response("pr", 333), stderr=""
+            ),
+            ("pr", "555"): subprocess.CompletedProcess(
+                [], 0, stdout=_fake_gh_view_response("pr", 555), stderr=""
             ),
         },
     )
@@ -2056,9 +2318,9 @@ def _work_item_appears_once(scenario_state: dict[str, Any]) -> None:
     assert len(matches) == 1, matches
 
 
-@then('the included pull request\'s type column reads "PR+#111"')
+@then('the included pull request\'s type column reads "CHECK+#111"')
 def _pr_plus_label(scenario_state: dict[str, Any]) -> None:
-    _assert_type_column(scenario_state, number=111, expected="PR+#111")
+    _assert_type_column(scenario_state, number=111, expected="CHECK+#111")
 
 
 @then('the included issue\'s type column reads "ISSUE+#222"')
@@ -2120,13 +2382,14 @@ def _list_command_suffixes(scenario_state: dict[str, Any]) -> None:
     # per-row assertions guarantee the "+" suffix is anchored to the type
     # column of the correct row rather than appearing somewhere else.
     expected_by_id = {
-        "owner/repo#PR-111": "PR+",
+        "owner/repo#CHECK-111": "CHECK+",
         "owner/repo#ISSUE-222": "ISSUE+",
         "owner/repo#REVIEW-333": "REVIEW+",
+        "owner/repo#PR-555": "PR+",
         # The tracked non-included PR must NOT carry the "+" suffix; this
         # guards against a regression where format_type_label always
         # appends "+".
-        "owner/repo#PR-444": "PR",
+        "owner/repo#CHECK-444": "CHECK",
     }
     found: dict[str, str] = {}
     for line in lines:
@@ -2450,9 +2713,9 @@ def _all_refreshed_items_listed(scenario_state: dict[str, Any]) -> None:
 
 @then("the included work item is listed")
 def _included_work_item_listed(scenario_state: dict[str, Any]) -> None:
-    assert any(type_column_label(row[0]) == "PR+#111" for row in scenario_state["search_rows"]), (
-        scenario_state["search_rows"]
-    )
+    assert any(
+        type_column_label(row[0]) == "CHECK+#111" for row in scenario_state["search_rows"]
+    ), scenario_state["search_rows"]
 
 
 @then("the action bar lists the search action first")

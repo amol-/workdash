@@ -448,12 +448,22 @@ def build_launch_agent_prompt(
     if not isinstance(github_context, dict):
         raise ValueError("GitHub context must be a JSON object.")
 
-    if item.kind == WorkItemKind.REVIEW_REQUESTED_PR:
-        template_name = "launch_review.txt"
-    elif item.item_type == WorkItemType.ISSUE:
-        template_name = "launch_issue.txt"
-    else:
-        template_name = "launch_pr.txt"
+    # A coding session either implements the user's own work or reviews somebody
+    # else's pull request, so the work kind picks between two briefings.
+    reviewing = item.kind in {
+        WorkItemKind.REVIEW_REQUESTED_PR,
+        WorkItemKind.TRACKED_PR,
+    }
+    template_name = "launch_review.txt" if reviewing else "launch_issue.txt"
+
+    partial_work_section = ""
+    if item.kind == WorkItemKind.AUTHORED_PR:
+        partial_work_section = (
+            "\nWORK ALREADY IN PROGRESS:\n"
+            f"This work already has an open pull request of yours ({item.url}), and the\n"
+            "checkout holds its partial implementation. Review those existing changes\n"
+            "first and build on them instead of starting the work over.\n"
+        )
 
     analysis_section = ""
     if analysis_path:
@@ -484,6 +494,7 @@ def build_launch_agent_prompt(
         title=item.title,
         url=item.url,
         repo_path=repo_path,
+        partial_work_section=partial_work_section,
         analysis_section=analysis_section,
         merge_base_section=merge_base_line,
         github_context_json=json.dumps(github_context, ensure_ascii=True, indent=2, sort_keys=True),

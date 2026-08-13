@@ -110,14 +110,17 @@ workdash --version           # print version and exit
 
 `workdash` gathers the following for your configured GitHub username:
 
-- Open pull requests you authored.
+- Open pull requests you authored (shown as `PR`).
 - Open pull requests where you are a requested reviewer, plus open pull
   requests you have already reviewed (shown as `REVIEW`).
-- Open issues assigned to you.
-- Open issues and pull requests across the tracked repositories.
+- Open issues assigned to you (shown as `ISSUE`).
+- Open issues and pull requests across the tracked repositories. A pull request
+  that is neither yours nor yours to review is shown as `CHECK`; once you review
+  it, the next refresh lists it as `REVIEW`.
 
-Items are merged, deduplicated, and sorted by last update. One item is marked
-with `*` as the suggested next thing to pick up.
+Items are merged, deduplicated, and sorted by last update. A pull request that
+closes an issue replaces that issue, so the same work never takes two rows. One
+item is marked with `*` as the suggested next thing to pick up.
 
 ### Repository selectors
 
@@ -165,6 +168,19 @@ configured `workdir`. Each tracked repository gets a local clone, and each work
 item gets its own worktree alongside it, so you can hop between items without
 disturbing other in-progress work.
 
+A pull request you authored that closes an issue in the same repository is the
+implementation of that issue, so it shares the issue's worktree directory (named
+after the issue number) while staying checked out on the pull request's own
+branch. That shared checkout is only reused while it holds the pull request's
+branch; a checkout sitting on another branch belongs to other work, so it is left
+alone and the pull request gets its own pull-request-numbered worktree instead.
+Worktree directories created before this behavior existed are still named
+after the pull request number; they are not migrated and keep working, so the
+pull request stays in the checkout it already has and only a pull request with no
+checkout yet gets an issue-numbered one. The link between a pull request and the
+issue it closes is resolved while the dashboard refreshes, so a pull request
+added by URL only shares the issue's worktree from the next refresh onwards.
+
 ## Local control server
 
 `workdash --server` starts the normal TUI and a localhost JSON control API in the
@@ -182,10 +198,12 @@ per server-known item, sorted by last update (most recent first):
 TYPE   repo#TYPE-N   YYYY-MM-DD   title
 ```
 
-`TYPE` is `ISSUE`, `PR`, or `REVIEW` (for review-requested PRs). The row ID is
-copy/paste-friendly: `repo#ISSUE-N`, `repo#PR-N`, `repo#REVIEW-N`, or
-`<target>#ISSUE-WT<n>` for a targeted todo. The suggested item's title is
-prefixed with `* `. If nothing matches, the output is `No work items found.`.
+`TYPE` is `ISSUE`, `PR` (a PR you authored), `REVIEW` (for review-requested or
+already reviewed PRs), or `CHECK` (any other PR). The row ID is
+copy/paste-friendly: `repo#ISSUE-N`, `repo#PR-N`, `repo#REVIEW-N`,
+`repo#CHECK-N`, or `<target>#ISSUE-WT<n>` for a targeted todo. The suggested
+item's title is prefixed with `* `. If nothing matches, the output is
+`No work items found.`.
 
 Use `workdash list --refresh` to ask the server to refresh GitHub data before
 listing. Use `workdash list --json` to emit the same list as JSON records with

@@ -15,7 +15,8 @@ Feature: List command
     - With `--refresh`, the list command asks the server to refresh dashboard items before returning them.
     - The list command emits one row per work item sorted by last update, most recently updated first.
     - Each row reports the item type, Workdash item ID, last update date, and title.
-    - Workdash item IDs are formatted as `repo#ISSUE-N`, `repo#PR-N`, or `repo#REVIEW-N`.
+    - The item type reported on a row is `ISSUE`, `PR`, `REVIEW`, or `CHECK`.
+    - Workdash item IDs are formatted as `repo#ISSUE-N`, `repo#PR-N`, `repo#REVIEW-N`, or `repo#CHECK-N`.
     - The list command supports `--json` for machine-readable work item records.
     - The suggested item's title is prefixed with "* ".
     - When no work items match, the list command emits an explicit empty-result line.
@@ -49,6 +50,13 @@ Feature: List command
     And the issue row can be copied as `owner/repo#ISSUE-1`
     And the pull request row can be copied as `owner/repo#PR-2`
     And the review row can be copied as `owner/repo#REVIEW-3`
+
+  @id:F-TRIAGE-LIST-COMMAND-S008
+  Scenario: List command shows CHECK IDs for pull requests the user is not involved in
+    Given a server-backed Workdash session has a pull request the user neither authored nor reviewed
+    When the user lists work items with `workdash list`
+    Then that row's item type reads `CHECK`
+    And that row can be copied as `owner/repo#CHECK-4`
 
   @id:F-TRIAGE-LIST-COMMAND-S005
   Scenario: List command returns machine-readable work items

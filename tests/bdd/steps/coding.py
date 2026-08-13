@@ -10,7 +10,7 @@ from pytest_bdd import given, then, when
 from textual.widgets import Static
 
 from workdash.analysis_cache import AnalysisCache
-from workdash.models import WorkItem
+from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import CodeDialog
 
 from .common import make_work_item, modal_screen_names
@@ -29,6 +29,56 @@ async def _open_code_dialog(app, pilot) -> CodeDialog:
 @given("the next coding session launch will fail")
 def _next_coding_session_launch_will_fail(scenario_state: dict[str, Any]) -> None:
     scenario_state["coding_launch_fails"] = True
+
+
+@given("the selected work item is a pull request the user authored")
+def _selected_item_is_an_authored_pr(
+    scenario_state: dict[str, Any], work_items: list[WorkItem]
+) -> None:
+    _select_only_pull_request(scenario_state, work_items, WorkItemKind.AUTHORED_PR)
+
+
+@given("the selected work item is a pull request the user did not author")
+def _selected_item_is_a_tracked_pr(
+    scenario_state: dict[str, Any], work_items: list[WorkItem]
+) -> None:
+    _select_only_pull_request(scenario_state, work_items, WorkItemKind.TRACKED_PR)
+
+
+def _select_only_pull_request(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], kind: WorkItemKind
+) -> None:
+    item = make_work_item(
+        item_type=WorkItemType.PR,
+        kind=kind,
+        number=42149,
+        title="Pull request work",
+    )
+    work_items.clear()
+    work_items.append(item)
+    scenario_state["selected_item"] = item
+
+
+@then("the agent is briefed to implement the work item")
+def _agent_briefed_to_implement(scenario_state: dict[str, Any]) -> None:
+    prompt = scenario_state["launched_prompts"][0]
+    assert "Propose a concrete implementation plan and clarifying questions." in prompt
+    assert "Discuss review findings" not in prompt
+
+
+@then("the agent is told the checkout already holds a partial implementation to build on")
+def _agent_told_about_partial_work(scenario_state: dict[str, Any]) -> None:
+    item: WorkItem = scenario_state["selected_item"]
+    prompt = scenario_state["launched_prompts"][0]
+    assert "WORK ALREADY IN PROGRESS:" in prompt
+    assert item.url in prompt
+    assert "build on them instead of starting the work over" in prompt
+
+
+@then("the agent is briefed to review the pull request")
+def _agent_briefed_to_review(scenario_state: dict[str, Any]) -> None:
+    prompt = scenario_state["launched_prompts"][0]
+    assert "Discuss review findings, risks, and open questions for the author." in prompt
 
 
 @given("the coding dialog is open")

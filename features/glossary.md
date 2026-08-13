@@ -7,10 +7,12 @@ Canonical product vocabulary used by the feature files.
 - User: The developer using `workdash` to triage their GitHub work.
 - System: `workdash`, the text-based GitHub work triage dashboard.
 - Work item: An issue or pull request surfaced by the system for triage.
-- Workdash item ID: A copy/paste identifier for a work item, formatted as `<repo>#ISSUE-<number>`, `<repo>#PR-<number>`, `<repo>#REVIEW-<number>`, or `<target>#ISSUE-WT<number>` for a targeted todo item.
-- Item type: The category of a work item. One of `ISSUE`, `PR`, or `REVIEW`.
+- Workdash item ID: A copy/paste identifier for a work item, formatted as `<repo>#ISSUE-<number>`, `<repo>#PR-<number>`, `<repo>#REVIEW-<number>`, `<repo>#CHECK-<number>`, or `<target>#ISSUE-WT<number>` for a targeted todo item.
+- Item type: The category of a work item shown in the Type column and used in its Workdash item ID. One of `ISSUE`, `PR`, `REVIEW`, or `CHECK`. An assigned or tracked issue is an `ISSUE`, a pull request the user authored is a `PR`, a pull request the user must review or has already reviewed is a `REVIEW`, and any other pull request is a `CHECK`.
 - REVIEW item: A pull request where the user is directly requested as a reviewer, or has already reviewed.
-- Authored PR: A pull request whose author is the user.
+- CHECK item: A pull request the user did not author and was neither asked to review nor has already reviewed, so it is still waiting to be looked at. This holds however the pull request reached the dashboard, including one the user included by URL.
+- Authored PR: A pull request whose author is the user, shown as a `PR` item.
+- Linked issue: The issue in a pull request's own repository that the pull request closes, as GitHub reports it. A pull request that closes several of them is linked to the lowest-numbered one. A pull request replaces every issue it closes on the dashboard, including issues in other repositories, but only a linked issue names its worktree.
 - CI result: The combined state of the checks GitHub last ran on an authored pull request's most recent commit, shown as a one-character symbol in the Type column. A pull request with no checks configured has no CI result.
 - Assigned issue: An open issue where the user is an assignee.
 - Tracked item: An open issue or pull request that appears in a tracked repository regardless of the user's direct involvement.

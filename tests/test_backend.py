@@ -169,6 +169,9 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
             captured["todo_repository"] = todo_repository
             return []
 
+        def fetch_linked_issues(self, pull_requests, progress_callback=None):
+            return {}
+
     class FakeAnalysisCache:
         def is_valid(self, item: WorkItem) -> bool:
             return item.number == 11
@@ -527,6 +530,179 @@ def test_load_items_submits_independent_github_fetches_before_waiting(
     assert suggestion_markers == {}
     assert events[:6] == [("submit", name) for name in expected_fetches]
     assert events[6] == ("result", "list_open_authored_prs")
+
+
+@pytest.mark.parametrize(
+    ("closing_issues", "expected_visible", "expected_linked_issue"),
+    [
+        # A closing issue in another repository cannot name this pull request's
+        # worktree, so the lowest-numbered issue in its own repository wins.
+        (
+            [("other/repo", 12), ("owner/repo", 41999), ("owner/repo", 41830)],
+            {("owner/repo", 42149), ("owner/repo", 500)},
+            ("owner/repo", 41830),
+        ),
+        # With nothing to redirect to the pull request keeps its own number, but
+        # the foreign issue is still work the pull request covers.
+        (
+            [("other/repo", 12)],
+            {("owner/repo", 42149), ("owner/repo", 41830), ("owner/repo", 500)},
+            None,
+        ),
+    ],
+)
+def test_load_items_hides_every_issue_a_pull_request_closes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    closing_issues: list[tuple[str, int]],
+    expected_visible: set[tuple[str, int]],
+    expected_linked_issue: tuple[str, int] | None,
+) -> None:
+    class FakeGitHubClient:
+        def list_open_authored_prs(self, login, progress_callback=None):
+            return [
+                {
+                    "id": "PR-42149",
+                    "repo": "owner/repo",
+                    "number": 42149,
+                    "title": "Implement the tracked issue",
+                    "url": "https://example.com/pull/42149",
+                    "created_at": "2026-02-01T00:00:00Z",
+                    "updated_at": "2026-02-05T01:00:00Z",
+                    "is_draft": False,
+                    "ci_state": None,
+                }
+            ]
+
+        def list_open_review_requested_prs(self, login, progress_callback=None):
+            return []
+
+        def list_open_reviewed_prs(self, login):
+            return []
+
+        def list_open_assigned_issues(self, login):
+            return [
+                {
+                    "id": "ISSUE-41830",
+                    "repo": "owner/repo",
+                    "number": 41830,
+                    "title": "The issue the pull request closes",
+                    "url": "https://example.com/issues/41830",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-02-04T01:00:00Z",
+                },
+                {
+                    "id": "ISSUE-500",
+                    "repo": "owner/repo",
+                    "number": 500,
+                    "title": "Unrelated assigned issue",
+                    "url": "https://example.com/issues/500",
+                    "created_at": "2026-01-02T00:00:00Z",
+                    "updated_at": "2026-02-03T01:00:00Z",
+                },
+            ]
+
+        def list_recent_tracked_items(self, repositories, progress_callback=None):
+            return [
+                {
+                    "id": "ISSUE-12",
+                    "repo": "other/repo",
+                    "number": 12,
+                    "title": "Planning issue in another repository",
+                    "url": "https://example.com/other/issues/12",
+                    "created_at": "2026-01-03T00:00:00Z",
+                    "updated_at": "2026-02-02T01:00:00Z",
+                    "is_pull_request": False,
+                }
+            ]
+
+        def list_open_todo_issues(self, todo_repository, progress_callback=None):
+            return []
+
+        def fetch_linked_issues(self, pull_requests, progress_callback=None):
+            assert pull_requests == [("owner/repo", 42149)]
+            return {("owner/repo", 42149): closing_issues}
+
+    monkeypatch.setattr(backend_module, "resolve_repositories", lambda selectors: ["owner/repo"])
+    backend = WorkdashBackend(
+        github_client=FakeGitHubClient(),
+        config=WorkdashConfig(repositories=("owner/repo",)),
+        cache_root=tmp_path / "cache",
+        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+    )
+
+    work_items, _markers = backend.load_items(progress_callback=lambda _: None)
+
+    assert {(item.repo, item.number) for item in work_items} == expected_visible
+    pull_request = next(item for item in work_items if item.item_type == WorkItemType.PR)
+    assert pull_request.linked_issue == expected_linked_issue
+
+
+def test_load_items_hides_an_included_issue_that_a_listed_pull_request_closes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Including the issue by URL brings it back for the session, but a refresh
+    # must drop it again because the pull request already covers that work.
+    included_issue = make_work_item(
+        item_type=WorkItemType.ISSUE,
+        kind=WorkItemKind.TRACKED_ISSUE,
+        number=41830,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    included_issue.included = True
+
+    class FakeGitHubClient:
+        def list_open_authored_prs(self, login, progress_callback=None):
+            return [
+                {
+                    "id": "PR-42149",
+                    "repo": "owner/repo",
+                    "number": 42149,
+                    "title": "Implement the tracked issue",
+                    "url": "https://example.com/pull/42149",
+                    "created_at": "2026-02-01T00:00:00Z",
+                    "updated_at": "2026-02-05T01:00:00Z",
+                    "is_draft": False,
+                    "ci_state": None,
+                }
+            ]
+
+        def list_open_review_requested_prs(self, login, progress_callback=None):
+            return []
+
+        def list_open_reviewed_prs(self, login):
+            return []
+
+        def list_open_assigned_issues(self, login):
+            return []
+
+        def list_recent_tracked_items(self, repositories, progress_callback=None):
+            return []
+
+        def list_open_todo_issues(self, todo_repository, progress_callback=None):
+            return []
+
+        def fetch_item_by_url(self, parsed_url, github_username):
+            return included_issue
+
+        def fetch_linked_issues(self, pull_requests, progress_callback=None):
+            return {("owner/repo", 42149): [("owner/repo", 41830)]}
+
+    monkeypatch.setattr(backend_module, "resolve_repositories", lambda selectors: ["owner/repo"])
+    store = IncludedItemsStore(tmp_path / "included.json")
+    store.save(["https://github.com/owner/repo/issues/41830"])
+    backend = WorkdashBackend(
+        github_client=FakeGitHubClient(),
+        config=WorkdashConfig(repositories=("owner/repo",)),
+        cache_root=tmp_path / "cache",
+        included_items_store=store,
+    )
+
+    work_items, _markers = backend.load_items(progress_callback=lambda _: None)
+
+    assert [(item.item_type, item.number) for item in work_items] == [(WorkItemType.PR, 42149)]
+    # The URL stays in the store, so the issue is still there to be re-included.
+    assert store.load() == ["https://github.com/owner/repo/issues/41830"]
 
 
 def test_compute_suggestion_markers_prefers_pr_when_age_is_tied() -> None:

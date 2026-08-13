@@ -12,6 +12,8 @@ Feature: Launch a coding session
     - Before launching a session, the system prepares the worktree for the selected work item.
     - The launched coding agent is started inside the work item's worktree.
     - The launched coding agent is preloaded with the work item's GitHub context and, when available, the cached analysis for that item.
+    - A coding session is briefed for exactly one of two jobs: implementing the work item, or reviewing somebody else's pull request. ISSUE and PR items get the implement briefing; REVIEW and CHECK items get the review briefing.
+    - The implement briefing for an authored pull request also tells the agent that the checkout already holds a partial implementation of this work, and that it must review those existing changes and build on them instead of starting over.
     - The user can cancel the dialog without launching a session.
     - The system reports the outcome of the launch to the user.
     - If preparing the worktree or launching the subprocess fails, the system closes the dialog/progress overlay and reports the error details to the user.
@@ -31,6 +33,19 @@ Feature: Launch a coding session
     Given the selected work item has a cached analysis
     When the user launches a coding session with a supported coding agent
     Then the agent is preloaded with the cached analysis alongside the GitHub context
+
+  @id:F-CODING-LAUNCH-S006
+  Scenario: An authored pull request is briefed as partially implemented work
+    Given the selected work item is a pull request the user authored
+    When the user launches a coding session with a supported coding agent
+    Then the agent is briefed to implement the work item
+    And the agent is told the checkout already holds a partial implementation to build on
+
+  @id:F-CODING-LAUNCH-S007
+  Scenario: A pull request the user did not author is briefed as a review
+    Given the selected work item is a pull request the user did not author
+    When the user launches a coding session with a supported coding agent
+    Then the agent is briefed to review the pull request
 
   @id:F-CODING-LAUNCH-S003
   Scenario: User cancels the coding dialog without launching

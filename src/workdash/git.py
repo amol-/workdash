@@ -3,7 +3,7 @@
 import subprocess
 from pathlib import Path
 
-from .models import WorkItem, WorkItemType
+from .models import WorkItem, WorkItemType, accepted_worktree_numbers
 
 
 class GitHelper:
@@ -19,12 +19,17 @@ class GitHelper:
             return origin_repo == item.todo_target and candidate.name == self.worktree_name(
                 item.todo_target, item.number, todo=True
             )
+        if origin_repo is None:
+            return False
+        accepted_names = {
+            self.worktree_name(origin_repo, number) for number in accepted_worktree_numbers(item)
+        }
         if origin_repo == item.repo:
-            return candidate.name == self.worktree_name(origin_repo, item.number)
-        if item.item_type == WorkItemType.PR and origin_repo is not None:
+            return candidate.name in accepted_names
+        if item.item_type == WorkItemType.PR:
             if self.remote_repo(candidate, "upstream") != item.repo:
                 return False
-            return candidate.name == self.worktree_name(origin_repo, item.number)
+            return candidate.name in accepted_names
         return False
 
     def is_worktree_root(self, candidate: Path) -> bool:
@@ -258,6 +263,22 @@ class GitHelper:
                     if wt.is_dir():
                         return wt
         return None
+
+    def current_branch(self, worktree: Path) -> str | None:
+        """Return the branch checked out in a worktree, or None when detached."""
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=worktree,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return None
+        if result.returncode != 0:
+            return None
+        branch = result.stdout.strip()
+        return branch if branch and branch != "HEAD" else None
 
     def merge_base_with_origin_default(self, worktree: str) -> str | None:
         """Return the merge-base commit between HEAD and origin's default branch."""

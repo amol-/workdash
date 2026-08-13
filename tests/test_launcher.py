@@ -862,7 +862,6 @@ def test_build_launch_agent_prompt_includes_required_metadata_and_non_start_inst
         },
     )
 
-    assert "session for this GitHub pull request" in prompt
     assert "Propose a concrete implementation plan and clarifying questions." in prompt
     assert "Do not start implementing code yet." in prompt
     assert "- type: pr" in prompt
@@ -875,30 +874,33 @@ def test_build_launch_agent_prompt_includes_required_metadata_and_non_start_inst
     assert "PREVIOUS ANALYSIS" not in prompt
 
 
-def test_build_launch_agent_prompt_for_review_requested_pr_is_review_focused() -> None:
+@pytest.mark.parametrize("kind", [WorkItemKind.REVIEW_REQUESTED_PR, WorkItemKind.TRACKED_PR])
+def test_build_launch_agent_prompt_for_somebody_elses_pr_is_review_focused(
+    kind: WorkItemKind,
+) -> None:
     prompt = build_launch_agent_prompt(
-        item=make_work_item(
-            WorkItemType.PR,
-            kind=WorkItemKind.REVIEW_REQUESTED_PR,
-        ),
+        item=make_work_item(WorkItemType.PR, kind=kind),
         repo_path="/tmp/repo",
-        github_context={
-            "state": "OPEN",
-            "author": {"login": "testuser"},
-            "assignees": [{"login": "dev1"}],
-            "labels": [{"name": "bug"}],
-            "createdAt": "2026-02-20T10:00:00Z",
-            "updatedAt": "2026-02-21T10:00:00Z",
-            "isDraft": False,
-            "reviewDecision": "REVIEW_REQUIRED",
-            "body": "details",
-        },
+        github_context={"state": "OPEN"},
     )
 
     assert "session to review this GitHub pull request" in prompt
     assert "Discuss review findings, risks, and open questions for the author." in prompt
     assert "Do not start implementing code changes." in prompt
-    assert "- kind: review_requested_pr" in prompt
+    assert f"- kind: {kind.value}" in prompt
+
+
+def test_build_launch_agent_prompt_tells_an_authored_pr_to_build_on_its_partial_work() -> None:
+    prompt = build_launch_agent_prompt(
+        item=make_work_item(WorkItemType.PR, kind=WorkItemKind.AUTHORED_PR),
+        repo_path="/tmp/repo",
+        github_context={"state": "OPEN"},
+    )
+
+    assert "Propose a concrete implementation plan and clarifying questions." in prompt
+    assert "WORK ALREADY IN PROGRESS:" in prompt
+    assert "https://github.com/owner/repo/pull/42" in prompt
+    assert "build on them instead of starting the work over" in prompt
 
 
 def test_build_launch_agent_prompt_includes_analysis_path_when_provided() -> None:
@@ -919,8 +921,10 @@ def test_build_launch_agent_prompt_uses_issue_template_for_issues() -> None:
         repo_path="/tmp/repo",
         github_context={"state": "OPEN"},
     )
-    assert "session for this GitHub issue" in prompt
+    assert "session to implement this GitHub work item" in prompt
     assert "- type: issue" in prompt
+    # The implement briefing must not claim partial work that does not exist yet.
+    assert "WORK ALREADY IN PROGRESS:" not in prompt
 
 
 def test_build_launch_agent_prompt_names_the_target_as_the_checkout_of_a_targeted_todo() -> None:

@@ -10,7 +10,7 @@ from workdash.github_client import (
     TransientFetchError,
     parse_github_item_url,
 )
-from workdash.models import WorkItemType
+from workdash.models import WorkItemKind, WorkItemType
 
 
 @pytest.mark.parametrize(
@@ -970,6 +970,180 @@ def test_list_open_review_requested_prs_raises_clear_error_when_gh_fails(
         GitHubClient().list_open_review_requested_prs("testuser")
 
 
+def test_fetch_linked_issues_reads_every_pull_request_in_one_graphql_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_commands: list[list[str]] = []
+
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        captured_commands.append(command)
+        if command[:3] == ["gh", "api", "graphql"]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "data": {
+                            "p0": {
+                                "pullRequest": {
+                                    "closingIssuesReferences": {
+                                        "nodes": [
+                                            {
+                                                "number": 41999,
+                                                "repository": {
+                                                    "nameWithOwner": "posit-dev/connect"
+                                                },
+                                            },
+                                            # Every closing issue is reported,
+                                            # including one in another repository.
+                                            {
+                                                "number": 41830,
+                                                "repository": {
+                                                    "nameWithOwner": "posit-dev/planning"
+                                                },
+                                            },
+                                        ]
+                                    }
+                                }
+                            },
+                            "p1": {"pullRequest": {"closingIssuesReferences": {"nodes": []}}},
+                        }
+                    }
+                ),
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = GitHubClient().fetch_linked_issues([("posit-dev/connect", 42149), ("owner/repo", 7)])
+
+    assert result == {
+        ("posit-dev/connect", 42149): [
+            ("posit-dev/connect", 41999),
+            ("posit-dev/planning", 41830),
+        ]
+    }
+    # Every pull request is asked for in one aliased document.
+    assert len(captured_commands) == 1
+    query = captured_commands[0][4]
+    assert query.startswith("query={ p0: ")
+    assert 'p0: repository(owner: "posit-dev", name: "connect")' in query
+    assert "pullRequest(number: 42149)" in query
+    assert 'p1: repository(owner: "owner", name: "repo")' in query
+    assert "pullRequest(number: 7)" in query
+    assert (
+        "closingIssuesReferences(first: 5) { nodes { number repository { nameWithOwner } } }"
+        in query
+    )
+
+
+def test_fetch_linked_issues_asks_gh_nothing_when_there_are_no_pull_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        raise AssertionError(f"Unexpected command: {args[0]}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert GitHubClient().fetch_linked_issues([]) == {}
+
+
+@pytest.mark.parametrize(
+    ("error_type", "skip_error", "expected_fragment"),
+    [
+        (
+            "FORBIDDEN",
+            "GraphQL: Resource protected by organization SAML enforcement. "
+            "You must grant your OAuth token access to this organization.",
+            "SAML enforcement",
+        ),
+        (
+            "NOT_FOUND",
+            "Could not resolve to a Repository with the name 'protected-org/protected-repo'.",
+            "Could not resolve to a Repository",
+        ),
+    ],
+)
+def test_fetch_linked_issues_warns_and_skips_an_unreachable_pull_request(
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: str,
+    skip_error: str,
+    expected_fragment: str,
+) -> None:
+    warnings: list[str] = []
+
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        if command[:3] == ["gh", "api", "graphql"]:
+            raise subprocess.CalledProcessError(
+                returncode=1,
+                cmd=command,
+                output=json.dumps(
+                    {
+                        "data": {
+                            "p0": None,
+                            "p1": {
+                                "pullRequest": {
+                                    "closingIssuesReferences": {
+                                        "nodes": [
+                                            {
+                                                "number": 12,
+                                                "repository": {"nameWithOwner": "owner/repo"},
+                                            }
+                                        ]
+                                    }
+                                }
+                            },
+                        },
+                        "errors": [{"type": error_type, "path": ["p0"], "message": skip_error}],
+                    }
+                ),
+                stderr=skip_error,
+            )
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = GitHubClient().fetch_linked_issues(
+        [("protected-org/protected-repo", 860), ("owner/repo", 42)],
+        progress_callback=warnings.append,
+    )
+
+    # The denied pull request has no linked issue, so it never redirects a
+    # worktree or hides an issue row.
+    assert result == {("owner/repo", 42): [("owner/repo", 12)]}
+    assert any(
+        "Warning: skipped linked issue lookup for protected-org/protected-repo#860" in warning
+        and expected_fragment in warning
+        for warning in warnings
+    )
+
+
+def test_fetch_linked_issues_reraises_a_non_authorization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warnings: list[str] = []
+
+    def fake_run(*args, **kwargs):
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=args[0],
+            stderr="permission denied",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="permission denied"):
+        GitHubClient().fetch_linked_issues(
+            [("owner/repo", 42)],
+            progress_callback=warnings.append,
+        )
+
+    assert not any("Warning: skipped linked issue lookup" in warning for warning in warnings)
+
+
 def test_list_open_reviewed_prs_returns_open_prs_reviewed_by_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1578,6 +1752,54 @@ def test_list_open_assigned_issues_raises_clear_error_when_gh_fails(
         GitHubClient().list_open_assigned_issues("testuser")
 
 
+@pytest.mark.parametrize(
+    ("author_login", "expected_kind"),
+    [
+        ("testuser", WorkItemKind.AUTHORED_PR),
+        # GitHub logins are case-insensitive, so a differently-cased login is
+        # still the user's own pull request.
+        ("TestUser", WorkItemKind.AUTHORED_PR),
+        ("somebody-else", WorkItemKind.TRACKED_PR),
+    ],
+)
+def test_fetch_item_by_url_classifies_a_pull_request_by_its_author(
+    monkeypatch: pytest.MonkeyPatch, author_login: str, expected_kind: WorkItemKind
+) -> None:
+    # An included pull request of the user's own is their work to implement, not
+    # somebody else's work to review.
+    parsed = parse_github_item_url("https://github.com/owner/repo/pull/1")
+    assert parsed is not None
+    captured_commands: list[list[str]] = []
+
+    def fake_run(*args, **kwargs):
+        captured_commands.append(args[0])
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "number": 1,
+                    "title": "Included pull request",
+                    "url": "https://github.com/owner/repo/pull/1",
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-02T00:00:00Z",
+                    "state": "OPEN",
+                    "author": {"login": author_login},
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    item = GitHubClient().fetch_item_by_url(parsed, "testuser")
+
+    assert item is not None
+    assert item.kind is expected_kind
+    assert item.included is True
+    assert "author" in captured_commands[0][-1]
+
+
 def test_fetch_item_by_url_raises_transient_for_malformed_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1611,7 +1833,7 @@ def test_fetch_item_by_url_raises_transient_for_malformed_timestamp(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(TransientFetchError, match="invalid timestamp"):
-        GitHubClient().fetch_item_by_url(parsed)
+        GitHubClient().fetch_item_by_url(parsed, "testuser")
 
 
 @pytest.mark.parametrize(
@@ -1670,9 +1892,9 @@ def test_fetch_item_by_url_classifies_errors_and_states(
 
     if expected == "transient":
         with pytest.raises(TransientFetchError):
-            GitHubClient().fetch_item_by_url(parsed)
+            GitHubClient().fetch_item_by_url(parsed, "testuser")
     else:
-        assert GitHubClient().fetch_item_by_url(parsed) is None
+        assert GitHubClient().fetch_item_by_url(parsed, "testuser") is None
 
 
 def test_list_open_todo_issues_reads_targets_from_issue_body_metadata(

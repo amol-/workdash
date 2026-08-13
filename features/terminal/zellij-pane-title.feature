@@ -9,7 +9,7 @@ Feature: Name Zellij panes for work actions
     - New Zellij panes for terminal-backed work actions are named "<action>_<worktree>".
     - The "code" action name is used for coding sessions that open in Zellij.
     - The "terminal" action name is used for plain terminal panes.
-    - The worktree part of the name is the worktree directory name, not the full path.
+    - The worktree part of the name is the worktree directory name, not the full path. An authored pull request that closes an issue in the same repository shares that issue's worktree, so its pane title carries the linked issue's number.
 
   @id:F-TERMINAL-PANE-TITLE-S001
   Scenario Outline: Terminal-backed work action names its Zellij pane

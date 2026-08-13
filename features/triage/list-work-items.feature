@@ -9,7 +9,11 @@ Feature: List work items
     - The list includes open pull requests the user authored, open pull requests where the user is a REVIEW item, open issues assigned to the user, open issues and pull requests across tracked repositories, and items the user has explicitly included by URL.
     - A pull request is a REVIEW item when the user is directly requested as a reviewer, or when the user has already reviewed it.
     - Review requests addressed only to a team the user belongs to do not make the pull request a REVIEW item; only direct user review requests do.
-    - Each TUI entry's Type column shows its item type (ISSUE, PR, or REVIEW) followed immediately by its GitHub number (for example, `ISSUE#123`), alongside the owning repository, last update date, item's age, and title.
+    - Each TUI entry's Type column shows its item type (ISSUE, PR, REVIEW, or CHECK) followed immediately by its GitHub number (for example, `ISSUE#123`), alongside the owning repository, last update date, item's age, and title.
+    - A pull request the user neither authored nor was asked to review nor already reviewed is a CHECK item, so an open pull request waiting to be looked at is never confused with the user's own work.
+    - Reviewing a CHECK item needs no extra action: the next refresh finds the same pull request as a reviewed one and lists it as a REVIEW item instead.
+    - A pull request that closes an issue replaces that issue: the issue is not listed on its own, so the same work never occupies two rows. This holds for PR, REVIEW, and CHECK items alike, and also for an issue the user included by URL.
+    - The closed issue is dropped while the list is loaded, so it can no longer be addressed by its Workdash item ID or its URL. Including it again by URL brings it back for the rest of the session, and the next refresh drops it again.
     - Tracked repositories can hold years of open work, so the number of discovered work items is capped and the oldest ones beyond that cap are dropped. Todo items and items the user included by URL are asked for by hand, so they are always listed even when they are older than everything else.
     - An authored pull request's Type column is prefixed with a one-character symbol for the latest CI result GitHub reports on it: passing, failing, or still running. Every other row, including issues and pull requests the user did not author, is prefixed with a blank instead so the Type labels stay aligned.
     - The Repo column is capped at the width of `posit-dev/rsconnect-python`, leaving the title more room. A longer repository is truncated on its left so the repository name itself stays readable, and the leading character is replaced with an ellipsis to show the owner was cut.
@@ -94,3 +98,24 @@ Feature: List work items
     When the user opens the dashboard
     Then the authorized authored pull request appears with its CI result
     And the system warns that the unauthorized authored pull request was skipped
+
+  @id:F-TRIAGE-LIST-S011
+  Scenario: A tracked pull request the user is not involved in appears as a CHECK item
+    Given a tracked repository has an open pull request the user neither authored nor reviewed
+    When the user opens the dashboard
+    Then that pull request appears as a CHECK item
+
+  @id:F-TRIAGE-LIST-S012
+  Scenario: Reviewing a CHECK item turns it into a REVIEW item on the next refresh
+    Given the dashboard lists a pull request as a CHECK item
+    And the user has since reviewed that pull request
+    When the user refreshes the dashboard
+    Then that pull request appears as a REVIEW item
+
+  @id:F-TRIAGE-LIST-S013
+  Scenario: A pull request replaces the issue it closes
+    Given an open pull request closes an assigned issue
+    And both the pull request and that issue are open work for the user
+    When the user opens the dashboard
+    Then the pull request appears on the dashboard
+    And the issue it closes does not appear on the dashboard

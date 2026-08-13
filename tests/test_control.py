@@ -1,6 +1,8 @@
 import base64
 import json
+import subprocess
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import workdash.control as control_module
@@ -52,11 +54,11 @@ def test_session_refresh_schedules_tui_repaint_through_callback() -> None:
 
     result = session.list_items(refresh=True)
 
-    assert [item["id"] for item in result["items"]] == ["owner/repo#PR-2"]
-    assert [item["display_type"] for item in result["items"]] == ["PR"]
-    assert [format_work_item_id(item) for item in session.work_items] == ["owner/repo#PR-2"]
+    assert [item["id"] for item in result["items"]] == ["owner/repo#CHECK-2"]
+    assert [item["display_type"] for item in result["items"]] == ["CHECK"]
+    assert [format_work_item_id(item) for item in session.work_items] == ["owner/repo#CHECK-2"]
     assert session.suggestion_markers == marker
-    assert repainted_item_ids == [["owner/repo#PR-2"]]
+    assert repainted_item_ids == [["owner/repo#CHECK-2"]]
 
 
 def test_session_list_payload_keeps_copy_paste_id_plain_and_display_type_included() -> None:
@@ -73,8 +75,8 @@ def test_session_list_payload_keeps_copy_paste_id_plain_and_display_type_include
 
     result = session.list_items()
 
-    assert result["items"][0]["id"] == "owner/repo#PR-2"
-    assert result["items"][0]["display_type"] == "PR+"
+    assert result["items"][0]["id"] == "owner/repo#CHECK-2"
+    assert result["items"][0]["display_type"] == "CHECK+"
 
 
 def test_session_include_notifies_items_changed_callback() -> None:
@@ -105,9 +107,70 @@ def test_session_include_notifies_items_changed_callback() -> None:
     assert result.fetched_item is included_item
     assert [format_work_item_id(item) for item in session.work_items] == [
         "owner/repo#ISSUE-1",
-        "owner/repo#PR-2",
+        "owner/repo#CHECK-2",
     ]
-    assert repainted_item_ids == [["owner/repo#ISSUE-1", "owner/repo#PR-2"]]
+    assert repainted_item_ids == [["owner/repo#ISSUE-1", "owner/repo#CHECK-2"]]
+
+
+def test_agent_panes_map_an_authored_pr_to_the_worktree_of_the_issue_it_closes(
+    tmp_path, monkeypatch
+) -> None:
+    # The agent works in the checkout opened from the linked issue, so the pane
+    # must still be reported against the pull request that owns that work.
+    worktree = tmp_path / "owner_repo_41830"
+    worktree.mkdir()
+    item = WorkItem(
+        kind=WorkItemKind.AUTHORED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=42149,
+        title="Implement the issue",
+        created_at=datetime(2026, 2, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 1, tzinfo=UTC),
+        url="https://example.com/42149",
+        linked_issue=("owner/repo", 41830),
+    )
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=f"{Path(kwargs['cwd']).resolve()}\n", stderr=""
+            )
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        control_module,
+        "load_zellij_panes",
+        lambda _session: [
+            {
+                "id": 1,
+                "title": "code_owner_repo_41830",
+                "pane_cwd": str(worktree),
+                "pane_command": "pi",
+                "tab_id": 7,
+                "tab_name": "work",
+                "state": "Running",
+                "exited": False,
+            }
+        ],
+    )
+
+    session = WorkdashSession(
+        config=WorkdashConfig(workdir=str(tmp_path)),
+        backend=MagicMock(),
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+
+    assert [pane["pane_id"] for pane in session.get_agent_panes_for_item(item)] == ["terminal_1"]
+    assert [pane["item"] for pane in session.info()["panes"]] == ["owner/repo#PR-42149"]
 
 
 def test_todo_notifies_the_live_tui_after_capturing(monkeypatch) -> None:

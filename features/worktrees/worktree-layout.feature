@@ -9,7 +9,8 @@ Feature: Work directory layout
     - Repositories and worktrees live under the configured work directory.
     - Each tracked repository has one main clone rooted at "<workdir>/<owner>_<repo>".
     - Each work item has its own worktree named "<owner>_<repo>_<number>", placed as a sibling of the main clone.
-    - Worktrees for pull requests from a fork are named after the fork's owner and repository, not the upstream repository.
+    - Two kinds of work item are named differently: a targeted todo uses "<owner>_<repo>_todo_<number>" under its target repository, and an authored pull request that closes an issue in the same repository shares that issue's worktree, so its directory carries the linked issue's number.
+    - Worktrees for pull requests from a fork are named after the fork's owner and repository, not the upstream repository, even when the number they carry comes from a linked issue in the upstream repository.
     - Preparing a worktree never disturbs other worktrees.
 
   @id:F-WORKTREES-LAYOUT-S001

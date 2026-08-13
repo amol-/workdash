@@ -18,6 +18,7 @@ Feature: CLI orchestration commands
     - Planned worktree path names are not known worktrees by name alone; local git metadata must prove the repository relationship.
     - Known worktrees are discovered from Workdash-style per-item directory candidates, then local git metadata must prove the candidate is the repository root and has the expected repository relationship.
     - Scanned PR worktree candidates with a same-name origin under another owner are not known worktrees.
+    - An authored pull request that shares the worktree of the issue it closes maps that worktree to the pull request, so its agent pane is reported against the pull request and not as an unknown item.
     - A fork or renamed fork directory must have local upstream metadata matching the base repository before it maps to that repository's item.
     - Manually renamed worktrees outside Workdash-style per-item candidates are unknown; Workdash may prepare its own worktree later.
     - `workdash info` reports only live panes whose titles prove Workdash launched them: `code_` agent panes and `terminal_` terminal panes.
@@ -203,6 +204,13 @@ Feature: CLI orchestration commands
     When the user runs `workdash todo "Fix the flaky test"`
     Then the command reports that `workdash --server` must be running
     And the command exits with a non-zero status
+
+  @id:F-CLI-ORCHESTRATION-S026
+  Scenario: Info maps the shared worktree of an authored pull request to that pull request
+    Given a server-backed Workdash session is running
+    And that session has an agent pane in the worktree of the issue an authored pull request closes
+    When the user runs `workdash info`
+    Then the pane is mapped to that authored pull request
 
   @id:F-CLI-ORCHESTRATION-S023
   Scenario: Analyze CLI writes server-returned analysis content to a secure local file

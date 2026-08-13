@@ -78,3 +78,23 @@ def test_fast_forward_default_branch_reports_git_failure(
         RuntimeError, match="Failed to fast-forward the default branch: not a git repository"
     ):
         GitHelper().fast_forward_default_branch(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected"),
+    [(0, "feature-branch\n", "feature-branch"), (0, "HEAD\n", None), (128, "", None)],
+)
+def test_current_branch_reports_none_without_a_checked_out_branch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    returncode: int,
+    stdout: str,
+    expected: str | None,
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], returncode, stdout, ""),
+    )
+
+    assert GitHelper().current_branch(tmp_path) == expected

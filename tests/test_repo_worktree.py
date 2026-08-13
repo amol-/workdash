@@ -60,6 +60,19 @@ def make_issue(number: int = 42, repo: str = "owner/repo") -> WorkItem:
     )
 
 
+def make_linked_pr(
+    number: int = 42149,
+    issue_number: int = 41830,
+    *,
+    kind: WorkItemKind = WorkItemKind.AUTHORED_PR,
+    repo: str = "owner/repo",
+) -> WorkItem:
+    item = make_pr(number, repo)
+    item.kind = kind
+    item.linked_issue = (repo, issue_number)
+    return item
+
+
 def make_targeted_todo(number: int = 110, target: str = "owner/repo") -> WorkItem:
     return WorkItem(
         kind=WorkItemKind.ASSIGNED_ISSUE,
@@ -423,6 +436,205 @@ def test_existing_worktree_path_finds_direct_worktree_when_origin_matches_item_r
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     assert existing_worktree_path(str(tmp_path), make_pr()) == candidate
+
+
+def test_existing_worktree_path_finds_the_linked_issue_worktree_for_an_authored_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pane and terminal actions of an authored pull request must land in the
+    # checkout the user already opened from the issue it closes.
+    issue_worktree = tmp_path / "owner_repo_41830"
+    issue_worktree.mkdir()
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert existing_worktree_path(str(tmp_path), make_linked_pr()) == issue_worktree
+    # A pull request the user only reviews keeps its own directory, so the
+    # issue's checkout is not offered for somebody else's branch.
+    assert (
+        existing_worktree_path(
+            str(tmp_path),
+            make_linked_pr(kind=WorkItemKind.REVIEW_REQUESTED_PR),
+        )
+        is None
+    )
+    # An issue closed in another repository names a checkout of that other
+    # repository, so the pull request keeps its own PR-numbered worktree.
+    cross_repo_pr = make_linked_pr()
+    cross_repo_pr.linked_issue = ("other/repo", 41830)
+    assert existing_worktree_path(str(tmp_path), cross_repo_pr) is None
+
+
+def test_existing_worktree_path_still_finds_a_pr_numbered_worktree_for_a_linked_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Checkouts opened before the pull request linked to its issue keep their own
+    # number, and their panes and terminals must stay mapped to the pull request.
+    pr_worktree = tmp_path / "owner_repo_42149"
+    pr_worktree.mkdir()
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert existing_worktree_path(str(tmp_path), make_linked_pr()) == pr_worktree
+
+
+def test_existing_worktree_path_prefers_the_pr_numbered_worktree_over_the_issue_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Both checkouts prove the pull request; the one named after the pull request
+    # itself is the one its panes and terminals belong to.
+    (tmp_path / "owner_repo_41830").mkdir()
+    pr_worktree = tmp_path / "owner_repo_42149"
+    pr_worktree.mkdir()
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert existing_worktree_path(str(tmp_path), make_linked_pr()) == pr_worktree
+
+
+def test_ensure_worktree_leaves_a_linked_issue_worktree_on_another_branch_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two open pull requests can close the same issue; adopting a checkout that
+    # holds the other one's branch would push this work onto the wrong PR.
+    (tmp_path / "owner_repo").mkdir()
+    issue_worktree = tmp_path / "owner_repo_41830"
+    issue_worktree.mkdir()
+    (issue_worktree / "other-work.txt").write_text("other pull request", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        calls.append(cmd)
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="other-pr-branch\n", stderr="")
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=_SAME_REPO_HEAD_INFO, stderr="")
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="origin/main\n", stderr="")
+        if cmd[:2] == ["git", "show-ref"] or cmd[:3] == ["git", "worktree", "list"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if cmd[:3] == ["git", "worktree", "add"]:
+            # git refuses to populate a directory that already holds files.
+            target = Path(cmd[cmd.index("-b") + 2])
+            if target.is_dir() and any(target.iterdir()):
+                raise subprocess.CalledProcessError(
+                    128, cmd, output="", stderr=f"fatal: '{target}' already exists\n"
+                )
+            target.mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[0] == "git":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = ensure_worktree(str(tmp_path), make_linked_pr())
+
+    # The occupied checkout is neither pulled nor returned; the pull request gets
+    # its own worktree, named after itself, on its own branch.
+    assert result == str(tmp_path / "owner_repo_42149")
+    assert not any(call[:2] == ["git", "pull"] for call in calls)
+    wt_add = next(call for call in calls if call[:3] == ["git", "worktree", "add"])
+    assert "feature-branch" in wt_add
+    assert str(tmp_path / "owner_repo_42149") in wt_add
+    # Both directories now exist forever; panes opened in the new checkout must
+    # still map back to the pull request instead of reading as unknown work.
+    assert existing_worktree_path(str(tmp_path), make_linked_pr()) == tmp_path / "owner_repo_42149"
+
+
+def test_ensure_worktree_adopts_a_linked_prs_own_pr_numbered_worktree_as_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A checkout named after the pull request itself is this pull request's own
+    # work whatever it is checked out on, so it is used directly: no branch
+    # lookup on GitHub and no upstream fetch in a checkout that has no fork.
+    (tmp_path / "owner_repo").mkdir()
+    (tmp_path / "owner_repo_42149").mkdir()
+    calls: list[list[str]] = []
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        calls.append(cmd)
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
+        if cmd == ["git", "pull", "--ff-only"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = ensure_worktree(str(tmp_path), make_linked_pr())
+
+    assert result == str(tmp_path / "owner_repo_42149")
+    assert ["git", "pull", "--ff-only"] in calls
+
+
+def test_ensure_worktree_names_a_fork_pr_worktree_after_the_fork_and_the_linked_issue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=_FORK_HEAD_INFO, stderr="")
+        if cmd[:3] == ["gh", "repo", "clone"]:
+            (tmp_path / "contributor_repo").mkdir(exist_ok=True)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="origin/main\n", stderr="")
+        if cmd[:2] == ["git", "show-ref"] or cmd[:3] == ["git", "worktree", "list"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if cmd[0] == "git":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = ensure_worktree(str(tmp_path), make_linked_pr())
+
+    # The directory names the checkout's own repository (the fork) and the issue
+    # the work implements, which lives in the upstream repository.
+    assert result == str(tmp_path / "contributor_repo_41830")
 
 
 def test_existing_worktree_path_returns_none_when_workdir_is_file(

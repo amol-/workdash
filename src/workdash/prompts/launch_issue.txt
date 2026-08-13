@@ -1,4 +1,4 @@
-You are starting an interactive coding session for this GitHub issue.
+You are starting an interactive coding session to implement this GitHub work item.
 Read the context below, then gather and confirm any additional context you need
 from the local repository checkout.
 Propose a concrete implementation plan and clarifying questions.
@@ -15,6 +15,6 @@ WORK ITEM:
 LOCAL REPOSITORY:
 - expected local checkout path: {repo_path}
 - confirm this checkout corresponds to {code_repo} before any code changes.{merge_base_section}
-{analysis_section}
+{partial_work_section}{analysis_section}
 GITHUB CONTEXT (from gh):
 {github_context_json}
