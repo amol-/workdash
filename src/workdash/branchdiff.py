@@ -19,6 +19,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.color import Color
@@ -411,6 +412,14 @@ class BranchDiffScreen(Screen[None]):
 
     def action_quit(self) -> None:
         self.app.exit()
+
+    def on_resize(self, event: events.Resize) -> None:
+        # Textual only repaints the cells its compositor believes changed. A terminal
+        # multiplexer shifts the pane contents when the pane is resized, which Textual
+        # cannot see, so those rows are never rewritten and the file list is left
+        # showing duplicated and stale rows. Erase the display so the repaint that
+        # follows this resize has to draw every cell, the way vim redraws on SIGWINCH.
+        self.app._driver.write("\x1b[2J")
 
     # TODO(EVO-002): Handle binary files and encoding errors gracefully
     # Why: Some files cannot be displayed as text (binary, encoding issues).

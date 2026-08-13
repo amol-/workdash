@@ -356,3 +356,27 @@ def test_branchdiff_app_mounts_and_navigates_between_files(monkeypatch, tmp_path
             assert app.return_code == 0
 
     asyncio.run(run_smoke())
+
+
+def test_branchdiff_erases_the_display_when_the_pane_is_resized(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
+        return ("old\n", "new\n")
+
+    monkeypatch.setattr(branchdiff, "get_file_diff", get_file_diff)
+    app = branchdiff.BranchDiffApp(["a.py", "b.py"], tmp_path, "main")
+
+    async def run_smoke() -> None:
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause()
+            written: list[str] = []
+            monkeypatch.setattr(app._driver, "write", written.append)
+
+            await pilot.resize_terminal(120, 40)
+            await pilot.pause()
+
+            assert "\x1b[2J" in written
+
+    asyncio.run(run_smoke())
