@@ -8,7 +8,8 @@ Feature: View branch diff in standalone TUI command
   Rules:
     - The `workdash branchdiff` command works in any git repository directory.
     - The command works the same from the repository root or a subdirectory.
-    - By default, it compares the current branch against its upstream branch.
+    - By default, it compares the current branch against the repository's default branch.
+    - A branch that has been pushed still shows its own changes, not just unpushed ones.
     - An optional argument specifies a different target branch for comparison.
     - The viewer shows files in a list with side-by-side diff view (old vs new).
     - Navigation uses vim-style keybindings (j/k for file list, Enter to view, q to quit).
@@ -23,16 +24,23 @@ Feature: View branch diff in standalone TUI command
   @id:F-BRANCHDIFF-S001
   Scenario: Run branchdiff command in git repository
     Given the current directory is a git repository
-    And the repository has changes compared to its upstream branch
+    And the repository has changes compared to the default branch
     When the user runs "workdash branchdiff"
     Then the diff viewer displays changes for the first file
 
   @id:F-BRANCHDIFF-S002
   Scenario: Branchdiff with target branch specification
     Given the current directory is a git repository
-    And the repository has changes compared to its upstream branch
+    And the repository has changes compared to the default branch
     When the user runs "workdash branchdiff main"
     Then the diff viewer displays a meaningful side-by-side diff
+
+  @id:F-BRANCHDIFF-S013
+  Scenario: Branchdiff on a branch that tracks its own remote branch
+    Given the current directory is a git repository
+    And the current branch has been pushed and tracks its own remote branch
+    When the user runs "workdash branchdiff"
+    Then the file list shows all changed files
 
   @id:F-BRANCHDIFF-S003
   Scenario: Branchdiff shows committed, modified, and untracked changes
@@ -96,7 +104,7 @@ Feature: View branch diff in standalone TUI command
   @id:F-BRANCHDIFF-S008
   Scenario: Branchdiff with no changes
     Given the current directory is a git repository
-    And the repository has no changes compared to upstream
+    And the repository has no changes compared to the default branch
     When the user runs "workdash branchdiff"
     Then the command reports no changes found
     And exits with zero status

@@ -18,7 +18,7 @@ import pytest
 from pytest_bdd import given, parsers, then, when
 
 import workdash.branchdiff as branchdiff_module
-from workdash.branchdiff import get_changed_files, get_file_diff, get_upstream_branch
+from workdash.branchdiff import get_base_branch, get_changed_files, get_file_diff
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.workdash import main as workdash_main
 
@@ -39,7 +39,7 @@ def _current_dir_is_git_repo(
     monkeypatch.chdir(repo_path)
 
 
-@given("the repository has changes compared to its upstream branch")
+@given("the repository has changes compared to the default branch")
 def _repo_has_changes(
     scenario_state: dict[str, Any],
 ) -> None:
@@ -75,13 +75,34 @@ def _repo_has_changes(
         capture_output=True,
     )
 
-    # Establish main as upstream for comparison
+
+@given("the current branch has been pushed and tracks its own remote branch")
+def _current_branch_tracks_its_own_remote_branch(
+    scenario_state: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    """Push a feature branch so its upstream is that same branch on the remote."""
+    repo_path = scenario_state["repo_path"]
+    remote_path = tmp_path / "remote.git"
     subprocess.run(
-        ["git", "branch", "--set-upstream-to", "main"],
-        cwd=repo_path,
+        ["git", "init", "--bare", "-b", "main", str(remote_path)],
         check=True,
         capture_output=True,
     )
+    for command in (
+        ["git", "remote", "add", "origin", str(remote_path)],
+        ["git", "push", "-u", "origin", "main"],
+        ["git", "remote", "set-head", "origin", "main"],
+        ["git", "checkout", "-b", "feature"],
+    ):
+        subprocess.run(command, cwd=repo_path, check=True, capture_output=True)
+
+    (repo_path / "README.md").write_text("# Changed on the feature branch\n")
+    for command in (
+        ["git", "commit", "-am", "Feature work"],
+        ["git", "push", "-u", "origin", "feature"],
+    ):
+        subprocess.run(command, cwd=repo_path, check=True, capture_output=True)
 
 
 @given("the repository has modified files under a subdirectory")
@@ -106,12 +127,6 @@ def _repo_has_modified_files_under_subdirectory(
         check=True,
         capture_output=True,
     )
-    subprocess.run(
-        ["git", "branch", "--set-upstream-to", "main"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-    )
     changed_file.write_text("base\nchanged\n", encoding="utf-8")
 
     scenario_state["branchdiff_subdir"] = nested_dir
@@ -126,7 +141,7 @@ def _repo_has_committed_modified_and_untracked_changes(
     """Create committed, modified, and untracked changes."""
     repo_path = scenario_state["repo_path"]
 
-    # Make sure we're on a branch with upstream
+    # Make sure the feature branch has a main to be compared against
     try:
         subprocess.run(
             ["git", "checkout", "main"],
@@ -153,26 +168,19 @@ def _repo_has_committed_modified_and_untracked_changes(
         check=True,
         capture_output=True,
     )
-    # Establish main as upstream for comparison
-    subprocess.run(
-        ["git", "branch", "--set-upstream-to", "main"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-    )
 
     (repo_path / "file.txt").write_text("Working tree content\n")
     (repo_path / "new_file.txt").write_text("Untracked content\n")
 
 
-@given("the repository has no changes compared to upstream")
+@given("the repository has no changes compared to the default branch")
 def _repo_has_no_changes(
     scenario_state: dict[str, Any],
 ) -> None:
-    """Set up a repository with no changes compared to upstream."""
+    """Set up a repository with no changes compared to the default branch."""
     repo_path = scenario_state["repo_path"]
 
-    # Ensure we're on main with upstream tracking itself
+    # Staying on the default branch means there is nothing to compare
     try:
         subprocess.run(
             ["git", "checkout", "main"],
@@ -187,14 +195,6 @@ def _repo_has_no_changes(
             check=True,
             capture_output=True,
         )
-
-    # Set upstream to main (comparing to itself means no changes)
-    subprocess.run(
-        ["git", "branch", "--set-upstream-to", "main"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-    )
 
 
 @when('the user runs "workdash branchdiff"')
@@ -232,9 +232,9 @@ def _file_list_shows_all_changed_files(
     repo_path = scenario_state.get("repo_path")
     assert repo_path is not None, "repo_path not set in scenario_state"
 
-    # Get the base branch (upstream)
+    # Get the base branch
     try:
-        base_branch = get_upstream_branch(repo_path)
+        base_branch = get_base_branch(repo_path)
     except ValueError:
         base_branch = "main"
 
@@ -256,9 +256,9 @@ def _diff_viewer_displays_changes_for_first_file(
     repo_path = scenario_state.get("repo_path")
     assert repo_path is not None, "repo_path not set in scenario_state"
 
-    # Get the base branch (upstream)
+    # Get the base branch
     try:
-        base_branch = get_upstream_branch(repo_path)
+        base_branch = get_base_branch(repo_path)
     except ValueError:
         base_branch = "main"
 
@@ -309,7 +309,7 @@ def _diff_viewer_displays_meaningful_diff(
     # If we don't have changed files yet, detect them
     if not files:
         try:
-            base_branch = get_upstream_branch(repo_path) if repo_path else "main"
+            base_branch = get_base_branch(repo_path) if repo_path else "main"
         except ValueError:
             base_branch = "main"
         files = get_changed_files(base_branch, repo_path) if repo_path else []
@@ -317,9 +317,9 @@ def _diff_viewer_displays_meaningful_diff(
     assert repo_path is not None, "repo_path not set in scenario_state"
     assert len(files) > 0, "No changed files found"
 
-    # Get the base branch (upstream)
+    # Get the base branch
     try:
-        base_branch = get_upstream_branch(repo_path)
+        base_branch = get_base_branch(repo_path)
     except ValueError:
         base_branch = "main"
 
@@ -374,13 +374,6 @@ def _diff_viewer_open_with_multiple_files(
     subprocess.run(["git", "add", "."], cwd=repo_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "Modify all files"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-    )
-
-    subprocess.run(
-        ["git", "branch", "--set-upstream-to", "main"],
         cwd=repo_path,
         check=True,
         capture_output=True,
@@ -442,9 +435,9 @@ def _user_navigates_to_next_file(
 
     assert repo_path is not None, "repo_path not set in scenario_state"
 
-    # Get the base branch (upstream)
+    # Get the base branch
     try:
-        base_branch = get_upstream_branch(repo_path)
+        base_branch = get_base_branch(repo_path)
     except ValueError:
         base_branch = "main"
 
@@ -470,9 +463,9 @@ def _diff_viewer_displays_file_changes(
     assert repo_path is not None, "repo_path not set in scenario_state"
     assert len(files) >= 2, "Need at least 2 files to test pane update"
 
-    # Get the base branch (upstream)
+    # Get the base branch
     try:
-        base_branch = get_upstream_branch(repo_path)
+        base_branch = get_base_branch(repo_path)
     except ValueError:
         base_branch = "main"
 

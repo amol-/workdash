@@ -2,8 +2,8 @@
 
 This module provides the `workdash branchdiff` CLI command that displays a
 side-by-side diff viewer for the current git repository. It compares the current
-branch against its upstream (or a specified target) and shows committed,
-working-tree, and untracked changes.
+branch against the repository default branch (or a specified target) and shows
+committed, working-tree, and untracked changes.
 
 The command is spawned by workdash's TUI when the user presses 'd'.
 Workdash only needs to ensure the worktree exists and spawn this command.
@@ -50,8 +50,8 @@ def get_repo_root(repo_path: Path | None = None) -> Path:
     return Path(result.stdout.strip())
 
 
-def get_upstream_branch(repo_path: Path | None = None) -> str:
-    """Get the upstream branch for the current branch."""
+def get_base_branch(repo_path: Path | None = None) -> str:
+    """Get the branch the current branch is compared against."""
     if repo_path is None:
         repo_path = Path.cwd()
 
@@ -59,15 +59,20 @@ def get_upstream_branch(repo_path: Path | None = None) -> str:
     try:
         os.chdir(repo_path)
 
-        # Try to get upstream branch
+        # The remote default branch, not this branch's upstream: once a branch is
+        # pushed its upstream is that same branch, which would diff it against
+        # itself. Prefer the remote-tracking ref so a stale local default branch
+        # cannot drag the merge base back and mix other people's commits in.
         try:
             result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "@{u}"],
+                ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
                 capture_output=True,
                 text=True,
                 check=True,
             )
-            return result.stdout.strip().split("/")[-1]
+            default_branch = result.stdout.strip()
+            if default_branch:
+                return default_branch
         except subprocess.CalledProcessError:
             pass
 
@@ -83,7 +88,7 @@ def get_upstream_branch(repo_path: Path | None = None) -> str:
             except subprocess.CalledProcessError:
                 continue
 
-        raise ValueError("Cannot determine upstream branch")
+        raise ValueError("Cannot determine base branch")
 
     finally:
         os.chdir(original_cwd)
@@ -119,7 +124,7 @@ def get_changed_files(
         repo_path = Path.cwd()
 
     if base_branch is None:
-        base_branch = get_upstream_branch(repo_path)
+        base_branch = get_base_branch(repo_path)
 
     original_cwd = Path.cwd()
     try:
@@ -510,7 +515,7 @@ def run_branchdiff(target: str | None = None) -> int:
         return 1
 
     if target is None:
-        target = get_upstream_branch(repo_path)
+        target = get_base_branch(repo_path)
 
     files = get_changed_files(target, repo_path)
 
