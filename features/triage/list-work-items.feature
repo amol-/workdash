@@ -16,6 +16,7 @@ Feature: List work items
     - The closed issue is dropped while the list is loaded, so it can no longer be addressed by its Workdash item ID or its URL. Including it again by URL brings it back for the rest of the session, and the next refresh drops it again.
     - Tracked repositories can hold years of open work, so the number of discovered work items is capped and the oldest ones beyond that cap are dropped. Todo items and items the user included by URL are asked for by hand, so they are always listed even when they are older than everything else.
     - An authored pull request's Type column is prefixed with a one-character symbol for the latest CI result GitHub reports on it: passing, failing, or still running. Every other row, including issues and pull requests the user did not author, is prefixed with a blank instead so the Type labels stay aligned.
+    - An authored pull request whose CI passed and whose review decision is approved is prefixed with a double checkmark instead of the single passing symbol, so a pull request that is fully ready to merge stands out from one that only passed CI.
     - The Repo column is capped at the width of `posit-dev/rsconnect-python`, leaving the title more room. A longer repository is truncated on its left so the repository name itself stays readable, and the leading character is replaced with an ellipsis to show the owner was cut.
     - Entries are sorted by last update, most recently updated first.
     - The same GitHub issue or pull request never appears twice in the list.
@@ -111,6 +112,14 @@ Feature: List work items
     And the user has since reviewed that pull request
     When the user refreshes the dashboard
     Then that pull request appears as a REVIEW item
+
+  @id:F-TRIAGE-LIST-S014
+  Scenario: A passing, approved authored pull request shows a double checkmark
+    Given the user has authored a pull request whose CI passed and whose review is approved
+    And the user has authored a pull request whose CI passed but whose review is not approved
+    When the user opens the dashboard
+    Then the approved pull request's Type column carries a double checkmark
+    And the other pull request's Type column carries the single passing symbol
 
   @id:F-TRIAGE-LIST-S013
   Scenario: A pull request replaces the issue it closes

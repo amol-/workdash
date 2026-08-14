@@ -14,6 +14,7 @@ Canonical product vocabulary used by the feature files.
 - Authored PR: A pull request whose author is the user, shown as a `PR` item.
 - Linked issue: The issue in a pull request's own repository that the pull request closes, as GitHub reports it. A pull request that closes several of them is linked to the lowest-numbered one. A pull request replaces every issue it closes on the dashboard, including issues in other repositories, but only a linked issue names its worktree.
 - CI result: The combined state of the checks GitHub last ran on an authored pull request's most recent commit, shown as a one-character symbol in the Type column. A pull request with no checks configured has no CI result.
+- Review decision: GitHub's rollup verdict on an authored pull request's reviews (for example approved, or changes requested). An authored pull request with a passing CI result and an approved review decision is prefixed with a double checkmark instead of the single passing symbol.
 - Assigned issue: An open issue where the user is an assignee.
 - Tracked item: An open issue or pull request that appears in a tracked repository regardless of the user's direct involvement.
 - Tracked repository: A repository listed in the user's configuration, either as `owner/repo` or expanded from an `owner/*` selector.

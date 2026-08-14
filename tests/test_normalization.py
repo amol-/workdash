@@ -47,6 +47,7 @@ def test_normalize_authored_pull_request_maps_to_work_item() -> None:
             "updated_at": "2026-02-21T12:00:00Z",
             "is_draft": True,
             "ci_state": "SUCCESS",
+            "review_decision": "APPROVED",
         }
     )
 
@@ -59,6 +60,7 @@ def test_normalize_authored_pull_request_maps_to_work_item() -> None:
     assert item.created_at == datetime(2026, 2, 20, 12, 0, 0, tzinfo=UTC)
     assert item.updated_at == datetime(2026, 2, 21, 12, 0, 0, tzinfo=UTC)
     assert item.ci_state == "SUCCESS"
+    assert item.review_decision == "APPROVED"
 
 
 def test_normalize_recent_tracked_item_maps_issue_and_pr() -> None:
@@ -136,6 +138,7 @@ def test_normalize_list_helpers_convert_each_record() -> None:
                 "updated_at": "2026-02-20T01:00:00Z",
                 "is_draft": False,
                 "ci_state": None,
+                "review_decision": None,
             }
         ]
     )
@@ -186,6 +189,7 @@ def test_merge_normalized_work_items_prefers_authored_pr_for_same_pr_identity() 
                 "updated_at": "2026-02-20T01:00:00Z",
                 "is_draft": False,
                 "ci_state": None,
+                "review_decision": None,
             }
         ]
     )
@@ -240,6 +244,7 @@ def test_merge_normalized_work_items_keeps_issue_and_pr_rows_independent() -> No
                 "updated_at": "2026-02-20T01:00:00Z",
                 "is_draft": False,
                 "ci_state": None,
+                "review_decision": None,
             }
         ]
     )
@@ -280,6 +285,7 @@ def test_merge_normalized_work_items_preserves_deterministic_stable_order() -> N
                 "updated_at": "2026-02-20T01:00:00Z",
                 "is_draft": False,
                 "ci_state": None,
+                "review_decision": None,
             },
             {
                 "id": "B",
@@ -291,6 +297,7 @@ def test_merge_normalized_work_items_preserves_deterministic_stable_order() -> N
                 "updated_at": "2026-02-21T01:00:00Z",
                 "is_draft": False,
                 "ci_state": None,
+                "review_decision": None,
             },
         ]
     )
@@ -352,6 +359,7 @@ def test_merge_normalized_work_items_prefers_first_input_for_duplicate_pr_identi
                 "updated_at": "2026-02-20T01:00:00Z",
                 "is_draft": False,
                 "ci_state": None,
+                "review_decision": None,
             }
         ]
     )

@@ -135,12 +135,14 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
                                         "nodes": [
                                             {"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}
                                         ]
-                                    }
+                                    },
+                                    "reviewDecision": "APPROVED",
                                 }
                             },
                             "p1": {
                                 "pullRequest": {
-                                    "commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]}
+                                    "commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]},
+                                    "reviewDecision": None,
                                 }
                             },
                         }
@@ -182,6 +184,7 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
             "updated_at": "2026-02-02T00:00:00Z",
             "is_draft": True,
             "ci_state": "SUCCESS",
+            "review_decision": "APPROVED",
         },
         {
             "id": "B",
@@ -193,6 +196,7 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
             "updated_at": "2026-02-04T00:00:00Z",
             "is_draft": False,
             "ci_state": None,
+            "review_decision": None,
         },
     ]
 
@@ -652,8 +656,9 @@ def test_list_open_review_requested_prs_returns_directly_requested_prs_in_one_gr
             "created_at": "2026-02-05T00:00:00Z",
             "updated_at": "2026-02-06T00:00:00Z",
             "is_draft": False,
-            # The review selectors do not ask for CI state.
+            # The review selectors do not ask for CI state or review decision.
             "ci_state": None,
+            "review_decision": None,
         }
     ]
 
@@ -1190,8 +1195,9 @@ def test_list_open_reviewed_prs_returns_open_prs_reviewed_by_user(
             "created_at": "2026-03-01T00:00:00Z",
             "updated_at": "2026-03-02T00:00:00Z",
             "is_draft": False,
-            # The review selectors do not ask for CI state.
+            # The review selectors do not ask for CI state or review decision.
             "ci_state": None,
+            "review_decision": None,
         }
     ]
 

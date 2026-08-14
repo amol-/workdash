@@ -107,6 +107,7 @@ def _has_open_work_all_sources(work_items: list[WorkItem]) -> None:
             "updated_at": "2026-04-28T12:00:00Z",
             "is_draft": False,
             "ci_state": None,
+            "review_decision": None,
         }
     ]
     review_raw = [
@@ -258,6 +259,71 @@ def _authored_prs_carry_ci_symbols(scenario_state: dict[str, Any]) -> None:
 @then("an issue's Type column carries no CI symbol")
 def _issue_carries_no_ci_symbol(scenario_state: dict[str, Any]) -> None:
     assert _rendered_type_cells(scenario_state)["ISSUE#11"] == " "
+
+
+@given("the user has authored a pull request whose CI passed and whose review is approved")
+def _authored_pr_ci_passed_review_approved(
+    scenario_state: dict[str, Any], work_items: list[WorkItem]
+) -> None:
+    work_items.append(
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.AUTHORED_PR,
+            number=51,
+            title="Approved authored PR",
+            ci_state="SUCCESS",
+            review_decision="APPROVED",
+        )
+    )
+    scenario_state["approved_pr_number"] = 51
+
+
+@given("the user has authored a pull request whose CI passed but whose review is not approved")
+def _authored_pr_ci_passed_review_not_approved(
+    scenario_state: dict[str, Any], work_items: list[WorkItem]
+) -> None:
+    work_items.append(
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.AUTHORED_PR,
+            number=52,
+            title="Unapproved authored PR",
+            ci_state="SUCCESS",
+            review_decision=None,
+        )
+    )
+    scenario_state["unapproved_pr_number"] = 52
+
+
+def _rendered_type_cell_strings(scenario_state: dict[str, Any]) -> list[str]:
+    """Return every rendered Type cell's full text, prefix included.
+
+    Unlike ``_rendered_type_cells``, this keeps the whole cell text instead of
+    only its first character, so a two-character double-checkmark prefix is
+    not truncated away.
+    """
+
+    captured: list[str] = []
+
+    async def interactions(app, pilot) -> None:
+        table = app.query_one("#work-items", DataTable)
+        for index in range(table.row_count):
+            captured.append(str(table.get_row_at(index)[0]))
+
+    run_app(work_items=scenario_state["work_items"], interactions=interactions)
+    return captured
+
+
+@then("the approved pull request's Type column carries a double checkmark")
+def _approved_pr_carries_double_checkmark(scenario_state: dict[str, Any]) -> None:
+    number = scenario_state["approved_pr_number"]
+    assert f"✓✓PR#{number}" in _rendered_type_cell_strings(scenario_state)
+
+
+@then("the other pull request's Type column carries the single passing symbol")
+def _other_pr_carries_single_passing_symbol(scenario_state: dict[str, Any]) -> None:
+    number = scenario_state["unapproved_pr_number"]
+    assert f"✓PR#{number}" in _rendered_type_cell_strings(scenario_state)
 
 
 def _rendered_type_cells(scenario_state: dict[str, Any]) -> dict[str, str]:
@@ -441,6 +507,7 @@ def _authored_also_tracked(scenario_state: dict[str, Any]) -> None:
             "updated_at": "2026-04-20T00:00:00Z",
             "is_draft": False,
             "ci_state": None,
+            "review_decision": None,
         }
     ]
     tracked_raw = [
@@ -1004,6 +1071,7 @@ def _pull_request_and_issue_are_open_work(
                 "updated_at": "2026-04-28T10:00:00Z",
                 "is_draft": False,
                 "ci_state": None,
+                "review_decision": None,
             }
         ],
     )
@@ -2034,6 +2102,7 @@ def _seed_three_included_items(
                 "updated_at": "2026-04-28T10:00:00Z",
                 "is_draft": False,
                 "ci_state": None,
+                "review_decision": None,
             }
         ],
     )

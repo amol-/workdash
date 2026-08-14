@@ -48,19 +48,23 @@ def _type_column(item: WorkItem, *, bold: bool) -> Text:
     """Return the Type column cell, prefixed with the item's CI symbol.
 
     An item without a CI result keeps a blank prefix so every Type label stays
-    aligned under the ones that carry a symbol.
+    aligned under the ones that carry a symbol. A passing, approved authored
+    pull request gets a double checkmark instead of the single passing symbol.
 
     :param WorkItem item: the work item whose type is shown.
     :param bool bold: whether the whole row is highlighted as recently updated.
     """
 
-    symbol, color = _CI_SYMBOLS.get(item.ci_state or "", (" ", None))
+    if item.ci_state == "SUCCESS" and item.review_decision == "APPROVED":
+        symbol, color = "✓✓", "green"
+    else:
+        symbol, color = _CI_SYMBOLS.get(item.ci_state or "", (" ", None))
     cell = Text(
         f"{symbol}{format_type_label(item)}#{item.number}",
         style="bold" if bold else "",
     )
     if color is not None:
-        cell.stylize(color, 0, 1)
+        cell.stylize(color, 0, len(symbol))
     return cell
 
 

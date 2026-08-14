@@ -61,6 +61,7 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
                     "updated_at": "2026-02-01T01:00:00Z",
                     "is_draft": False,
                     "ci_state": None,
+                    "review_decision": None,
                 }
             ]
 
@@ -571,6 +572,7 @@ def test_load_items_hides_every_issue_a_pull_request_closes(
                     "updated_at": "2026-02-05T01:00:00Z",
                     "is_draft": False,
                     "ci_state": None,
+                    "review_decision": None,
                 }
             ]
 
@@ -664,6 +666,7 @@ def test_load_items_hides_an_included_issue_that_a_listed_pull_request_closes(
                     "updated_at": "2026-02-05T01:00:00Z",
                     "is_draft": False,
                     "ci_state": None,
+                    "review_decision": None,
                 }
             ]
 

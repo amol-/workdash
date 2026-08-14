@@ -41,6 +41,7 @@ class WorkItem:
     included: bool = False
     todo_target: str | None = None
     ci_state: str | None = None
+    review_decision: str | None = None
     linked_issue: tuple[str, int] | None = None
 
 

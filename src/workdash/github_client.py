@@ -72,8 +72,11 @@ def parse_github_item_url(url: str) -> ParsedGitHubItemURL | None:
 _DEFAULT_PR_SEARCH_LIMIT = 1000
 _DEFAULT_ASSIGNED_ISSUE_LIMIT = 20
 _PR_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,isDraft,repository"
-# `gh search prs` cannot report the CI result shown next to authored PRs.
-_AUTHORED_CI_SELECTION = "commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }"
+# `gh search prs` cannot report the CI result or review decision shown next
+# to authored PRs.
+_AUTHORED_CI_SELECTION = (
+    "commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } reviewDecision"
+)
 # GraphQL search returns at most 100 nodes per page, and nobody triages more
 # open authored pull requests than that.
 _AUTHORED_PR_SEARCH_LIMIT = 100
@@ -264,6 +267,7 @@ class AuthoredPullRequest(TypedDict):
     updated_at: str
     is_draft: bool
     ci_state: str | None
+    review_decision: str | None
 
 
 class ReviewRequestedPullRequest(TypedDict):
@@ -278,6 +282,7 @@ class ReviewRequestedPullRequest(TypedDict):
     updated_at: str
     is_draft: bool
     ci_state: str | None
+    review_decision: str | None
 
 
 class RecentTrackedItem(TypedDict):
@@ -343,6 +348,7 @@ def normalize_authored_pull_request(item: AuthoredPullRequest) -> WorkItem:
         updated_at=parse_github_datetime(item["updated_at"]),
         url=item["url"],
         ci_state=item["ci_state"],
+        review_decision=item["review_decision"],
     )
 
 
@@ -552,6 +558,7 @@ class GitHubClient:
                     updated_at=updated_at,
                     is_draft=is_draft,
                     ci_state=_extract_ci_state(entry),
+                    review_decision=entry.get("reviewDecision"),
                 )
             )
         return pull_requests
@@ -752,6 +759,7 @@ class GitHubClient:
                     f"Invalid gh authored PR CI payload for {subject}: expected an object."
                 )
             item["ci_state"] = _extract_ci_state(pull_request)
+            item["review_decision"] = pull_request.get("reviewDecision")
             authored_pull_requests.append(item)
         return authored_pull_requests
 

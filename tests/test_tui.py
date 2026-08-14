@@ -122,21 +122,24 @@ def test_workdash_app_truncates_a_long_repo_column_on_the_left() -> None:
 
 
 @pytest.mark.parametrize(
-    ("ci_state", "expected_symbol", "expected_color"),
+    ("ci_state", "review_decision", "expected_symbol", "expected_color"),
     [
-        ("SUCCESS", "✓", "green"),
-        ("FAILURE", "✗", "red"),
-        ("ERROR", "✗", "red"),
-        ("PENDING", "●", "yellow"),
-        ("EXPECTED", "●", "yellow"),
+        ("SUCCESS", None, "✓", "green"),
+        ("FAILURE", None, "✗", "red"),
+        ("ERROR", None, "✗", "red"),
+        ("PENDING", None, "●", "yellow"),
+        ("EXPECTED", None, "●", "yellow"),
         # A pull request with no checks, and a state GitHub may add later, both
         # fall back to the blank prefix rather than inventing a symbol.
-        (None, " ", None),
-        ("SOMETHING_NEW", " ", None),
+        (None, None, " ", None),
+        ("SOMETHING_NEW", None, " ", None),
+        # A passing, approved authored pull request gets the double checkmark.
+        ("SUCCESS", "APPROVED", "✓✓", "green"),
     ],
 )
 def test_workdash_app_colors_the_ci_symbol_in_the_type_column(
     ci_state: str | None,
+    review_decision: str | None,
     expected_symbol: str,
     expected_color: str | None,
 ) -> None:
@@ -152,6 +155,7 @@ def test_workdash_app_colors_the_ci_symbol_in_the_type_column(
         updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
         url="https://example.com/pull/22",
         ci_state=ci_state,
+        review_decision=review_decision,
     )
     app = WorkdashApp(work_items=[work_item], now_utc=now_utc)
 
@@ -164,7 +168,9 @@ def test_workdash_app_colors_the_ci_symbol_in_the_type_column(
             if expected_color is None:
                 assert cell.spans == []
             else:
-                assert [(s.start, s.end, s.style) for s in cell.spans] == [(0, 1, expected_color)]
+                assert [(s.start, s.end, s.style) for s in cell.spans] == [
+                    (0, len(expected_symbol), expected_color)
+                ]
 
     asyncio.run(run_smoke())
 
