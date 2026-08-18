@@ -71,8 +71,10 @@ The wizard fills in:
 - The analyze and launch commands for Claude and Codex (auto-detected when the
   tools are on your `PATH`).
 
-You can edit `~/.config/workdash/config.json` by hand at any time. Re-running
-`--configure` only prompts for fields that are still empty, except for Zellij:
+You can edit `~/.config/workdash/config.json` by hand at any time. The `open`
+setting controls the command used to open URLs and rendered analyses. The wizard
+prompts for `open` when it is missing or malformed. Re-running `--configure`
+only prompts for fields that are still empty, except for Zellij:
 the wizard always checks for a global `zellij` first and downloads a fresh
 local binary when no global binary exists. It does the same for `gh`, checking
 for a global GitHub CLI first and downloading a fresh local copy when none is

@@ -385,6 +385,7 @@ class WorkdashApp(App[None]):
         work_items: Sequence[WorkItem] | None = None,
         suggestion_markers: SuggestionMarkers | None = None,
         open_callback: Callable[[WorkItem], None] | None = None,
+        open_markdown_callback: Callable[[str], None] | None = None,
         refresh_callback: Callable[[], RefreshCallbackResult] | None = None,
         analyze_callback: Callable[[WorkItem, str], AnalyzeCallbackResult] | None = None,
         launch_callback: Callable[[WorkItem, str], None] | None = None,
@@ -409,6 +410,7 @@ class WorkdashApp(App[None]):
         self._search_filter = ""
         self._suggestion_markers = dict(suggestion_markers or {})
         self._open_callback = open_callback
+        self._open_markdown_callback = open_markdown_callback or open_markdown
         self._refresh_callback = refresh_callback
         self._analyze_callback = analyze_callback
         self._launch_callback = launch_callback
@@ -677,7 +679,7 @@ class WorkdashApp(App[None]):
             return
         if analysis_path is not None:
             try:
-                open_markdown(analysis_path)
+                self._open_markdown_callback(analysis_path)
             except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
                 self._update_status(f"Failed to open analysis: {error}")
                 self.notify(f"Failed to open analysis: {error}", severity="error", timeout=10)

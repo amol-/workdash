@@ -46,6 +46,7 @@ def _config_missing_fields(scenario_state: dict[str, Any]) -> None:
 def _config_has_malformed_agent_command(scenario_state: dict[str, Any]) -> None:
     scenario_state["_malformed_config"] = WorkdashConfig(
         github_username="testuser",
+        open_command="xdg-open",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze="codex exec", launch="codex"),
         pi=AgentConfig(launch="pi 'broken"),
@@ -96,6 +97,7 @@ def _run_system(
             "load_config",
             lambda: WorkdashConfig(
                 github_username="testuser",
+                open_command="xdg-open",
                 claude=AgentConfig(analyze="claude -p", launch="claude"),
                 codex=AgentConfig(analyze="codex exec", launch="codex"),
                 pi=AgentConfig(launch="pi"),
@@ -118,6 +120,7 @@ def _run_system(
             "load_config",
             lambda: WorkdashConfig(
                 github_username="testuser",
+                open_command="xdg-open",
                 claude=AgentConfig(analyze="claude -p", launch="claude"),
                 codex=AgentConfig(analyze="codex exec", launch="codex"),
                 pi=AgentConfig(launch="pi"),
@@ -185,6 +188,7 @@ def _install_direct_start_fakes(
         "load_config",
         lambda: WorkdashConfig(
             github_username="testuser",
+            open_command="xdg-open",
             claude=AgentConfig(analyze="claude -p", launch="claude"),
             codex=AgentConfig(analyze="codex exec", launch="codex"),
             pi=AgentConfig(launch="pi"),
@@ -338,6 +342,7 @@ def _user_starts_list_command(
         "load_config",
         lambda: WorkdashConfig(
             github_username="testuser",
+            open_command="xdg-open",
             claude=AgentConfig(analyze="claude -p", launch="claude"),
             codex=AgentConfig(analyze="codex exec", launch="codex"),
             pi=AgentConfig(launch="pi"),

@@ -28,6 +28,7 @@ def _no_config(scenario_state: dict[str, Any], config_path: Path) -> None:
     scenario_state.setdefault(
         "input_responses",
         [
+            "",  # open command default
             "claude -p",  # claude analyze
             "claude",  # claude launch
             "codex exec",  # codex analyze
@@ -44,9 +45,10 @@ def _no_config(scenario_state: dict[str, Any], config_path: Path) -> None:
 def _agent_on_path(scenario_state: dict[str, Any]) -> None:
     # Expose 'claude' only; codex will be prompted interactively.
     scenario_state.setdefault("on_path_tools", set()).add("claude")
-    # Interactive inputs: codex analyze, codex launch, pi launch, username,
-    # workdir, todo repository.
+    # Interactive inputs: open command, codex analyze, codex launch, pi launch,
+    # username, workdir, todo repository.
     scenario_state["input_responses"] = [
+        "",  # open command default
         "codex exec",
         "codex",
         "pi",
@@ -73,6 +75,7 @@ def _partial_configuration(scenario_state: dict[str, Any], config_path: Path) ->
         json.dumps(
             {
                 "github_username": "existing-user",
+                "open": "existing-open",
                 "agents": {
                     "claude": {
                         "analyze": "existing-claude-analyze",
@@ -99,6 +102,7 @@ def _partial_configuration(scenario_state: dict[str, Any], config_path: Path) ->
 def _empty_defaults_then_username(scenario_state: dict[str, Any]) -> None:
     scenario_state["on_path_tools"] = {"zellij", "gh"}
     scenario_state["input_responses"] = [
+        "",  # open command default
         "",  # claude analyze default
         "",  # claude launch default
         "",  # codex analyze default
@@ -183,6 +187,7 @@ def _wizard_completes(
     # Scenario S003: username is provided and repositories list is empty.
     scenario_state.setdefault("on_path_tools", {"zellij", "gh"})
     scenario_state["input_responses"] = [
+        "",  # open command default
         "my-claude -p",  # claude analyze
         "my-claude",  # claude launch
         "my-codex",  # codex analyze
@@ -295,7 +300,13 @@ def _writes_default_values(scenario_state: dict[str, Any]) -> None:
     assert written.claude.launch == "claude"
     assert written.codex.analyze == "codex exec"
     assert written.codex.launch == "codex"
+    assert written.open_command == config_module._default_open_command()
     assert written.workdir == "~/wrk"
+
+
+@then("submitting an empty open command stores the platform default")
+def _empty_open_command_stores_default(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["written_config"].open_command == config_module._default_open_command()
 
 
 @then("the system prompts again for the GitHub username")

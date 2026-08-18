@@ -33,6 +33,10 @@ _DEFAULT_PI_LAUNCH = "pi"
 _DEFAULT_WORKDIR = "~/wrk"
 
 
+def _default_open_command() -> str:
+    return "open" if platform.system() == "Darwin" else "xdg-open"
+
+
 class WorkdashConfigValidationError(RuntimeError):
     """Raised when runtime configuration is incomplete or invalid."""
 
@@ -74,6 +78,7 @@ class WorkdashConfig:
     """Runtime configuration loaded from ~/.config/workdash/config.json."""
 
     github_username: str = ""
+    open_command: str = ""
     claude: AgentConfig = field(default_factory=AgentConfig)
     codex: AgentConfig = field(default_factory=AgentConfig)
     pi: AgentConfig = field(default_factory=AgentConfig)
@@ -158,6 +163,7 @@ def _config_to_json(config: WorkdashConfig) -> str:
         json.dumps(
             {
                 "github_username": config.github_username,
+                "open": config.open_command,
                 "agents": {
                     "claude": {"analyze": config.claude.analyze, "launch": config.claude.launch},
                     "codex": {"analyze": config.codex.analyze, "launch": config.codex.launch},
@@ -223,6 +229,7 @@ def load_config(path: Path = CONFIG_PATH) -> WorkdashConfig:
             pi_config = AgentConfig(launch=pi_raw.get("launch", ""))
     return WorkdashConfig(
         github_username=raw.get("github_username", ""),
+        open_command=raw.get("open", ""),
         claude=claude_config,
         codex=codex_config,
         pi=pi_config,
@@ -245,6 +252,8 @@ def validate_config(config: WorkdashConfig) -> list[str]:
     missing: list[str] = []
     if not config.github_username:
         missing.append("github_username")
+    if not config.open_command:
+        missing.append("open")
     if not config.repositories:
         missing.append("repositories")
     if not config.workdir:
@@ -263,6 +272,7 @@ def _numbered_agent_choices(choices: list[tuple[str, str, str]]) -> list[Workdas
 
 def _config_command_fields(config: WorkdashConfig) -> tuple[tuple[str, object], ...]:
     return (
+        ("open", config.open_command),
         ("agents.claude.analyze", config.claude.analyze),
         ("agents.claude.launch", config.claude.launch),
         ("agents.codex.analyze", config.codex.analyze),
@@ -543,6 +553,14 @@ def configure(
         installed_gh = install_gh()
         print(f"Installed GitHub CLI to: {installed_gh}")
 
+    open_command = config.open_command
+    if not _is_configured_command(open_command):
+        suggested_open_command = _default_open_command()
+        detected_open = which_fn(suggested_open_command)
+        if detected_open:
+            print(f"Detected '{suggested_open_command}' on PATH: {detected_open}")
+        open_command = _prompt_with_default(input_fn, "Open command", suggested_open_command)
+
     claude = config.claude
     if not claude.analyze or not claude.launch:
         if which_fn("claude"):
@@ -616,6 +634,7 @@ def configure(
 
     new_config = WorkdashConfig(
         github_username=github_username,
+        open_command=open_command,
         claude=claude,
         codex=codex,
         pi=pi,
