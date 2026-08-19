@@ -34,6 +34,7 @@ from .launcher import (
     launch_terminal_context,
     list_workdash_sessions,
     open_in_browser,
+    open_markdown,
 )
 from .models import WorkItem, format_type_label
 from .repo_worktree import ensure_worktree
@@ -269,7 +270,8 @@ class WorkdashCommands:
         app = WorkdashApp(
             work_items=session.work_items,
             suggestion_markers=session.suggestion_markers,
-            open_callback=lambda item: open_in_browser(item.url),
+            open_callback=lambda item: open_in_browser(item.url, config.open_command),
+            open_markdown_callback=lambda path: open_markdown(path, config.open_command),
             refresh_callback=lambda: (
                 session.list_items(refresh=True)
                 and (session.work_items, session.suggestion_markers)

@@ -77,6 +77,7 @@ def work_items() -> list[WorkItem]:
 def make_valid_config() -> WorkdashConfig:
     return WorkdashConfig(
         github_username="testuser",
+        open_command="xdg-open",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze="codex exec", launch="codex"),
         pi=AgentConfig(launch="pi"),
@@ -309,6 +310,7 @@ def _client_process_cannot_find_github_cli(scenario_state: dict[str, Any]) -> No
 def api_config(tmp_path: Path) -> WorkdashConfig:
     return WorkdashConfig(
         github_username="testuser",
+        open_command="xdg-open",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze="codex exec", launch="codex"),
         pi=AgentConfig(launch="pi"),

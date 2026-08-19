@@ -44,11 +44,21 @@ def _resolve_browser_open_command() -> str:
     raise RuntimeError("Neither xdg-open nor open is installed or on PATH.")
 
 
-def _run_browser_open(target: str, *, kind: str) -> None:
-    command_name = _resolve_browser_open_command()
+def _run_browser_open(
+    target: str,
+    *,
+    command: str | None = None,
+    kind: str,
+) -> None:
+    command_tokens = (
+        shlex.split(command) if command is not None else [_resolve_browser_open_command()]
+    )
+    if not command_tokens:
+        raise RuntimeError(f"Failed to open {kind}: command is empty.")
+    command_name = command_tokens[0]
     try:
         subprocess.run(
-            [command_name, target],
+            [*command_tokens, target],
             check=True,
             capture_output=True,
             text=True,
@@ -69,10 +79,10 @@ def _run_browser_open(target: str, *, kind: str) -> None:
         raise RuntimeError(f"Failed to open {kind} via {command_name}: {details}") from error
 
 
-def open_in_browser(url: str) -> None:
+def open_in_browser(url: str, command: str | None = None) -> None:
     if not isinstance(url, str) or not url.strip():
         raise ValueError("URL must be a non-empty string.")
-    _run_browser_open(url, kind="URL")
+    _run_browser_open(url, command=command, kind="URL")
 
 
 _HTML_TEMPLATE = """\
@@ -92,7 +102,7 @@ table {{ border-collapse: collapse; }} th, td {{ border: 1px solid #d0d7de; padd
 """
 
 
-def open_markdown(path: str) -> None:
+def open_markdown(path: str, command: str | None = None) -> None:
     """Render a markdown file to HTML and open it in the browser."""
 
     if not isinstance(path, str) or not path.strip():
@@ -103,7 +113,7 @@ def open_markdown(path: str) -> None:
     html = _HTML_TEMPLATE.format(title=md_path.stem, body=html_body)
     html_path = md_path.with_suffix(".html")
     html_path.write_text(html, encoding="utf-8")
-    _run_browser_open(str(html_path), kind="file")
+    _run_browser_open(str(html_path), command=command, kind="file")
 
 
 def _run_launch_command(command: list[str], *, context: str) -> None:

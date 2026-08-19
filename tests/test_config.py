@@ -1,4 +1,5 @@
 import json
+import platform
 import tarfile
 import zipfile
 from io import BytesIO
@@ -39,6 +40,7 @@ def test_load_config_reads_existing_config(tmp_path):
         json.dumps(
             {
                 "github_username": "octocat",
+                "open": "xdg-open",
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},
                     "codex": {"analyze": "codex exec", "launch": "codex"},
@@ -53,6 +55,7 @@ def test_load_config_reads_existing_config(tmp_path):
     config = load_config(config_path)
 
     assert config.github_username == "octocat"
+    assert config.open_command == "xdg-open"
     assert config.claude.analyze == "claude -p"
     assert config.claude.launch == "claude"
     assert config.codex.analyze == "codex exec"
@@ -94,6 +97,7 @@ def test_save_config_creates_parent_dirs_and_writes_json(tmp_path):
     config_path = tmp_path / "sub" / "dir" / "config.json"
     config = WorkdashConfig(
         github_username="octocat",
+        open_command="xdg-open",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze="codex exec", launch="codex"),
         pi=AgentConfig(launch="pi"),
@@ -107,6 +111,7 @@ def test_save_config_creates_parent_dirs_and_writes_json(tmp_path):
     written = json.loads(config_path.read_text(encoding="utf-8"))
     assert written == {
         "github_username": "octocat",
+        "open": "xdg-open",
         "agents": {
             "claude": {"analyze": "claude -p", "launch": "claude"},
             "codex": {"analyze": "codex exec", "launch": "codex"},
@@ -121,6 +126,7 @@ def test_save_config_creates_parent_dirs_and_writes_json(tmp_path):
 def test_validate_config_returns_empty_for_complete_config():
     config = WorkdashConfig(
         github_username="octocat",
+        open_command="xdg-open",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze="codex exec", launch="codex"),
         pi=AgentConfig(launch="pi"),
@@ -136,6 +142,7 @@ def test_validate_config_returns_empty_for_complete_config():
 def test_require_valid_accepts_partial_agent_config():
     config = WorkdashConfig(
         github_username="octocat",
+        open_command="xdg-open",
         codex=AgentConfig(analyze="codex exec"),
         repositories=("owner/repo",),
         workdir="~/src",
@@ -167,6 +174,7 @@ def test_analyze_agent_command_tokens_rejects_unsupported_agent_without_codex_fa
 def test_require_valid_rejects_malformed_command_strings():
     config = WorkdashConfig(
         github_username="octocat",
+        open_command="xdg-open",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze="codex 'broken", launch="codex"),
         pi=AgentConfig(launch="pi 'broken"),
@@ -189,9 +197,25 @@ def test_require_valid_rejects_malformed_command_strings():
     )
 
 
+def test_require_valid_rejects_malformed_open_command():
+    config = WorkdashConfig(
+        github_username="octocat",
+        open_command="open 'broken",
+        repositories=("owner/repo",),
+        workdir="~/src",
+        todo_repository="octocat/todos",
+    )
+
+    with pytest.raises(WorkdashConfigValidationError) as error:
+        config.require_valid()
+
+    assert error.value.invalid_fields == ("open: No closing quotation",)
+
+
 def test_require_valid_rejects_non_string_command_values():
     config = WorkdashConfig(
         github_username="octocat",
+        open_command="xdg-open",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze=["codex", "exec"], launch="codex"),
         pi=AgentConfig(launch="pi"),
@@ -209,6 +233,7 @@ def test_require_valid_rejects_non_string_command_values():
 def test_require_valid_rejects_blank_command_tokens(command: str):
     config = WorkdashConfig(
         github_username="octocat",
+        open_command="xdg-open",
         codex=AgentConfig(analyze="codex exec", launch=command),
         repositories=("owner/repo",),
         workdir="~/src",
@@ -222,7 +247,7 @@ def test_require_valid_rejects_blank_command_tokens(command: str):
 
 
 def test_validate_config_returns_all_missing_fields():
-    expected_missing = ["github_username", "repositories", "workdir", "todo_repository"]
+    expected_missing = ["github_username", "open", "repositories", "workdir", "todo_repository"]
 
     assert validate_config(WorkdashConfig()) == expected_missing
     with pytest.raises(WorkdashConfigValidationError) as error:
@@ -236,6 +261,7 @@ def test_require_valid_rejects_a_todo_repository_that_is_not_owner_slash_repo():
 
     config = WorkdashConfig(
         github_username="octocat",
+        open_command="xdg-open",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         repositories=("owner/repo",),
         workdir="~/src",
@@ -257,12 +283,12 @@ def test_validate_config_returns_subset_of_missing_fields():
         claude=AgentConfig(analyze="claude -p", launch="claude"),
     )
 
-    assert validate_config(config) == ["repositories", "workdir", "todo_repository"]
+    assert validate_config(config) == ["open", "repositories", "workdir", "todo_repository"]
 
 
 def test_configure_fresh_auto_detects_and_asks_username(tmp_path, capsys):
     config_path = tmp_path / "config.json"
-    inputs = iter(["octocat", "~/projects", ""])  # username, workdir, todo repository default
+    inputs = iter(["", "octocat", "~/projects", ""])  # open, username, workdir, todo default
 
     config = configure(
         config_path,
@@ -272,6 +298,7 @@ def test_configure_fresh_auto_detects_and_asks_username(tmp_path, capsys):
         ),
     )
 
+    assert config.open_command == "xdg-open"
     assert config.github_username == "octocat"
     assert config.claude.analyze == "claude -p"
     assert config.claude.launch == "claude"
@@ -288,10 +315,65 @@ def test_configure_fresh_auto_detects_and_asks_username(tmp_path, capsys):
     assert "octocat/*" in output
 
 
+def test_configure_suggests_the_macos_open_command(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    prompts: list[str] = []
+    inputs = iter(["", "octocat", "", ""])
+
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    config = configure(
+        config_path,
+        input_fn=lambda prompt: (prompts.append(prompt), next(inputs))[1],
+        which_fn=lambda cmd: (
+            f"/usr/bin/{cmd}" if cmd in ("zellij", "gh", "claude", "codex", "pi") else None
+        ),
+    )
+
+    assert config.open_command == "open"
+    assert prompts == [
+        "Open command [open]: ",
+        "GitHub username: ",
+        "Work directory [~/wrk]: ",
+        "Todo repository [octocat/todos]: ",
+    ]
+
+
+def test_configure_reprompts_for_an_invalid_open_command(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "github_username": "octocat",
+                "open": "open 'broken",
+                "agents": {
+                    "claude": {"analyze": "claude -p", "launch": "claude"},
+                    "codex": {"analyze": "codex exec", "launch": "codex"},
+                    "pi": {"launch": "pi"},
+                },
+                "repositories": ["specific/repo"],
+                "workdir": "~/src",
+                "todo_repository": "octocat/todos",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    prompts: list[str] = []
+    config = configure(
+        config_path,
+        input_fn=lambda prompt: (prompts.append(prompt), "term-copy")[1],
+        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "gh") else None,
+    )
+
+    assert config.open_command == "term-copy"
+    assert prompts == ["Open command [xdg-open]: "]
+
+
 def test_configure_asks_interactively_when_commands_not_on_path(tmp_path):
     config_path = tmp_path / "config.json"
     inputs = iter(
         [
+            "term-copy",  # open command
             "my-claude -p",  # claude analyze
             "my-claude",  # claude launch
             "my-codex run",  # codex analyze
@@ -308,6 +390,7 @@ def test_configure_asks_interactively_when_commands_not_on_path(tmp_path):
         input_fn=lambda prompt: next(inputs),
         which_fn=lambda cmd: f"/usr/local/bin/{cmd}" if cmd in ("zellij", "gh") else None,
     )
+    assert config.open_command == "term-copy"
     assert config.claude.analyze == "my-claude -p"
     assert config.claude.launch == "my-claude"
     assert config.codex.analyze == "my-codex run"
@@ -323,6 +406,7 @@ def test_configure_accepts_defaults_for_empty_optional_responses(tmp_path):
     config_path = tmp_path / "config.json"
     inputs = iter(
         [
+            "",  # open command default
             "",  # claude analyze default
             "",  # claude launch default
             "",  # codex analyze default
@@ -353,8 +437,8 @@ def test_configure_accepts_defaults_for_empty_optional_responses(tmp_path):
 def test_configure_reprompts_for_required_fields_without_defaults(tmp_path):
     config_path = tmp_path / "config.json"
     prompts: list[str] = []
-    # Username retry, then the workdir and todo repository defaults.
-    inputs = iter(["", "octocat", "", ""])
+    # Open command default, username retry, then workdir and todo defaults.
+    inputs = iter(["", "", "octocat", "", ""])
 
     config = configure(
         config_path,
@@ -375,6 +459,7 @@ def test_configure_fills_only_missing_fields(tmp_path):
         json.dumps(
             {
                 "github_username": "existing-user",
+                "open": "existing-open",
                 "agents": {
                     "claude": {
                         "analyze": "existing-claude-analyze",
@@ -415,6 +500,7 @@ def test_configure_reprompts_for_a_malformed_todo_repository(tmp_path):
         json.dumps(
             {
                 "github_username": "octocat",
+                "open": "xdg-open",
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},
                     "codex": {"analyze": "codex exec", "launch": "codex"},
@@ -451,6 +537,7 @@ def test_configure_preserves_existing_repositories(tmp_path):
         json.dumps(
             {
                 "github_username": "octocat",
+                "open": "xdg-open",
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},
                     "codex": {"analyze": "codex exec", "launch": "codex"},
@@ -478,6 +565,7 @@ def test_configure_installs_zellij_when_not_on_path(tmp_path, capsys):
     config_path = tmp_path / "config.json"
     inputs = iter(
         [
+            "",  # open command default
             "",  # claude analyze default
             "",  # claude launch default
             "",  # codex analyze default
@@ -514,6 +602,7 @@ def test_configure_redownloads_zellij_when_no_global_binary_exists(tmp_path):
         json.dumps(
             {
                 "github_username": "octocat",
+                "open": "xdg-open",
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},
                     "codex": {"analyze": "codex exec", "launch": "codex"},
@@ -549,6 +638,7 @@ def test_configure_installs_gh_when_not_on_path(tmp_path, capsys):
     config_path = tmp_path / "config.json"
     inputs = iter(
         [
+            "",  # open command default
             "",  # claude analyze default
             "",  # claude launch default
             "",  # codex analyze default
@@ -585,6 +675,7 @@ def test_configure_redownloads_gh_when_no_global_binary_exists(tmp_path):
         json.dumps(
             {
                 "github_username": "octocat",
+                "open": "xdg-open",
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},
                     "codex": {"analyze": "codex exec", "launch": "codex"},

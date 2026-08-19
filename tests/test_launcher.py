@@ -69,6 +69,20 @@ def test_open_in_browser_runs_xdg_open_for_valid_url(monkeypatch: pytest.MonkeyP
     assert captured["timeout"] == 4
 
 
+def test_open_in_browser_uses_configured_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["command"] = args[0]
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    open_in_browser("https://example.com/issues/11", "term-copy --quiet")
+
+    assert captured["command"] == ["term-copy", "--quiet", "https://example.com/issues/11"]
+
+
 def test_open_in_browser_uses_open_when_xdg_open_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

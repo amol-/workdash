@@ -12,8 +12,9 @@ Feature: First-time configuration
 
   Rules:
     - The configuration lives at ~/.config/workdash/config.json.
-    - Required configuration fields are the GitHub username, at least one repository selector, the work directory, and the todo repository.
+    - Required configuration fields are the GitHub username, open command, at least one repository selector, the work directory, and the todo repository.
     - Every required field must be present for the system to start; the wizard backfills missing required fields, using a default when one exists.
+    - When the open command is missing or invalid, the wizard prompts for it with the platform default: `xdg-open` on Linux and `open` on macOS.
     - When the todo repository is empty or not in "owner/repo" form, the wizard prompts for it with the default "<username>/todos"; the repository does not have to exist yet.
     - Present agent command fields must be valid command lines; each valid command enables that agent action.
     - The wizard only prompts for fields that are currently empty; previously filled fields are left untouched.
@@ -46,6 +47,12 @@ Feature: First-time configuration
     When the user runs the system with "--configure"
     Then the system fills in that agent's commands automatically
     And the system tells the user which commands were detected
+
+  @id:F-SETUP-CONFIGURE-S010
+  Scenario: Missing open command accepts the platform default
+    Given the user has no configuration file
+    When the user runs the system with "--configure"
+    Then submitting an empty open command stores the platform default
 
   @id:F-SETUP-CONFIGURE-S006
   Scenario: Detected Zellij binary is reported automatically

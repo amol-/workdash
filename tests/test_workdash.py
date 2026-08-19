@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import tempfile
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -16,6 +17,7 @@ from workdash.workdash import _print_work_items, _print_work_items_result
 
 _VALID_CONFIG = WorkdashConfig(
     github_username="testuser",
+    open_command="xdg-open",
     claude=AgentConfig(analyze="claude -p", launch="claude"),
     codex=AgentConfig(analyze="codex exec", launch="codex"),
     pi=AgentConfig(launch="pi --no-tips"),
@@ -243,8 +245,11 @@ def test_main_passes_configured_agent_choices_to_tui(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_kwargs: dict[str, object] = {}
+    open_calls: list[tuple[str, str]] = []
+    markdown_calls: list[tuple[str, str]] = []
     config = WorkdashConfig(
         github_username="testuser",
+        open_command="xdg-open",
         codex=AgentConfig(analyze="codex exec"),
         repositories=("owner/*",),
         workdir="~/wrk",
@@ -273,12 +278,26 @@ def test_main_passes_configured_agent_choices_to_tui(
     monkeypatch.setattr(workdash_module, "load_config", lambda: config)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
+    monkeypatch.setattr(
+        workdash_module,
+        "open_in_browser",
+        lambda url, command: open_calls.append((url, command)),
+    )
+    monkeypatch.setattr(
+        workdash_module,
+        "open_markdown",
+        lambda path, command: markdown_calls.append((path, command)),
+    )
     monkeypatch.setenv("ZELLIJ", "0")
 
     assert workdash_module.main([]) == 0
 
     assert captured_kwargs["analyze_choices"] == config.tui_analyze_choices()
     assert captured_kwargs["code_choices"] == config.tui_code_choices()
+    captured_kwargs["open_callback"](_issue())
+    captured_kwargs["open_markdown_callback"]("/tmp/analysis.md")
+    assert open_calls == [("https://example.com/1", "xdg-open")]
+    assert markdown_calls == [("/tmp/analysis.md", "xdg-open")]
 
 
 def test_main_tui_analyze_callback_uses_worktree_and_backend(
@@ -409,12 +428,36 @@ def test_main_exits_with_error_when_config_incomplete(
     assert "--configure" in captured.err
 
 
+def test_main_exits_with_config_guidance_when_open_command_is_malformed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = replace(_VALID_CONFIG, open_command="open 'broken")
+
+    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
+    monkeypatch.setattr(
+        workdash_module,
+        "WorkdashBackend",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("backend should not load invalid runtime config")
+        ),
+    )
+    monkeypatch.setenv("ZELLIJ", "0")
+
+    assert workdash_module.main([]) == 1
+    captured = capsys.readouterr()
+    assert "invalid configuration fields: open: No closing quotation" in captured.err
+    assert "workdash --configure" in captured.err
+
+
 @pytest.mark.parametrize("argv", [[], ["--server"]])
 def test_main_exits_with_config_guidance_when_startup_config_command_is_malformed(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
 ) -> None:
     config = WorkdashConfig(
         github_username="testuser",
+        open_command="xdg-open",
         claude=AgentConfig(analyze="claude -p", launch="claude"),
         codex=AgentConfig(analyze="codex exec", launch="codex"),
         pi=AgentConfig(launch="pi 'broken"),
