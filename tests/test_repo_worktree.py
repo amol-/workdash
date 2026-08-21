@@ -522,15 +522,17 @@ def test_existing_worktree_path_prefers_the_pr_numbered_worktree_over_the_issue_
     assert existing_worktree_path(str(tmp_path), make_linked_pr()) == pr_worktree
 
 
-def test_ensure_worktree_leaves_a_linked_issue_worktree_on_another_branch_alone(
+def test_ensure_worktree_reuses_a_linked_issue_worktree_whatever_branch_it_holds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Two open pull requests can close the same issue; adopting a checkout that
-    # holds the other one's branch would push this work onto the wrong PR.
+    # The checkout was opened for this work, so it is trusted to be configured
+    # for it: the pull request's branch name is never looked up, and no second,
+    # PR-numbered checkout of the same work is opened. The fake raises on any
+    # branch inspection or gh call, so a regression to either fails here.
     (tmp_path / "owner_repo").mkdir()
     issue_worktree = tmp_path / "owner_repo_41830"
     issue_worktree.mkdir()
-    (issue_worktree / "other-work.txt").write_text("other pull request", encoding="utf-8")
+    (issue_worktree / "work.txt").write_text("work in progress", encoding="utf-8")
     calls: list[list[str]] = []
 
     def fake_run(*args, **kwargs):
@@ -542,24 +544,7 @@ def test_ensure_worktree_leaves_a_linked_issue_worktree_on_another_branch_alone(
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
             )
-        if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="other-pr-branch\n", stderr="")
-        if cmd[:3] == ["gh", "pr", "view"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout=_SAME_REPO_HEAD_INFO, stderr="")
-        if cmd == ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="origin/main\n", stderr="")
-        if cmd[:2] == ["git", "show-ref"] or cmd[:3] == ["git", "worktree", "list"]:
-            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
-        if cmd[:3] == ["git", "worktree", "add"]:
-            # git refuses to populate a directory that already holds files.
-            target = Path(cmd[cmd.index("-b") + 2])
-            if target.is_dir() and any(target.iterdir()):
-                raise subprocess.CalledProcessError(
-                    128, cmd, output="", stderr=f"fatal: '{target}' already exists\n"
-                )
-            target.mkdir(parents=True, exist_ok=True)
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        if cmd[0] == "git":
+        if cmd[:2] == ["git", "pull"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         raise AssertionError(f"Unexpected command: {cmd}")
 
@@ -567,16 +552,10 @@ def test_ensure_worktree_leaves_a_linked_issue_worktree_on_another_branch_alone(
 
     result = ensure_worktree(str(tmp_path), make_linked_pr())
 
-    # The occupied checkout is neither pulled nor returned; the pull request gets
-    # its own worktree, named after itself, on its own branch.
-    assert result == str(tmp_path / "owner_repo_42149")
-    assert not any(call[:2] == ["git", "pull"] for call in calls)
-    wt_add = next(call for call in calls if call[:3] == ["git", "worktree", "add"])
-    assert "feature-branch" in wt_add
-    assert str(tmp_path / "owner_repo_42149") in wt_add
-    # Both directories now exist forever; panes opened in the new checkout must
-    # still map back to the pull request instead of reading as unknown work.
-    assert existing_worktree_path(str(tmp_path), make_linked_pr()) == tmp_path / "owner_repo_42149"
+    assert result == str(issue_worktree)
+    assert not (tmp_path / "owner_repo_42149").exists()
+    assert ["git", "pull", "--ff-only"] in calls
+    assert (issue_worktree / "work.txt").read_text() == "work in progress"
 
 
 def test_ensure_worktree_adopts_a_linked_prs_own_pr_numbered_worktree_as_is(

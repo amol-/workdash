@@ -107,6 +107,42 @@ def test_main_prints_loading_message_before_tui_start(
     assert captured.out.startswith("Loading work items from GitHub...\n")
 
 
+def test_main_bare_interactive_uses_own_zellij_session_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Outside --server, the dashboard must find active agent panes for itself
+    # (e.g. to offer focusing one instead of only starting a new session), so
+    # it needs its own Zellij session name without asking Zellij to enumerate
+    # sessions, which is reserved for a separate process finding it later.
+    captured: dict[str, object] = {}
+
+    class FakeBackend:
+        def __init__(self, config=None, **kwargs) -> None:
+            pass
+
+        def load_items(self, progress_callback=None):
+            return [], {}
+
+    class FakeApp:
+        def __init__(self, **kwargs) -> None:
+            captured["session"] = kwargs["session"]
+
+        def run(self, *, mouse: bool) -> None:
+            pass
+
+    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+    monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-abc123")
+
+    assert workdash_module.main([]) == 0
+
+    assert captured["session"].zellij_session == "workdash-abc123"
+
+
 def test_main_server_refresh_before_tui_run_updates_session_and_repaints_when_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1256,6 +1292,7 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
         lambda repo, prompt: vscode_calls.append((repo, prompt)),
     )
     monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
 
     assert workdash_module.main([]) == 0
 

@@ -264,22 +264,6 @@ class GitHelper:
                         return wt
         return None
 
-    def current_branch(self, worktree: Path) -> str | None:
-        """Return the branch checked out in a worktree, or None when detached."""
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=worktree,
-                capture_output=True,
-                text=True,
-            )
-        except OSError:
-            return None
-        if result.returncode != 0:
-            return None
-        branch = result.stdout.strip()
-        return branch if branch and branch != "HEAD" else None
-
     def merge_base_with_origin_default(self, worktree: str) -> str | None:
         """Return the merge-base commit between HEAD and origin's default branch."""
         result = subprocess.run(

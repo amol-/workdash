@@ -256,7 +256,13 @@ class WorkdashCommands:
             progress_callback=lambda message: print(message, flush=True)
         )
         try:
-            zellij_session = _select_workdash_session(None) if server else None
+            # Outside --server, the dashboard is already running inside its own
+            # Zellij session (Zellij sets this env var), so it doesn't need to
+            # enumerate sessions to find itself; that lookup is only for a
+            # separate process (the JSON API) locating the session later.
+            zellij_session = (
+                _select_workdash_session(None) if server else os.getenv("ZELLIJ_SESSION_NAME")
+            )
         except RuntimeError as error:
             print(f"Error: {error}", file=sys.stderr, flush=True)
             return 1

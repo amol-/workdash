@@ -226,21 +226,6 @@ def _user_already_has_an_issue_worktree(
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
             )
-        if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="feature-branch\n", stderr="")
-        if cmd[:3] == ["gh", "pr", "view"]:
-            return subprocess.CompletedProcess(
-                cmd,
-                0,
-                stdout=json.dumps(
-                    {
-                        "headRefName": "feature-branch",
-                        "headRepository": {"name": "repo"},
-                        "headRepositoryOwner": {"login": "owner"},
-                    }
-                ),
-                stderr="",
-            )
         if cmd[:2] == ["git", "pull"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         raise AssertionError(f"Unexpected command in linked issue reuse scenario: {cmd}")
@@ -248,7 +233,7 @@ def _user_already_has_an_issue_worktree(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
 
-@given("the user authored a pull request that closes that issue and is checked out there")
+@given("the user authored a pull request that closes that issue")
 def _user_authored_a_pr_closing_that_issue(scenario_state: dict[str, Any]) -> None:
     item = make_work_item(
         item_type=WorkItemType.PR,

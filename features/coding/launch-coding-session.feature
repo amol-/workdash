@@ -17,6 +17,8 @@ Feature: Launch a coding session
     - The user can cancel the dialog without launching a session.
     - The system reports the outcome of the launch to the user.
     - If preparing the worktree or launching the subprocess fails, the system closes the dialog/progress overlay and reports the error details to the user.
+    - When the selected work item already has an open coding-agent pane, the dialog also offers to focus that pane instead of only offering to start a new session.
+    - Choosing to focus the active pane switches to it and starts no new coding session.
 
   @id:F-CODING-LAUNCH-S001
   Scenario: User picks a coding agent and a session opens on the worktree
@@ -72,3 +74,17 @@ Feature: Launch a coding session
     And the user picks a supported coding agent from the dialog
     Then the system reports the coding launch error details to the user
     And no dialog or progress overlay remains
+
+  @id:F-CODING-LAUNCH-S008
+  Scenario: An item with an already open agent pane offers to focus it
+    Given the selected work item already has an open coding-agent pane
+    When the user presses "c"
+    Then the dialog offers to focus the active agent pane
+
+  @id:F-CODING-LAUNCH-S009
+  Scenario: User focuses the already open agent pane instead of starting a new one
+    Given the selected work item already has an open coding-agent pane
+    When the user presses "c"
+    And the user chooses to focus the active agent pane
+    Then the system focuses that pane
+    And no coding session is launched

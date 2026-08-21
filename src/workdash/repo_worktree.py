@@ -65,20 +65,7 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
     :param WorkItem item: The work item to prepare a worktree for.
     """
     git = GitHelper()
-    pr_head: tuple[str, str] | None = None
-    directory_number = worktree_item_number(item)
     existing = existing_worktree_path(workdir, item)
-    if existing is not None and not existing.name.endswith(f"_{item.number}"):
-        # A checkout found under another number is the linked issue's, and
-        # adopting it is only safe while it holds this pull request's branch:
-        # pulling and committing on somebody else's branch there would push work
-        # onto the wrong pull request.
-        pr_head = GithubHelper().fetch_worktree_head(item)
-        if git.current_branch(existing) != pr_head[0]:
-            # The issue's directory belongs to that other work, so this pull
-            # request needs a checkout of its own under its own number.
-            existing = None
-            directory_number = item.number
     if existing is not None:
         # Local divergence or missing upstream shouldn't block the user.
         with contextlib.suppress(subprocess.CalledProcessError, OSError):
@@ -100,7 +87,7 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
         head_ref = ""
         branch = f"wt-{item.number}"
     elif item.item_type == WorkItemType.PR:
-        head_ref, head_repo = pr_head or GithubHelper().fetch_worktree_head(item)
+        head_ref, head_repo = GithubHelper().fetch_worktree_head(item)
         repo = head_repo
         branch = head_ref
     else:
@@ -108,7 +95,7 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
         head_ref = ""
         branch = f"issue-{item.number}"
 
-    wt = worktree_path(workdir, repo, directory_number, todo=todo_target is not None)
+    wt = worktree_path(workdir, repo, worktree_item_number(item), todo=todo_target is not None)
     main = main_repo_path(workdir, repo)
 
     # Check if git already tracks a worktree for this branch before creating another one.

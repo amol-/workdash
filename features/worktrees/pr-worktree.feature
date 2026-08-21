@@ -6,13 +6,13 @@ Feature: Pull request worktree
   changes on the branch are immediately visible.
 
   Rules:
-    - A pull request's worktree is checked out on the pull request's head branch.
-    - For a pull request that originates in a fork, the worktree is cloned from the fork's repository rather than the upstream one.
-    - For a fork pull request, the clone has an `upstream` remote pointing at the pull request's base repository.
+    - A pull request's worktree is checked out on the pull request's head branch when the system creates that worktree.
+    - When the system creates the worktree for a pull request that originates in a fork, it clones the fork's repository rather than the upstream one.
+    - A fork clone the system creates has an `upstream` remote pointing at the pull request's base repository.
     - The system fetches the remote before creating the worktree so the branch reflects the latest state of the pull request.
     - A coding session or analysis running in the worktree has access to a stable diff target that represents only this pull request's changes.
-    - An authored pull request that closes an issue in the same repository is the implementation of that issue, so it uses the worktree directory named after the linked issue instead of opening a second checkout for the same work. It stays checked out on the pull request's head branch.
-    - That shared checkout is only reused while it holds the pull request's head branch. A checkout sitting on another branch belongs to other work, so the pull request gets its own pull-request-numbered worktree instead.
+    - An authored pull request that closes an issue in the same repository is the implementation of that issue, so it uses the worktree directory named after the linked issue instead of opening a second checkout for the same work.
+    - A worktree that already exists for the linked issue is reused whatever branch it holds, and whatever repository the pull request's own branch lives in: it was opened for this work, so its remote configuration decides where commits go. This takes precedence over the fork rules above, and two open pull requests closing one issue therefore share that single checkout.
     - A REVIEW or CHECK pull request keeps its own pull-request-numbered worktree directory, because the user reviews the author's branch rather than continuing their own work.
     - A pull-request-numbered worktree directory that already exists keeps resolving to its pull request, so checkouts opened before this naming rule keep working.
 
@@ -32,7 +32,7 @@ Feature: Pull request worktree
   @id:F-WORKTREES-PR-S004
   Scenario: An authored pull request reuses the worktree already opened from its issue
     Given the user already has a worktree opened from an issue
-    And the user authored a pull request that closes that issue and is checked out there
+    And the user authored a pull request that closes that issue
     When the system prepares the worktree
     Then the same worktree is returned to the user
 

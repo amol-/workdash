@@ -89,6 +89,86 @@ def _coding_dialog_open(scenario_state: dict[str, Any], work_items: list[WorkIte
     scenario_state["dialog_kind"] = "coding"
 
 
+@given("the selected work item already has an open coding-agent pane")
+def _selected_item_has_open_pane(
+    scenario_state: dict[str, Any], work_items: list[WorkItem]
+) -> None:
+    if not work_items:
+        work_items.append(make_work_item(number=42, title="Item with open pane"))
+    scenario_state["selected_item"] = work_items[0]
+    scenario_state["active_agent_panes"] = [{"pane_id": "terminal_7"}]
+
+
+def run_active_pane_code_dialog_scenario(
+    scenario_state: dict[str, Any], work_items: list[WorkItem]
+) -> None:
+    """Drive the coding dialog for an item with an already open agent pane.
+
+    Captures the dialog's rendered lines right after it opens, proving the
+    focus option is offered, then presses "0" so a scenario that continues
+    with choosing to focus the pane can assert on the outcome from the same
+    drive (mirrors how ``run_code_dialog_scenario`` presses "1" once and lets
+    later Then steps inspect the result).
+    """
+
+    launch_calls: list[tuple[WorkItem, str]] = []
+    focus_calls: list[str] = []
+    captured: dict[str, Any] = {}
+
+    def launch_callback(item: WorkItem, tool: str = "codex") -> None:
+        launch_calls.append((item, tool))
+
+    def focus_callback(pane_id: str) -> None:
+        focus_calls.append(pane_id)
+
+    def list_agent_panes_callback(item: WorkItem) -> list[dict[str, object]]:
+        return scenario_state.get("active_agent_panes", [])
+
+    async def interactions(app, pilot) -> None:
+        dialog = await _open_code_dialog(app, pilot)
+        captured["dialog_lines"] = [static.render().plain for static in dialog.query(Static)]
+        await pilot.press("0")
+        status = ""
+        for _ in range(40):
+            await pilot.pause()
+            status = app.query_one("#status-footer", Static).render().plain
+            if focus_calls or "Failed to focus pane" in status:
+                break
+        captured["status"] = status
+
+    from .common import run_app
+
+    run_app(
+        work_items=list(work_items),
+        launch_callback=launch_callback,
+        focus_callback=focus_callback,
+        list_agent_panes_callback=list_agent_panes_callback,
+        interactions=interactions,
+    )
+    scenario_state["dialog_lines"] = captured["dialog_lines"]
+    scenario_state["launch_calls"] = launch_calls
+    scenario_state["focus_calls"] = focus_calls
+    scenario_state["coding_status"] = captured["status"]
+
+
+@when("the user chooses to focus the active agent pane")
+def _user_chooses_focus(scenario_state: dict[str, Any]) -> None:
+    # Already performed inside run_active_pane_code_dialog_scenario when the
+    # user pressed "c".
+    assert scenario_state["focus_calls"], "Expected the focus callback to have fired"
+
+
+@then("the dialog offers to focus the active agent pane")
+def _dialog_offers_focus(scenario_state: dict[str, Any]) -> None:
+    lines = scenario_state["dialog_lines"]
+    assert any("(0) Focus active agent" in line for line in lines), lines
+
+
+@then("the system focuses that pane")
+def _system_focuses_pane(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["focus_calls"] == ["terminal_7"]
+
+
 def run_code_dialog_scenario(
     scenario_state: dict[str, Any],
     work_items: list[WorkItem],

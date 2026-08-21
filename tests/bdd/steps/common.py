@@ -118,6 +118,8 @@ def run_app(
     session: WorkdashSession | None = None,
     busy_messages: list[str] | None = None,
     config: WorkdashConfig | None = None,
+    focus_callback=None,
+    list_agent_panes_callback=None,
 ) -> None:
     """Drive ``WorkdashApp`` through an async pilot routine for BDD tests.
 
@@ -151,6 +153,8 @@ def run_app(
         todo_callback=todo_callback,
         session=session,
         now_utc=now_utc,
+        focus_callback=focus_callback,
+        list_agent_panes_callback=list_agent_panes_callback,
     )
     if busy_messages is not None:
         original_run_with_busy_screen = WorkdashApp._run_with_busy_screen
