@@ -309,6 +309,37 @@ def _client_requests_code(
     _call_api(scenario_state, work_items, tmp_path, "code", {"target": item_id, "agent": agent})
 
 
+@when(parsers.parse("a client requests terminal for `{item_id}`"))
+def _client_requests_terminal(
+    item_id: str,
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workdash.control.ensure_worktree",
+        lambda workdir, item: (
+            scenario_state.setdefault("ensure_calls", []).append((workdir, item))
+            or str(tmp_path / "wrk" / "owner_repo_1")
+        ),
+    )
+
+    def fake_launch_terminal(repo_path, *, zellij_session=None):
+        scenario_state.setdefault("terminal_launch_calls", []).append(
+            (repo_path, zellij_session)
+        )
+        return SimpleNamespace(
+            session=zellij_session,
+            pane_id="terminal_23",
+            pane_title="terminal_owner_repo_1",
+            cwd=repo_path,
+        )
+
+    monkeypatch.setattr("workdash.control.launch_terminal_context", fake_launch_terminal)
+    _call_api(scenario_state, work_items, tmp_path, "terminal", {"target": item_id})
+
+
 @when(parsers.parse("a client requests pane content for `{pane_id}`"))
 def _client_requests_pane_content(
     pane_id: str,
@@ -636,6 +667,25 @@ def _api_returns_code_result(scenario_state: dict[str, Any]) -> None:
         "agent": "pi",
         "cwd": str(Path(scenario_state["api_session"].config.workdir) / "owner_repo_1"),
         "pane_title": "code_owner_repo_1",
+        "pane_id": "terminal_23",
+    }
+
+
+@then("the server opens a plain terminal in the item's worktree")
+def _server_opens_plain_terminal(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("terminal_launch_calls") == [
+        (str(Path(scenario_state["api_session"].config.workdir) / "owner_repo_1"), "workdash-main"),
+    ]
+
+
+@then("the API returns the item ID, session, cwd, pane title, and pane ID")
+def _api_returns_terminal_result(scenario_state: dict[str, Any]) -> None:
+    result = _api_result(scenario_state)
+    assert result == {
+        "item_id": "owner/repo#ISSUE-1",
+        "session": "workdash-main",
+        "cwd": str(Path(scenario_state["api_session"].config.workdir) / "owner_repo_1"),
+        "pane_title": "terminal_owner_repo_1",
         "pane_id": "terminal_23",
     }
 
