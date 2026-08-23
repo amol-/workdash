@@ -53,7 +53,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     commands = WorkdashCommands()
-    if options.command in {"list", "info", "analyze", "code", "read", "write", "todo"}:
+    if options.command in {"list", "info", "analyze", "code", "read", "write", "todo", "terminal"}:
         return _run_server_backed_command(commands, options)
     if options.command == "branchdiff":
         from .branchdiff import run_branchdiff
@@ -168,6 +168,20 @@ class WorkdashCommands:
             print(json.dumps(result, ensure_ascii=True, indent=2))
         else:
             _print_code_result(result)
+        return 0
+
+    def terminal_cli(self, *, target: str, json_output: bool) -> int:
+        """Launch a terminal through the local Workdash server."""
+
+        try:
+            result = self._client.request("terminal", {"target": target})
+        except WorkdashControlError as error:
+            _print_control_error(error)
+            return 1
+        if json_output:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        else:
+            _print_terminal_result(result)
         return 0
 
     def todo_cli(self, *, text: str, target: str | None, json_output: bool) -> int:
@@ -360,6 +374,11 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             agent=options.agent,
             json_output=options.json_output,
         )
+    if options.command == "terminal":
+        return commands.terminal_cli(
+            target=options.target or "",
+            json_output=options.json_output,
+        )
     if options.command == "todo":
         return commands.todo_cli(
             text=options.text or "",
@@ -496,6 +515,18 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         help="Configured terminal-backed coding agent to launch.",
     )
     code_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Emit machine-readable JSON.",
+    )
+    terminal_parser = subparsers.add_parser(
+        "terminal",
+        help="Open a plain terminal in a current Workdash item's worktree.",
+    )
+    terminal_parser.add_argument("target", metavar="ITEM", help="Workdash item ID or GitHub URL.")
+    terminal_parser.add_argument(
         "--json",
         dest="json_output",
         action="store_true",
@@ -719,6 +750,14 @@ def _print_todo_result(result: dict[str, object]) -> None:
 def _print_code_result(result: dict[str, object]) -> None:
     print(f"Item: {result['item_id']}")
     print(f"Agent: {result['agent']}")
+    print(f"Session: {result['session']}")
+    print(f"Cwd: {result['cwd']}")
+    print(f"Pane title: {result['pane_title'] or '-'}")
+    print(f"Pane id: {result['pane_id'] or '-'}")
+
+
+def _print_terminal_result(result: dict[str, object]) -> None:
+    print(f"Item: {result['item_id']}")
     print(f"Session: {result['session']}")
     print(f"Cwd: {result['cwd']}")
     print(f"Pane title: {result['pane_title'] or '-'}")

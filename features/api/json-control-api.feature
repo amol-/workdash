@@ -15,7 +15,7 @@ Feature: Local JSON control API
     - V0 has no authentication because the server is localhost-only.
     - V0 exposes JSON APIs only, not an HTML browser UI.
     - API requests and responses use JSON objects.
-    - V0 capabilities are exposed as `POST /api/v0/list`, `POST /api/v0/info`, `POST /api/v0/analyze`, `POST /api/v0/code`, `POST /api/v0/todo`, `POST /api/v0/show-config`, `POST /api/v0/pane/content`, and `POST /api/v0/pane/send`.
+    - V0 capabilities are exposed as `POST /api/v0/list`, `POST /api/v0/info`, `POST /api/v0/analyze`, `POST /api/v0/code`, `POST /api/v0/terminal`, `POST /api/v0/todo`, `POST /api/v0/show-config`, `POST /api/v0/pane/content`, and `POST /api/v0/pane/send`.
     - Successful API responses use `{ "ok": true, "result": ... }`.
     - Failed API responses use an appropriate HTTP error status and `{ "ok": false, "error": { "code": ..., "message": ... } }`.
     - Work item actions accept Workdash item IDs exactly as emitted by `workdash list`.
@@ -97,6 +97,22 @@ Feature: Local JSON control API
     When a client requests code for `owner/repo#ISSUE-1` with agent `pi`
     Then the server launches the selected configured terminal-backed agent for the known item
     And the API returns the item ID, selected agent, selected session, cwd, pane title, and pane ID
+
+  @id:F-API-JSON-CONTROL-S018
+  Scenario: Terminal API opens a terminal for a known dashboard item
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current dashboard items include `owner/repo#ISSUE-1`
+    When a client requests terminal for `owner/repo#ISSUE-1`
+    Then the server opens a plain terminal in the item's worktree
+    And the API returns the item ID, session, cwd, pane title, and pane ID
+
+  @id:F-API-JSON-CONTROL-S019
+  Scenario: Terminal API rejects an unknown item
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current dashboard items do not include `owner/repo#ISSUE-99`
+    When a client requests terminal for `owner/repo#ISSUE-99`
+    Then the API returns an error saying the work item is unknown
+    And the server does not prepare a worktree
 
   @id:F-API-JSON-CONTROL-S015
   Scenario: Todo API captures a todo in the configured todo repository

@@ -6,7 +6,7 @@ Feature: CLI orchestration commands
   humans or pass structured JSON through for agents.
 
   Rules:
-    - `workdash list`, `workdash info`, `workdash analyze`, `workdash code`, `workdash todo`, `workdash read`, and `workdash write` require a running `workdash --server` session.
+    - `workdash list`, `workdash info`, `workdash analyze`, `workdash code`, `workdash terminal`, `workdash todo`, `workdash read`, and `workdash write` require a running `workdash --server` session.
     - Server-backed CLI commands connect to the local Workdash JSON API at `127.0.0.1:8765`.
     - Server-backed CLI commands do not load configuration, run GitHub preflight, inspect Zellij, or fetch GitHub directly.
     - Server-backed CLI commands report a clear error when the local Workdash server is not reachable.
@@ -28,6 +28,8 @@ Feature: CLI orchestration commands
     - `workdash analyze` accepts only configured analysis agents reported by `workdash show-config`.
     - `workdash code` launches only configured terminal-backed coding agents reported by `workdash show-config`.
     - `workdash code` reports the created Zellij pane ID from live session state without persisting it.
+    - `workdash terminal` opens a plain terminal in the item's worktree and reports the created Zellij pane ID.
+    - `workdash terminal` does not accept an agent parameter.
     - `workdash code` does not expose non-terminal editors such as VSCode in V0.
     - `workdash read` returns pane text from the server-backed pane content API, with `--full` requesting full scrollback.
     - `workdash write` sends pane input through the server-backed pane send API, appending Enter unless raw input is requested.
@@ -122,6 +124,30 @@ Feature: CLI orchestration commands
     When the user runs `workdash code owner/repo#ISSUE-1 --agent codex --json`
     Then the command requests code launch from the local Workdash server
     And the system returns JSON with the item ID, selected agent, selected session, cwd, pane title, and pane ID
+
+  @id:F-CLI-ORCHESTRATION-S027
+  Scenario: Terminal opens a plain terminal through the local Workdash server
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current Workdash items include an assigned issue
+    When the user runs `workdash terminal owner/repo#ISSUE-1 --json`
+    Then the command requests terminal launch from the local Workdash server
+    And the system returns JSON with the item ID, session, cwd, pane title, and pane ID
+
+  @id:F-CLI-ORCHESTRATION-S028
+  Scenario: Terminal requires the local Workdash server
+    Given no server-backed Workdash session is running
+    When the user runs `workdash terminal owner/repo#ISSUE-1`
+    Then the command reports that `workdash --server` must be running
+    And the command exits with a non-zero status
+
+  @id:F-CLI-ORCHESTRATION-S029
+  Scenario: Terminal rejects an item outside the current dashboard state
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current Workdash items do not include `owner/repo#ISSUE-99`
+    When the user runs `workdash terminal owner/repo#ISSUE-99 --json`
+    Then the command requests terminal launch from the local Workdash server
+    And the system reports that the work item is unknown
+    And the command exits with a non-zero status
 
   @id:F-CLI-ORCHESTRATION-S014
   Scenario: Code does not expose non-terminal editors

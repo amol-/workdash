@@ -98,6 +98,7 @@ workdash list --json         # list items as machine-readable JSON
 workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
 workdash analyze ITEM [--agent NAME] [--json]  # analyze a current server item
 workdash code ITEM [--agent NAME] [--json]  # launch a terminal-backed coding agent
+workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
 workdash todo TEXT [--target owner/repo] [--json]  # capture a todo
 workdash read PANE_ID [--full] [--json]  # read text from a live pane
 workdash write PANE_ID TEXT [--raw] [--json]  # send text to a live pane

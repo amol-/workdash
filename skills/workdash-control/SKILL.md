@@ -43,11 +43,16 @@ workdash analyze ITEM --agent codex --json
 
 workdash code ITEM --agent pi
 workdash code ITEM --agent codex --json
+
+workdash terminal ITEM
+workdash terminal ITEM --json
 ```
 
 `analyze` receives markdown content from the server as base64 (`content_type`,
 `file_name`, `file_content`), writes it to a secure temporary local file, and
 prints that path as `analysis_path`. `code` prints the new pane title and pane ID.
+`terminal` opens a plain terminal pane in the item's worktree and prints the
+pane title and pane ID.
 
 ## Talk to panes
 
