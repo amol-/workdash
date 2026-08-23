@@ -17,6 +17,7 @@ from .backend import IncludeResult, SuggestionMarkers, WorkdashBackend, compute_
 from .config import WorkdashConfig
 from .github_client import parse_github_item_url
 from .launcher import (
+    close_zellij_pane,
     dump_zellij_pane,
     launch_agent_context,
     launch_terminal_context,
@@ -319,6 +320,18 @@ class WorkdashSession:
         send_zellij_pane_input(self.zellij_session, pane_id, data, raw=raw)
         return {"pane_id": pane_id, "raw": raw, "accepted": True}
 
+    def pane_close(self, *, pane_id: str) -> dict[str, object]:
+        """Close a Zellij pane by its ID."""
+
+        if not self.zellij_session:
+            raise WorkdashControlError(
+                "zellij_session_required",
+                "Pane close requires a known Workdash Zellij session.",
+                status=HTTPStatus.CONFLICT,
+            )
+        close_zellij_pane(self.zellij_session, pane_id)
+        return {"pane_id": pane_id, "accepted": True}
+
     def _notify_items_changed(self) -> None:
         if self.items_changed_callback is not None:
             self.items_changed_callback()
@@ -571,6 +584,16 @@ def _make_turbogears_app(session: WorkdashSession):
                     pane_id=_required_text(payload, "pane_id"),
                     data=_required_text(payload, "data"),
                     raw=bool(payload.get("raw", False)),
+                ),
+            )
+
+        @expose("json")
+        def close(self):
+            return _handle_json_request(
+                request,
+                response,
+                lambda payload: self._session.pane_close(
+                    pane_id=_required_text(payload, "pane_id"),
                 ),
             )
 

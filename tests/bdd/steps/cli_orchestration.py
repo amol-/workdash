@@ -153,6 +153,10 @@ def _run_workdash(
                         data=payload["data"],
                         raw=bool(payload.get("raw", False)),
                     )
+                if endpoint == "pane/close":
+                    return scenario_state["api_session"].pane_close(
+                        pane_id=payload["pane_id"],
+                    )
                 raise AssertionError(f"Unexpected control endpoint: {endpoint}")
 
         monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
@@ -220,7 +224,11 @@ def _run_workdash(
         def fake_send_zellij_pane_input(session, pane_id, data, *, raw=False):
             scenario_state.setdefault("pane_send_calls", []).append((session, pane_id, data, raw))
 
+        def fake_close_zellij_pane(session, pane_id):
+            scenario_state.setdefault("pane_close_calls", []).append((session, pane_id))
+
         monkeypatch.setattr(control_module, "send_zellij_pane_input", fake_send_zellij_pane_input)
+        monkeypatch.setattr(control_module, "close_zellij_pane", fake_close_zellij_pane)
 
     monkeypatch.setattr(workdash_module.subprocess, "run", fake_run)
     if scenario_state.get("client_missing_tools"):
@@ -740,6 +748,24 @@ def _run_write_raw_json(
     )
 
 
+@when("the user runs `workdash close terminal_26`")
+def _run_close(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(["close", "terminal_26"], scenario_state, monkeypatch, capsys)
+
+
+@when("the user runs `workdash close terminal_26 --json`")
+def _run_close_json(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(["close", "terminal_26", "--json"], scenario_state, monkeypatch, capsys)
+
+
 @when("the user runs an orchestration command")
 @when("the user runs a server-backed orchestration command")
 def _run_orchestration_command(
@@ -1120,6 +1146,26 @@ def _returns_pane_send_json(scenario_state: dict[str, Any]) -> None:
     assert json.loads(scenario_state["stdout"]) == {
         "pane_id": "terminal_23",
         "raw": True,
+        "accepted": True,
+    }
+
+
+@then("the command requests pane close from the local Workdash server")
+def _requests_pane_close(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("control_requests") == [
+        {"endpoint": "pane/close", "payload": {"pane_id": "terminal_26"}}
+    ]
+
+
+@then("the system confirms that the pane close was accepted")
+def _confirms_pane_close_accepted(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["stdout"] == "Accepted close for terminal_26.\n"
+
+
+@then("the system returns JSON with the pane ID and accepted status")
+def _returns_pane_close_json(scenario_state: dict[str, Any]) -> None:
+    assert json.loads(scenario_state["stdout"]) == {
+        "pane_id": "terminal_26",
         "accepted": True,
     }
 

@@ -6,7 +6,7 @@ Feature: CLI orchestration commands
   humans or pass structured JSON through for agents.
 
   Rules:
-    - `workdash list`, `workdash info`, `workdash analyze`, `workdash code`, `workdash terminal`, `workdash todo`, `workdash read`, and `workdash write` require a running `workdash --server` session.
+    - `workdash list`, `workdash info`, `workdash analyze`, `workdash code`, `workdash terminal`, `workdash todo`, `workdash read`, `workdash write`, and `workdash close` require a running `workdash --server` session.
     - Server-backed CLI commands connect to the local Workdash JSON API at `127.0.0.1:8765`.
     - Server-backed CLI commands do not load configuration, run GitHub preflight, inspect Zellij, or fetch GitHub directly.
     - Server-backed CLI commands report a clear error when the local Workdash server is not reachable.
@@ -33,6 +33,7 @@ Feature: CLI orchestration commands
     - `workdash code` does not expose non-terminal editors such as VSCode in V0.
     - `workdash read` returns pane text from the server-backed pane content API, with `--full` requesting full scrollback.
     - `workdash write` sends pane input through the server-backed pane send API, appending Enter unless raw input is requested.
+    - `workdash close` closes a pane through the server-backed pane close API.
     - `workdash analyze` returns markdown analysis content as base64 in the server response with `content_type`, `file_name`, and `file_content`.
     - `workdash analyze` writes the server-returned analysis content to a secure temporary local file and reports that client-side path as `analysis_path`.
     - `workdash todo` captures a todo through the server, taking the todo text as its argument and an optional `--target owner/repo`.
@@ -217,28 +218,44 @@ Feature: CLI orchestration commands
     Then the command sends raw pane input through the local Workdash server
     And the system returns JSON with the pane ID, raw flag, and accepted status
 
+  @id:F-CLI-ORCHESTRATION-S023
+  Scenario: Close closes a pane through the local Workdash server
+    Given a server-backed Workdash session is running
+    And `workdash info` reports pane ID `terminal_26`
+    When the user runs `workdash close terminal_26`
+    Then the command requests pane close from the local Workdash server
+    And the system confirms that the pane close was accepted
+
   @id:F-CLI-ORCHESTRATION-S024
+  Scenario: Close can return JSON output
+    Given a server-backed Workdash session is running
+    And `workdash info` reports pane ID `terminal_26`
+    When the user runs `workdash close terminal_26 --json`
+    Then the command requests pane close from the local Workdash server
+    And the system returns JSON with the pane ID and accepted status
+
+  @id:F-CLI-ORCHESTRATION-S030
   Scenario: Todo captures a work item through the local Workdash server
     Given a server-backed Workdash session is running
     When the user runs `workdash todo "Fix the flaky test" --target owner/repo`
     Then the command captures the todo through the local Workdash server
     And the system reports the created Workdash item ID and issue URL
 
-  @id:F-CLI-ORCHESTRATION-S025
+  @id:F-CLI-ORCHESTRATION-S031
   Scenario: Todo requires the local Workdash server
     Given no server-backed Workdash session is running
     When the user runs `workdash todo "Fix the flaky test"`
     Then the command reports that `workdash --server` must be running
     And the command exits with a non-zero status
 
-  @id:F-CLI-ORCHESTRATION-S026
+  @id:F-CLI-ORCHESTRATION-S032
   Scenario: Info maps the shared worktree of an authored pull request to that pull request
     Given a server-backed Workdash session is running
     And that session has an agent pane in the worktree of the issue an authored pull request closes
     When the user runs `workdash info`
     Then the pane is mapped to that authored pull request
 
-  @id:F-CLI-ORCHESTRATION-S023
+  @id:F-CLI-ORCHESTRATION-S033
   Scenario: Analyze CLI writes server-returned analysis content to a secure local file
     Given a server-backed Workdash session has loaded dashboard items
     And the current Workdash items include an assigned issue without cached analysis

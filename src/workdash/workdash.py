@@ -53,7 +53,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     commands = WorkdashCommands()
-    if options.command in {"list", "info", "analyze", "code", "read", "write", "todo", "terminal"}:
+    if options.command in {
+        "list",
+        "info",
+        "analyze",
+        "code",
+        "read",
+        "write",
+        "todo",
+        "close",
+        "terminal",
+    }:
         return _run_server_backed_command(commands, options)
     if options.command == "branchdiff":
         from .branchdiff import run_branchdiff
@@ -231,6 +241,20 @@ class WorkdashCommands:
             )
         return 0
 
+    def close_pane(self, *, pane_id: str, json_output: bool) -> int:
+        """Close a pane through the local Workdash server."""
+
+        try:
+            result = self._client.request("pane/close", {"pane_id": pane_id})
+        except WorkdashControlError as error:
+            _print_control_error(error)
+            return 1
+        if json_output:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        else:
+            print(f"Accepted close for {result['pane_id']}.")
+        return 0
+
     def show_config(self, *, json_output: bool) -> int:
         """Show configured automation choices without requiring the server."""
 
@@ -396,6 +420,11 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             pane_id=options.pane_id or "",
             text=options.text or "",
             raw=options.raw,
+            json_output=options.json_output,
+        )
+    if options.command == "close":
+        return commands.close_pane(
+            pane_id=options.pane_id or "",
             json_output=options.json_output,
         )
     raise AssertionError(f"Unsupported server-backed command: {options.command}")
@@ -583,6 +612,18 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         help="Send raw text without the default trailing Enter.",
     )
     write_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Emit machine-readable JSON.",
+    )
+    close_parser = subparsers.add_parser(
+        "close",
+        help="Close a live pane.",
+    )
+    close_parser.add_argument("pane_id", metavar="PANE_ID", help="Pane ID from workdash info.")
+    close_parser.add_argument(
         "--json",
         dest="json_output",
         action="store_true",

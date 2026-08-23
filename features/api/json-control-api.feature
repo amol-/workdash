@@ -15,7 +15,7 @@ Feature: Local JSON control API
     - V0 has no authentication because the server is localhost-only.
     - V0 exposes JSON APIs only, not an HTML browser UI.
     - API requests and responses use JSON objects.
-    - V0 capabilities are exposed as `POST /api/v0/list`, `POST /api/v0/info`, `POST /api/v0/analyze`, `POST /api/v0/code`, `POST /api/v0/terminal`, `POST /api/v0/todo`, `POST /api/v0/show-config`, `POST /api/v0/pane/content`, and `POST /api/v0/pane/send`.
+    - V0 capabilities are exposed as `POST /api/v0/list`, `POST /api/v0/info`, `POST /api/v0/analyze`, `POST /api/v0/code`, `POST /api/v0/terminal`, `POST /api/v0/todo`, `POST /api/v0/show-config`, `POST /api/v0/pane/content`, `POST /api/v0/pane/send`, and `POST /api/v0/pane/close`.
     - Successful API responses use `{ "ok": true, "result": ... }`.
     - Failed API responses use an appropriate HTTP error status and `{ "ok": false, "error": { "code": ..., "message": ... } }`.
     - Work item actions accept Workdash item IDs exactly as emitted by `workdash list`.
@@ -167,5 +167,20 @@ Feature: Local JSON control API
   Scenario: Pane APIs report Zellij failures as JSON errors
     Given a server-backed Workdash session is running
     When a client requests a pane action for a pane ID that Zellij rejects
+    Then the API returns an error with an appropriate HTTP status
+    And the error message includes the Zellij failure in user-readable form
+
+  @id:F-API-JSON-CONTROL-S017
+  Scenario: Pane close API closes the target pane
+    Given a server-backed Workdash session is running
+    And `workdash info` reports pane ID `terminal_26`
+    When a client requests pane close for `terminal_26`
+    Then the server asks Zellij to close pane `terminal_26`
+    And the API returns the pane ID and accepted status
+
+  @id:F-API-JSON-CONTROL-S020
+  Scenario: Pane close API reports Zellij failures as JSON errors
+    Given a server-backed Workdash session is running
+    When a client requests pane close for a pane ID that Zellij rejects
     Then the API returns an error with an appropriate HTTP status
     And the error message includes the Zellij failure in user-readable form
