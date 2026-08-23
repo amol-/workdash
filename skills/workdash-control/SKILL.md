@@ -10,8 +10,10 @@ Zellij, GitHub, config files, or worktrees directly.
 
 ## Required server
 
-Start from an existing `workdash --server` session. Server-backed commands fail
-clearly if it is not running.
+Depends on an existing `workdash --server` session.
+Server-backed commands fail clearly if it is not running.
+You MUST NEVER start a server yourself, if no server is running just tell so.
+To know the configuration of the server, you can use `show-config` subcommand
 
 ```bash
 workdash show-config          # configured agents + fixed server address
