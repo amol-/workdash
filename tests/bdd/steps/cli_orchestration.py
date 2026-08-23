@@ -44,6 +44,7 @@ def _run_workdash(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     import workdash.control as control_module
+    import workdash.launcher as launcher_module
     import workdash.workdash as workdash_module
 
     workdir = scenario_state.get("workdir", "/tmp/workdash-bdd")
@@ -137,6 +138,10 @@ def _run_workdash(
                         target=payload["target"],
                         agent=payload.get("agent"),
                     )
+                if endpoint == "terminal":
+                    return scenario_state["api_session"].terminal(
+                        target=payload["target"],
+                    )
                 if endpoint == "pane/content":
                     return scenario_state["api_session"].pane_content(
                         pane_id=payload["pane_id"],
@@ -153,6 +158,11 @@ def _run_workdash(
         monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
         monkeypatch.setattr(
             control_module,
+            "load_zellij_panes",
+            lambda _session: list(scenario_state.get("panes", [])),
+        )
+        monkeypatch.setattr(
+            launcher_module,
             "load_zellij_panes",
             lambda _session: list(scenario_state.get("panes", [])),
         )
@@ -180,6 +190,21 @@ def _run_workdash(
                     pane_id="terminal_23",
                     pane_title="code_owner_repo_1",
                     cwd=repo,
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            control_module,
+            "launch_terminal_context",
+            lambda repo_path, *, zellij_session=None: (
+                scenario_state.setdefault("terminal_launch_calls", []).append(
+                    (repo_path, zellij_session)
+                )
+                or SimpleNamespace(
+                    session=zellij_session,
+                    pane_id="terminal_23",
+                    pane_title="terminal_owner_repo_1",
+                    cwd=repo_path,
                 )
             ),
         )
@@ -523,6 +548,13 @@ def _current_items_include_uncached_issue(
     scenario_state["analysis_path"] = str(tmp_path / "analysis.md")
 
 
+@given("the current Workdash items include an assigned issue")
+def _current_items_include_assigned_issue(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    _current_items_include_uncached_issue(scenario_state, work_items, tmp_path)
+
+
 @given("only the Codex analyze command is configured")
 def _only_codex_analyze_command_is_configured(scenario_state: dict[str, Any]) -> None:
     scenario_state["only_codex_analyze_configured"] = True
@@ -619,6 +651,48 @@ def _run_code_vscode_json(
 ) -> None:
     _run_workdash(
         ["code", "owner/repo#ISSUE-1", "--agent", "vscode", "--json"],
+        scenario_state,
+        monkeypatch,
+        capsys,
+    )
+
+
+@when("the user runs `workdash terminal owner/repo#ISSUE-1 --json`")
+def _run_terminal_json(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(
+        ["terminal", "owner/repo#ISSUE-1", "--json"],
+        scenario_state,
+        monkeypatch,
+        capsys,
+    )
+
+
+@when("the user runs `workdash terminal owner/repo#ISSUE-1`")
+def _run_terminal(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(
+        ["terminal", "owner/repo#ISSUE-1"],
+        scenario_state,
+        monkeypatch,
+        capsys,
+    )
+
+
+@when("the user runs `workdash terminal owner/repo#ISSUE-99 --json`")
+def _run_terminal_unknown_json(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(
+        ["terminal", "owner/repo#ISSUE-99", "--json"],
         scenario_state,
         monkeypatch,
         capsys,
@@ -739,6 +813,22 @@ def _both_panes_mapped(scenario_state: dict[str, Any]) -> None:
 def _does_not_choose_session(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["exit_code"] != 0
     assert "Session:" not in scenario_state["stdout"]
+
+
+@then("the command reports that `workdash --server` must be running")
+def _reports_server_required(scenario_state: dict[str, Any]) -> None:
+    assert "No Workdash server is reachable" in scenario_state["stderr"]
+    assert "workdash --server" in scenario_state["stderr"]
+
+
+@then("the command exits with a non-zero status")
+def _exits_non_zero(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] != 0
+
+
+@then("the system reports that the work item is unknown")
+def _reports_unknown_item(scenario_state: dict[str, Any]) -> None:
+    assert "No dashboard item matches" in scenario_state["stderr"]
 
 
 @then("the system lists the candidate Workdash-owned sessions")
@@ -905,6 +995,18 @@ def _returns_code_json(scenario_state: dict[str, Any]) -> None:
     }
 
 
+@then("the system returns JSON with the item ID, session, cwd, pane title, and pane ID")
+def _returns_terminal_json(scenario_state: dict[str, Any]) -> None:
+    payload = json.loads(scenario_state["stdout"])
+    assert payload == {
+        "item_id": "owner/repo#ISSUE-1",
+        "session": "workdash-main",
+        "cwd": str(Path(scenario_state["workdir"]) / "owner_repo_1"),
+        "pane_title": "terminal_owner_repo_1",
+        "pane_id": "terminal_23",
+    }
+
+
 @then("the system reports that the coding agent is not a configured terminal-backed agent")
 def _reports_non_terminal_agent_rejected(scenario_state: dict[str, Any]) -> None:
     assert "not a configured terminal-backed agent" in scenario_state["stderr"]
@@ -952,6 +1054,12 @@ def _requests_pane_information_with_ordinary_panes(scenario_state: dict[str, Any
 def _requests_code_launch(scenario_state: dict[str, Any]) -> None:
     control_requests = scenario_state.get("control_requests", [])
     assert any(req["endpoint"] == "code" for req in control_requests)
+
+
+@then("the command requests terminal launch from the local Workdash server")
+def _requests_terminal_launch(scenario_state: dict[str, Any]) -> None:
+    control_requests = scenario_state.get("control_requests", [])
+    assert any(req["endpoint"] == "terminal" for req in control_requests)
 
 
 @then("the command requests pane content from the local Workdash server")

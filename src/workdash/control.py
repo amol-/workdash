@@ -19,6 +19,7 @@ from .github_client import parse_github_item_url
 from .launcher import (
     dump_zellij_pane,
     launch_agent_context,
+    launch_terminal_context,
     launch_vscode_context,
     load_zellij_panes,
     prepare_launch_agent_prompt,
@@ -270,6 +271,25 @@ class WorkdashSession:
                 "item_id": item_id,
                 "session": launch.session or self.zellij_session,
                 "agent": selected_agent,
+                "cwd": launch.cwd,
+                "pane_title": launch.pane_title,
+                "pane_id": launch.pane_id,
+            }
+
+    def terminal(self, *, target: str) -> dict[str, object]:
+        """Open a terminal for a current dashboard item."""
+
+        with self._lock:
+            item = self._require_item(target)
+            item_id = format_work_item_id(item)
+            repo_path = ensure_worktree(self.config.workdir, item)
+            launch = launch_terminal_context(
+                repo_path,
+                zellij_session=self.zellij_session,
+            )
+            return {
+                "item_id": item_id,
+                "session": launch.session or self.zellij_session,
                 "cwd": launch.cwd,
                 "pane_title": launch.pane_title,
                 "pane_id": launch.pane_id,
@@ -598,6 +618,16 @@ def _make_turbogears_app(session: WorkdashSession):
                 lambda payload: self._session.code(
                     target=_required_text(payload, "target"),
                     agent=_optional_text(payload, "agent"),
+                ),
+            )
+
+        @expose("json")
+        def terminal(self):
+            return _handle_json_request(
+                request,
+                response,
+                lambda payload: self._session.terminal(
+                    target=_required_text(payload, "target"),
                 ),
             )
 

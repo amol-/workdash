@@ -572,7 +572,9 @@ def launch_vscode_context(repo_path: str, prompt: str) -> None:
     )
 
 
-def launch_terminal_context(repo_path: str) -> ZellijPaneLaunch:
+def launch_terminal_context(
+    repo_path: str, *, zellij_session: str | None = None
+) -> ZellijPaneLaunch:
     """Open a terminal in zellij rooted at the given repository path."""
 
     if not isinstance(repo_path, str) or not repo_path.strip():
@@ -584,6 +586,7 @@ def launch_terminal_context(repo_path: str) -> ZellijPaneLaunch:
         shell_command,
         context="Failed to launch terminal in zellij",
         work_action="terminal",
+        zellij_session=zellij_session,
     )
 
 
