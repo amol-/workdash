@@ -326,9 +326,7 @@ def _client_requests_terminal(
     )
 
     def fake_launch_terminal(repo_path, *, zellij_session=None):
-        scenario_state.setdefault("terminal_launch_calls", []).append(
-            (repo_path, zellij_session)
-        )
+        scenario_state.setdefault("terminal_launch_calls", []).append((repo_path, zellij_session))
         return SimpleNamespace(
             session=zellij_session,
             pane_id="terminal_23",
