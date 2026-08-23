@@ -35,6 +35,27 @@ Copy IDs exactly:
 - Item IDs from `workdash list`: `owner/repo#ISSUE-123`, `owner/repo#PR-123`, `owner/repo#REVIEW-123`, `owner/repo#CHECK-123`.
 - Pane IDs from `workdash info`: usually `terminal_N`.
 
+## Capture todos
+
+```bash
+workdash todo TEXT                     # capture a todo in the todo repository
+workdash todo TEXT --target owner/repo # capture a todo for another repository
+workdash todo TEXT --json              # machine-readable output
+```
+
+Use `workdash todo` to create **private task tracking items** that are not part of
+any specific repository or that should not be public. A todo is stored as a
+GitHub issue in your configured todo repository (assigned to you, labeled
+`workdash-todo`), so it appears in your dashboard like any other work item.
+
+Use `--target owner/repo` when you need to create a task for another repository but
+want to keep the task itself non-public (the todo issue lives in your todo
+repository, not the target). The target is recorded in the issue body metadata
+and the todo appears in the dashboard under its target repository.
+
+`todo` prints the created Workdash item ID, todo repository, target, issue
+number, and issue URL.
+
 ## Start useful work
 
 ```bash
