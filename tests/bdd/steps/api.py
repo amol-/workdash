@@ -428,6 +428,37 @@ def _client_sends_raw_to_pane(
     )
 
 
+@when(parsers.parse("a client requests pane close for `{pane_id}`"))
+def _client_requests_pane_close(
+    pane_id: str,
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "workdash.control.close_zellij_pane",
+        lambda session, requested_pane_id: scenario_state.setdefault("pane_close_calls", []).append(
+            (session, requested_pane_id)
+        ),
+    )
+    _call_api(scenario_state, work_items, tmp_path, "pane/close", {"pane_id": pane_id})
+
+
+@when("a client requests pane close for a pane ID that Zellij rejects")
+def _client_requests_rejected_pane_close(
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def zellij_rejects_close(_session, _pane_id):
+        raise RuntimeError("Zellij rejected terminal_404")
+
+    monkeypatch.setattr("workdash.control.close_zellij_pane", zellij_rejects_close)
+    _call_api(scenario_state, work_items, tmp_path, "pane/close", {"pane_id": "terminal_404"})
+
+
 @when("a client requests a pane action for a pane ID that Zellij rejects")
 def _client_requests_rejected_pane_action(
     scenario_state: dict[str, Any],
@@ -729,6 +760,18 @@ def _server_does_not_send_trailing_enter(scenario_state: dict[str, Any]) -> None
 def _api_reports_input_accepted(scenario_state: dict[str, Any]) -> None:
     result = _api_result(scenario_state)
     assert result["pane_id"] == "terminal_23"
+    assert result["accepted"] is True
+
+
+@then("the server asks Zellij to close pane `terminal_26`")
+def _server_asks_zellij_to_close_pane(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["pane_close_calls"] == [("workdash-main", "terminal_26")]
+
+
+@then("the API returns the pane ID and accepted status")
+def _api_returns_pane_close_result(scenario_state: dict[str, Any]) -> None:
+    result = _api_result(scenario_state)
+    assert result["pane_id"] == "terminal_26"
     assert result["accepted"] is True
 
 

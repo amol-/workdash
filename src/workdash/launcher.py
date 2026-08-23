@@ -647,3 +647,33 @@ def focus_zellij_pane(session: str, pane_id: str) -> None:
         raise RuntimeError(
             f"Failed to focus Zellij pane {pane_id} in {session}: {details or error.returncode}"
         ) from error
+
+
+def close_zellij_pane(session: str, pane_id: str) -> None:
+    """Close a Zellij pane by its ID using zellij action close-pane.
+
+    :param session: Zellij session name
+    :param pane_id: Pane ID to close
+    :raises RuntimeError: If the close command fails
+    """
+    zellij = _resolve_zellij_binary()
+    try:
+        subprocess.run(
+            [
+                zellij,
+                "--session",
+                session,
+                "action",
+                "close-pane",
+                "-p",
+                pane_id,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        details = (error.stderr or "").strip() or (error.stdout or "").strip()
+        raise RuntimeError(
+            f"Failed to close Zellij pane {pane_id} in {session}: {details or error.returncode}"
+        ) from error

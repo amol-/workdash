@@ -87,6 +87,9 @@ workdash read PANE_ID --json
 workdash write PANE_ID "continue"     # sends text plus Enter
 workdash write PANE_ID "question" --raw
 workdash write PANE_ID "question" --no-enter --json
+
+workdash close PANE_ID            # close a pane
+workdash close PANE_ID --json
 ```
 
 Human `read` output is just the pane text so it can be read directly.
@@ -101,6 +104,7 @@ Human `read` output is just the pane text so it can be read directly.
 6. Poll with `workdash read PANE_ID --full`.
 7. Send concise instructions with `workdash write PANE_ID "..."`.
 8. Repeat `read`/`write` until the pane reports completion.
+9. Close finished panes with `workdash close PANE_ID` when done.
 
 ## Safety notes
 
