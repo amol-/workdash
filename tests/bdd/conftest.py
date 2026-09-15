@@ -22,6 +22,9 @@ from .steps import (
     branchdiff as _branchdiff,
 )
 from .steps import (
+    branchinfo as _branchinfo,
+)
+from .steps import (
     browse as _browse,
 )
 from .steps import (
@@ -70,6 +73,7 @@ for _step_module in (
     _terminal,
     _show_config,
     _todo,
+    _branchinfo,
 ):
     for _name in dir(_step_module):
         if _name.startswith("pytestbdd_stepdef_") or _name in {

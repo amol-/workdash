@@ -194,7 +194,7 @@ def _user_needs_worktree_for_pr_closing_an_issue(
         number=42149,
         title="Implement the issue",
     )
-    item.linked_issue = ("owner/repo", 41830)
+    item.closing_issue_numbers = (41830,)
     scenario_state["work_item"] = item
     scenario_state["workdir"] = tmp_path
     _install_fake_git(scenario_state, monkeypatch, workdir=tmp_path)
@@ -203,8 +203,10 @@ def _user_needs_worktree_for_pr_closing_an_issue(
 @then("the worktree directory is named after the issue the pull request closes")
 def _worktree_named_after_linked_issue(scenario_state: dict[str, Any]) -> None:
     item: WorkItem = scenario_state["work_item"]
-    assert item.linked_issue is not None
-    assert Path(scenario_state["worktree_path"]).name == f"owner_repo_{item.linked_issue[1]}"
+    assert item.closing_issue_numbers
+    assert (
+        Path(scenario_state["worktree_path"]).name == f"owner_repo_{item.closing_issue_numbers[0]}"
+    )
 
 
 @given("the user already has a worktree opened from an issue")
@@ -242,7 +244,48 @@ def _user_authored_a_pr_closing_that_issue(scenario_state: dict[str, Any]) -> No
         number=42149,
         title="Implement the issue",
     )
-    item.linked_issue = ("owner/repo", 41830)
+    item.closing_issue_numbers = (41830,)
+    scenario_state["work_item"] = item
+
+
+@given(
+    "the user already has a worktree opened from the higher-numbered of two issues a pull request closes"
+)
+def _user_already_has_a_worktree_for_the_higher_closing_issue(
+    scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "owner_repo").mkdir()
+    (tmp_path / "owner_repo_41999").mkdir()
+    scenario_state["workdir"] = tmp_path
+    scenario_state["_pre_existing_worktree"] = tmp_path / "owner_repo_41999"
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=f"{Path(kwargs['cwd']).resolve()}\n", stderr=""
+            )
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
+        if cmd[:2] == ["git", "pull"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command in closing-issues reuse scenario: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+@given("the user authored a pull request that closes both issues")
+def _user_authored_a_pr_closing_both_issues(scenario_state: dict[str, Any]) -> None:
+    item = make_work_item(
+        item_type=WorkItemType.PR,
+        kind=WorkItemKind.AUTHORED_PR,
+        repo="owner/repo",
+        number=42149,
+        title="Implement both issues",
+    )
+    item.closing_issue_numbers = (41830, 41999)
     scenario_state["work_item"] = item
 
 

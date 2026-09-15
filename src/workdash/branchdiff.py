@@ -29,25 +29,9 @@ from textual.style import Style
 from textual.widgets import DataTable, Footer, Static
 from textual_diff_view import DiffView
 
+from .git import get_repo_root
+
 _SCROLL_DIFF_BINDING_GROUP = Binding.Group("Scroll diff", compact=True)
-
-
-def get_repo_root(repo_path: Path | None = None) -> Path:
-    """Get the repository root for any path inside a git worktree."""
-    if repo_path is None:
-        repo_path = Path.cwd()
-
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except subprocess.CalledProcessError as error:
-        raise RuntimeError("Not a git repository.") from error
-    return Path(result.stdout.strip())
 
 
 def get_base_branch(repo_path: Path | None = None) -> str:

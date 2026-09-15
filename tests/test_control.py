@@ -128,7 +128,7 @@ def test_agent_panes_map_an_authored_pr_to_the_worktree_of_the_issue_it_closes(
         created_at=datetime(2026, 2, 1, tzinfo=UTC),
         updated_at=datetime(2026, 2, 1, tzinfo=UTC),
         url="https://example.com/42149",
-        linked_issue=("owner/repo", 41830),
+        closing_issue_numbers=(41830,),
     )
 
     def fake_run(*args, **kwargs):

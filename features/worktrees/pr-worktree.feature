@@ -13,6 +13,7 @@ Feature: Pull request worktree
     - A coding session or analysis running in the worktree has access to a stable diff target that represents only this pull request's changes.
     - An authored pull request that closes an issue in the same repository is the implementation of that issue, so it uses the worktree directory named after the linked issue instead of opening a second checkout for the same work.
     - A worktree that already exists for the linked issue is reused whatever branch it holds, and whatever repository the pull request's own branch lives in: it was opened for this work, so its remote configuration decides where commits go. This takes precedence over the fork rules above, and two open pull requests closing one issue therefore share that single checkout.
+    - An authored pull request that closes several issues in its own repository reuses a worktree already opened from any of those issues, not only the one opened from the lowest-numbered issue.
     - A REVIEW or CHECK pull request keeps its own pull-request-numbered worktree directory, because the user reviews the author's branch rather than continuing their own work.
     - A pull-request-numbered worktree directory that already exists keeps resolving to its pull request, so checkouts opened before this naming rule keep working.
 
@@ -33,6 +34,13 @@ Feature: Pull request worktree
   Scenario: An authored pull request reuses the worktree already opened from its issue
     Given the user already has a worktree opened from an issue
     And the user authored a pull request that closes that issue
+    When the system prepares the worktree
+    Then the same worktree is returned to the user
+
+  @id:F-WORKTREES-PR-S005
+  Scenario: An authored pull request closing several issues reuses whichever one's worktree already exists
+    Given the user already has a worktree opened from the higher-numbered of two issues a pull request closes
+    And the user authored a pull request that closes both issues
     When the system prepares the worktree
     Then the same worktree is returned to the user
 

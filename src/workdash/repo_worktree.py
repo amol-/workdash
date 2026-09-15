@@ -46,9 +46,9 @@ def existing_worktree_path(workdir: str, item: WorkItem) -> Path | None:
         if git.worktree_proves_item(candidate, item)
     ]
     # A checkout named after the item's own number is beyond doubt this item's,
-    # so it wins over the linked issue's directory when both exist. Anything
-    # still ambiguous after both preferences is somebody's guess, not an answer.
-    for number in (item.number, worktree_item_number(item)):
+    # so it wins over any closing issue's directory when several exist. Anything
+    # still ambiguous after every accepted number is somebody's guess, not an answer.
+    for number in (item.number, *accepted_worktree_numbers(item)):
         preferred = [candidate for candidate in matches if candidate.name.endswith(f"_{number}")]
         if len(preferred) == 1:
             return preferred[0]

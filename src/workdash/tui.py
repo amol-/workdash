@@ -17,7 +17,7 @@ from textual.widgets import DataTable, Input, Static
 from .backend import IncludeResult, compute_suggestion_markers
 from .config import WorkdashAgentChoice
 from .launcher import launch_branchdiff_context, open_markdown
-from .models import WorkItem, WorkItemType, display_repo, format_type_label
+from .models import WorkItem, WorkItemType, ci_status_symbol, display_repo, format_type_label
 
 SuggestionMarkers = dict[tuple[WorkItemType, str, int], str]
 RefreshCallbackResult = Sequence[WorkItem] | tuple[Sequence[WorkItem], SuggestionMarkers]
@@ -25,14 +25,6 @@ AnalyzeCallbackResult = str | None
 _CallbackResult = TypeVar("_CallbackResult")
 # The Repo column is capped at this reference name so the title keeps more room.
 _MAX_REPO_WIDTH = len("posit-dev/rsconnect-python")
-# One-character CI symbols, keyed by the GraphQL status check rollup states.
-_CI_SYMBOLS = {
-    "SUCCESS": ("✓", "green"),
-    "FAILURE": ("✗", "red"),
-    "ERROR": ("✗", "red"),
-    "PENDING": ("●", "yellow"),
-    "EXPECTED": ("●", "yellow"),
-}
 
 if TYPE_CHECKING:
     from .control import WorkdashSession
@@ -55,10 +47,7 @@ def _type_column(item: WorkItem, *, bold: bool) -> Text:
     :param bool bold: whether the whole row is highlighted as recently updated.
     """
 
-    if item.ci_state == "SUCCESS" and item.review_decision == "APPROVED":
-        symbol, color = "✓✓", "green"
-    else:
-        symbol, color = _CI_SYMBOLS.get(item.ci_state or "", (" ", None))
+    symbol, color = ci_status_symbol(item.ci_state, item.review_decision)
     cell = Text(
         f"{symbol}{format_type_label(item)}#{item.number}",
         style="bold" if bold else "",

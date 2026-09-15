@@ -204,14 +204,14 @@ class WorkdashBackend:
             )
             for item in pull_request_items:
                 # Only an issue in the pull request's own repository can name the
-                # pull request's worktree, so a foreign closing issue is not the
-                # item's linked issue even though it is still hidden below.
+                # pull request's worktree, so a foreign closing issue is not one
+                # of its closing issue numbers even though it is still hidden below.
                 own_repo_issues = [
                     issue
                     for issue in linked_issues.get((item.repo, item.number), [])
                     if issue[0] == item.repo
                 ]
-                item.linked_issue = min(own_repo_issues, key=lambda issue: issue[1], default=None)
+                item.closing_issue_numbers = tuple(sorted(issue[1] for issue in own_repo_issues))
             # A pull request already carries the work of the issue it closes, so
             # listing that issue as well would show the same work twice.
             hidden_issues = {issue for issues in linked_issues.values() for issue in issues}

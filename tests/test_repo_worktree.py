@@ -69,7 +69,7 @@ def make_linked_pr(
 ) -> WorkItem:
     item = make_pr(number, repo)
     item.kind = kind
-    item.linked_issue = (repo, issue_number)
+    item.closing_issue_numbers = (issue_number,)
     return item
 
 
@@ -468,11 +468,36 @@ def test_existing_worktree_path_finds_the_linked_issue_worktree_for_an_authored_
         )
         is None
     )
-    # An issue closed in another repository names a checkout of that other
-    # repository, so the pull request keeps its own PR-numbered worktree.
-    cross_repo_pr = make_linked_pr()
-    cross_repo_pr.linked_issue = ("other/repo", 41830)
+    # An issue closed in another repository never becomes a closing issue
+    # number, so the pull request keeps its own PR-numbered worktree.
+    cross_repo_pr = make_pr()
     assert existing_worktree_path(str(tmp_path), cross_repo_pr) is None
+
+
+def test_existing_worktree_path_finds_the_worktree_of_a_non_lowest_closing_issue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A pull request closing several issues in its own repository shares one
+    # checkout with all of them, so the worktree opened from a non-lowest
+    # closing issue must be found too, not just the lowest-numbered one.
+    item = make_pr()
+    item.closing_issue_numbers = (41830, 41999)
+    non_lowest_worktree = tmp_path / "owner_repo_41999"
+    non_lowest_worktree.mkdir()
+
+    def fake_run(*args, **kwargs):
+        cmd = args[0]
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
+            )
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert existing_worktree_path(str(tmp_path), item) == non_lowest_worktree
 
 
 def test_existing_worktree_path_still_finds_a_pr_numbered_worktree_for_a_linked_pr(

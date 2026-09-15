@@ -6,6 +6,37 @@ from pathlib import Path
 from .models import WorkItem, WorkItemType, accepted_worktree_numbers
 
 
+def get_repo_root(repo_path: Path | None = None) -> Path:
+    """Get the repository root for any path inside a git worktree."""
+    if repo_path is None:
+        repo_path = Path.cwd()
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError("Not a git repository.") from error
+    return Path(result.stdout.strip())
+
+
+def get_current_branch(repo_path: Path) -> str:
+    """Get the branch checked out at ``repo_path``."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Failed to determine the current branch.")
+    return result.stdout.strip()
+
+
 class GitHelper:
     """Local git command helpers used to prepare and prove Workdash worktrees."""
 

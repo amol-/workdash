@@ -534,21 +534,28 @@ def test_load_items_submits_independent_github_fetches_before_waiting(
 
 
 @pytest.mark.parametrize(
-    ("closing_issues", "expected_visible", "expected_linked_issue"),
+    ("closing_issues", "expected_visible", "expected_closing_issue_numbers"),
     [
         # A closing issue in another repository cannot name this pull request's
-        # worktree, so the lowest-numbered issue in its own repository wins.
+        # worktree, so only the issues in its own repository are kept. A closing
+        # issue in the middle of the range must survive too, not just the min
+        # and max, since any of them can name the pull request's worktree.
         (
-            [("other/repo", 12), ("owner/repo", 41999), ("owner/repo", 41830)],
+            [
+                ("other/repo", 12),
+                ("owner/repo", 41999),
+                ("owner/repo", 41900),
+                ("owner/repo", 41830),
+            ],
             {("owner/repo", 42149), ("owner/repo", 500)},
-            ("owner/repo", 41830),
+            (41830, 41900, 41999),
         ),
         # With nothing to redirect to the pull request keeps its own number, but
         # the foreign issue is still work the pull request covers.
         (
             [("other/repo", 12)],
             {("owner/repo", 42149), ("owner/repo", 41830), ("owner/repo", 500)},
-            None,
+            (),
         ),
     ],
 )
@@ -557,7 +564,7 @@ def test_load_items_hides_every_issue_a_pull_request_closes(
     tmp_path: Path,
     closing_issues: list[tuple[str, int]],
     expected_visible: set[tuple[str, int]],
-    expected_linked_issue: tuple[str, int] | None,
+    expected_closing_issue_numbers: tuple[int, ...],
 ) -> None:
     class FakeGitHubClient:
         def list_open_authored_prs(self, login, progress_callback=None):
@@ -637,7 +644,7 @@ def test_load_items_hides_every_issue_a_pull_request_closes(
 
     assert {(item.repo, item.number) for item in work_items} == expected_visible
     pull_request = next(item for item in work_items if item.item_type == WorkItemType.PR)
-    assert pull_request.linked_issue == expected_linked_issue
+    assert pull_request.closing_issue_numbers == expected_closing_issue_numbers
 
 
 def test_load_items_hides_an_included_issue_that_a_listed_pull_request_closes(

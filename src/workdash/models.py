@@ -42,7 +42,7 @@ class WorkItem:
     todo_target: str | None = None
     ci_state: str | None = None
     review_decision: str | None = None
-    linked_issue: tuple[str, int] | None = None
+    closing_issue_numbers: tuple[int, ...] = ()
 
 
 _TYPE_LABELS = {
@@ -64,33 +64,48 @@ def format_type_label(item: WorkItem) -> str:
 
 
 def worktree_item_number(item: WorkItem) -> int:
-    """Return the item number naming ``item``'s worktree directory.
+    """Return the item number naming a freshly created worktree for ``item``."""
 
-    A pull request the user authored is the implementation of the issue it
-    closes, so both share one checkout instead of splitting the same work
-    across two worktrees. Only an issue in the pull request's own repository
-    qualifies, because a worktree directory is named after the repository the
-    checkout belongs to and an issue elsewhere would name a foreign checkout.
+    return accepted_worktree_numbers(item)[0]
+
+
+def accepted_worktree_numbers(item: WorkItem) -> tuple[int, ...]:
+    """Return every item number a worktree of ``item`` may be named after, most preferred first.
+
+    A pull request the user authored is the implementation of every issue it
+    closes in its own repository, so all of them share one checkout instead of
+    splitting the same work across several worktrees; only a same-repository
+    issue qualifies, because a worktree directory is named after the
+    repository the checkout belongs to and an issue elsewhere would name a
+    foreign checkout. The lowest-numbered one comes first so a freshly created
+    worktree keeps a stable name regardless of the order GitHub reports
+    closing issues in, but a checkout already opened under the pull request's
+    own number, or under any other closing issue, keeps resolving to it too.
     """
 
-    if (
-        item.kind is WorkItemKind.AUTHORED_PR
-        and item.linked_issue is not None
-        and item.linked_issue[0] == item.repo
-    ):
-        return item.linked_issue[1]
-    return item.number
+    if item.kind is WorkItemKind.AUTHORED_PR and item.closing_issue_numbers:
+        lowest = min(item.closing_issue_numbers)
+        others = tuple(number for number in item.closing_issue_numbers if number != lowest)
+        return (lowest, item.number, *others)
+    return (item.number,)
 
 
-def accepted_worktree_numbers(item: WorkItem) -> set[int]:
-    """Return every item number a worktree of ``item`` may be named after.
+# One-character CI symbols, keyed by the GraphQL status check rollup states.
+_CI_SYMBOLS = {
+    "SUCCESS": ("\u2713", "green"),
+    "FAILURE": ("\u2717", "red"),
+    "ERROR": ("\u2717", "red"),
+    "PENDING": ("\u25cf", "yellow"),
+    "EXPECTED": ("\u25cf", "yellow"),
+}
 
-    New worktrees are created under :func:`worktree_item_number`, but a pull
-    request whose checkout was opened before it linked to an issue still lives
-    under its own number, and that directory must keep resolving to it.
-    """
 
-    return {item.number, worktree_item_number(item)}
+def ci_status_symbol(ci_state: str | None, review_decision: str | None) -> tuple[str, str | None]:
+    """Return the (symbol, color) pair representing a CI/review state pair."""
+
+    if ci_state == "SUCCESS" and review_decision == "APPROVED":
+        return "\u2713\u2713", "green"
+    return _CI_SYMBOLS.get(ci_state or "", (" ", None))
 
 
 def display_repo(item: WorkItem) -> str:

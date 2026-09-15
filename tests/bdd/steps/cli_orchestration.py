@@ -364,7 +364,7 @@ def _session_has_agent_pane_in_the_linked_issue_worktree(
         created_at=NOW_UTC,
         updated_at=NOW_UTC,
     )
-    item.linked_issue = (item.repo, 41830)
+    item.closing_issue_numbers = (41830,)
     work_items[:] = [item]
     set_session_items(scenario_state, work_items)
     cwd = worktree_path(scenario_state["workdir"], item.repo, 41830)

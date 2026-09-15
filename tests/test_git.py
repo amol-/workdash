@@ -3,11 +3,40 @@ from pathlib import Path
 
 import pytest
 
-from workdash.git import GitHelper
+from workdash.git import GitHelper, get_current_branch, get_repo_root
 
 
 def test_worktree_name_preserves_owner_repo_number_shape() -> None:
     assert GitHelper().worktree_name("owner/repo", 42) == "owner_repo_42"
+
+
+def test_get_repo_root_resolves_from_a_subdirectory(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+    nested_dir = tmp_path / "pkg" / "module"
+    nested_dir.mkdir(parents=True)
+
+    assert get_repo_root(nested_dir) == tmp_path.resolve()
+
+
+def test_get_repo_root_rejects_a_non_git_directory(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="Not a git repository."):
+        get_repo_root(tmp_path)
+
+
+def test_get_current_branch_returns_the_checked_out_branch(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", "-b", "feature"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "dev@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Dev"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "--allow-empty", "-m", "initial"], cwd=tmp_path, check=True
+    )
+
+    assert get_current_branch(tmp_path) == "feature"
+
+
+def test_get_current_branch_raises_when_git_fails(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="Failed to determine the current branch."):
+        get_current_branch(tmp_path)
 
 
 def test_repo_from_remote_url_accepts_https_and_ssh_forms() -> None:

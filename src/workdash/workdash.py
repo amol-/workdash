@@ -69,6 +69,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .branchdiff import run_branchdiff
 
         return run_branchdiff(target=options.target)
+    if options.command == "branchinfo":
+        from .branchinfo import run_branchinfo
+
+        return run_branchinfo()
     if options.command == "show-config":
         return commands.show_config(json_output=options.json_output)
 
@@ -650,6 +654,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         nargs="?",
         default=None,
         help="Branch to compare against (default: upstream).",
+    )
+    subparsers.add_parser(
+        "branchinfo",
+        help="Show the open pull request and issue for the current branch.",
     )
     namespace = parser.parse_args(argv) if argv is not None else parser.parse_args()
     return CLIOptions(
