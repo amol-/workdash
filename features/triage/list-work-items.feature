@@ -69,14 +69,6 @@ Feature: List work items
     When the user opens the dashboard
     Then the system reports that no work items were found
 
-  @id:F-TRIAGE-LIST-S006
-  Scenario: Repository authorization failure skips only that tracked repository
-    Given one tracked repository requires additional GitHub authorization
-    And another tracked repository has open work
-    When the user opens the dashboard
-    Then the accessible repository's work items appear
-    And the system warns that the unauthorized repository was skipped
-
   @id:F-TRIAGE-LIST-S009
   Scenario: Authored pull requests show their latest CI result
     Given the user has authored pull requests whose CI is passing, failing, and still running

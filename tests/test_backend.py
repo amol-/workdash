@@ -5,7 +5,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import workdash.backend as backend_module
 import workdash.github_client as github_client_module
 from workdash.backend import (
     _MAX_WORK_ITEMS,
@@ -42,10 +41,6 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     captured: dict[str, object] = {}
-
-    def fake_resolve_repositories(selectors):
-        captured["repositories_selectors"] = selectors
-        return ["owner/repo", "owner/other-repo"]
 
     class FakeGitHubClient:
         def list_open_authored_prs(self, login, progress_callback=None):
@@ -130,8 +125,8 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
                 }
             ]
 
-        def list_recent_tracked_items(self, repositories, progress_callback=None):
-            captured["tracked_repositories"] = repositories
+        def list_recent_tracked_items(self, search_scope, progress_callback=None):
+            captured["tracked_search_scope"] = search_scope
             captured["tracked_progress_callback"] = progress_callback is not None
             return [
                 {
@@ -191,7 +186,6 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
         ) -> str | None:  # pragma: no cover - unused here
             raise AssertionError("analyze should not be called while loading items")
 
-    monkeypatch.setattr(backend_module, "resolve_repositories", fake_resolve_repositories)
     config = WorkdashConfig(repositories=("owner/*",))
     backend = WorkdashBackend(
         github_client=FakeGitHubClient(),
@@ -203,13 +197,12 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
 
     work_items, suggestion_markers = backend.load_items(progress_callback=lambda _: None)
 
-    assert captured["repositories_selectors"] == ["owner/*"]
     assert captured["authored_called"] is True
     assert captured["review_requested_called"] is True
     assert captured["review_requested_progress_callback"] is True
     assert captured["reviewed_called"] is True
     assert captured["assigned_called"] is True
-    assert captured["tracked_repositories"] == ["owner/repo", "owner/other-repo"]
+    assert captured["tracked_search_scope"] == "user:owner"
     assert captured["tracked_progress_callback"] is True
     assert [(item.kind, item.number) for item in work_items] == [
         (WorkItemKind.AUTHORED_PR, 10),
@@ -264,10 +257,9 @@ def test_load_items_keeps_only_the_most_recently_updated_items(
         def list_open_todo_issues(self, repository, progress_callback=None):
             return []
 
-        def list_recent_tracked_items(self, repositories, progress_callback=None):
+        def list_recent_tracked_items(self, search_scope, progress_callback=None):
             return tracked_payload
 
-    monkeypatch.setattr(backend_module, "resolve_repositories", lambda selectors: ["owner/repo"])
     backend = WorkdashBackend(
         github_client=FakeGitHubClient(),
         config=WorkdashConfig(repositories=("owner/repo",)),
@@ -340,10 +332,9 @@ def test_load_items_keeps_a_hand_picked_item_older_than_every_discovered_item(
         def list_open_todo_issues(self, repository, progress_callback=None):
             return todo_payload
 
-        def list_recent_tracked_items(self, repositories, progress_callback=None):
+        def list_recent_tracked_items(self, search_scope, progress_callback=None):
             return tracked_payload
 
-    monkeypatch.setattr(backend_module, "resolve_repositories", lambda selectors: ["owner/repo"])
     backend = WorkdashBackend(
         github_client=FakeGitHubClient(),
         config=WorkdashConfig(repositories=("owner/repo",), todo_repository="testuser/todos"),
@@ -385,13 +376,12 @@ def test_load_items_keeps_the_todo_target_when_the_same_issue_is_also_assigned(
         def list_open_assigned_issues(self, login):
             return [dict(issue_payload)]
 
-        def list_recent_tracked_items(self, repositories, progress_callback=None):
+        def list_recent_tracked_items(self, search_scope, progress_callback=None):
             return []
 
         def list_open_todo_issues(self, todo_repository, progress_callback=None):
             return [dict(issue_payload, target="owner/repo")]
 
-    monkeypatch.setattr(backend_module, "resolve_repositories", lambda selectors: [])
     backend = WorkdashBackend(
         github_client=FakeGitHubClient(),
         analysis_cache=MagicMock(),
@@ -435,7 +425,7 @@ def test_load_items_survives_a_todo_repository_that_does_not_exist_yet(
     monkeypatch.setattr(
         GitHubClient,
         "list_recent_tracked_items",
-        lambda self, repositories, progress_callback=None: [],
+        lambda self, search_scope, progress_callback=None: [],
     )
 
     def fake_run(command, **kwargs):
@@ -447,7 +437,6 @@ def test_load_items_survives_a_todo_repository_that_does_not_exist_yet(
         )
 
     monkeypatch.setattr(github_client_module.subprocess, "run", fake_run)
-    monkeypatch.setattr(backend_module, "resolve_repositories", lambda selectors: [])
     backend = WorkdashBackend(
         github_client=GitHubClient(),
         analysis_cache=MagicMock(),
@@ -458,79 +447,6 @@ def test_load_items_survives_a_todo_repository_that_does_not_exist_yet(
     work_items, _markers = backend.load_items(progress_callback=lambda _: None)
 
     assert [(item.repo, item.number) for item in work_items] == [("owner/repo", 11)]
-
-
-def test_load_items_submits_independent_github_fetches_before_waiting(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    events: list[tuple[str, str]] = []
-
-    class FakeFuture:
-        def __init__(self, name, callback, args, kwargs) -> None:
-            self.name = name
-            self.callback = callback
-            self.args = args
-            self.kwargs = kwargs
-
-        def result(self):
-            events.append(("result", self.name))
-            return self.callback(*self.args, **self.kwargs)
-
-    class FakeThreadPoolExecutor:
-        def __init__(self, max_workers) -> None:
-            assert max_workers == 6
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc_value, traceback) -> None:
-            pass
-
-        def submit(self, callback, *args, **kwargs):
-            events.append(("submit", callback.__name__))
-            return FakeFuture(callback.__name__, callback, args, kwargs)
-
-    class FakeGitHubClient:
-        def list_open_authored_prs(self, login, progress_callback=None):
-            return []
-
-        def list_open_review_requested_prs(self, login, progress_callback=None):
-            return []
-
-        def list_open_reviewed_prs(self, login):
-            return []
-
-        def list_open_assigned_issues(self, login):
-            return []
-
-        def list_recent_tracked_items(self, repositories, progress_callback=None):
-            return []
-
-        def list_open_todo_issues(self, todo_repository, progress_callback=None):
-            return []
-
-    monkeypatch.setattr(backend_module, "ThreadPoolExecutor", FakeThreadPoolExecutor)
-    backend = WorkdashBackend(
-        github_client=FakeGitHubClient(),
-        analysis_cache=MagicMock(),
-        config=WorkdashConfig(repositories=("owner/repo",)),
-        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
-    )
-
-    work_items, suggestion_markers = backend.load_items(progress_callback=lambda _: None)
-
-    expected_fetches = [
-        "list_open_authored_prs",
-        "list_open_review_requested_prs",
-        "list_open_reviewed_prs",
-        "list_open_assigned_issues",
-        "list_recent_tracked_items",
-        "list_open_todo_issues",
-    ]
-    assert work_items == []
-    assert suggestion_markers == {}
-    assert events[:6] == [("submit", name) for name in expected_fetches]
-    assert events[6] == ("result", "list_open_authored_prs")
 
 
 @pytest.mark.parametrize(
@@ -611,7 +527,7 @@ def test_load_items_hides_every_issue_a_pull_request_closes(
                 },
             ]
 
-        def list_recent_tracked_items(self, repositories, progress_callback=None):
+        def list_recent_tracked_items(self, search_scope, progress_callback=None):
             return [
                 {
                     "id": "ISSUE-12",
@@ -632,7 +548,6 @@ def test_load_items_hides_every_issue_a_pull_request_closes(
             assert pull_requests == [("owner/repo", 42149)]
             return {("owner/repo", 42149): closing_issues}
 
-    monkeypatch.setattr(backend_module, "resolve_repositories", lambda selectors: ["owner/repo"])
     backend = WorkdashBackend(
         github_client=FakeGitHubClient(),
         config=WorkdashConfig(repositories=("owner/repo",)),
@@ -686,7 +601,7 @@ def test_load_items_hides_an_included_issue_that_a_listed_pull_request_closes(
         def list_open_assigned_issues(self, login):
             return []
 
-        def list_recent_tracked_items(self, repositories, progress_callback=None):
+        def list_recent_tracked_items(self, search_scope, progress_callback=None):
             return []
 
         def list_open_todo_issues(self, todo_repository, progress_callback=None):
@@ -698,7 +613,6 @@ def test_load_items_hides_an_included_issue_that_a_listed_pull_request_closes(
         def fetch_linked_issues(self, pull_requests, progress_callback=None):
             return {("owner/repo", 42149): [("owner/repo", 41830)]}
 
-    monkeypatch.setattr(backend_module, "resolve_repositories", lambda selectors: ["owner/repo"])
     store = IncludedItemsStore(tmp_path / "included.json")
     store.save(["https://github.com/owner/repo/issues/41830"])
     backend = WorkdashBackend(

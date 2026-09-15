@@ -98,8 +98,14 @@ _ISSUE_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,repository"
 _TODO_ISSUE_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,body"
 _DEFAULT_TODO_ISSUE_LIMIT = 200
 _DEFAULT_RECENT_SEARCH_LIMIT = 200
-_RECENT_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,state,isPullRequest,repository"
-_RECENT_QUALIFIER_BATCH_SIZE = 20
+_RECENT_SEARCH_PAGE_SIZE = 100
+# `search` returns a union type, so PullRequest and Issue each need their own
+# inline fragment even though they ask for the same fields.
+_RECENT_TRACKED_ITEM_FRAGMENT = (
+    "__typename "
+    "... on PullRequest { id number title url createdAt updatedAt state repository { nameWithOwner } } "
+    "... on Issue { id number title url createdAt updatedAt state repository { nameWithOwner } }"
+)
 _TRANSIENT_RETRIES = 2
 _TRANSIENT_RETRY_DELAY_SECONDS = 2.0
 # gh never surfaces the `Retry-After` header on rate-limit errors (it is
@@ -147,10 +153,6 @@ class TransientFetchError(RuntimeError):
     Callers that maintain a persistent store of URLs should retain the
     entry so the next refresh can try again.
     """
-
-
-class RepositoryAuthorizationError(RuntimeError):
-    """Raised when gh reports repository-specific authorization is required."""
 
 
 def _is_transient_gh_error(error: subprocess.CalledProcessError) -> bool:
@@ -203,6 +205,28 @@ def _is_unresolvable_item_error(message: str) -> bool:
     return "could not resolve to a" in message.lower()
 
 
+def _recent_tracked_items_selection(query: str, first: int, after: str | None) -> str:
+    """Build one page's ``search`` selection for the tracked-items GraphQL query."""
+
+    after_argument = f", after: {json.dumps(after)}" if after is not None else ""
+    return (
+        f"tracked: search(type: ISSUE, first: {first}, query: {json.dumps(query)}{after_argument}) "
+        f"{{ pageInfo {{ hasNextPage endCursor }} nodes {{ {_RECENT_TRACKED_ITEM_FRAGMENT} }} }}"
+    )
+
+
+def _recent_tracked_item_node_entry(node: object) -> object:
+    """Add the ``isPullRequest`` flag ``_parse_recent_tracked_item_payload`` expects.
+
+    GraphQL reports a node's type via ``__typename`` instead of the REST
+    search API's ``isPullRequest`` boolean.
+    """
+
+    if not isinstance(node, dict):
+        return node
+    return {**node, "isPullRequest": node.get("__typename") == "PullRequest"}
+
+
 def _noop_progress_callback(_message: str) -> None:
     """Ignore progress updates when no reporting target is configured."""
 
@@ -214,7 +238,6 @@ def _run_gh_command_with_retry(
     failure_message_prefix: str,
     report_progress: Callable[[str], None] = _noop_progress_callback,
     retry_label: str | None = None,
-    classify_repository_authorization: bool = False,
     tolerate_partial_response: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a ``gh`` subprocess with bounded retry on transient failures.
@@ -223,9 +246,7 @@ def _run_gh_command_with_retry(
     final failure was classified transient (5xx, 429, rate-limit, common
     network errors). Raises a plain ``RuntimeError`` for permanent errors
     (bad auth, 404, malformed command) so existing callers continue to
-    surface the same descriptive message they did before. Raises
-    ``RepositoryAuthorizationError`` for known repository-specific denial
-    shapes when ``classify_repository_authorization`` is enabled.
+    surface the same descriptive message they did before.
 
     :param bool tolerate_partial_response: Return the output of a failed gh
         command instead of raising when it still printed something. GraphQL
@@ -265,8 +286,6 @@ def _run_gh_command_with_retry(
             )
             if transient:
                 raise TransientFetchError(message) from error
-            if classify_repository_authorization and _is_repository_authorization_error(stderr):
-                raise RepositoryAuthorizationError(message) from error
             if tolerate_partial_response and error.stdout:
                 return subprocess.CompletedProcess(
                     command, error.returncode, stdout=error.stdout, stderr=stderr
@@ -1145,102 +1164,105 @@ class GitHubClient:
 
     def list_recent_tracked_items(
         self,
-        repositories: list[str],
+        search_scope: str,
         limit: int = _DEFAULT_RECENT_SEARCH_LIMIT,
         progress_callback: Callable[[str], None] | None = None,
     ) -> list[RecentTrackedItem]:
+        """List recently updated open issues/PRs across the tracked search scope.
+
+        ``search_scope`` is the space-joined ``user:``/``repo:`` GitHub search
+        qualifiers built from the configured repository selectors; an empty
+        scope means nothing is tracked. One aggregated, paginated GraphQL
+        ``search`` query replaces the old per-repository-batch REST searches,
+        continuing to the next page until GitHub says there is none left or
+        ``limit`` is reached. A repository or item the scope cannot reach is
+        silently absent from the results, exactly like any other GitHub search.
+        """
+
         report_progress = (
             progress_callback if progress_callback is not None else _noop_progress_callback
         )
-        if not repositories:
+        if not search_scope:
             return []
 
-        deduped_repositories = list(dict.fromkeys(repositories))
-        if not deduped_repositories:
-            return []
-
-        batch_count = (
-            len(deduped_repositories) + _RECENT_QUALIFIER_BATCH_SIZE - 1
-        ) // _RECENT_QUALIFIER_BATCH_SIZE
-        report_progress(
-            f"Prepared {len(deduped_repositories)} repository filter(s) across {batch_count} batch(es)."
-        )
-        items: list[RecentTrackedItem] = []
-        seen_keys: set[tuple[str, int, bool]] = set()
-        for batch_start in range(0, len(deduped_repositories), _RECENT_QUALIFIER_BATCH_SIZE):
-            batch_number = (batch_start // _RECENT_QUALIFIER_BATCH_SIZE) + 1
-            repository_batch = deduped_repositories[
-                batch_start : batch_start + _RECENT_QUALIFIER_BATCH_SIZE
+        query = f"is:open sort:updated-desc {search_scope}"
+        nodes: list[object] = []
+        cursor: str | None = None
+        round_number = 1
+        while True:
+            command = [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                "query={ "
+                + _recent_tracked_items_selection(query, _RECENT_SEARCH_PAGE_SIZE, cursor)
+                + " }",
             ]
-            report_progress(
-                f"Querying recent items batch {batch_number}/{batch_count} for: {', '.join(repository_batch)}"
+            completed = _run_gh_command_with_retry(
+                command,
+                not_found_message=(
+                    "Failed to run gh recent tracked item search: "
+                    "gh CLI is not installed or not on PATH."
+                ),
+                failure_message_prefix="Failed to list recent tracked items via gh",
+                report_progress=report_progress,
+                retry_label=f"Recent tracked item search round {round_number}",
+                # A repository or item denied mid-scan still answers for the
+                # rest of the scope, and gh reports that partial answer as a
+                # failure.
+                tolerate_partial_response=True,
             )
-            completed_batches: list[tuple[list[str], subprocess.CompletedProcess[str]]] = []
             try:
-                completed_batches.append(
-                    (
-                        repository_batch,
-                        self._run_recent_tracked_items_search(
-                            repository_batch,
-                            limit=limit,
-                            report_progress=report_progress,
-                            retry_label=f"Batch {batch_number}/{batch_count}",
-                        ),
-                    )
-                )
-            except RepositoryAuthorizationError as error:
-                if len(repository_batch) == 1:
-                    report_progress(
-                        "Warning: skipped repository "
-                        f"{repository_batch[0]} because GitHub denied access: {error}"
-                    )
-                    continue
-                report_progress(
-                    "A repository in this batch needs additional GitHub "
-                    "authorization; checking repositories individually."
-                )
-                for repository in repository_batch:
-                    try:
-                        completed_batches.append(
-                            (
-                                [repository],
-                                self._run_recent_tracked_items_search(
-                                    [repository],
-                                    limit=limit,
-                                    report_progress=report_progress,
-                                    retry_label=f"Repository {repository}",
-                                ),
-                            )
+                payload = json.loads(completed.stdout)
+            except json.JSONDecodeError as error:
+                raise RuntimeError(
+                    f"Failed to parse gh recent tracked item JSON: {error.msg}"
+                ) from error
+            data = payload.get("data") if isinstance(payload, dict) else None
+            alias_data = data.get("tracked") if isinstance(data, dict) else None
+            errors = payload.get("errors") if isinstance(payload, dict) else None
+            if isinstance(errors, list) and errors:
+                for entry in errors:
+                    message = entry.get("message") if isinstance(entry, dict) else None
+                    if not isinstance(message, str) or not (
+                        _is_repository_authorization_error(message)
+                        or _is_unresolvable_item_error(message)
+                    ):
+                        raise RuntimeError(
+                            "Failed to list recent tracked items via gh: "
+                            f"{message or 'unknown error'}"
                         )
-                    except RepositoryAuthorizationError as single_error:
-                        report_progress(
-                            "Warning: skipped repository "
-                            f"{repository} because GitHub denied access: {single_error}"
-                        )
-                        continue
+                # A denied or unresolvable repository/item in the scope still
+                # answers with whatever it could resolve; keep that instead of
+                # losing every already-fetched page to it.
+                page_nodes = alias_data.get("nodes") if isinstance(alias_data, dict) else None
+                if isinstance(page_nodes, list):
+                    nodes.extend(page_nodes)
+                break
+            if not isinstance(alias_data, dict):
+                raise RuntimeError(
+                    "Failed to list recent tracked items via gh: "
+                    f"{completed.stderr.strip() or 'response contained no data'}"
+                )
+            page_nodes = alias_data.get("nodes")
+            if not isinstance(page_nodes, list):
+                raise RuntimeError(
+                    "Invalid gh recent tracked item payload: expected a nodes array."
+                )
+            nodes.extend(page_nodes)
+            page_info = alias_data.get("pageInfo")
+            has_next_page = isinstance(page_info, dict) and page_info.get("hasNextPage")
+            if has_next_page and len(nodes) < limit:
+                cursor = page_info["endCursor"]
+                round_number += 1
+                continue
+            break
 
-            for payload_repositories, completed in completed_batches:
-                try:
-                    payload = json.loads(completed.stdout)
-                except json.JSONDecodeError as error:
-                    raise RuntimeError(
-                        "Failed to parse gh recent tracked item JSON for repository batch "
-                        f"{payload_repositories!r}: {error.msg}"
-                    ) from error
-
-                for item in self._parse_recent_tracked_item_payload(
-                    payload,
-                    repositories=payload_repositories,
-                ):
-                    dedupe_key = (item["repo"], item["number"], item["is_pull_request"])
-                    if dedupe_key in seen_keys:
-                        continue
-                    seen_keys.add(dedupe_key)
-                    items.append(item)
-            report_progress(
-                f"Processed batch {batch_number}/{batch_count}; accumulated {len(items)} unique item(s)."
-            )
-        return items
+        return self._parse_recent_tracked_item_payload(
+            [_recent_tracked_item_node_entry(node) for node in nodes[:limit]],
+            repositories=[search_scope],
+        )
 
     @staticmethod
     def _parse_recent_tracked_item_payload(
@@ -1297,48 +1319,6 @@ class GitHubClient:
                 )
             )
         return items
-
-    def _run_recent_tracked_items_search(
-        self,
-        repositories: list[str],
-        *,
-        limit: int,
-        report_progress: Callable[[str], None],
-        retry_label: str,
-    ) -> subprocess.CompletedProcess[str]:
-        command = [
-            "gh",
-            "search",
-            "issues",
-            "--include-prs",
-            "--state",
-            "open",
-            # Without this gh ranks by best match, so the limit would drop items
-            # arbitrarily instead of keeping the ones that moved most recently.
-            "--sort",
-            "updated",
-            "--order",
-            "desc",
-            "--limit",
-            str(limit),
-            "--json",
-            _RECENT_JSON_FIELDS,
-        ]
-        for repository in repositories:
-            command.extend(["--repo", repository])
-        return _run_gh_command_with_retry(
-            command,
-            not_found_message=(
-                "Failed to run gh recent tracked item search: "
-                "gh CLI is not installed or not on PATH."
-            ),
-            failure_message_prefix=(
-                f"Failed to list recent tracked items for repository batch {repositories!r} via gh"
-            ),
-            report_progress=report_progress,
-            retry_label=retry_label,
-            classify_repository_authorization=True,
-        )
 
     def fetch_linked_issues(
         self,

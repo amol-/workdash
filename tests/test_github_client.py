@@ -6,7 +6,6 @@ import pytest
 from workdash.github_client import (
     GitHubClient,
     ParsedGitHubItemURL,
-    RepositoryAuthorizationError,
     TransientFetchError,
     parse_github_item_url,
 )
@@ -1244,6 +1243,48 @@ def test_list_open_reviewed_prs_raises_clear_error_when_gh_fails(
         GitHubClient().list_open_reviewed_prs("testuser")
 
 
+def _tracked_pr_node(
+    number: int, *, repo: str = "owner/repo-one", state: str = "OPEN", **overrides: object
+) -> dict[str, object]:
+    node: dict[str, object] = {
+        "__typename": "PullRequest",
+        "id": f"PR-{number}",
+        "number": number,
+        "title": f"pr {number}",
+        "url": f"https://example.com/pull/{number}",
+        "createdAt": "2026-02-20T00:00:00Z",
+        "updatedAt": "2026-02-21T00:00:00Z",
+        "state": state,
+        "repository": {"nameWithOwner": repo},
+    }
+    node.update(overrides)
+    return node
+
+
+def _tracked_issue_node(
+    number: int, *, repo: str = "owner/repo-one", state: str = "OPEN", **overrides: object
+) -> dict[str, object]:
+    node: dict[str, object] = {
+        "__typename": "Issue",
+        "id": f"ISSUE-{number}",
+        "number": number,
+        "title": f"issue {number}",
+        "url": f"https://example.com/issues/{number}",
+        "createdAt": "2026-02-20T00:00:00Z",
+        "updatedAt": "2026-02-21T00:00:00Z",
+        "state": state,
+        "repository": {"nameWithOwner": repo},
+    }
+    node.update(overrides)
+    return node
+
+
+def _tracked_search_page(
+    nodes: list[dict[str, object]], *, has_next_page: bool = False, end_cursor: str | None = None
+) -> dict[str, object]:
+    return {"pageInfo": {"hasNextPage": has_next_page, "endCursor": end_cursor}, "nodes": nodes}
+
+
 def test_list_recent_tracked_items_returns_issue_and_pr_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1252,54 +1293,42 @@ def test_list_recent_tracked_items_returns_issue_and_pr_results(
     def fake_run(*args, **kwargs):
         command = args[0]
         captured_commands.append(command)
+        assert command[:3] == ["gh", "api", "graphql"]
+        assert command[4] == (
+            "query={ tracked: search(type: ISSUE, first: 100, "
+            'query: "is:open sort:updated-desc user:owner") '
+            "{ pageInfo { hasNextPage endCursor } nodes { __typename "
+            "... on PullRequest { id number title url createdAt updatedAt state "
+            "repository { nameWithOwner } } "
+            "... on Issue { id number title url createdAt updatedAt state "
+            "repository { nameWithOwner } } } } }"
+        )
         return subprocess.CompletedProcess(
             args=command,
             returncode=0,
-            stdout=(
-                '[{"id":"ISSUE-1","number":1,"title":"issue title","url":"https://example.com/issues/1",'
-                '"createdAt":"2026-02-20T00:00:00Z","updatedAt":"2026-02-21T00:00:00Z","state":"OPEN","isPullRequest":false,'
-                '"repository":{"name":"repo-one","nameWithOwner":"owner/repo-one"}},'
-                '{"id":"PR-2","number":2,"title":"pr title","url":"https://example.com/pull/2",'
-                '"createdAt":"2026-02-22T00:00:00Z","updatedAt":"2026-02-23T00:00:00Z","state":"OPEN","isPullRequest":true,'
-                '"repository":{"name":"repo-one","nameWithOwner":"owner/repo-one"}}]'
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "tracked": _tracked_search_page(
+                            [_tracked_issue_node(1), _tracked_pr_node(2)]
+                        )
+                    }
+                }
             ),
             stderr="",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    result = GitHubClient().list_recent_tracked_items(
-        repositories=["owner/repo-one", "owner/repo-two"]
-    )
+    result = GitHubClient().list_recent_tracked_items("user:owner")
 
-    assert captured_commands == [
-        [
-            "gh",
-            "search",
-            "issues",
-            "--include-prs",
-            "--state",
-            "open",
-            "--sort",
-            "updated",
-            "--order",
-            "desc",
-            "--limit",
-            "200",
-            "--json",
-            "id,number,title,url,createdAt,updatedAt,state,isPullRequest,repository",
-            "--repo",
-            "owner/repo-one",
-            "--repo",
-            "owner/repo-two",
-        ]
-    ]
+    assert len(captured_commands) == 1
     assert result == [
         {
             "id": "ISSUE-1",
             "repo": "owner/repo-one",
             "number": 1,
-            "title": "issue title",
+            "title": "issue 1",
             "url": "https://example.com/issues/1",
             "created_at": "2026-02-20T00:00:00Z",
             "updated_at": "2026-02-21T00:00:00Z",
@@ -1309,16 +1338,104 @@ def test_list_recent_tracked_items_returns_issue_and_pr_results(
             "id": "PR-2",
             "repo": "owner/repo-one",
             "number": 2,
-            "title": "pr title",
+            "title": "pr 2",
             "url": "https://example.com/pull/2",
-            "created_at": "2026-02-22T00:00:00Z",
-            "updated_at": "2026-02-23T00:00:00Z",
+            "created_at": "2026-02-20T00:00:00Z",
+            "updated_at": "2026-02-21T00:00:00Z",
             "is_pull_request": True,
         },
     ]
 
 
-def test_list_recent_tracked_items_deduplicates_by_repo_number_and_item_type(
+def test_list_recent_tracked_items_returns_empty_list_for_an_empty_search_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        raise AssertionError("gh should not be called when nothing is tracked")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert GitHubClient().list_recent_tracked_items("") == []
+
+
+def test_list_recent_tracked_items_continues_pagination_until_no_next_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queries: list[str] = []
+
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        queries.append(command[4])
+        if len(queries) == 1:
+            assert "CURSOR-1" not in command[4]
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "data": {
+                            "tracked": _tracked_search_page(
+                                [_tracked_issue_node(1)],
+                                has_next_page=True,
+                                end_cursor="CURSOR-1",
+                            )
+                        }
+                    }
+                ),
+                stderr="",
+            )
+        assert "CURSOR-1" in command[4]
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=json.dumps(
+                {"data": {"tracked": _tracked_search_page([_tracked_issue_node(2)])}}
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = GitHubClient().list_recent_tracked_items("user:owner")
+
+    assert len(queries) == 2
+    assert [item["number"] for item in result] == [1, 2]
+
+
+def test_list_recent_tracked_items_stops_pagination_once_the_limit_is_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "tracked": _tracked_search_page(
+                            [_tracked_issue_node(1), _tracked_issue_node(2)],
+                            has_next_page=True,
+                            end_cursor="CURSOR-1",
+                        )
+                    }
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = GitHubClient().list_recent_tracked_items("user:owner", limit=2)
+
+    assert len(calls) == 1
+    assert [item["number"] for item in result] == [1, 2]
+
+
+def test_list_recent_tracked_items_truncates_a_single_page_that_exceeds_the_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_run(*args, **kwargs):
@@ -1326,53 +1443,57 @@ def test_list_recent_tracked_items_deduplicates_by_repo_number_and_item_type(
             args=args[0],
             returncode=0,
             stdout=json.dumps(
-                [
-                    {
-                        "id": "ISSUE-1",
-                        "number": 1,
-                        "title": "first issue",
-                        "url": "https://example.com/issues/1",
-                        "createdAt": "2026-02-20T00:00:00Z",
-                        "updatedAt": "2026-02-21T00:00:00Z",
-                        "state": "OPEN",
-                        "isPullRequest": False,
-                        "repository": {"nameWithOwner": "owner/repo"},
-                    },
-                    {
-                        "id": "ISSUE-1-DUPLICATE",
-                        "number": 1,
-                        "title": "duplicate issue",
-                        "url": "https://example.com/issues/1-duplicate",
-                        "createdAt": "2026-02-22T00:00:00Z",
-                        "updatedAt": "2026-02-23T00:00:00Z",
-                        "state": "OPEN",
-                        "isPullRequest": False,
-                        "repository": {"nameWithOwner": "owner/repo"},
-                    },
-                    {
-                        "id": "PR-1",
-                        "number": 1,
-                        "title": "same-number pr",
-                        "url": "https://example.com/pull/1",
-                        "createdAt": "2026-02-24T00:00:00Z",
-                        "updatedAt": "2026-02-25T00:00:00Z",
-                        "state": "OPEN",
-                        "isPullRequest": True,
-                        "repository": {"nameWithOwner": "owner/repo"},
-                    },
-                ]
+                {
+                    "data": {
+                        "tracked": _tracked_search_page(
+                            [
+                                _tracked_issue_node(1),
+                                _tracked_issue_node(2),
+                                _tracked_issue_node(3),
+                            ],
+                            has_next_page=False,
+                        )
+                    }
+                }
             ),
             stderr="",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    result = GitHubClient().list_recent_tracked_items(["owner/repo"])
+    result = GitHubClient().list_recent_tracked_items("user:owner", limit=2)
 
-    assert [(item["id"], item["number"], item["is_pull_request"]) for item in result] == [
-        ("ISSUE-1", 1, False),
-        ("PR-1", 1, True),
-    ]
+    assert [item["number"] for item in result] == [1, 2]
+
+
+def test_list_recent_tracked_items_filters_out_closed_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "tracked": _tracked_search_page(
+                            [
+                                _tracked_pr_node(1, state="CLOSED"),
+                                _tracked_issue_node(2, state="CLOSED"),
+                                _tracked_issue_node(3, state="OPEN"),
+                            ]
+                        )
+                    }
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = GitHubClient().list_recent_tracked_items("user:owner")
+
+    assert [item["number"] for item in result] == [3]
 
 
 def test_list_recent_tracked_items_raises_clear_error_when_gh_missing(
@@ -1384,7 +1505,7 @@ def test_list_recent_tracked_items_raises_clear_error_when_gh_missing(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="gh CLI is not installed or not on PATH"):
-        GitHubClient().list_recent_tracked_items(["owner/repo"])
+        GitHubClient().list_recent_tracked_items("user:owner")
 
 
 def test_list_recent_tracked_items_raises_clear_error_when_gh_fails(
@@ -1399,188 +1520,114 @@ def test_list_recent_tracked_items_raises_clear_error_when_gh_fails(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    with pytest.raises(
-        RuntimeError,
-        match="Failed to list recent tracked items for repository batch",
-    ):
-        GitHubClient().list_recent_tracked_items(["owner/repo"])
+    with pytest.raises(RuntimeError, match="Failed to list recent tracked items via gh"):
+        GitHubClient().list_recent_tracked_items("user:owner")
 
 
-def test_list_recent_tracked_items_warns_and_skips_saml_protected_repository(
+@pytest.mark.parametrize(
+    "error_message",
+    [
+        "Resource protected by organization SAML enforcement.",
+        "Could not resolve to a PullRequest with the number of 999.",
+    ],
+    ids=["denied_repository", "unresolvable_item"],
+)
+def test_list_recent_tracked_items_degrades_to_what_was_fetched_on_a_mid_scan_error(
+    error_message: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[list[str]] = []
-    warnings: list[str] = []
-    saml_error = (
-        "GraphQL: Resource protected by organization SAML enforcement. "
-        "You must grant your OAuth token access to this organization."
-    )
+    """A denied repo or unresolvable item mid-scan keeps prior pages instead of raising."""
+    call_count = 0
 
     def fake_run(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
         command = args[0]
-        calls.append(command)
-        repositories = [
-            command[index + 1] for index, token in enumerate(command) if token == "--repo"
-        ]
-        if repositories == ["owner/private", "owner/public"]:
-            raise subprocess.CalledProcessError(
-                returncode=1,
-                cmd=command,
-                stderr=saml_error,
-            )
-        if repositories == ["owner/private"]:
-            raise subprocess.CalledProcessError(
-                returncode=1,
-                cmd=command,
-                stderr=saml_error,
-            )
-        if repositories == ["owner/public"]:
+        if call_count == 1:
             return subprocess.CompletedProcess(
                 args=command,
                 returncode=0,
-                stdout=(
-                    '[{"id":"ISSUE-1","number":1,"title":"issue title",'
-                    '"url":"https://example.com/issues/1",'
-                    '"createdAt":"2026-02-20T00:00:00Z",'
-                    '"updatedAt":"2026-02-21T00:00:00Z",'
-                    '"state":"OPEN","isPullRequest":false,'
-                    '"repository":{"name":"public","nameWithOwner":"owner/public"}}]'
+                stdout=json.dumps(
+                    {
+                        "data": {
+                            "tracked": _tracked_search_page(
+                                [_tracked_issue_node(1)],
+                                has_next_page=True,
+                                end_cursor="CURSOR-1",
+                            )
+                        }
+                    }
                 ),
                 stderr="",
             )
-        raise AssertionError(f"Unexpected repositories: {repositories}")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    result = GitHubClient().list_recent_tracked_items(
-        ["owner/private", "owner/public"],
-        progress_callback=warnings.append,
-    )
-
-    assert [item["repo"] for item in result] == ["owner/public"]
-    assert any(
-        "Warning: skipped repository owner/private" in warning and "SAML enforcement" in warning
-        for warning in warnings
-    )
-    assert [
-        [command[index + 1] for index, token in enumerate(command) if token == "--repo"]
-        for command in calls
-    ] == [
-        ["owner/private", "owner/public"],
-        ["owner/private"],
-        ["owner/public"],
-    ]
-
-
-def test_recent_tracked_items_search_raises_typed_repository_auth_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    saml_error = (
-        "GraphQL: Resource protected by organization SAML enforcement. "
-        "You must grant your OAuth token access to this organization."
-    )
-
-    def fake_run(*args, **kwargs):
-        raise subprocess.CalledProcessError(
-            returncode=1,
-            cmd=args[0],
-            stderr=saml_error,
+        error_stdout = json.dumps(
+            {
+                "data": {"tracked": None},
+                "errors": [{"message": error_message}],
+            }
         )
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    with pytest.raises(RepositoryAuthorizationError, match="SAML enforcement"):
-        GitHubClient()._run_recent_tracked_items_search(
-            ["owner/private"],
-            limit=1000,
-            report_progress=lambda _: None,
-            retry_label="Repository owner/private",
-        )
-
-
-def test_list_recent_tracked_items_reraises_permanent_error_after_auth_skip(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[list[str]] = []
-    warnings: list[str] = []
-    saml_error = (
-        "GraphQL: Resource protected by organization SAML enforcement. "
-        "You must grant your OAuth token access to this organization."
-    )
-
-    def fake_run(*args, **kwargs):
-        command = args[0]
-        calls.append(command)
-        repositories = [
-            command[index + 1] for index, token in enumerate(command) if token == "--repo"
-        ]
-        if repositories == ["owner/private", "owner/broken"]:
-            raise subprocess.CalledProcessError(
-                returncode=1,
-                cmd=command,
-                stderr=saml_error,
-            )
-        if repositories == ["owner/private"]:
-            raise subprocess.CalledProcessError(
-                returncode=1,
-                cmd=command,
-                stderr=saml_error,
-            )
-        if repositories == ["owner/broken"]:
-            raise subprocess.CalledProcessError(
-                returncode=1,
-                cmd=command,
-                stderr="permission denied",
-            )
-        raise AssertionError(f"Unexpected repositories: {repositories}")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    with pytest.raises(RuntimeError, match="permission denied"):
-        GitHubClient().list_recent_tracked_items(
-            ["owner/private", "owner/broken"],
-            progress_callback=warnings.append,
-        )
-
-    assert any("Warning: skipped repository owner/private" in warning for warning in warnings)
-    assert [
-        [command[index + 1] for index, token in enumerate(command) if token == "--repo"]
-        for command in calls
-    ] == [
-        ["owner/private", "owner/broken"],
-        ["owner/private"],
-        ["owner/broken"],
-    ]
-
-
-def test_list_recent_tracked_items_does_not_skip_generic_auth_message(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[list[str]] = []
-    warnings: list[str] = []
-
-    def fake_run(*args, **kwargs):
-        command = args[0]
-        calls.append(command)
         raise subprocess.CalledProcessError(
             returncode=1,
             cmd=command,
-            stderr="This operation requires additional authorization from security.",
+            output=error_stdout,
+            stderr=error_message,
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    with pytest.raises(RuntimeError, match="requires additional authorization"):
-        GitHubClient().list_recent_tracked_items(
-            ["owner/private", "owner/public"],
-            progress_callback=warnings.append,
+    result = GitHubClient().list_recent_tracked_items("user:owner")
+
+    assert call_count == 2
+    assert [item["number"] for item in result] == [1]
+
+
+def test_list_recent_tracked_items_raises_when_an_error_does_not_classify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrelated, unclassified error must raise, even alongside a well-formed page."""
+    call_count = 0
+
+    def fake_run(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        command = args[0]
+        if call_count == 1:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "data": {
+                            "tracked": _tracked_search_page(
+                                [_tracked_issue_node(1)],
+                                has_next_page=True,
+                                end_cursor="CURSOR-1",
+                            )
+                        }
+                    }
+                ),
+                stderr="",
+            )
+        error_stdout = json.dumps(
+            {
+                "data": {"tracked": _tracked_search_page([_tracked_issue_node(2)])},
+                "errors": [
+                    {"message": "Resource protected by organization SAML enforcement."},
+                    {"message": "Something else entirely went wrong."},
+                ],
+            }
+        )
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=command,
+            output=error_stdout,
+            stderr="Something else entirely went wrong.",
         )
 
-    assert not any("Warning: skipped repository" in warning for warning in warnings)
-    assert [
-        [command[index + 1] for index, token in enumerate(command) if token == "--repo"]
-        for command in calls
-    ] == [["owner/private", "owner/public"]]
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Something else entirely went wrong."):
+        GitHubClient().list_recent_tracked_items("user:owner")
 
 
 def test_list_recent_tracked_items_retries_on_transient_http_5xx(
@@ -1595,19 +1642,19 @@ def test_list_recent_tracked_items_retries_on_transient_http_5xx(
             raise subprocess.CalledProcessError(
                 returncode=1,
                 cmd=args[0],
-                stderr="HTTP 502: Server Error (https://api.github.com/search/issues?...)",
+                stderr="HTTP 502: Server Error (https://api.github.com/graphql)",
             )
         return subprocess.CompletedProcess(
             args=args[0],
             returncode=0,
-            stdout="[]",
+            stdout=json.dumps({"data": {"tracked": _tracked_search_page([])}}),
             stderr="",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr("workdash.github_client.time.sleep", lambda _: None)
 
-    result = GitHubClient().list_recent_tracked_items(["owner/repo"])
+    result = GitHubClient().list_recent_tracked_items("user:owner")
     assert result == []
     assert call_count == 2
 
@@ -1627,13 +1674,13 @@ def test_list_recent_tracked_items_waits_longer_for_a_secondary_rate_limit(
                 cmd=args[0],
                 stderr=(
                     "HTTP 403: You have exceeded a secondary rate limit. "
-                    "(https://api.github.com/search/issues?...)"
+                    "(https://api.github.com/graphql)"
                 ),
             )
         return subprocess.CompletedProcess(
             args=args[0],
             returncode=0,
-            stdout="[]",
+            stdout=json.dumps({"data": {"tracked": _tracked_search_page([])}}),
             stderr="",
         )
 
@@ -1641,7 +1688,7 @@ def test_list_recent_tracked_items_waits_longer_for_a_secondary_rate_limit(
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr("workdash.github_client.time.sleep", sleeps.append)
 
-    result = GitHubClient().list_recent_tracked_items(["owner/repo"])
+    result = GitHubClient().list_recent_tracked_items("user:owner")
 
     assert result == []
     assert sleeps == [70.0]
@@ -1661,7 +1708,24 @@ def test_list_recent_tracked_items_raises_clear_error_for_bad_json(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="Failed to parse gh recent tracked item JSON"):
-        GitHubClient().list_recent_tracked_items(["owner/repo"])
+        GitHubClient().list_recent_tracked_items("user:owner")
+
+
+def test_list_recent_tracked_items_raises_clear_error_for_missing_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout=json.dumps({"message": "Bad credentials"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="response contained no data"):
+        GitHubClient().list_recent_tracked_items("user:owner")
 
 
 def test_list_recent_tracked_items_raises_error_for_invalid_payload_entry(
@@ -1671,56 +1735,22 @@ def test_list_recent_tracked_items_raises_error_for_invalid_payload_entry(
         return subprocess.CompletedProcess(
             args=args[0],
             returncode=0,
-            stdout=(
-                '[{"id":"A","number":1,"title":"x","url":"u","createdAt":"c",'
-                '"updatedAt":"u","state":"OPEN"}]'
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "tracked": _tracked_search_page(
+                            [{"__typename": "Issue", "id": "A", "number": 1, "title": "x"}]
+                        )
+                    }
+                }
             ),
             stderr="",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    with pytest.raises(RuntimeError, match="entry 0 has missing or invalid isPullRequest"):
-        GitHubClient().list_recent_tracked_items(["owner/repo"])
-
-
-def test_list_recent_tracked_items_filters_out_closed_rows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_run(*args, **kwargs):
-        return subprocess.CompletedProcess(
-            args=args[0],
-            returncode=0,
-            stdout=(
-                '[{"id":"PR-1","number":1,"title":"closed pr","url":"https://example.com/pull/1",'
-                '"createdAt":"2026-02-20T00:00:00Z","updatedAt":"2026-02-21T00:00:00Z","state":"CLOSED","isPullRequest":true,'
-                '"repository":{"name":"repo-one","nameWithOwner":"owner/repo-one"}},'
-                '{"id":"ISSUE-2","number":2,"title":"closed issue","url":"https://example.com/issues/2",'
-                '"createdAt":"2026-02-22T00:00:00Z","updatedAt":"2026-02-23T00:00:00Z","state":"CLOSED","isPullRequest":false,'
-                '"repository":{"name":"repo-one","nameWithOwner":"owner/repo-one"}},'
-                '{"id":"ISSUE-3","number":3,"title":"open issue","url":"https://example.com/issues/3",'
-                '"createdAt":"2026-02-24T00:00:00Z","updatedAt":"2026-02-25T00:00:00Z","state":"OPEN","isPullRequest":false,'
-                '"repository":{"name":"repo-one","nameWithOwner":"owner/repo-one"}}]'
-            ),
-            stderr="",
-        )
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    result = GitHubClient().list_recent_tracked_items(["owner/repo-one"])
-
-    assert result == [
-        {
-            "id": "ISSUE-3",
-            "repo": "owner/repo-one",
-            "number": 3,
-            "title": "open issue",
-            "url": "https://example.com/issues/3",
-            "created_at": "2026-02-24T00:00:00Z",
-            "updated_at": "2026-02-25T00:00:00Z",
-            "is_pull_request": False,
-        }
-    ]
+    with pytest.raises(RuntimeError, match="entry 0 has missing or invalid url"):
+        GitHubClient().list_recent_tracked_items("user:owner")
 
 
 def test_list_open_assigned_issues_returns_assigned_issues(
