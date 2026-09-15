@@ -1285,7 +1285,7 @@ def test_list_recent_tracked_items_returns_issue_and_pr_results(
             "--order",
             "desc",
             "--limit",
-            "1000",
+            "200",
             "--json",
             "id,number,title,url,createdAt,updatedAt,state,isPullRequest,repository",
             "--repo",
@@ -1610,6 +1610,41 @@ def test_list_recent_tracked_items_retries_on_transient_http_5xx(
     result = GitHubClient().list_recent_tracked_items(["owner/repo"])
     assert result == []
     assert call_count == 2
+
+
+def test_list_recent_tracked_items_waits_longer_for_a_secondary_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retrying a rate limit after the usual 2s just digs the penalty deeper."""
+    call_count = 0
+
+    def fake_run(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise subprocess.CalledProcessError(
+                returncode=1,
+                cmd=args[0],
+                stderr=(
+                    "HTTP 403: You have exceeded a secondary rate limit. "
+                    "(https://api.github.com/search/issues?...)"
+                ),
+            )
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout="[]",
+            stderr="",
+        )
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("workdash.github_client.time.sleep", sleeps.append)
+
+    result = GitHubClient().list_recent_tracked_items(["owner/repo"])
+
+    assert result == []
+    assert sleeps == [70.0]
 
 
 def test_list_recent_tracked_items_raises_clear_error_for_bad_json(

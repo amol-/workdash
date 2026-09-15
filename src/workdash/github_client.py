@@ -97,11 +97,15 @@ _ISSUE_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,repository"
 # but it can report the body that carries the todo target metadata.
 _TODO_ISSUE_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,body"
 _DEFAULT_TODO_ISSUE_LIMIT = 200
-_DEFAULT_RECENT_SEARCH_LIMIT = 1000
+_DEFAULT_RECENT_SEARCH_LIMIT = 200
 _RECENT_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,state,isPullRequest,repository"
 _RECENT_QUALIFIER_BATCH_SIZE = 20
 _TRANSIENT_RETRIES = 2
 _TRANSIENT_RETRY_DELAY_SECONDS = 2.0
+# gh never surfaces the `Retry-After` header on rate-limit errors (it is
+# dropped before the CLI formats its error text), so this is a fixed stand-in
+# for GitHub's own guidance to wait about a minute before retrying.
+_RATE_LIMIT_RETRY_DELAY_SECONDS = 70.0
 # gh surfaces transient API failures in several shapes we've seen in the wild:
 #   - "HTTP 5xx: ..." / "non-200 OK status code: 5xx ..." (5xx server errors)
 #   - "HTTP 429" / "API rate limit exceeded" / "abuse detection" (rate limiting)
@@ -110,10 +114,16 @@ _TRANSIENT_RETRY_DELAY_SECONDS = 2.0
 # Each of these can succeed on a later retry, so the caller should retain the
 # URL in the included-items store and retry on the next refresh.
 _TRANSIENT_HTTP_STATUS_RE = re.compile(r"(?:HTTP |status code:?\s*)5\d{2}", re.IGNORECASE)
-_TRANSIENT_SUBSTRINGS = (
+# Rate-limit shapes get the longer _RATE_LIMIT_RETRY_DELAY_SECONDS instead of
+# _TRANSIENT_RETRY_DELAY_SECONDS: retrying a rate limit after 2s just digs the
+# penalty deeper, unlike a 5xx or network blip.
+_RATE_LIMIT_SUBSTRINGS = (
     "http 429",
     "rate limit",
     "abuse detection",
+)
+_TRANSIENT_SUBSTRINGS = (
+    *_RATE_LIMIT_SUBSTRINGS,
     "dial tcp",
     "connection refused",
     "connection reset",
@@ -151,6 +161,11 @@ def _is_transient_gh_error(error: subprocess.CalledProcessError) -> bool:
         return True
     stderr_lower = stderr.lower()
     return any(needle in stderr_lower for needle in _TRANSIENT_SUBSTRINGS)
+
+
+def _is_rate_limit_error(stderr: str) -> bool:
+    stderr_lower = stderr.lower()
+    return any(needle in stderr_lower for needle in _RATE_LIMIT_SUBSTRINGS)
 
 
 def _is_repository_authorization_error(message: str) -> bool:
@@ -229,16 +244,21 @@ def _run_gh_command_with_retry(
             # letting fetch_item_by_url retain the URL for a later retry.
             raise TransientFetchError(not_found_message) from error
         except subprocess.CalledProcessError as error:
+            stderr = (error.stderr or "").strip()
             transient = _is_transient_gh_error(error)
             if attempt < _TRANSIENT_RETRIES and transient:
+                delay = (
+                    _RATE_LIMIT_RETRY_DELAY_SECONDS
+                    if _is_rate_limit_error(stderr)
+                    else _TRANSIENT_RETRY_DELAY_SECONDS
+                )
                 if retry_label is not None:
                     report_progress(
                         f"{retry_label} got transient error, "
-                        f"retrying ({attempt + 1}/{_TRANSIENT_RETRIES})..."
+                        f"retrying in {delay:.0f}s ({attempt + 1}/{_TRANSIENT_RETRIES})..."
                     )
-                time.sleep(_TRANSIENT_RETRY_DELAY_SECONDS)
+                time.sleep(delay)
                 continue
-            stderr = (error.stderr or "").strip()
             message = (
                 f"{failure_message_prefix}: "
                 f"{stderr or f'process exited with code {error.returncode}'}"
