@@ -1,4 +1,4 @@
-"""Unit tests for `workdash branchinfo` gh/git helpers and issue tie-break."""
+"""Unit tests for `workdash branchinfo` gh/git helpers and closing-issue selection."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def test_current_repo_rejects_a_missing_origin_remote(
         branchinfo._current_repo(tmp_path)
 
 
-def test_fetch_open_pull_request_returns_none_when_gh_reports_no_pull_request(
+def test_fetch_pull_request_returns_none_when_gh_reports_no_pull_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -57,24 +57,29 @@ def test_fetch_open_pull_request_returns_none_when_gh_reports_no_pull_request(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    assert branchinfo._fetch_open_pull_request("owner/repo", "feature") is None
+    assert branchinfo._fetch_pull_request("owner/repo", "feature") is None
 
 
-def test_fetch_open_pull_request_returns_none_when_the_pull_request_is_not_open(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("state", ["OPEN", "MERGED", "CLOSED"])
+def test_fetch_pull_request_reports_the_branch_pull_request_whatever_its_state(
+    monkeypatch: pytest.MonkeyPatch, state: str
 ) -> None:
     def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        payload = {"number": 1, "title": "t", "url": "u", "state": "MERGED"}
+        payload = {"number": 1, "title": "t", "url": "u", "state": state}
         return subprocess.CompletedProcess(
             command, returncode=0, stdout=json.dumps(payload), stderr=""
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    assert branchinfo._fetch_open_pull_request("owner/repo", "feature") is None
+    pull_request = branchinfo._fetch_pull_request("owner/repo", "feature")
+
+    assert pull_request is not None
+    assert pull_request.number == 1
+    assert pull_request.state == state
 
 
-def test_fetch_open_pull_request_raises_on_a_genuine_gh_failure(
+def test_fetch_pull_request_raises_on_a_genuine_gh_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -83,7 +88,7 @@ def test_fetch_open_pull_request_raises_on_a_genuine_gh_failure(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="authentication required"):
-        branchinfo._fetch_open_pull_request("owner/repo", "feature")
+        branchinfo._fetch_pull_request("owner/repo", "feature")
 
 
 def test_fetch_ci_and_closing_issues_combines_both_selections_in_one_gh_call(
@@ -187,17 +192,20 @@ def test_fetch_ci_and_closing_issues_guards_against_malformed_closing_issues_ref
         branchinfo._fetch_ci_and_closing_issues("owner/repo", 5)
 
 
-def test_linked_issue_picks_lowest_numbered_same_repo_issue() -> None:
+def test_linked_issues_keeps_every_same_repo_issue_lowest_number_first() -> None:
     closing_issues = [("owner/other", 1), ("owner/repo", 9), ("owner/repo", 4)]
 
-    assert branchinfo._linked_issue("owner/repo", closing_issues) == ("owner/repo", 4)
+    assert branchinfo._linked_issues("owner/repo", closing_issues) == [
+        ("owner/repo", 4),
+        ("owner/repo", 9),
+    ]
 
 
-def test_linked_issue_is_none_without_a_same_repo_closing_issue() -> None:
-    assert branchinfo._linked_issue("owner/repo", [("owner/other", 1)]) is None
+def test_linked_issues_is_empty_without_a_same_repo_closing_issue() -> None:
+    assert branchinfo._linked_issues("owner/repo", [("owner/other", 1)]) == []
 
 
-def test_fetch_issue_reads_title_and_url(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_issue_reads_title_url_and_state(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         assert command == [
             "gh",
@@ -207,9 +215,13 @@ def test_fetch_issue_reads_title_and_url(monkeypatch: pytest.MonkeyPatch) -> Non
             "--repo",
             "owner/repo",
             "--json",
-            "title,url",
+            "title,url,state",
         ]
-        payload = {"title": "Bug", "url": "https://github.com/owner/repo/issues/4"}
+        payload = {
+            "title": "Bug",
+            "url": "https://github.com/owner/repo/issues/4",
+            "state": "CLOSED",
+        }
         return subprocess.CompletedProcess(
             command, returncode=0, stdout=json.dumps(payload), stderr=""
         )
@@ -220,3 +232,4 @@ def test_fetch_issue_reads_title_and_url(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert issue.title == "Bug"
     assert issue.url == "https://github.com/owner/repo/issues/4"
+    assert issue.state == "CLOSED"

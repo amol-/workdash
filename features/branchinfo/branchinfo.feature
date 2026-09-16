@@ -2,17 +2,19 @@
 Feature: Report branch info in standalone CLI command
 
   Users need a quick summary of the pull request tied to their current branch
-  and the issue it closes without opening a browser. The `workdash branchinfo`
+  and the issues it closes without opening a browser. The `workdash branchinfo`
   command reports both from GitHub metadata and works in any git repository
   directory, standalone from the interactive dashboard.
 
   Rules:
     - The `workdash branchinfo` command works in any git repository directory.
-    - It reports the open pull request for the checked-out branch: title, url,
-      and a CI/review status symbol.
-    - It reports the issue that pull request closes in the same repository,
-      when GitHub metadata names one: title and url.
-    - When no open pull request, or no same-repository closing issue, can be
+    - It reports the pull request for the checked-out branch: title, url, and a
+      CI/review status symbol.
+    - It reports every issue that pull request closes in the same repository,
+      one per line: title and url.
+    - Merged or closed pull requests and issues are still reported, marked with
+      their state, so work that continues after a merge stays visible.
+    - When no pull request, or no same-repository closing issue, can be
       resolved from GitHub metadata alone, that field is reported as "unknown".
 
   @id:F-BRANCHINFO-S001
@@ -25,7 +27,7 @@ Feature: Report branch info in standalone CLI command
 
   @id:F-BRANCHINFO-S002
   Scenario: Branchinfo reports no pull request as unknown
-    Given the current directory is a git repository on a branch with no open pull request
+    Given the current directory is a git repository on a branch with no pull request
     When the user runs "workdash branchinfo"
     Then the command reports the pull request as unknown
 
@@ -50,3 +52,18 @@ Feature: Report branch info in standalone CLI command
     When the user runs "workdash branchinfo" from a subdirectory of the repository
     Then the command reports the pull request's title, url, and a passing, approved symbol
     And the command reports the closed issue's title and url
+
+  @id:F-BRANCHINFO-S006
+  Scenario: Branchinfo marks a merged pull request and its closed issue with their state
+    Given the current directory is a git repository on a branch whose pull request is merged
+    And that pull request closes an already closed issue in the same repository
+    When the user runs "workdash branchinfo"
+    Then the command reports the pull request marked as merged
+    And the command reports the issue marked as closed
+
+  @id:F-BRANCHINFO-S007
+  Scenario: Branchinfo lists every issue the pull request closes
+    Given the current directory is a git repository on a branch with an open pull request
+    And that pull request closes two issues in the same repository
+    When the user runs "workdash branchinfo"
+    Then the command reports both issues' titles and urls

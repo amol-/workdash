@@ -1,7 +1,7 @@
 """BDD step definitions for the branchinfo feature.
 
-Tests the standalone `workdash branchinfo` CLI command that reports the open
-pull request and issue for the current branch.
+Tests the standalone `workdash branchinfo` CLI command that reports the pull
+request and closing issues for the current branch.
 """
 
 from __future__ import annotations
@@ -41,8 +41,8 @@ def _repo_on_branch_with_open_pull_request(
     scenario_state["gh_closing_issues"] = []
 
 
-@given("the current directory is a git repository on a branch with no open pull request")
-def _repo_on_branch_with_no_open_pull_request(
+@given("the current directory is a git repository on a branch with no pull request")
+def _repo_on_branch_with_no_pull_request(
     scenario_state: dict[str, Any],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -53,6 +53,16 @@ def _repo_on_branch_with_no_open_pull_request(
     scenario_state["gh_pr"] = None
 
 
+@given("the current directory is a git repository on a branch whose pull request is merged")
+def _repo_on_branch_with_merged_pull_request(
+    scenario_state: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _repo_on_branch_with_open_pull_request(scenario_state, tmp_path, monkeypatch)
+    scenario_state["gh_pr"]["state"] = "MERGED"
+
+
 @given("that pull request is passing CI and approved, and closes an issue in the same repository")
 def _pull_request_passing_and_approved_with_same_repo_issue(
     scenario_state: dict[str, Any],
@@ -60,9 +70,48 @@ def _pull_request_passing_and_approved_with_same_repo_issue(
     scenario_state["gh_ci_state"] = "SUCCESS"
     scenario_state["gh_review_decision"] = "APPROVED"
     scenario_state["gh_closing_issues"] = [{"number": 42, "repository": "owner/repo"}]
-    scenario_state["gh_issue"] = {
-        "title": "Renderer crashes on empty input",
-        "url": "https://github.com/owner/repo/issues/42",
+    scenario_state["gh_issues"] = {
+        42: {
+            "title": "Renderer crashes on empty input",
+            "url": "https://github.com/owner/repo/issues/42",
+            "state": "OPEN",
+        }
+    }
+
+
+@given("that pull request closes an already closed issue in the same repository")
+def _pull_request_closes_closed_issue_in_same_repository(
+    scenario_state: dict[str, Any],
+) -> None:
+    scenario_state["gh_closing_issues"] = [{"number": 42, "repository": "owner/repo"}]
+    scenario_state["gh_issues"] = {
+        42: {
+            "title": "Renderer crashes on empty input",
+            "url": "https://github.com/owner/repo/issues/42",
+            "state": "CLOSED",
+        }
+    }
+
+
+@given("that pull request closes two issues in the same repository")
+def _pull_request_closes_two_issues_in_same_repository(
+    scenario_state: dict[str, Any],
+) -> None:
+    scenario_state["gh_closing_issues"] = [
+        {"number": 42, "repository": "owner/repo"},
+        {"number": 7, "repository": "owner/repo"},
+    ]
+    scenario_state["gh_issues"] = {
+        42: {
+            "title": "Renderer crashes on empty input",
+            "url": "https://github.com/owner/repo/issues/42",
+            "state": "OPEN",
+        },
+        7: {
+            "title": "Renderer ignores the theme",
+            "url": "https://github.com/owner/repo/issues/7",
+            "state": "CLOSED",
+        },
     }
 
 
@@ -115,9 +164,31 @@ def _command_reports_pull_request(scenario_state: dict[str, Any]) -> None:
 @then("the command reports the closed issue's title and url")
 def _command_reports_closed_issue(scenario_state: dict[str, Any]) -> None:
     stdout = scenario_state["stdout"]
-    issue = scenario_state["gh_issue"]
+    issue = scenario_state["gh_issues"][42]
     assert issue["title"] in stdout
     assert issue["url"] in stdout
+
+
+@then("the command reports the pull request marked as merged")
+def _command_reports_pull_request_marked_merged(scenario_state: dict[str, Any]) -> None:
+    pull_request = scenario_state["gh_pr"]
+    expected = f"PR: {pull_request['title']} {pull_request['url']}"
+    assert expected in scenario_state["stdout"]
+    assert "[MERGED]" in scenario_state["stdout"]
+
+
+@then("the command reports the issue marked as closed")
+def _command_reports_issue_marked_closed(scenario_state: dict[str, Any]) -> None:
+    issue = scenario_state["gh_issues"][42]
+    assert f"ISSUE: {issue['title']} {issue['url']} [CLOSED]" in scenario_state["stdout"]
+
+
+@then("the command reports both issues' titles and urls")
+def _command_reports_both_issues(scenario_state: dict[str, Any]) -> None:
+    stdout = scenario_state["stdout"]
+    for issue in scenario_state["gh_issues"].values():
+        assert f"{issue['title']} {issue['url']}" in stdout
+    assert stdout.count("ISSUE: ") == 2
 
 
 @then("the command reports the pull request as unknown")
@@ -215,8 +286,9 @@ def _run_branchinfo_command(
                 command, returncode=0, stdout=json.dumps(payload), stderr=""
             )
         if command[:3] == ["gh", "issue", "view"]:
+            issue = scenario_state["gh_issues"][int(command[3])]
             return subprocess.CompletedProcess(
-                command, returncode=0, stdout=json.dumps(scenario_state["gh_issue"]), stderr=""
+                command, returncode=0, stdout=json.dumps(issue), stderr=""
             )
         raise AssertionError(f"Unexpected gh command in branchinfo test: {command}")
 

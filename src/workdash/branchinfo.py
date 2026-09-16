@@ -1,9 +1,10 @@
-"""Standalone CLI command reporting the current branch's pull request and issue.
+"""Standalone CLI command reporting the current branch's pull request and issues.
 
 This module provides the `workdash branchinfo` CLI command, which reports the
-open pull request for the currently checked-out branch and the issue it closes
-in the same repository, resolved from GitHub metadata alone. It works in any
-git repository directory with no server dependency, the same as `workdash
+pull request for the currently checked-out branch and every issue it closes in
+the same repository, resolved from GitHub metadata alone. Merged and closed
+items are reported too, flagged with their state. It works in any git
+repository directory with no server dependency, the same as `workdash
 branchdiff`.
 """
 
@@ -23,23 +24,25 @@ from .models import ci_status_symbol
 
 @dataclass(frozen=True, slots=True)
 class _PullRequestInfo:
-    """The open pull request resolved for the current branch."""
+    """The pull request resolved for the current branch."""
 
     number: int
     title: str
     url: str
+    state: str
 
 
 @dataclass(frozen=True, slots=True)
 class _IssueInfo:
-    """The issue a pull request closes."""
+    """An issue a pull request closes."""
 
     title: str
     url: str
+    state: str
 
 
 def run_branchinfo() -> int:
-    """Report the open pull request and its linked issue for the current branch."""
+    """Report the pull request and the issues it closes for the current branch."""
     try:
         repo_path = get_repo_root()
     except RuntimeError:
@@ -49,16 +52,15 @@ def run_branchinfo() -> int:
     try:
         repo = _current_repo(repo_path)
         branch = get_current_branch(repo_path)
-        pull_request = _fetch_open_pull_request(repo, branch)
-        symbol, issue = None, None
+        pull_request = _fetch_pull_request(repo, branch)
+        symbol: str | None = None
+        issues: list[_IssueInfo] = []
         if pull_request is not None:
             ci_state, review_decision, closing_issues = _fetch_ci_and_closing_issues(
                 repo, pull_request.number
             )
             symbol, _color = ci_status_symbol(ci_state, review_decision)
-            issue_ref = _linked_issue(repo, closing_issues)
-            if issue_ref is not None:
-                issue = _fetch_issue(*issue_ref)
+            issues = [_fetch_issue(*issue) for issue in _linked_issues(repo, closing_issues)]
     except RuntimeError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
@@ -66,12 +68,18 @@ def run_branchinfo() -> int:
     if pull_request is None:
         print("PR: unknown")
     else:
-        print(f"PR: {pull_request.title} {pull_request.url} {symbol}")
-    if issue is None:
+        flag = _state_flag(pull_request.state)
+        print(f"PR: {pull_request.title} {pull_request.url} {symbol}{flag}")
+    if not issues:
         print("ISSUE: unknown")
-    else:
-        print(f"ISSUE: {issue.title} {issue.url}")
+    for issue in issues:
+        print(f"ISSUE: {issue.title} {issue.url}{_state_flag(issue.state)}")
     return 0
+
+
+def _state_flag(state: str) -> str:
+    """Return a ``[MERGED]``/``[CLOSED]`` marker for anything no longer open."""
+    return "" if state == "OPEN" else f" [{state}]"
 
 
 def _current_repo(repo_path: Path) -> str:
@@ -86,8 +94,8 @@ def _current_repo(repo_path: Path) -> str:
     return repo
 
 
-def _fetch_open_pull_request(repo: str, branch: str) -> _PullRequestInfo | None:
-    """Return the open pull request for ``branch``, or ``None`` if there isn't one."""
+def _fetch_pull_request(repo: str, branch: str) -> _PullRequestInfo | None:
+    """Return the pull request for ``branch``, whatever its state, or ``None`` if there is none."""
     command = ["gh", "pr", "view", branch, "--repo", repo, "--json", "number,title,url,state"]
     try:
         completed = subprocess.run(command, check=True, capture_output=True, text=True)
@@ -102,12 +110,20 @@ def _fetch_open_pull_request(repo: str, branch: str) -> _PullRequestInfo | None:
             f"{stderr or f'gh exited with code {error.returncode}'}"
         ) from error
     payload = _parse_json_object(completed.stdout, context="pull request lookup")
-    if payload.get("state") != "OPEN":
-        return None
-    number, title, url = payload.get("number"), payload.get("title"), payload.get("url")
-    if not isinstance(number, int) or not isinstance(title, str) or not isinstance(url, str):
-        raise RuntimeError("Invalid gh pull request payload: missing number, title, or url.")
-    return _PullRequestInfo(number=number, title=title, url=url)
+    number, title, url, state = (
+        payload.get("number"),
+        payload.get("title"),
+        payload.get("url"),
+        payload.get("state"),
+    )
+    if (
+        not isinstance(number, int)
+        or not isinstance(title, str)
+        or not isinstance(url, str)
+        or not isinstance(state, str)
+    ):
+        raise RuntimeError("Invalid gh pull request payload: missing number, title, url, or state.")
+    return _PullRequestInfo(number=number, title=title, url=url, state=state)
 
 
 def _fetch_ci_and_closing_issues(
@@ -162,15 +178,14 @@ def _closing_issues(pull_request: dict[str, Any]) -> list[tuple[str, int]]:
     return issues
 
 
-def _linked_issue(repo: str, closing_issues: list[tuple[str, int]]) -> tuple[str, int] | None:
-    """Return the lowest-numbered closing issue in ``repo``, if any."""
-    own_repo_issues = [issue for issue in closing_issues if issue[0] == repo]
-    return min(own_repo_issues, key=lambda issue: issue[1], default=None)
+def _linked_issues(repo: str, closing_issues: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    """Return every closing issue that lives in ``repo``, lowest number first."""
+    return sorted(issue for issue in closing_issues if issue[0] == repo)
 
 
 def _fetch_issue(repo: str, number: int) -> _IssueInfo:
     """Return the title and url of one issue."""
-    command = ["gh", "issue", "view", str(number), "--repo", repo, "--json", "title,url"]
+    command = ["gh", "issue", "view", str(number), "--repo", repo, "--json", "title,url,state"]
     try:
         completed = subprocess.run(command, check=True, capture_output=True, text=True)
     except FileNotFoundError as error:
@@ -182,10 +197,12 @@ def _fetch_issue(repo: str, number: int) -> _IssueInfo:
             f"{stderr or f'gh exited with code {error.returncode}'}"
         ) from error
     payload = _parse_json_object(completed.stdout, context=f"issue lookup for {repo}#{number}")
-    title, url = payload.get("title"), payload.get("url")
-    if not isinstance(title, str) or not isinstance(url, str):
-        raise RuntimeError(f"Invalid gh issue payload for {repo}#{number}: missing title or url.")
-    return _IssueInfo(title=title, url=url)
+    title, url, state = payload.get("title"), payload.get("url"), payload.get("state")
+    if not isinstance(title, str) or not isinstance(url, str) or not isinstance(state, str):
+        raise RuntimeError(
+            f"Invalid gh issue payload for {repo}#{number}: missing title, url, or state."
+        )
+    return _IssueInfo(title=title, url=url, state=state)
 
 
 def _parse_json_object(raw: str, *, context: str) -> dict[str, Any]:
