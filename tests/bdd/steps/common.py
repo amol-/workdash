@@ -40,6 +40,7 @@ def make_work_item(
     url: str | None = None,
     ci_state: str | None = None,
     review_decision: str | None = None,
+    review_requested: bool = False,
 ) -> WorkItem:
     """Build a ``WorkItem`` with sensible defaults for BDD scenarios."""
 
@@ -56,6 +57,7 @@ def make_work_item(
         url=url or f"https://github.com/{repo}/{item_type.value}/{number}",
         ci_state=ci_state,
         review_decision=review_decision,
+        review_requested=review_requested,
     )
 
 

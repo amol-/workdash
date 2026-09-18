@@ -37,23 +37,27 @@ def _to_utc(dt: datetime) -> datetime:
 
 
 def _type_column(item: WorkItem, *, bold: bool) -> Text:
-    """Return the Type column cell, prefixed with the item's CI symbol.
+    """Return the Type column cell, prefixed with the item's CI and review symbols.
 
-    An item without a CI result keeps a blank prefix so every Type label stays
-    aligned under the ones that carry a symbol. A passing, approved authored
-    pull request gets a double checkmark instead of the single passing symbol.
+    An item without a CI result or review state keeps a blank prefix so every
+    Type label stays aligned under the ones that carry a symbol.
 
     :param WorkItem item: the work item whose type is shown.
     :param bool bold: whether the whole row is highlighted as recently updated.
     """
 
-    symbol, color = ci_status_symbol(item.ci_state, item.review_decision)
+    (ci_symbol, ci_color), (review_symbol, review_color) = ci_status_symbol(
+        item.ci_state, item.review_decision, item.review_requested
+    )
+    prefix = f"{ci_symbol}{review_symbol}"
     cell = Text(
-        f"{symbol}{format_type_label(item)}#{item.number}",
+        f"{prefix}{format_type_label(item)}#{item.number}",
         style="bold" if bold else "",
     )
-    if color is not None:
-        cell.stylize(color, 0, len(symbol))
+    if ci_color is not None:
+        cell.stylize(ci_color, 0, len(ci_symbol))
+    if review_color is not None:
+        cell.stylize(review_color, len(ci_symbol), len(prefix))
     return cell
 
 

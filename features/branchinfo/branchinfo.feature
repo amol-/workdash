@@ -67,3 +67,10 @@ Feature: Report branch info in standalone CLI command
     And that pull request closes two issues in the same repository
     When the user runs "workdash branchinfo"
     Then the command reports both issues' titles and urls
+
+  @id:F-BRANCHINFO-S008
+  Scenario: Branchinfo shows a pending reviewer's question mark alongside the CI symbol
+    Given the current directory is a git repository on a branch with an open pull request
+    And that pull request is passing CI with a reviewer requested who has not yet reviewed
+    When the user runs "workdash branchinfo"
+    Then the command reports the pull request's title, url, and a passing symbol followed by a question mark

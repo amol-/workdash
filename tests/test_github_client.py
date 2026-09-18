@@ -136,12 +136,14 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
                                         ]
                                     },
                                     "reviewDecision": "APPROVED",
+                                    "reviewRequests": {"totalCount": 0},
                                 }
                             },
                             "p1": {
                                 "pullRequest": {
                                     "commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]},
                                     "reviewDecision": None,
+                                    "reviewRequests": {"totalCount": 1},
                                 }
                             },
                         }
@@ -184,6 +186,7 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
             "is_draft": True,
             "ci_state": "SUCCESS",
             "review_decision": "APPROVED",
+            "review_requested": False,
         },
         {
             "id": "B",
@@ -196,6 +199,7 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
             "is_draft": False,
             "ci_state": None,
             "review_decision": None,
+            "review_requested": True,
         },
     ]
 
@@ -655,9 +659,11 @@ def test_list_open_review_requested_prs_returns_directly_requested_prs_in_one_gr
             "created_at": "2026-02-05T00:00:00Z",
             "updated_at": "2026-02-06T00:00:00Z",
             "is_draft": False,
-            # The review selectors do not ask for CI state or review decision.
+            # The review selectors do not ask for CI state, review decision, or
+            # pending review requests.
             "ci_state": None,
             "review_decision": None,
+            "review_requested": False,
         }
     ]
 
@@ -1194,9 +1200,11 @@ def test_list_open_reviewed_prs_returns_open_prs_reviewed_by_user(
             "created_at": "2026-03-01T00:00:00Z",
             "updated_at": "2026-03-02T00:00:00Z",
             "is_draft": False,
-            # The review selectors do not ask for CI state or review decision.
+            # The review selectors do not ask for CI state, review decision, or
+            # pending review requests.
             "ci_state": None,
             "review_decision": None,
+            "review_requested": False,
         }
     ]
 

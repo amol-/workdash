@@ -38,6 +38,7 @@ def _repo_on_branch_with_open_pull_request(
     }
     scenario_state["gh_ci_state"] = None
     scenario_state["gh_review_decision"] = None
+    scenario_state["gh_review_requested_total"] = 0
     scenario_state["gh_closing_issues"] = []
 
 
@@ -77,6 +78,14 @@ def _pull_request_passing_and_approved_with_same_repo_issue(
             "state": "OPEN",
         }
     }
+
+
+@given("that pull request is passing CI with a reviewer requested who has not yet reviewed")
+def _pull_request_passing_with_pending_reviewer(
+    scenario_state: dict[str, Any],
+) -> None:
+    scenario_state["gh_ci_state"] = "SUCCESS"
+    scenario_state["gh_review_requested_total"] = 1
 
 
 @given("that pull request closes an already closed issue in the same repository")
@@ -183,6 +192,19 @@ def _command_reports_issue_marked_closed(scenario_state: dict[str, Any]) -> None
     assert f"ISSUE: {issue['title']} {issue['url']} [CLOSED]" in scenario_state["stdout"]
 
 
+@then(
+    "the command reports the pull request's title, url, and a passing symbol followed by a question mark"
+)
+def _command_reports_pull_request_passing_with_question_mark(
+    scenario_state: dict[str, Any],
+) -> None:
+    stdout = scenario_state["stdout"]
+    pull_request = scenario_state["gh_pr"]
+    assert pull_request["title"] in stdout
+    assert pull_request["url"] in stdout
+    assert "✓?" in stdout
+
+
 @then("the command reports both issues' titles and urls")
 def _command_reports_both_issues(scenario_state: dict[str, Any]) -> None:
     stdout = scenario_state["stdout"]
@@ -269,6 +291,9 @@ def _run_branchinfo_command(
                         "pullRequest": {
                             "commits": {"nodes": [{"commit": {"statusCheckRollup": rollup}}]},
                             "reviewDecision": scenario_state["gh_review_decision"],
+                            "reviewRequests": {
+                                "totalCount": scenario_state["gh_review_requested_total"]
+                            },
                             "closingIssuesReferences": {
                                 "nodes": [
                                     {

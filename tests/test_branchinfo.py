@@ -12,13 +12,18 @@ from workdash import branchinfo
 from workdash.models import ci_status_symbol
 
 
-def test_ci_status_symbol_gives_a_double_checkmark_for_passing_approved_prs() -> None:
-    assert ci_status_symbol("SUCCESS", "APPROVED") == ("✓✓", "green")
+def test_ci_status_symbol_gives_independent_ci_and_review_symbols() -> None:
+    assert ci_status_symbol("SUCCESS", "APPROVED", False) == (("✓", "green"), ("✓", "green"))
+    assert ci_status_symbol("SUCCESS", "CHANGES_REQUESTED", False) == (
+        ("✓", "green"),
+        ("✗", "red"),
+    )
+    assert ci_status_symbol("SUCCESS", None, True) == (("✓", "green"), ("?", "yellow"))
 
 
 def test_ci_status_symbol_falls_back_to_a_blank_glyph_for_unknown_states() -> None:
-    assert ci_status_symbol(None, None) == (" ", None)
-    assert ci_status_symbol("SOMETHING_NEW", None) == (" ", None)
+    assert ci_status_symbol(None, None, False) == ((" ", None), (" ", None))
+    assert ci_status_symbol("SOMETHING_NEW", None, False) == ((" ", None), (" ", None))
 
 
 def test_current_repo_reads_the_origin_remote(
@@ -119,13 +124,14 @@ def test_fetch_ci_and_closing_issues_combines_both_selections_in_one_gh_call(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    ci_state, review_decision, closing_issues = branchinfo._fetch_ci_and_closing_issues(
-        "owner/repo", 5
+    ci_state, review_decision, review_requested, closing_issues = (
+        branchinfo._fetch_ci_and_closing_issues("owner/repo", 5)
     )
 
     assert len(calls) == 1
     assert ci_state == "SUCCESS"
     assert review_decision == "APPROVED"
+    assert review_requested is False
     assert closing_issues == [("owner/repo", 3)]
 
 

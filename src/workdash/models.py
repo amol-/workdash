@@ -42,6 +42,7 @@ class WorkItem:
     todo_target: str | None = None
     ci_state: str | None = None
     review_decision: str | None = None
+    review_requested: bool = False
     closing_issue_numbers: tuple[int, ...] = ()
 
 
@@ -98,14 +99,33 @@ _CI_SYMBOLS = {
     "PENDING": ("\u25cf", "yellow"),
     "EXPECTED": ("\u25cf", "yellow"),
 }
+# One-character review symbols, keyed by GitHub's review decision.
+_REVIEW_SYMBOLS = {
+    "APPROVED": ("\u2713", "green"),
+    "CHANGES_REQUESTED": ("\u2717", "red"),
+}
+_REVIEW_PENDING_SYMBOL = ("?", "yellow")
+_BLANK_SYMBOL = (" ", None)
 
 
-def ci_status_symbol(ci_state: str | None, review_decision: str | None) -> tuple[str, str | None]:
-    """Return the (symbol, color) pair representing a CI/review state pair."""
+def ci_status_symbol(
+    ci_state: str | None, review_decision: str | None, review_requested: bool
+) -> tuple[tuple[str, str | None], tuple[str, str | None]]:
+    """Return the ((ci_symbol, ci_color), (review_symbol, review_color)) pair for one item.
 
-    if ci_state == "SUCCESS" and review_decision == "APPROVED":
-        return "\u2713\u2713", "green"
-    return _CI_SYMBOLS.get(ci_state or "", (" ", None))
+    The CI symbol reports the latest check result. The review symbol reports
+    the review state independently: approved or changes-requested win over a
+    still-pending request, which in turn wins over no reviewer at all.
+    """
+
+    ci = _CI_SYMBOLS.get(ci_state or "", _BLANK_SYMBOL)
+    if review_decision in _REVIEW_SYMBOLS:
+        review = _REVIEW_SYMBOLS[review_decision]
+    elif review_requested:
+        review = _REVIEW_PENDING_SYMBOL
+    else:
+        review = _BLANK_SYMBOL
+    return ci, review
 
 
 def display_repo(item: WorkItem) -> str:

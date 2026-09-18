@@ -72,10 +72,11 @@ def parse_github_item_url(url: str) -> ParsedGitHubItemURL | None:
 _DEFAULT_PR_SEARCH_LIMIT = 1000
 _DEFAULT_ASSIGNED_ISSUE_LIMIT = 20
 _PR_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,isDraft,repository"
-# `gh search prs` cannot report the CI result or review decision shown next
-# to authored PRs.
+# `gh search prs` cannot report the CI result, review decision, or pending
+# review requests shown next to authored PRs.
 _AUTHORED_CI_SELECTION = (
-    "commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } reviewDecision"
+    "commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } "
+    "reviewDecision reviewRequests { totalCount }"
 )
 # GraphQL search returns at most 100 nodes per page, and nobody triages more
 # open authored pull requests than that.
@@ -194,6 +195,22 @@ def _extract_ci_state(entry: dict[str, object]) -> str | None:
     return rollup["state"] if rollup else None
 
 
+def _extract_pending_review_request(entry: dict[str, object]) -> bool:
+    """Report whether a pull request still has an unresolved review request.
+
+    A requested reviewer stays pending until they approve or request changes;
+    a comment-only review does not clear the request.
+
+    :param dict entry: One raw pull request payload.
+    """
+
+    review_requests = entry.get("reviewRequests")
+    if not isinstance(review_requests, dict):
+        return False
+    total_count = review_requests.get("totalCount")
+    return isinstance(total_count, int) and total_count > 0
+
+
 def _is_unresolvable_item_error(message: str) -> bool:
     """Report whether a GraphQL error says GitHub cannot resolve the queried item.
 
@@ -307,6 +324,7 @@ class AuthoredPullRequest(TypedDict):
     is_draft: bool
     ci_state: str | None
     review_decision: str | None
+    review_requested: bool
 
 
 class ReviewRequestedPullRequest(TypedDict):
@@ -322,6 +340,7 @@ class ReviewRequestedPullRequest(TypedDict):
     is_draft: bool
     ci_state: str | None
     review_decision: str | None
+    review_requested: bool
 
 
 class RecentTrackedItem(TypedDict):
@@ -388,6 +407,7 @@ def normalize_authored_pull_request(item: AuthoredPullRequest) -> WorkItem:
         url=item["url"],
         ci_state=item["ci_state"],
         review_decision=item["review_decision"],
+        review_requested=item["review_requested"],
     )
 
 
@@ -598,6 +618,7 @@ class GitHubClient:
                     is_draft=is_draft,
                     ci_state=_extract_ci_state(entry),
                     review_decision=entry.get("reviewDecision"),
+                    review_requested=_extract_pending_review_request(entry),
                 )
             )
         return pull_requests
@@ -799,6 +820,7 @@ class GitHubClient:
                 )
             item["ci_state"] = _extract_ci_state(pull_request)
             item["review_decision"] = pull_request.get("reviewDecision")
+            item["review_requested"] = _extract_pending_review_request(pull_request)
             authored_pull_requests.append(item)
         return authored_pull_requests
 

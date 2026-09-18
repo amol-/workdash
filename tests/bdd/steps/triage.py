@@ -108,6 +108,7 @@ def _has_open_work_all_sources(work_items: list[WorkItem]) -> None:
             "is_draft": False,
             "ci_state": None,
             "review_decision": None,
+            "review_requested": False,
         }
     ]
     review_raw = [
@@ -220,15 +221,15 @@ def _tracked_items_carry_expected_type(scenario_state: dict[str, Any]) -> None:
 
 
 def type_column_label(cell: object) -> str:
-    """Return a Type cell without its leading CI symbol.
+    """Return a Type cell without its leading CI and review symbols.
 
-    Every Type cell reserves its first character for the CI symbol, so a step
-    about the type label itself has to look past it.
+    Every Type cell reserves its first two characters for the CI and review
+    symbols, so a step about the type label itself has to look past them.
 
     :param object cell: the rendered Type cell.
     """
 
-    return str(cell)[1:]
+    return str(cell)[2:]
 
 
 @given("the user has authored pull requests whose CI is passing, failing, and still running")
@@ -250,7 +251,7 @@ def _authored_prs_with_ci_results(
 
 @then("each authored pull request's Type column carries the symbol for its CI result")
 def _authored_prs_carry_ci_symbols(scenario_state: dict[str, Any]) -> None:
-    expected_symbols = {"SUCCESS": "✓", "FAILURE": "✗", "PENDING": "●"}
+    expected_symbols = {"SUCCESS": "✓ ", "FAILURE": "✗ ", "PENDING": "● "}
     type_cells = _rendered_type_cells(scenario_state)
     for number, ci_state in scenario_state["ci_states"].items():
         assert type_cells[f"PR#{number}"] == expected_symbols[ci_state], (number, type_cells)
@@ -258,7 +259,7 @@ def _authored_prs_carry_ci_symbols(scenario_state: dict[str, Any]) -> None:
 
 @then("an issue's Type column carries no CI symbol")
 def _issue_carries_no_ci_symbol(scenario_state: dict[str, Any]) -> None:
-    assert _rendered_type_cells(scenario_state)["ISSUE#11"] == " "
+    assert _rendered_type_cells(scenario_state)["ISSUE#11"] == "  "
 
 
 @given("the user has authored a pull request whose CI passed and whose review is approved")
@@ -278,8 +279,8 @@ def _authored_pr_ci_passed_review_approved(
     scenario_state["approved_pr_number"] = 51
 
 
-@given("the user has authored a pull request whose CI passed but whose review is not approved")
-def _authored_pr_ci_passed_review_not_approved(
+@given("the user has authored a pull request whose CI passed but whose review requested changes")
+def _authored_pr_ci_passed_review_changes_requested(
     scenario_state: dict[str, Any], work_items: list[WorkItem]
 ) -> None:
     work_items.append(
@@ -287,20 +288,50 @@ def _authored_pr_ci_passed_review_not_approved(
             item_type=WorkItemType.PR,
             kind=WorkItemKind.AUTHORED_PR,
             number=52,
-            title="Unapproved authored PR",
+            title="Changes-requested authored PR",
             ci_state="SUCCESS",
-            review_decision=None,
+            review_decision="CHANGES_REQUESTED",
         )
     )
-    scenario_state["unapproved_pr_number"] = 52
+    scenario_state["changes_requested_pr_number"] = 52
+
+
+@given("the user has authored a pull request with a reviewer requested who has not yet reviewed")
+def _authored_pr_with_pending_reviewer(
+    scenario_state: dict[str, Any], work_items: list[WorkItem]
+) -> None:
+    work_items.append(
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.AUTHORED_PR,
+            number=53,
+            title="Pending-review authored PR",
+            review_requested=True,
+        )
+    )
+    scenario_state["pending_review_pr_number"] = 53
+
+
+@given("the user has authored a pull request with no reviewer requested")
+def _authored_pr_with_no_reviewer(
+    scenario_state: dict[str, Any], work_items: list[WorkItem]
+) -> None:
+    work_items.append(
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.AUTHORED_PR,
+            number=54,
+            title="No-reviewer authored PR",
+        )
+    )
+    scenario_state["no_reviewer_pr_number"] = 54
 
 
 def _rendered_type_cell_strings(scenario_state: dict[str, Any]) -> list[str]:
     """Return every rendered Type cell's full text, prefix included.
 
     Unlike ``_rendered_type_cells``, this keeps the whole cell text instead of
-    only its first character, so a two-character double-checkmark prefix is
-    not truncated away.
+    only its leading two-character CI/review symbol prefix.
     """
 
     captured: list[str] = []
@@ -314,20 +345,32 @@ def _rendered_type_cell_strings(scenario_state: dict[str, Any]) -> list[str]:
     return captured
 
 
-@then("the approved pull request's Type column carries a double checkmark")
-def _approved_pr_carries_double_checkmark(scenario_state: dict[str, Any]) -> None:
+@then("the approved pull request's Type column carries a green review checkmark")
+def _approved_pr_carries_green_review_checkmark(scenario_state: dict[str, Any]) -> None:
     number = scenario_state["approved_pr_number"]
     assert f"✓✓PR#{number}" in _rendered_type_cell_strings(scenario_state)
 
 
-@then("the other pull request's Type column carries the single passing symbol")
-def _other_pr_carries_single_passing_symbol(scenario_state: dict[str, Any]) -> None:
-    number = scenario_state["unapproved_pr_number"]
-    assert f"✓PR#{number}" in _rendered_type_cell_strings(scenario_state)
+@then("the other pull request's Type column carries a red review cross")
+def _other_pr_carries_red_review_cross(scenario_state: dict[str, Any]) -> None:
+    number = scenario_state["changes_requested_pr_number"]
+    assert f"✓✗PR#{number}" in _rendered_type_cell_strings(scenario_state)
+
+
+@then("the pending pull request's Type column carries a question mark review symbol")
+def _pending_pr_carries_question_mark(scenario_state: dict[str, Any]) -> None:
+    number = scenario_state["pending_review_pr_number"]
+    assert f" ?PR#{number}" in _rendered_type_cell_strings(scenario_state)
+
+
+@then("the other pull request's Type column carries no review symbol")
+def _other_pr_carries_no_review_symbol(scenario_state: dict[str, Any]) -> None:
+    number = scenario_state["no_reviewer_pr_number"]
+    assert f"  PR#{number}" in _rendered_type_cell_strings(scenario_state)
 
 
 def _rendered_type_cells(scenario_state: dict[str, Any]) -> dict[str, str]:
-    """Return each rendered Type label mapped to its leading CI symbol."""
+    """Return each rendered Type label mapped to its leading CI/review symbol pair."""
 
     captured: dict[str, str] = {}
 
@@ -335,7 +378,7 @@ def _rendered_type_cells(scenario_state: dict[str, Any]) -> dict[str, str]:
         table = app.query_one("#work-items", DataTable)
         for index in range(table.row_count):
             cell = table.get_row_at(index)[0]
-            captured[type_column_label(cell)] = str(cell)[0]
+            captured[type_column_label(cell)] = str(cell)[:2]
 
     run_app(work_items=scenario_state["work_items"], interactions=interactions)
     return captured
@@ -508,6 +551,7 @@ def _authored_also_tracked(scenario_state: dict[str, Any]) -> None:
             "is_draft": False,
             "ci_state": None,
             "review_decision": None,
+            "review_requested": False,
         }
     ]
     tracked_raw = [
@@ -960,6 +1004,7 @@ def _pull_request_and_issue_are_open_work(
                 "is_draft": False,
                 "ci_state": None,
                 "review_decision": None,
+                "review_requested": False,
             }
         ],
     )
@@ -1994,6 +2039,7 @@ def _seed_three_included_items(
                 "is_draft": False,
                 "ci_state": None,
                 "review_decision": None,
+                "review_requested": False,
             }
         ],
     )

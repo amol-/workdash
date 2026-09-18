@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import Any
 
 from .git import GitHelper, get_current_branch, get_repo_root
-from .github_client import _AUTHORED_CI_SELECTION, _CLOSING_ISSUES_SELECTION, _extract_ci_state
+from .github_client import (
+    _AUTHORED_CI_SELECTION,
+    _CLOSING_ISSUES_SELECTION,
+    _extract_ci_state,
+    _extract_pending_review_request,
+)
 from .models import ci_status_symbol
 
 
@@ -56,10 +61,13 @@ def run_branchinfo() -> int:
         symbol: str | None = None
         issues: list[_IssueInfo] = []
         if pull_request is not None:
-            ci_state, review_decision, closing_issues = _fetch_ci_and_closing_issues(
-                repo, pull_request.number
+            ci_state, review_decision, review_requested, closing_issues = (
+                _fetch_ci_and_closing_issues(repo, pull_request.number)
             )
-            symbol, _color = ci_status_symbol(ci_state, review_decision)
+            (ci_symbol, _ci_color), (review_symbol, _review_color) = ci_status_symbol(
+                ci_state, review_decision, review_requested
+            )
+            symbol = f"{ci_symbol}{review_symbol}"
             issues = [_fetch_issue(*issue) for issue in _linked_issues(repo, closing_issues)]
     except RuntimeError as error:
         print(f"Error: {error}", file=sys.stderr)
@@ -128,8 +136,8 @@ def _fetch_pull_request(repo: str, branch: str) -> _PullRequestInfo | None:
 
 def _fetch_ci_and_closing_issues(
     repo: str, number: int
-) -> tuple[str | None, str | None, list[tuple[str, int]]]:
-    """Return CI state, review decision, and closing issues for one pull request."""
+) -> tuple[str | None, str | None, bool, list[tuple[str, int]]]:
+    """Return CI state, review decision, pending review request, and closing issues."""
     owner, _, name = repo.partition("/")
     query = (
         f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
@@ -156,6 +164,7 @@ def _fetch_ci_and_closing_issues(
     return (
         _extract_ci_state(pull_request),
         pull_request.get("reviewDecision"),
+        _extract_pending_review_request(pull_request),
         _closing_issues(pull_request),
     )
 
