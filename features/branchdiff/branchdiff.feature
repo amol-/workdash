@@ -20,6 +20,8 @@ Feature: View branch diff in standalone TUI command
     - Diff scroll arrow bindings appear as one grouped footer entry.
     - Added lines are highlighted in green, removed lines in red.
     - The command shows committed changes, modified working-tree files, and untracked files.
+    - Inside a zellij pane the viewer fills the pane while it is open and restores the pane layout when it quits.
+    - Outside zellij the viewer does not change any pane layout.
 
   @id:F-BRANCHDIFF-S001
   Scenario: Run branchdiff command in git repository
@@ -108,3 +110,37 @@ Feature: View branch diff in standalone TUI command
     When the user runs "workdash branchdiff"
     Then the command reports no changes found
     And exits with zero status
+
+  @id:F-BRANCHDIFF-S014
+  Scenario: Branchdiff fills its zellij pane and restores it on quit
+    Given the current directory is a git repository
+    And the repository has changes compared to the default branch
+    And the diff viewer runs inside a zellij pane that is not fullscreen
+    When the user runs "workdash branchdiff" and quits the diff viewer
+    Then the zellij pane became fullscreen while the diff viewer was open
+    And the zellij pane is restored to its original size after quitting
+
+  @id:F-BRANCHDIFF-S015
+  Scenario: Branchdiff keeps an already fullscreen zellij pane fullscreen on quit
+    Given the current directory is a git repository
+    And the repository has changes compared to the default branch
+    And the diff viewer runs inside a fullscreen zellij pane
+    When the user runs "workdash branchdiff" and quits the diff viewer
+    Then the diff viewer does not change the zellij pane size
+    And the zellij pane is still fullscreen
+
+  @id:F-BRANCHDIFF-S016
+  Scenario: Branchdiff leaves pane layout alone outside zellij
+    Given the current directory is a git repository
+    And the repository has changes compared to the default branch
+    And the diff viewer does not run inside a zellij pane
+    When the user runs "workdash branchdiff"
+    Then the diff viewer does not change any zellij pane size
+
+  @id:F-BRANCHDIFF-S017
+  Scenario: Branchdiff leaves an un-fullscreened pane alone on quit
+    Given the current directory is a git repository
+    And the repository has changes compared to the default branch
+    And the diff viewer runs inside a zellij pane that the user un-fullscreens while it is open
+    When the user runs "workdash branchdiff" and quits the diff viewer
+    Then the diff viewer leaves the zellij pane tiled

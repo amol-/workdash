@@ -30,6 +30,7 @@ from textual.widgets import DataTable, Footer, Static
 from textual_diff_view import DiffView
 
 from .git import get_repo_root
+from .launcher import zellij_fullscreen_pane
 
 _SCROLL_DIFF_BINDING_GROUP = Binding.Group("Scroll diff", compact=True)
 
@@ -508,5 +509,6 @@ def run_branchdiff(target: str | None = None) -> int:
         return 0
 
     app = BranchDiffApp(files, repo_path, target)
-    app.run()
+    with zellij_fullscreen_pane():
+        app.run()
     return 0

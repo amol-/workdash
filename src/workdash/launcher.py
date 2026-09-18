@@ -8,7 +8,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
@@ -227,6 +228,73 @@ def load_zellij_panes(session: str) -> list[dict[str, object]]:
     if not isinstance(panes, list):
         raise RuntimeError("Zellij pane JSON must be a list.")
     return [pane for pane in panes if isinstance(pane, dict)]
+
+
+@contextmanager
+def zellij_fullscreen_pane() -> Iterator[None]:
+    """Fill the surrounding Zellij pane while the block runs and restore its size afterwards.
+
+    Restores the pane only while it still fills the tab, so a pane the user sized
+    back during the block is left alone. Leaves the pane untouched when the caller
+    is not inside a Zellij pane, is already fullscreen, cannot have its pane state
+    read, or when filling the pane fails.
+    """
+    session = os.environ.get("ZELLIJ_SESSION_NAME", "").strip()
+    pane_id = os.environ.get("ZELLIJ_PANE_ID", "").strip()
+    pane = _find_zellij_pane(session, pane_id) if session and pane_id else None
+    if pane is None or pane.get("is_fullscreen"):
+        yield
+        return
+
+    try:
+        _toggle_zellij_pane_fullscreen(session, pane_id)
+    except RuntimeError:
+        yield
+        return
+
+    try:
+        yield
+    finally:
+        with suppress(RuntimeError):
+            pane = _find_zellij_pane(session, pane_id)
+            if pane is not None and pane.get("is_fullscreen"):
+                _toggle_zellij_pane_fullscreen(session, pane_id)
+
+
+def _find_zellij_pane(session: str, pane_id: str) -> dict[str, object] | None:
+    """Return the identified pane's state, or None when it cannot be read."""
+
+    try:
+        panes = load_zellij_panes(session)
+    except RuntimeError:
+        return None
+    return next(
+        (
+            pane
+            for pane in panes
+            if pane.get("is_plugin") is not True and str(pane.get("id")) == pane_id
+        ),
+        None,
+    )
+
+
+def _toggle_zellij_pane_fullscreen(session: str, pane_id: str) -> None:
+    """Toggle fullscreen for a Zellij pane by its ID."""
+
+    zellij = _resolve_zellij_binary()
+    try:
+        subprocess.run(
+            [zellij, "--session", session, "action", "toggle-fullscreen", "-p", pane_id],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        details = (error.stderr or "").strip() or (error.stdout or "").strip()
+        raise RuntimeError(
+            f"Failed to toggle fullscreen for Zellij pane {pane_id} in {session}: "
+            f"{details or error.returncode}"
+        ) from error
 
 
 def dump_zellij_pane(session: str, pane_id: str, *, full: bool = False) -> str:

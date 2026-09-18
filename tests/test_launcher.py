@@ -17,6 +17,7 @@ from workdash.launcher import (
     open_in_browser,
     open_markdown,
     prepare_launch_agent_prompt,
+    zellij_fullscreen_pane,
 )
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 
@@ -268,6 +269,231 @@ def test_load_zellij_panes_returns_dict_panes(monkeypatch: pytest.MonkeyPatch) -
             "--tab",
         ]
     ]
+
+
+def test_zellij_fullscreen_pane_fills_and_restores_the_calling_pane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_args: list[list[str]] = []
+    pane = {"is_fullscreen": False}
+
+    def fake_run(args, **kwargs):
+        run_args.append(args)
+        if "list-panes" in args:
+            fullscreen = str(pane["is_fullscreen"]).lower()
+            stdout = f'[{{"id": 3, "is_plugin": false, "is_fullscreen": {fullscreen}}}]'
+        else:
+            pane["is_fullscreen"] = not pane["is_fullscreen"]
+            stdout = ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout)
+
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
+    monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
+    monkeypatch.setattr(
+        launcher_module.shutil,
+        "which",
+        lambda name: "/usr/bin/zellij" if name == "zellij" else None,
+    )
+    monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
+
+    with zellij_fullscreen_pane():
+        assert pane["is_fullscreen"] is True
+
+    assert pane["is_fullscreen"] is False
+    zellij_prefix = ["/usr/bin/zellij", "--session", "workdash-main", "action"]
+    list_panes = [*zellij_prefix, "list-panes", "--json", "--all", "--command", "--state", "--tab"]
+    assert run_args == [
+        list_panes,
+        [*zellij_prefix, "toggle-fullscreen", "-p", "3"],
+        list_panes,
+        [*zellij_prefix, "toggle-fullscreen", "-p", "3"],
+    ]
+
+
+def test_zellij_fullscreen_pane_leaves_a_pane_the_user_tiled_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_args: list[list[str]] = []
+    pane = {"is_fullscreen": False}
+
+    def fake_run(args, **kwargs):
+        run_args.append(args)
+        if "list-panes" in args:
+            fullscreen = str(pane["is_fullscreen"]).lower()
+            stdout = f'[{{"id": 3, "is_plugin": false, "is_fullscreen": {fullscreen}}}]'
+        else:
+            pane["is_fullscreen"] = not pane["is_fullscreen"]
+            stdout = ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout)
+
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
+    monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
+    monkeypatch.setattr(
+        launcher_module.shutil,
+        "which",
+        lambda name: "/usr/bin/zellij" if name == "zellij" else None,
+    )
+    monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
+
+    with zellij_fullscreen_pane():
+        pane["is_fullscreen"] = False
+
+    assert [args for args in run_args if "toggle-fullscreen" in args] == [
+        ["/usr/bin/zellij", "--session", "workdash-main", "action", "toggle-fullscreen", "-p", "3"]
+    ]
+
+
+def test_zellij_fullscreen_pane_ignores_plugin_panes_sharing_its_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    toggles: list[list[str]] = []
+    terminal_fullscreen = False
+
+    def fake_run(args, **kwargs):
+        nonlocal terminal_fullscreen
+        if "list-panes" in args:
+            plugin_fullscreen = str(not terminal_fullscreen).lower()
+            pane_fullscreen = str(terminal_fullscreen).lower()
+            stdout = (
+                f'[{{"id": 3, "is_plugin": true, "is_fullscreen": {plugin_fullscreen}}},'
+                f' {{"id": 3, "is_plugin": false, "is_fullscreen": {pane_fullscreen}}}]'
+            )
+        else:
+            toggles.append(args)
+            terminal_fullscreen = not terminal_fullscreen
+            stdout = ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout)
+
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
+    monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
+    monkeypatch.setattr(
+        launcher_module.shutil,
+        "which",
+        lambda name: "/usr/bin/zellij" if name == "zellij" else None,
+    )
+    monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
+
+    with zellij_fullscreen_pane():
+        assert terminal_fullscreen is True
+
+    assert terminal_fullscreen is False
+    assert len(toggles) == 2
+
+
+def test_zellij_fullscreen_pane_leaves_a_fullscreen_pane_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_args: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        run_args.append(args)
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout='[{"id": 3, "is_plugin": false, "is_fullscreen": true}]',
+        )
+
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
+    monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
+    monkeypatch.setattr(
+        launcher_module.shutil,
+        "which",
+        lambda name: "/usr/bin/zellij" if name == "zellij" else None,
+    )
+    monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
+
+    with zellij_fullscreen_pane():
+        pass
+
+    assert [args for args in run_args if "toggle-fullscreen" in args] == []
+
+
+def test_zellij_fullscreen_pane_skips_missing_pane_states(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_args: list[list[str]] = []
+
+    def failing_run(args, **kwargs):
+        run_args.append(args)
+        raise subprocess.CalledProcessError(1, args, stderr="no such session")
+
+    def other_pane_run(args, **kwargs):
+        run_args.append(args)
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout='[{"id": 9, "is_plugin": false, "is_fullscreen": false}]',
+        )
+
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
+    monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
+    monkeypatch.setattr(
+        launcher_module.shutil,
+        "which",
+        lambda name: "/usr/bin/zellij" if name == "zellij" else None,
+    )
+    monkeypatch.setattr(launcher_module.subprocess, "run", failing_run)
+    with zellij_fullscreen_pane():
+        pass
+
+    monkeypatch.setattr(launcher_module.subprocess, "run", other_pane_run)
+    with zellij_fullscreen_pane():
+        pass
+
+    assert [args for args in run_args if "toggle-fullscreen" in args] == []
+
+
+def test_zellij_fullscreen_pane_does_not_restore_when_filling_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_args: list[list[str]] = []
+    block_ran = False
+
+    def fake_run(args, **kwargs):
+        run_args.append(args)
+        if "list-panes" in args:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout='[{"id": 3, "is_plugin": false, "is_fullscreen": false}]',
+            )
+        raise subprocess.CalledProcessError(2, args, stderr="pane not found")
+
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
+    monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
+    monkeypatch.setattr(
+        launcher_module.shutil,
+        "which",
+        lambda name: "/usr/bin/zellij" if name == "zellij" else None,
+    )
+    monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
+
+    with zellij_fullscreen_pane():
+        block_ran = True
+
+    assert block_ran is True
+    assert [args for args in run_args if "toggle-fullscreen" in args] == [
+        ["/usr/bin/zellij", "--session", "workdash-main", "action", "toggle-fullscreen", "-p", "3"]
+    ]
+
+
+def test_zellij_fullscreen_pane_does_nothing_outside_zellij(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_run(args, **kwargs):
+        raise AssertionError(f"unexpected command: {args}")
+
+    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+    monkeypatch.delenv("ZELLIJ_PANE_ID", raising=False)
+    monkeypatch.setattr(launcher_module.subprocess, "run", unexpected_run)
+    monkeypatch.setattr(
+        launcher_module.shutil,
+        "which",
+        lambda name: "/usr/bin/zellij" if name == "zellij" else None,
+    )
+
+    with zellij_fullscreen_pane():
+        pass
 
 
 def test_send_zellij_pane_input_separates_text_from_options(

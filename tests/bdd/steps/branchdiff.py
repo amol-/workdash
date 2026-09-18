@@ -718,6 +718,77 @@ def _exits_with_zero_status(
     assert exit_code == 0, f"Expected zero exit code, got {exit_code}"
 
 
+@given("the diff viewer runs inside a zellij pane that is not fullscreen")
+def _diff_viewer_runs_in_tiled_zellij_pane(scenario_state: dict[str, Any]) -> None:
+    scenario_state["zellij_pane"] = "tiled"
+
+
+@given("the diff viewer runs inside a fullscreen zellij pane")
+def _diff_viewer_runs_in_fullscreen_zellij_pane(scenario_state: dict[str, Any]) -> None:
+    scenario_state["zellij_pane"] = "fullscreen"
+
+
+@given("the diff viewer does not run inside a zellij pane")
+def _diff_viewer_runs_outside_zellij(scenario_state: dict[str, Any]) -> None:
+    scenario_state["zellij_pane"] = "outside"
+
+
+@given("the diff viewer runs inside a zellij pane that the user un-fullscreens while it is open")
+def _diff_viewer_runs_in_zellij_pane_the_user_unfullscreens(
+    scenario_state: dict[str, Any],
+) -> None:
+    scenario_state["zellij_pane"] = "tiled"
+    scenario_state["zellij_pane_user_unfullscreens"] = True
+
+
+@when('the user runs "workdash branchdiff" and quits the diff viewer')
+def _user_runs_and_quits_branchdiff(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run the branchdiff CLI through the whole lifetime of the diff viewer."""
+    _run_branchdiff_command(scenario_state, [], monkeypatch)
+
+
+@then("the zellij pane became fullscreen while the diff viewer was open")
+def _zellij_pane_became_fullscreen(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["branchdiff_pane_fullscreen_while_open"] is True
+    assert _zellij_fullscreen_toggles(scenario_state) >= 1
+
+
+@then("the zellij pane is restored to its original size after quitting")
+def _zellij_pane_restored_after_quitting(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["branchdiff_pane_fullscreen_after_quit"] is False
+    assert _zellij_fullscreen_toggles(scenario_state) == 2
+
+
+@then("the diff viewer does not change the zellij pane size")
+def _diff_viewer_leaves_zellij_pane_size_alone(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["branchdiff_pane_fullscreen_while_open"] is True
+    assert _zellij_fullscreen_toggles(scenario_state) == 0
+
+
+@then("the zellij pane is still fullscreen")
+def _zellij_pane_still_fullscreen(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["branchdiff_pane_fullscreen_after_quit"] is True
+
+
+@then("the diff viewer leaves the zellij pane tiled")
+def _diff_viewer_leaves_zellij_pane_tiled(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["branchdiff_pane_fullscreen_after_quit"] is False
+    assert _zellij_fullscreen_toggles(scenario_state) == 1
+
+
+@then("the diff viewer does not change any zellij pane size")
+def _diff_viewer_changes_no_zellij_pane_size(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["branchdiff_zellij_commands"] == []
+
+
+def _zellij_fullscreen_toggles(scenario_state: dict[str, Any]) -> int:
+    commands = scenario_state["branchdiff_zellij_commands"]
+    return len([command for command in commands if "toggle-fullscreen" in command])
+
+
 @given("a git repository with a known upstream branch")
 def _git_repo_with_upstream(
     scenario_state: dict[str, Any],
@@ -958,19 +1029,53 @@ def _run_branchdiff_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Run the CLI path while replacing the blocking Textual run loop."""
+    import workdash.launcher as launcher_module
+
     stdout = io.StringIO()
     stderr = io.StringIO()
+    zellij_binary = "/usr/bin/zellij"
+    pane = {"is_fullscreen": scenario_state.get("zellij_pane") == "fullscreen"}
+    zellij_commands: list[list[str]] = []
+    real_subprocess_run = subprocess.run
+
+    def fake_which(name: str) -> str | None:
+        return zellij_binary if name == "zellij" else None
+
+    def fake_run(*call_args, **call_kwargs):
+        command = call_args[0]
+        if command[0] != zellij_binary:
+            return real_subprocess_run(*call_args, **call_kwargs)
+        zellij_commands.append(list(command))
+        if "list-panes" in command:
+            panes = [{"id": 3, "is_plugin": False, "is_fullscreen": pane["is_fullscreen"]}]
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(panes), stderr="")
+        pane["is_fullscreen"] = not pane["is_fullscreen"]
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     def fake_run_app(self) -> None:
         scenario_state["branchdiff_app_opened"] = True
         scenario_state["branchdiff_app_files"] = self._files
         scenario_state["branchdiff_app_repo_path"] = self._repo_path
         scenario_state["branchdiff_app_base_branch"] = self._base_branch
+        if scenario_state.get("zellij_pane_user_unfullscreens"):
+            pane["is_fullscreen"] = False
+        scenario_state["branchdiff_pane_fullscreen_while_open"] = pane["is_fullscreen"]
 
+    if scenario_state.get("zellij_pane") in {"tiled", "fullscreen"}:
+        monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
+        monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
+    else:
+        monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+        monkeypatch.delenv("ZELLIJ_PANE_ID", raising=False)
+
+    monkeypatch.setattr(launcher_module.shutil, "which", fake_which)
+    monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
     monkeypatch.setattr(branchdiff_module.BranchDiffApp, "run", fake_run_app)
     with redirect_stdout(stdout), redirect_stderr(stderr):
         exit_code = workdash_main(["branchdiff", *args])
 
+    scenario_state["branchdiff_zellij_commands"] = zellij_commands
+    scenario_state["branchdiff_pane_fullscreen_after_quit"] = pane["is_fullscreen"]
     command = ["workdash", "branchdiff", *args]
     result = subprocess.CompletedProcess(
         args=command,
