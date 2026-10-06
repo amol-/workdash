@@ -21,6 +21,18 @@ def test_ci_status_symbol_gives_independent_ci_and_review_symbols() -> None:
     assert ci_status_symbol("SUCCESS", None, True) == (("✓", "green"), ("?", "yellow"))
 
 
+def test_ci_status_symbol_colors_the_question_mark_by_whether_reviewers_left_comments() -> None:
+    assert ci_status_symbol(None, None, True) == ((" ", None), ("?", "yellow"))
+    assert ci_status_symbol(None, None, False, True) == ((" ", None), ("?", "dodger_blue1"))
+    # Unresolved comments mean a reviewer already looked, even if the request was cleared.
+    assert ci_status_symbol(None, None, True, True) == ((" ", None), ("?", "dodger_blue1"))
+
+
+def test_ci_status_symbol_lets_a_verdict_win_over_unresolved_comments() -> None:
+    assert ci_status_symbol(None, "APPROVED", False, True)[1] == ("✓", "green")
+    assert ci_status_symbol(None, "CHANGES_REQUESTED", False, True)[1] == ("✗", "red")
+
+
 def test_ci_status_symbol_falls_back_to_a_blank_glyph_for_unknown_states() -> None:
     assert ci_status_symbol(None, None, False) == ((" ", None), (" ", None))
     assert ci_status_symbol("SOMETHING_NEW", None, False) == ((" ", None), (" ", None))

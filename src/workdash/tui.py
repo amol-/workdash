@@ -47,7 +47,7 @@ def _type_column(item: WorkItem, *, bold: bool) -> Text:
     """
 
     (ci_symbol, ci_color), (review_symbol, review_color) = ci_status_symbol(
-        item.ci_state, item.review_decision, item.review_requested
+        item.ci_state, item.review_decision, item.review_requested, item.has_unresolved_comments
     )
     prefix = f"{ci_symbol}{review_symbol}"
     cell = Text(

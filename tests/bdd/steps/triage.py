@@ -109,6 +109,7 @@ def _has_open_work_all_sources(work_items: list[WorkItem]) -> None:
             "ci_state": None,
             "review_decision": None,
             "review_requested": False,
+            "has_unresolved_comments": False,
         }
     ]
     review_raw = [
@@ -312,6 +313,25 @@ def _authored_pr_with_pending_reviewer(
     scenario_state["pending_review_pr_number"] = 53
 
 
+@given(
+    "the user has authored a pull request with unresolved review comments "
+    "but no approval or requested changes"
+)
+def _authored_pr_with_unresolved_comments(
+    scenario_state: dict[str, Any], work_items: list[WorkItem]
+) -> None:
+    work_items.append(
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.AUTHORED_PR,
+            number=55,
+            title="Commented authored PR",
+            has_unresolved_comments=True,
+        )
+    )
+    scenario_state["commented_pr_number"] = 55
+
+
 @given("the user has authored a pull request with no reviewer requested")
 def _authored_pr_with_no_reviewer(
     scenario_state: dict[str, Any], work_items: list[WorkItem]
@@ -361,6 +381,35 @@ def _other_pr_carries_red_review_cross(scenario_state: dict[str, Any]) -> None:
 def _pending_pr_carries_question_mark(scenario_state: dict[str, Any]) -> None:
     number = scenario_state["pending_review_pr_number"]
     assert f" ?PR#{number}" in _rendered_type_cell_strings(scenario_state)
+
+
+@then("the pending pull request's question mark review symbol is yellow")
+def _pending_pr_question_mark_is_yellow(scenario_state: dict[str, Any]) -> None:
+    number = scenario_state["pending_review_pr_number"]
+    assert _review_symbol_style(scenario_state, number) == ("?", "yellow")
+
+
+@then("the commented pull request's question mark review symbol is blue")
+def _commented_pr_question_mark_is_blue(scenario_state: dict[str, Any]) -> None:
+    number = scenario_state["commented_pr_number"]
+    assert _review_symbol_style(scenario_state, number) == ("?", "dodger_blue1")
+
+
+def _review_symbol_style(scenario_state: dict[str, Any], number: int) -> tuple[str, str]:
+    """Return the rendered review symbol and the color it is drawn in for one pull request."""
+
+    captured: list[tuple[str, str]] = []
+
+    async def interactions(app, pilot) -> None:
+        table = app.query_one("#work-items", DataTable)
+        for index in range(table.row_count):
+            cell = table.get_row_at(index)[0]
+            if type_column_label(cell) == f"PR#{number}":
+                (span,) = (s for s in cell.spans if s.start == 1)
+                captured.append((cell.plain[1], str(span.style)))
+
+    run_app(work_items=scenario_state["work_items"], interactions=interactions)
+    return captured[0]
 
 
 @then("the other pull request's Type column carries no review symbol")
@@ -552,6 +601,7 @@ def _authored_also_tracked(scenario_state: dict[str, Any]) -> None:
             "ci_state": None,
             "review_decision": None,
             "review_requested": False,
+            "has_unresolved_comments": False,
         }
     ]
     tracked_raw = [
@@ -1005,6 +1055,7 @@ def _pull_request_and_issue_are_open_work(
                 "ci_state": None,
                 "review_decision": None,
                 "review_requested": False,
+                "has_unresolved_comments": False,
             }
         ],
     )
@@ -2040,6 +2091,7 @@ def _seed_three_included_items(
                 "ci_state": None,
                 "review_decision": None,
                 "review_requested": False,
+                "has_unresolved_comments": False,
             }
         ],
     )

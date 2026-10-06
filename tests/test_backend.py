@@ -58,6 +58,7 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
                     "ci_state": None,
                     "review_decision": None,
                     "review_requested": False,
+                    "has_unresolved_comments": False,
                 }
             ]
 
@@ -498,6 +499,7 @@ def test_load_items_hides_every_issue_a_pull_request_closes(
                     "ci_state": None,
                     "review_decision": None,
                     "review_requested": False,
+                    "has_unresolved_comments": False,
                 }
             ]
 
@@ -592,6 +594,7 @@ def test_load_items_hides_an_included_issue_that_a_listed_pull_request_closes(
                     "ci_state": None,
                     "review_decision": None,
                     "review_requested": False,
+                    "has_unresolved_comments": False,
                 }
             ]
 

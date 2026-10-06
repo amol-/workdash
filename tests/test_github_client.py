@@ -137,6 +137,7 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
                                     },
                                     "reviewDecision": "APPROVED",
                                     "reviewRequests": {"totalCount": 0},
+                                    "reviewThreads": {"nodes": [{"isResolved": True}]},
                                 }
                             },
                             "p1": {
@@ -144,6 +145,9 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
                                     "commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]},
                                     "reviewDecision": None,
                                     "reviewRequests": {"totalCount": 1},
+                                    "reviewThreads": {
+                                        "nodes": [{"isResolved": True}, {"isResolved": False}]
+                                    },
                                 }
                             },
                         }
@@ -174,6 +178,8 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
     assert "number: 10" in ci_command[4]
     assert "number: 11" in ci_command[4]
     assert "statusCheckRollup { state }" in ci_command[4]
+    assert "reviewThreads(first: 100) { nodes { isResolved } }" in ci_command[4]
+    assert ci_command[4].count("{") == ci_command[4].count("}")
     assert result == [
         {
             "id": "A",
@@ -187,6 +193,7 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
             "ci_state": "SUCCESS",
             "review_decision": "APPROVED",
             "review_requested": False,
+            "has_unresolved_comments": False,
         },
         {
             "id": "B",
@@ -200,6 +207,7 @@ def test_list_open_authored_prs_returns_open_prs_including_drafts_and_forks(
             "ci_state": None,
             "review_decision": None,
             "review_requested": True,
+            "has_unresolved_comments": True,
         },
     ]
 
@@ -664,6 +672,7 @@ def test_list_open_review_requested_prs_returns_directly_requested_prs_in_one_gr
             "ci_state": None,
             "review_decision": None,
             "review_requested": False,
+            "has_unresolved_comments": False,
         }
     ]
 
@@ -1205,6 +1214,7 @@ def test_list_open_reviewed_prs_returns_open_prs_reviewed_by_user(
             "ci_state": None,
             "review_decision": None,
             "review_requested": False,
+            "has_unresolved_comments": False,
         }
     ]
 

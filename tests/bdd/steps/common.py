@@ -41,6 +41,7 @@ def make_work_item(
     ci_state: str | None = None,
     review_decision: str | None = None,
     review_requested: bool = False,
+    has_unresolved_comments: bool = False,
 ) -> WorkItem:
     """Build a ``WorkItem`` with sensible defaults for BDD scenarios."""
 
@@ -58,6 +59,7 @@ def make_work_item(
         ci_state=ci_state,
         review_decision=review_decision,
         review_requested=review_requested,
+        has_unresolved_comments=has_unresolved_comments,
     )
 
 

@@ -43,6 +43,7 @@ class WorkItem:
     ci_state: str | None = None
     review_decision: str | None = None
     review_requested: bool = False
+    has_unresolved_comments: bool = False
     closing_issue_numbers: tuple[int, ...] = ()
 
 
@@ -105,22 +106,29 @@ _REVIEW_SYMBOLS = {
     "CHANGES_REQUESTED": ("\u2717", "red"),
 }
 _REVIEW_PENDING_SYMBOL = ("?", "yellow")
+_REVIEW_COMMENTED_SYMBOL = ("?", "dodger_blue1")
 _BLANK_SYMBOL = (" ", None)
 
 
 def ci_status_symbol(
-    ci_state: str | None, review_decision: str | None, review_requested: bool
+    ci_state: str | None,
+    review_decision: str | None,
+    review_requested: bool,
+    has_unresolved_comments: bool = False,
 ) -> tuple[tuple[str, str | None], tuple[str, str | None]]:
     """Return the ((ci_symbol, ci_color), (review_symbol, review_color)) pair for one item.
 
     The CI symbol reports the latest check result. The review symbol reports
-    the review state independently: approved or changes-requested win over a
-    still-pending request, which in turn wins over no reviewer at all.
+    the review state independently: approved or changes-requested win over
+    unresolved review comments, which win over a still-pending request, which
+    in turn wins over no reviewer at all.
     """
 
     ci = _CI_SYMBOLS.get(ci_state or "", _BLANK_SYMBOL)
     if review_decision in _REVIEW_SYMBOLS:
         review = _REVIEW_SYMBOLS[review_decision]
+    elif has_unresolved_comments:
+        review = _REVIEW_COMMENTED_SYMBOL
     elif review_requested:
         review = _REVIEW_PENDING_SYMBOL
     else:

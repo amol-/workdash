@@ -81,6 +81,10 @@ _AUTHORED_CI_SELECTION = (
 # GraphQL search returns at most 100 nodes per page, and nobody triages more
 # open authored pull requests than that.
 _AUTHORED_PR_SEARCH_LIMIT = 100
+# GraphQL selection for the review threads of an authored pull request, so a
+# reviewer's comment nobody resolved yet can be told apart from no review at
+# all. Nobody leaves more than 100 threads on one pull request.
+_UNRESOLVED_THREADS_SELECTION = "reviewThreads(first: 100) { nodes { isResolved } }"
 # GraphQL selection listing the reviewers a pull request asked for, so a
 # direct user request can be told apart from a team-wide one.
 _REVIEW_REQUESTS_SELECTION = (
@@ -211,6 +215,21 @@ def _extract_pending_review_request(entry: dict[str, object]) -> bool:
     return isinstance(total_count, int) and total_count > 0
 
 
+def _extract_unresolved_comments(entry: dict[str, object]) -> bool:
+    """Report whether a pull request has a review thread nobody resolved yet.
+
+    Only the GraphQL authored lookup asks for review threads, so every other
+    payload reports none.
+
+    :param dict entry: One raw pull request payload.
+    """
+
+    review_threads = entry.get("reviewThreads")
+    if review_threads is None:
+        return False
+    return any(not thread["isResolved"] for thread in review_threads["nodes"])
+
+
 def _is_unresolvable_item_error(message: str) -> bool:
     """Report whether a GraphQL error says GitHub cannot resolve the queried item.
 
@@ -325,6 +344,7 @@ class AuthoredPullRequest(TypedDict):
     ci_state: str | None
     review_decision: str | None
     review_requested: bool
+    has_unresolved_comments: bool
 
 
 class ReviewRequestedPullRequest(TypedDict):
@@ -341,6 +361,7 @@ class ReviewRequestedPullRequest(TypedDict):
     ci_state: str | None
     review_decision: str | None
     review_requested: bool
+    has_unresolved_comments: bool
 
 
 class RecentTrackedItem(TypedDict):
@@ -408,6 +429,7 @@ def normalize_authored_pull_request(item: AuthoredPullRequest) -> WorkItem:
         ci_state=item["ci_state"],
         review_decision=item["review_decision"],
         review_requested=item["review_requested"],
+        has_unresolved_comments=item["has_unresolved_comments"],
     )
 
 
@@ -619,6 +641,7 @@ class GitHubClient:
                     ci_state=_extract_ci_state(entry),
                     review_decision=entry.get("reviewDecision"),
                     review_requested=_extract_pending_review_request(entry),
+                    has_unresolved_comments=_extract_unresolved_comments(entry),
                 )
             )
         return pull_requests
@@ -742,7 +765,8 @@ class GitHubClient:
             owner, _, name = item["repo"].partition("/")
             alias_selections.append(
                 f"p{index}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
-                f"{{ pullRequest(number: {item['number']}) {{ {_AUTHORED_CI_SELECTION} }} }}"
+                f"{{ pullRequest(number: {item['number']}) "
+                f"{{ {_AUTHORED_CI_SELECTION} {_UNRESOLVED_THREADS_SELECTION} }} }}"
             )
         ci_command = [
             "gh",
@@ -821,6 +845,7 @@ class GitHubClient:
             item["ci_state"] = _extract_ci_state(pull_request)
             item["review_decision"] = pull_request.get("reviewDecision")
             item["review_requested"] = _extract_pending_review_request(pull_request)
+            item["has_unresolved_comments"] = _extract_unresolved_comments(pull_request)
             authored_pull_requests.append(item)
         return authored_pull_requests
 

@@ -49,6 +49,7 @@ def test_normalize_authored_pull_request_maps_to_work_item() -> None:
             "ci_state": "SUCCESS",
             "review_decision": "APPROVED",
             "review_requested": True,
+            "has_unresolved_comments": False,
         }
     )
 
@@ -142,6 +143,7 @@ def test_normalize_list_helpers_convert_each_record() -> None:
                 "ci_state": None,
                 "review_decision": None,
                 "review_requested": False,
+                "has_unresolved_comments": False,
             }
         ]
     )
@@ -194,6 +196,7 @@ def test_merge_normalized_work_items_prefers_authored_pr_for_same_pr_identity() 
                 "ci_state": None,
                 "review_decision": None,
                 "review_requested": False,
+                "has_unresolved_comments": False,
             }
         ]
     )
@@ -250,6 +253,7 @@ def test_merge_normalized_work_items_keeps_issue_and_pr_rows_independent() -> No
                 "ci_state": None,
                 "review_decision": None,
                 "review_requested": False,
+                "has_unresolved_comments": False,
             }
         ]
     )
@@ -292,6 +296,7 @@ def test_merge_normalized_work_items_preserves_deterministic_stable_order() -> N
                 "ci_state": None,
                 "review_decision": None,
                 "review_requested": False,
+                "has_unresolved_comments": False,
             },
             {
                 "id": "B",
@@ -305,6 +310,7 @@ def test_merge_normalized_work_items_preserves_deterministic_stable_order() -> N
                 "ci_state": None,
                 "review_decision": None,
                 "review_requested": False,
+                "has_unresolved_comments": False,
             },
         ]
     )
@@ -368,6 +374,7 @@ def test_merge_normalized_work_items_prefers_first_input_for_duplicate_pr_identi
                 "ci_state": None,
                 "review_decision": None,
                 "review_requested": False,
+                "has_unresolved_comments": False,
             }
         ]
     )
