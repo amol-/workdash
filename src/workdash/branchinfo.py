@@ -2,7 +2,8 @@
 
 This module provides the `workdash branchinfo` CLI command, which reports the
 pull request for the currently checked-out branch and every issue it closes in
-the same repository, resolved from GitHub metadata alone. Merged and closed
+the same repository, resolved from GitHub metadata. When GitHub links no issue,
+a workdash issue branch (``issue-N``) names the issue instead. Merged and closed
 items are reported too, flagged with their state. It works in any git
 repository directory with no server dependency, the same as `workdash
 branchdiff`.
@@ -25,6 +26,7 @@ from .github_client import (
     _extract_pending_review_request,
 )
 from .models import ci_status_symbol
+from .repo_worktree import issue_branch_number
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +71,9 @@ def run_branchinfo() -> int:
             )
             symbol = f"{ci_symbol}{review_symbol}"
             issues = [_fetch_issue(*issue) for issue in _linked_issues(repo, closing_issues)]
+        branch_issue = issue_branch_number(branch)
+        if not issues and branch_issue is not None:
+            issues = [_fetch_issue(repo, branch_issue)]
     except RuntimeError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1

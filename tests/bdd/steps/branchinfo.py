@@ -54,6 +54,28 @@ def _repo_on_branch_with_no_pull_request(
     scenario_state["gh_pr"] = None
 
 
+@given(
+    "the current directory is a git repository on the workdash branch of an issue, "
+    "with no pull request"
+)
+def _repo_on_issue_branch_with_no_pull_request(
+    scenario_state: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _repo_on_branch_with_no_pull_request(scenario_state, tmp_path, monkeypatch)
+    subprocess.run(
+        ["git", "checkout", "-q", "-b", "issue-42"], cwd=scenario_state["repo_path"], check=True
+    )
+    scenario_state["gh_issues"] = {
+        42: {
+            "title": "Renderer crashes on empty input",
+            "url": "https://github.com/owner/repo/issues/42",
+            "state": "OPEN",
+        }
+    }
+
+
 @given("the current directory is a git repository on a branch whose pull request is merged")
 def _repo_on_branch_with_merged_pull_request(
     scenario_state: dict[str, Any],
@@ -176,6 +198,12 @@ def _command_reports_closed_issue(scenario_state: dict[str, Any]) -> None:
     issue = scenario_state["gh_issues"][42]
     assert issue["title"] in stdout
     assert issue["url"] in stdout
+
+
+@then("the command reports the branch issue's title and url")
+def _command_reports_branch_issue(scenario_state: dict[str, Any]) -> None:
+    issue = scenario_state["gh_issues"][42]
+    assert f"ISSUE: {issue['title']} {issue['url']}\n" in scenario_state["stdout"]
 
 
 @then("the command reports the pull request marked as merged")

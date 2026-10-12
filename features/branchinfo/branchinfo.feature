@@ -14,8 +14,11 @@ Feature: Report branch info in standalone CLI command
       one per line: title and url.
     - Merged or closed pull requests and issues are still reported, marked with
       their state, so work that continues after a merge stays visible.
-    - When no pull request, or no same-repository closing issue, can be
-      resolved from GitHub metadata alone, that field is reported as "unknown".
+    - When GitHub links no same-repository issue and the branch is named
+      `issue-N`, the name workdash gives an issue's worktree branch, issue N
+      of the repository is reported.
+    - When no pull request, or no issue, can be resolved, that field is
+      reported as "unknown".
 
   @id:F-BRANCHINFO-S001
   Scenario: Branchinfo shows a passing, approved pull request and the issue it closes
@@ -74,3 +77,10 @@ Feature: Report branch info in standalone CLI command
     And that pull request is passing CI with a reviewer requested who has not yet reviewed
     When the user runs "workdash branchinfo"
     Then the command reports the pull request's title, url, and a passing symbol followed by a question mark
+
+  @id:F-BRANCHINFO-S009
+  Scenario: Branchinfo recognizes the issue from a workdash issue branch with no pull request
+    Given the current directory is a git repository on the workdash branch of an issue, with no pull request
+    When the user runs "workdash branchinfo"
+    Then the command reports the pull request as unknown
+    And the command reports the branch issue's title and url

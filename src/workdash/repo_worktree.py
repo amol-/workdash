@@ -1,12 +1,15 @@
 """Git worktree management for work items."""
 
 import contextlib
+import re
 import subprocess
 from pathlib import Path
 
 from .git import GitHelper
 from .github import GithubHelper
 from .models import WorkItem, WorkItemType, accepted_worktree_numbers, worktree_item_number
+
+_ISSUE_BRANCH_RE = re.compile(r"^issue-(\d+)$")
 
 
 def main_repo_path(workdir: str, repo: str) -> Path:
@@ -129,6 +132,12 @@ def get_merge_base(worktree: str) -> str | None:
     Returns None if the merge-base cannot be determined (e.g. shallow clone).
     """
     return GitHelper().merge_base_with_origin_default(worktree)
+
+
+def issue_branch_number(branch: str) -> int | None:
+    """Return the issue number of a branch named the way ``ensure_worktree`` names an issue's."""
+    match = _ISSUE_BRANCH_RE.match(branch)
+    return int(match.group(1)) if match else None
 
 
 def _worktree_candidates(base: Path, item: WorkItem) -> list[Path]:
