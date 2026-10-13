@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import shlex
@@ -11,6 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .agent_context import render_github_context
 from .github import GithubHelper
 from .models import WorkItem, WorkItemType, display_repo
 
@@ -63,9 +63,7 @@ class Analyzer:
             "number": item.number,
             "title": item.title,
             "url": item.url,
-            "github_context_json": json.dumps(
-                github_context, ensure_ascii=True, indent=2, sort_keys=True
-            ),
+            "github_context": render_github_context(github_context, item.item_type),
         }
         if item.item_type != WorkItemType.ISSUE:
             format_kwargs["diff_path"] = diff_path or ""

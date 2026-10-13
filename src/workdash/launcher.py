@@ -16,6 +16,7 @@ from typing import Any, NoReturn
 
 import markdown
 
+from .agent_context import render_github_context
 from .config import LOCAL_BIN_PATH
 from .github import GithubHelper
 from .models import WorkItem, WorkItemKind, WorkItemType, display_repo
@@ -575,7 +576,7 @@ def build_launch_agent_prompt(
         partial_work_section=partial_work_section,
         analysis_section=analysis_section,
         merge_base_section=merge_base_line,
-        github_context_json=json.dumps(github_context, ensure_ascii=True, indent=2, sort_keys=True),
+        github_context=render_github_context(github_context, item.item_type),
     )
 
 

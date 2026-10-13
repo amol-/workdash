@@ -8,11 +8,12 @@ from typing import Any
 from .models import WorkItem, WorkItemType
 
 _LAUNCH_ISSUE_CONTEXT_JSON_FIELDS = (
-    "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt"
+    "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,comments"
 )
 _LAUNCH_PR_CONTEXT_JSON_FIELDS = (
     "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,"
-    "isDraft,reviewDecision,additions,deletions,changedFiles,headRefName,baseRefName"
+    "isDraft,reviewDecision,additions,deletions,changedFiles,headRefName,baseRefName,"
+    "comments,reviews"
 )
 _ANALYSIS_ISSUE_CONTEXT_JSON_FIELDS = (
     "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,comments"
@@ -20,7 +21,7 @@ _ANALYSIS_ISSUE_CONTEXT_JSON_FIELDS = (
 _ANALYSIS_PR_CONTEXT_JSON_FIELDS = (
     "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,"
     "isDraft,reviewDecision,additions,deletions,changedFiles,headRefName,baseRefName,"
-    "comments,reviews,latestReviews"
+    "comments,reviews"
 )
 _HEAD_METADATA_JSON_FIELDS = "headRefName,headRepository,headRepositoryOwner"
 _BASE_METADATA_JSON_FIELDS = "baseRefName,headRepository,headRepositoryOwner"
@@ -30,12 +31,15 @@ class GithubHelper:
     """Run GitHub CLI commands and translate command/JSON failures."""
 
     def fetch_launch_context(self, item: WorkItem) -> dict[str, Any]:
-        return self._fetch_item_context(
+        context = self._fetch_item_context(
             item,
             issue_fields=_LAUNCH_ISSUE_CONTEXT_JSON_FIELDS,
             pr_fields=_LAUNCH_PR_CONTEXT_JSON_FIELDS,
             context_label="launch context",
         )
+        if item.item_type == WorkItemType.PR:
+            context.update(self._fetch_pr_discussion(item))
+        return context
 
     def fetch_analysis_context(self, item: WorkItem) -> dict[str, Any]:
         return self._fetch_item_context(
@@ -157,6 +161,44 @@ class GithubHelper:
                 pr_fields,
             ]
         return self._run_json_command(item=item, command=command, context_label=context_label)
+
+    def _fetch_pr_discussion(self, item: WorkItem) -> dict[str, Any]:
+        owner, _, name = item.repo.partition("/")
+        # Lists are capped at 100 entries without pagination: more is not realistic.
+        comments = "comments(first: 100) { nodes { author { login } body createdAt isMinimized minimizedReason } }"
+        query = (
+            f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+            f"{{ pullRequest(number: {item.number}) {{ "
+            f"closingIssuesReferences(first: 100) {{ nodes {{ "
+            f"number title body author {{ login }} repository {{ nameWithOwner }} {comments} }} }} "
+            f"reviewThreads(first: 100) {{ nodes {{ isResolved path line {comments} }} }} "
+            "} } }"
+        )
+        payload = self._run_json_command(
+            item=item,
+            command=["gh", "api", "graphql", "-f", f"query={query}"],
+            context_label="linked issues and review threads",
+        )
+        pull_request = payload["data"]["repository"]["pullRequest"]
+        return {
+            "linkedIssues": [
+                {
+                    **issue,
+                    "repository": issue["repository"]["nameWithOwner"],
+                    "comments": issue["comments"]["nodes"],
+                }
+                for issue in pull_request["closingIssuesReferences"]["nodes"]
+            ],
+            "unresolvedReviewThreads": [
+                {
+                    "path": thread["path"],
+                    "line": thread["line"],
+                    "comments": thread["comments"]["nodes"],
+                }
+                for thread in pull_request["reviewThreads"]["nodes"]
+                if not thread["isResolved"]
+            ],
+        }
 
     def _run_json_command(
         self,

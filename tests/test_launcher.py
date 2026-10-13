@@ -1110,7 +1110,7 @@ def test_build_launch_agent_prompt_includes_required_metadata_and_non_start_inst
     assert "- title: Implement launch prompt" in prompt
     assert "- url: https://github.com/owner/repo/pull/42" in prompt
     assert "- expected local checkout path: /tmp/repo" in prompt
-    assert '"state": "OPEN"' in prompt
+    assert "<state>OPEN</state>" in prompt
     assert "PREVIOUS ANALYSIS" not in prompt
 
 
@@ -1167,6 +1167,22 @@ def test_build_launch_agent_prompt_uses_issue_template_for_issues() -> None:
     assert "WORK ALREADY IN PROGRESS:" not in prompt
 
 
+def test_build_launch_agent_prompt_flags_the_issue_authors_own_comments() -> None:
+    prompt = build_launch_agent_prompt(
+        item=make_work_item(WorkItemType.ISSUE),
+        repo_path="/tmp/repo",
+        github_context={
+            "author": {"login": "alice"},
+            "comments": [
+                {"author": {"login": "alice"}, "body": "mine", "createdAt": "2026-02-20T10:00:00Z"}
+            ],
+        },
+    )
+
+    assert 'issue_author="true"' in prompt
+    assert "pr_author" not in prompt
+
+
 def test_build_launch_agent_prompt_names_the_target_as_the_checkout_of_a_targeted_todo() -> None:
     """The identity triple must name the todo issue while the checkout names the target.
 
@@ -1201,39 +1217,22 @@ def test_prepare_launch_agent_prompt_collects_gh_context_and_builds_prompt(
     def fake_run(*args, **kwargs):
         command = args[0]
         calls.append(command)
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout=(
-                '{"number":42,"title":"Implement launch prompt","state":"OPEN",'
-                '"author":{"login":"testuser"},"assignees":[],"labels":[],'
-                '"createdAt":"2026-02-20T10:00:00Z","updatedAt":"2026-02-21T10:00:00Z"}'
-            ),
-            stderr="",
+        stdout = (
+            '{"data":{"repository":{"pullRequest":'
+            '{"closingIssuesReferences":{"nodes":[]},"reviewThreads":{"nodes":[]}}}}}'
+            if "graphql" in command
+            else '{"number":42,"title":"Implement launch prompt","state":"OPEN"}'
         )
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     prompt = prepare_launch_agent_prompt(make_work_item(WorkItemType.PR), "/tmp/repo")
 
-    assert calls == [
-        [
-            "gh",
-            "pr",
-            "view",
-            "42",
-            "--repo",
-            "owner/repo",
-            "--json",
-            (
-                "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,"
-                "isDraft,reviewDecision,additions,deletions,changedFiles,headRefName,baseRefName"
-            ),
-        ]
-    ]
+    assert [command[:3] for command in calls] == [["gh", "pr", "view"], ["gh", "api", "graphql"]]
     assert "- expected local checkout path: /tmp/repo" in prompt
     assert "Do not start implementing code yet." in prompt
-    assert '"state": "OPEN"' in prompt
+    assert "<state>OPEN</state>" in prompt
 
 
 def test_prepare_launch_agent_prompt_collects_issue_gh_context(
@@ -1268,7 +1267,7 @@ def test_prepare_launch_agent_prompt_collects_issue_gh_context(
             "--repo",
             "owner/repo",
             "--json",
-            "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt",
+            "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,comments",
         ]
     ]
     assert "- type: issue" in prompt

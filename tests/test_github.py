@@ -1,3 +1,4 @@
+import json
 import subprocess
 from datetime import UTC, datetime
 
@@ -22,35 +23,88 @@ def make_work_item(item_type: WorkItemType) -> WorkItem:
     )
 
 
-def test_fetch_launch_context_builds_pr_view_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[list[str], dict[str, object]]] = []
+def graphql_payload(*, issues: list | None = None, threads: list | None = None) -> str:
+    pull_request = {
+        "closingIssuesReferences": {"nodes": issues or []},
+        "reviewThreads": {"nodes": threads or []},
+    }
+    return json.dumps({"data": {"repository": {"pullRequest": pull_request}}})
 
+
+def fake_gh(calls: list[list[str]], *, graphql_stdout: str):
     def fake_run(*args, **kwargs):
-        calls.append((args[0], kwargs))
-        return subprocess.CompletedProcess(args[0], 0, stdout='{"state":"OPEN"}', stderr="")
+        calls.append(args[0])
+        stdout = graphql_stdout if "graphql" in args[0] else '{"state":"OPEN"}'
+        return subprocess.CompletedProcess(args[0], 0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    return fake_run
 
-    assert GithubHelper().fetch_launch_context(make_work_item(WorkItemType.PR)) == {"state": "OPEN"}
-    assert calls == [
-        (
-            [
-                "gh",
-                "pr",
-                "view",
-                "42",
-                "--repo",
-                "owner/repo",
-                "--json",
-                (
-                    "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,"
-                    "isDraft,reviewDecision,additions,deletions,changedFiles,"
-                    "headRefName,baseRefName"
-                ),
-            ],
-            {"check": True, "capture_output": True, "text": True},
-        )
-    ]
+
+def test_fetch_launch_context_for_pr_adds_linked_issues_and_unresolved_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    comment = {"author": {"login": "bob"}, "body": "fix this", "createdAt": "2026-02-01T00:00:00Z"}
+    graphql_stdout = graphql_payload(
+        issues=[
+            {
+                "number": 7,
+                "title": "Goal",
+                "body": "Do the thing",
+                "author": {"login": "alice"},
+                "repository": {"nameWithOwner": "other/repo"},
+                "comments": {"nodes": [comment]},
+            }
+        ],
+        threads=[
+            {"isResolved": False, "path": "a.py", "line": 3, "comments": {"nodes": [comment]}},
+            {"isResolved": True, "path": "b.py", "line": 9, "comments": {"nodes": [comment]}},
+        ],
+    )
+    monkeypatch.setattr(subprocess, "run", fake_gh(calls, graphql_stdout=graphql_stdout))
+
+    context = GithubHelper().fetch_launch_context(make_work_item(WorkItemType.PR))
+
+    assert context == {
+        "state": "OPEN",
+        "linkedIssues": [
+            {
+                "number": 7,
+                "title": "Goal",
+                "body": "Do the thing",
+                "author": {"login": "alice"},
+                "repository": "other/repo",
+                "comments": [comment],
+            }
+        ],
+        "unresolvedReviewThreads": [{"path": "a.py", "line": 3, "comments": [comment]}],
+    }
+    view_command, graphql_command = calls
+    assert view_command[:7] == ["gh", "pr", "view", "42", "--repo", "owner/repo", "--json"]
+    assert {"comments", "reviews"} <= set(view_command[7].split(","))
+    assert "latestReviews" not in view_command[7]
+    assert graphql_command[:4] == ["gh", "api", "graphql", "-f"]
+    assert 'repository(owner: "owner", name: "repo")' in graphql_command[4]
+    assert "pullRequest(number: 42)" in graphql_command[4]
+    assert "repository { nameWithOwner }" in graphql_command[4]
+    query = graphql_command[4]
+    closing_issues = query.split("closingIssuesReferences")[1].split("reviewThreads")[0]
+    review_threads = query.split("reviewThreads")[1]
+    assert "number title body author { login } repository" in closing_issues
+    assert "isMinimized minimizedReason" in closing_issues
+    assert "isMinimized minimizedReason" in review_threads
+
+
+def test_fetch_launch_context_for_issue_makes_no_graphql_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", fake_gh(calls, graphql_stdout=graphql_payload()))
+
+    context = GithubHelper().fetch_launch_context(make_work_item(WorkItemType.ISSUE))
+
+    assert context == {"state": "OPEN"}
+    assert [command[1] for command in calls] == ["issue"]
 
 
 def test_fetch_analysis_context_for_issue_includes_discussion(
