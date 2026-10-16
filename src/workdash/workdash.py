@@ -16,6 +16,7 @@ import tempfile
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from ipaddress import ip_address
 
 from . import __version__
 from .backend import SuggestionMarkers, WorkdashBackend
@@ -52,7 +53,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         configure()
         return 0
 
-    commands = WorkdashCommands()
+    commands = WorkdashCommands(host=options.host)
     if options.command in {
         "list",
         "info",
@@ -91,7 +92,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Error: {error}", file=sys.stderr, flush=True)
             return 1
 
-    return commands.interactive(server=options.server)
+    return commands.interactive(server=options.server, listeners=options.listeners)
 
 
 @dataclass(frozen=True)
@@ -113,15 +114,17 @@ class CLIOptions:
     text: str | None = None
     full: bool = False
     raw: bool = False
+    host: str = "127.0.0.1"
+    listeners: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 class WorkdashCommands:
     """Commands that share Workdash config, backend, and server-backed clients."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, host: str = "127.0.0.1") -> None:
         self._config: WorkdashConfig | None = None
         self._backend: WorkdashBackend | None = None
-        self._client = WorkdashControlClient()
+        self._client = WorkdashControlClient(host)
 
     def list_items(self, *, json_output: bool, refresh: bool = False) -> int:
         """List work items through the local Workdash server."""
@@ -286,7 +289,9 @@ class WorkdashCommands:
             return False
         return True
 
-    def interactive(self, *, server: bool = False) -> int:
+    def interactive(
+        self, *, server: bool = False, listeners: Sequence[tuple[str, Sequence[str]]] = ()
+    ) -> int:
         """Start the interactive dashboard, optionally with the JSON server."""
 
         loaded = self._load_config_and_backend()
@@ -354,7 +359,7 @@ class WorkdashCommands:
                         raise
 
             session.items_changed_callback = refresh_tui_from_session
-        control_server = WorkdashControlServer(session) if server else None
+        control_server = WorkdashControlServer(session, listeners=listeners) if server else None
         if control_server is not None:
             try:
                 control_server.start()
@@ -479,6 +484,13 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         "--server",
         action="store_true",
         help="Start the TUI with the localhost JSON control API.",
+    )
+    parser.add_argument(
+        "--listen",
+        action="append",
+        default=[],
+        metavar="HOST@IP1,IP2",
+        help="Add a trusted LAN listener with exact accepted source IPs (requires --server).",
     )
     parser.add_argument(
         "--json",
@@ -634,6 +646,20 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         default=argparse.SUPPRESS,
         help="Emit machine-readable JSON.",
     )
+    for client_parser in (
+        list_parser,
+        info_parser,
+        analyze_parser,
+        code_parser,
+        terminal_parser,
+        todo_parser,
+        read_parser,
+        write_parser,
+        close_parser,
+    ):
+        client_parser.add_argument(
+            "--host", default="127.0.0.1", help="Workdash server host (port 8765)."
+        )
     show_config_parser = subparsers.add_parser(
         "show-config",
         help="Show configured agents and the fixed server address.",
@@ -660,6 +686,20 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         help="Show the open pull request and issue for the current branch.",
     )
     namespace = parser.parse_args(argv) if argv is not None else parser.parse_args()
+    if namespace.listen and not namespace.server:
+        parser.error("--listen requires --server")
+    listeners = []
+    for listener in namespace.listen:
+        host, separator, sources = listener.partition("@")
+        if not host or not separator or ":" in host or host == "*":
+            parser.error("--listen requires HOST@IP1,IP2 without wildcard binds or custom ports")
+        try:
+            if host == "0.0.0.0":
+                raise ValueError("wildcard listener binds are not allowed")
+            ips = tuple(str(ip_address(source)) for source in sources.split(","))
+        except ValueError as error:
+            parser.error(f"Invalid --listen {listener!r}: {error}")
+        listeners.append((host, ips))
     return CLIOptions(
         debug=namespace.debug,
         refresh=namespace.refresh,
@@ -676,6 +716,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         text=getattr(namespace, "text", None),
         full=getattr(namespace, "full", False),
         raw=getattr(namespace, "raw", False),
+        host=getattr(namespace, "host", "127.0.0.1"),
+        listeners=tuple(listeners),
     )
 
 

@@ -661,7 +661,8 @@ def _empty_response_stores_todo_repository(template: str, scenario_state: dict[s
 # ----- F-CLI-ORCHESTRATION-S024/S025 -----
 
 
-@when(parsers.parse('the user runs `workdash todo "{text}" --target {target}`'))
+@when(parsers.parse('the user runs `workdash todo "{text}" --target {target:S} --host {host}`'))
+@when(parsers.parse('the user runs `workdash todo "{text}" --target {target:S}`'))
 def _run_todo_cli_with_target(
     text: str,
     target: str,
@@ -670,6 +671,7 @@ def _run_todo_cli_with_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    host: str = "127.0.0.1",
 ) -> None:
     import workdash.workdash as workdash_module
 
@@ -677,6 +679,10 @@ def _run_todo_cli_with_target(
     _install_gh_todo_fake(scenario_state, monkeypatch)
 
     class FakeControlClient:
+        def __init__(self, selected_host="127.0.0.1") -> None:
+            assert selected_host == host
+            scenario_state["client_host"] = selected_host
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             payload = payload or {}
             scenario_state.setdefault("control_requests", []).append(
@@ -686,7 +692,9 @@ def _run_todo_cli_with_target(
             return session.todo(text=payload["text"], target=payload.get("target"))
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
-    scenario_state["exit_code"] = workdash_module.main(["todo", text, "--target", target])
+    scenario_state["exit_code"] = workdash_module.main(
+        ["todo", text, "--target", target, "--host", host]
+    )
     captured = capsys.readouterr()
     scenario_state["stdout"] = captured.out
     scenario_state["stderr"] = captured.err

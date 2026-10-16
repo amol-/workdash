@@ -8,8 +8,9 @@ import os
 import threading
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from http import HTTPStatus
+from ipaddress import ip_address
 from socketserver import BaseServer
 from wsgiref.simple_server import make_server
 
@@ -385,47 +386,63 @@ class WorkdashSession:
 
 
 class WorkdashControlServer:
-    """Background localhost HTTP server for a server-backed Workdash session."""
+    """Background HTTP listeners for a server-backed Workdash session."""
 
-    def __init__(self, session: WorkdashSession) -> None:
+    def __init__(
+        self, session: WorkdashSession, *, listeners: Sequence[tuple[str, Sequence[str]]] = ()
+    ) -> None:
         self._session = session
-        self._httpd: BaseServer | None = None
-        self._thread: threading.Thread | None = None
+        self._listeners = listeners
+        self._httpds: list[BaseServer] = []
+        self._threads: list[threading.Thread] = []
 
     def start(self) -> None:
-        """Start serving the TurboGears JSON API in a background thread."""
+        """Bind every listener before serving the shared JSON API."""
 
-        app = _localhost_only_wsgi_app(_make_turbogears_app(self._session))
+        accepted_ips = {ip for _host, ips in self._listeners for ip in ips}
+        app = _source_filtered_wsgi_app(_make_turbogears_app(self._session), accepted_ips)
         try:
-            self._httpd = make_server(SERVER_HOST, SERVER_PORT, app)
+            for host in [SERVER_HOST, *(host for host, _ips in self._listeners)]:
+                httpd = make_server(host, SERVER_PORT, app)
+                self._httpds.append(httpd)
+                if ip_address(httpd.server_address[0]).is_unspecified:
+                    raise OSError("Wildcard listener binds are not allowed")
         except OSError as error:
+            self.stop()
             raise RuntimeError(
-                f"Workdash server port {SERVER_PORT} is already in use. "
+                f"Cannot bind Workdash server at {host}:{SERVER_PORT}: {error}. "
                 "Is another `workdash --server` running?"
             ) from error
-        self._thread = threading.Thread(
-            target=self._httpd.serve_forever,
-            name="workdash-control-server",
-            daemon=True,
-        )
-        self._thread.start()
+        for httpd in self._httpds:
+            thread = threading.Thread(
+                target=httpd.serve_forever,
+                name="workdash-control-server",
+                daemon=True,
+            )
+            thread.start()
+            self._threads.append(thread)
 
     def stop(self) -> None:
-        if self._httpd is None:
-            return
-        self._httpd.shutdown()
-        self._httpd.server_close()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
+        for httpd in self._httpds[: len(self._threads)]:
+            httpd.shutdown()
+        for httpd in self._httpds:
+            httpd.server_close()
+        for thread in self._threads:
+            thread.join()
+        self._httpds.clear()
+        self._threads.clear()
 
 
 class WorkdashControlClient:
-    """HTTP client used by thin local CLI commands."""
+    """HTTP client used by thin CLI commands."""
+
+    def __init__(self, host: str = SERVER_HOST) -> None:
+        self._address = f"{host}:{SERVER_PORT}"
 
     def request(self, endpoint: str, payload: dict[str, object] | None = None) -> dict[str, object]:
         body = json.dumps(payload or {}).encode("utf-8")
         request = urllib.request.Request(
-            f"{SERVER_URL}/api/v0/{endpoint}",
+            f"http://{self._address}/api/v0/{endpoint}",
             data=body,
             headers={"Content-Type": "application/json", "Accept": "application/json"},
             method="POST",
@@ -434,11 +451,16 @@ class WorkdashControlClient:
             with urllib.request.urlopen(request) as response:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as error:
-            raise _client_error_from_body(error) from error
+            api_error = _client_error_from_body(error)
+            raise WorkdashControlError(
+                api_error.code,
+                f"Workdash server at {self._address}: {api_error}",
+                status=api_error.status,
+            ) from error
         except OSError as error:
             raise WorkdashControlError(
                 "server_unreachable",
-                "No Workdash server is reachable at 127.0.0.1:8765. "
+                f"No Workdash server is reachable at {self._address}. "
                 "Start one with `workdash --server`.",
                 status=HTTPStatus.SERVICE_UNAVAILABLE,
             ) from error
@@ -447,16 +469,17 @@ class WorkdashControlClient:
         except json.JSONDecodeError as error:
             raise WorkdashControlError(
                 "invalid_response",
-                f"Workdash server returned invalid JSON: {error.msg}",
+                f"Workdash server at {self._address} returned invalid JSON: {error.msg}",
             ) from error
         if not isinstance(envelope, dict) or envelope.get("ok") is not True:
             raise WorkdashControlError(
-                "invalid_response", "Workdash server returned an invalid response."
+                "invalid_response",
+                f"Workdash server at {self._address} returned an invalid response.",
             )
         result = envelope.get("result")
         if not isinstance(result, dict):
             raise WorkdashControlError(
-                "invalid_response", "Workdash server result was not an object."
+                "invalid_response", f"Workdash server at {self._address} result was not an object."
             )
         return result
 
@@ -722,11 +745,17 @@ def _handle_json_request(request, response, action) -> dict[str, object]:
         return _error_envelope("invalid_json", f"Request body is not valid JSON: {error}")
 
 
-def _localhost_only_wsgi_app(app):
-    def only_localhost(environ, start_response):
-        if environ.get("REMOTE_ADDR") not in {"127.0.0.1", "::1"}:
+def _source_filtered_wsgi_app(app, accepted_ips: Collection[str] = ()):
+    allowed = {ip_address(ip) for ip in accepted_ips} | {ip_address("127.0.0.1"), ip_address("::1")}
+
+    def source_filtered(environ, start_response):
+        try:
+            accepted = ip_address(environ.get("REMOTE_ADDR", "")) in allowed
+        except ValueError:
+            accepted = False
+        if not accepted:
             body = json.dumps(
-                _error_envelope("forbidden", "Workdash V0 only accepts localhost clients.")
+                _error_envelope("forbidden", "Workdash server does not accept this source IP.")
             ).encode("utf-8")
             start_response(
                 "403 Forbidden",
@@ -735,7 +764,7 @@ def _localhost_only_wsgi_app(app):
             return [body]
         return app(environ, start_response)
 
-    return only_localhost
+    return source_filtered
 
 
 def _client_error_from_body(error: urllib.error.HTTPError) -> WorkdashControlError:

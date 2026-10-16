@@ -294,6 +294,9 @@ def _local_workdash_server_reachable(
     import workdash.workdash as workdash_module
 
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             scenario_state.setdefault("control_requests", []).append(
                 {"endpoint": endpoint, "payload": dict(payload or {})}

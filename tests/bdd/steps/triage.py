@@ -1339,6 +1339,9 @@ def _list_work_items_refresh(
     ]
 
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             scenario_state.setdefault("client_requests", []).append((endpoint, payload or {}))
             assert endpoint == "list"
@@ -1380,6 +1383,9 @@ def _run_list_command(
     if scenario_state.get("api_session") is not None:
 
         class FakeControlClient:
+            def __init__(self, host="127.0.0.1") -> None:
+                assert host == "127.0.0.1"
+
             def request(
                 self, endpoint: str, payload: dict[str, object] | None = None
             ) -> dict[str, object]:

@@ -7,13 +7,14 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from pytest_bdd import given, parsers, then, when
 from webob import Request
 
 from workdash.backend import compute_suggestion_markers
-from workdash.control import _localhost_only_wsgi_app, _make_turbogears_app, format_work_item_id
+from workdash.control import _make_turbogears_app, _source_filtered_wsgi_app, format_work_item_id
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.repo_worktree import worktree_path
 
@@ -33,8 +34,9 @@ def _call_api(
     endpoint: str,
     payload: dict[str, object] | None = None,
 ) -> None:
-    app = _localhost_only_wsgi_app(
-        _make_turbogears_app(ensure_api_session(scenario_state, work_items, tmp_path))
+    app = _source_filtered_wsgi_app(
+        _make_turbogears_app(ensure_api_session(scenario_state, work_items, tmp_path)),
+        scenario_state.get("accepted_ips", ()),
     )
     request = Request.blank(
         f"/api/v0/{endpoint}",
@@ -43,6 +45,7 @@ def _call_api(
         body=json.dumps(payload or {}).encode("utf-8"),
     )
     request.environ["REMOTE_ADDR"] = scenario_state.get("remote_addr", "127.0.0.1")
+    request.headers.update(scenario_state.get("forwarding_headers", {}))
     response = request.get_response(app)
     scenario_state["api_status"] = response.status_int
     scenario_state["api_payload"] = json.loads(response.text)
@@ -165,7 +168,8 @@ def _user_starts_workdash_with_server(
             return None
 
     class FakeControlServer:
-        def __init__(self, session) -> None:
+        def __init__(self, session, *, listeners=()) -> None:
+            assert listeners == ()
             self.session = session
 
         def start(self) -> None:
@@ -791,3 +795,42 @@ def _read_startup_layout(scenario_state: dict[str, Any]) -> str:
     layout_path = command[command.index("--layout") + 1]
     with open(layout_path, encoding="utf-8") as layout_file:
         return layout_file.read()
+
+
+@given("listeners accept source IPs `192.0.2.10` and `192.0.2.11`")
+def _listeners_accept_sources(scenario_state, work_items, tmp_path) -> None:
+    seed_dashboard_item(work_items, scenario_state)
+    scenario_state["accepted_ips"] = ("192.0.2.10", "192.0.2.11")
+    ensure_api_session(scenario_state, work_items, tmp_path)
+
+
+@when(parsers.parse("a client at `{source}` requests the list API"))
+def _source_requests_list(source, scenario_state, work_items, tmp_path) -> None:
+    scenario_state["remote_addr"] = source
+    _call_api(scenario_state, work_items, tmp_path, "list")
+
+
+@when(
+    parsers.parse(
+        "a client at `{source}` requests a todo with a forwarding header claiming `{claimed}`"
+    )
+)
+def _unlisted_source_requests_todo(
+    source, claimed, scenario_state, work_items, tmp_path, monkeypatch
+):
+    scenario_state["remote_addr"] = source
+    scenario_state["forwarding_headers"] = {
+        "X-Forwarded-For": claimed,
+        "Forwarded": f"for={claimed}",
+    }
+    scenario_state["todo_gh_commands"] = []
+    create_todo = MagicMock(side_effect=AssertionError("denied request executed a todo"))
+    monkeypatch.setattr("workdash.control.create_todo", create_todo)
+    _call_api(scenario_state, work_items, tmp_path, "todo", {"text": "Forbidden todo"})
+    create_todo.assert_not_called()
+
+
+@then("the API returns a forbidden error")
+def _api_returns_forbidden(scenario_state) -> None:
+    assert scenario_state["api_status"] == 403
+    assert scenario_state["api_payload"]["error"]["code"] == "forbidden"

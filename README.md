@@ -92,6 +92,8 @@ Useful commands and flags:
 
 ```bash
 workdash --server            # start the TUI plus localhost JSON control API
+workdash --server --listen 192.168.1.5@192.168.1.10,192.168.1.11
+workdash list --host dashboard.lan --json  # connect to an explicit server host
 workdash list                # list server-backed dashboard items as plain text
 workdash list --refresh      # ask the server to refresh items before listing
 workdash list --json         # list items as machine-readable JSON
@@ -186,11 +188,27 @@ added by URL only shares the issue's worktree from the next refresh onwards.
 
 ## Local control server
 
-`workdash --server` starts the normal TUI and a localhost JSON control API in the
-same process. V0 listens on `127.0.0.1:8765`, accepts JSON only, and stops when
-the TUI exits. Client commands such as `list`, `info`, `analyze`, `code`, `todo`,
-`read`, and `write` connect to this server instead of loading GitHub or Zellij
-state themselves.
+`workdash --server` starts the normal TUI and a JSON control API in the same
+process. It always listens on `127.0.0.1:8765`, accepts JSON only, and stops all
+listeners when the TUI exits.
+
+For trusted LAN access, add repeatable `--listen HOST@IP1,IP2` options alongside
+`--server`. Each listener needs a nonempty list of exact accepted source IPs
+(no hostnames or subnets). All supplied source IPs are shared across every
+listener, with localhost always accepted. Access checks use the actual peer IP,
+never forwarding headers. Wildcard binds are rejected; the port stays 8765.
+If any listener cannot bind, the entire server startup fails.
+
+**Trusted LAN only:** the API is intentionally unauthenticated plain HTTP.
+Allowed clients can execute dashboard actions; do not expose it to untrusted
+networks or treat the IP allowlist as authentication or encryption.
+
+Client commands `list`, `info`, `analyze`, `code`, `terminal`, `todo`, `read`,
+`write`, and `close` accept `--host HOST` (default `127.0.0.1`). Listener and
+client hosts may be IP addresses or DNS hostnames. Clients connect on port 8765
+without loading local GitHub, configuration, or Zellij state. Todo's `--target`
+still selects its repository, independently of the server host. `show-config`
+continues to report the default `127.0.0.1:8765` address.
 
 ## List command
 

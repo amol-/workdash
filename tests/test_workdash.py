@@ -143,8 +143,13 @@ def test_main_bare_interactive_uses_own_zellij_session_from_environment(
     assert captured["session"].zellij_session == "workdash-abc123"
 
 
+@pytest.mark.parametrize(
+    "listeners",
+    [(), (("dashboard.lan", ("192.0.2.1",)), ("192.0.2.5", ("192.0.2.2", "192.0.2.3")))],
+)
 def test_main_server_refresh_before_tui_run_updates_session_and_repaints_when_running(
     monkeypatch: pytest.MonkeyPatch,
+    listeners,
 ) -> None:
     initial_item = _issue(number=1)
     early_refresh_item = _issue(number=2)
@@ -164,7 +169,8 @@ def test_main_server_refresh_before_tui_run_updates_session_and_repaints_when_ru
             return None
 
     class FakeControlServer:
-        def __init__(self, session) -> None:
+        def __init__(self, session, *, listeners=()) -> None:
+            captured["listeners"] = listeners
             self.session = session
 
         def start(self) -> None:
@@ -208,7 +214,11 @@ def test_main_server_refresh_before_tui_run_updates_session_and_repaints_when_ru
     monkeypatch.setattr(workdash_module, "list_workdash_sessions", lambda: ["workdash-main"])
     monkeypatch.setenv("ZELLIJ", "0")
 
-    assert workdash_module.main(["--server"]) == 0
+    argv = ["--server"]
+    for host, ips in listeners:
+        argv.extend(["--listen", f"{host}@{','.join(ips)}"])
+    assert workdash_module.main(argv) == 0
+    assert captured["listeners"] == listeners
 
     assert captured["app_session"].items_changed_callback is not None
     assert captured["early_api_ids"] == ["owner/repo#ISSUE-2"]
@@ -237,7 +247,8 @@ def test_main_server_refresh_callback_reraises_unrelated_runtime_errors(
             return None
 
     class FakeControlServer:
-        def __init__(self, session) -> None:
+        def __init__(self, session, *, listeners=()) -> None:
+            assert listeners == ()
             self.session = session
 
         def start(self) -> None:
@@ -394,6 +405,9 @@ def test_main_list_command_does_not_print_loading_message(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "list"
             assert payload == {"refresh": False}
@@ -541,6 +555,13 @@ def test_select_workdash_session_treats_no_zellij_sessions_as_empty(
         (["list"], "list", {"refresh": False}),
         (["list", "--refresh"], "list", {"refresh": True}),
         (["info"], "info", {"include_all_panes": False}),
+        (["terminal", "owner/repo#ISSUE-1"], "terminal", {"target": "owner/repo#ISSUE-1"}),
+        (
+            ["todo", "Fix it", "--target", "owner/repo"],
+            "todo",
+            {"text": "Fix it", "target": "owner/repo"},
+        ),
+        (["close", "terminal_23"], "pane/close", {"pane_id": "terminal_23"}),
         (["info", "--all"], "info", {"include_all_panes": True}),
         (
             ["analyze", "owner/repo#ISSUE-1", "--agent", "codex"],
@@ -570,10 +591,12 @@ def test_select_workdash_session_treats_no_zellij_sessions_as_empty(
         ),
     ],
 )
+@pytest.mark.parametrize("host", ["127.0.0.1", "192.0.2.10", "dashboard.lan"])
 def test_main_server_backed_commands_are_pure_http_clients(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path,
+    host: str,
     argv: list[str],
     expected_endpoint: str,
     expected_payload: dict[str, object],
@@ -582,6 +605,9 @@ def test_main_server_backed_commands_are_pure_http_clients(
     analysis_path = tmp_path / "missing-analysis.md"
 
     class FakeControlClient:
+        def __init__(self, selected_host="127.0.0.1") -> None:
+            assert selected_host == host
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             requests.append((endpoint, dict(payload or {})))
             if endpoint == "list":
@@ -608,6 +634,23 @@ def test_main_server_backed_commands_are_pure_http_clients(
                     "pane_title": "code_owner_repo_1",
                     "pane_id": "terminal_1",
                 }
+            if endpoint == "terminal":
+                return {
+                    "item_id": "owner/repo#ISSUE-1",
+                    "session": "workdash",
+                    "cwd": "/tmp/wt",
+                    "pane_title": "terminal_owner_repo_1",
+                    "pane_id": "terminal_1",
+                }
+            if endpoint == "todo":
+                return {
+                    "item_id": "owner/repo#ISSUE-WT1",
+                    "todo_repository": "me/todos",
+                    "target": payload["target"],
+                    "url": "https://example.com/1",
+                }
+            if endpoint == "pane/close":
+                return {"pane_id": payload["pane_id"], "accepted": True}
             if endpoint == "pane/content":
                 return {"pane_id": "terminal_23", "content": "ready\n", "full": payload["full"]}
             if endpoint == "pane/send":
@@ -643,7 +686,7 @@ def test_main_server_backed_commands_are_pure_http_clients(
         lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
     )
 
-    assert workdash_module.main(argv) == 0
+    assert workdash_module.main(argv + (["--host", host] if host != "127.0.0.1" else [])) == 0
 
     output = capsys.readouterr().out
     if expected_endpoint == "analyze":
@@ -671,6 +714,9 @@ def test_main_server_backed_command_reports_unreachable_server(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
 ) -> None:
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             raise workdash_module.WorkdashControlError(
                 "server_unreachable",
@@ -692,6 +738,9 @@ def test_main_analyze_human_output_formats_server_response(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "analyze"
             assert payload == {"target": "owner/repo#ISSUE-1", "agent": None}
@@ -730,6 +779,9 @@ def test_main_analyze_json_outputs_local_analysis_path_without_server_content_fi
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "analyze"
             assert payload == {"target": "https://github.com/owner/repo/issues/1", "agent": None}
@@ -769,6 +821,9 @@ def test_main_analyze_json_writes_unique_secure_temp_file_from_server_content(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "analyze"
             return {
@@ -829,6 +884,9 @@ def test_main_analyze_reports_invalid_content_response(
     expected_error: str,
 ) -> None:
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "analyze"
             return {
@@ -857,6 +915,9 @@ def test_main_analyze_reports_server_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             raise workdash_module.WorkdashControlError(
                 "unknown_agent", "Analysis agent 'vscode' is not configured."
@@ -876,6 +937,9 @@ def test_main_code_human_output_formats_server_response(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "code"
             assert payload == {"target": "owner/repo#ISSUE-1", "agent": "pi"}
@@ -915,6 +979,9 @@ def test_main_code_json_outputs_server_response(
     }
 
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "code"
             assert payload == {"target": "https://github.com/owner/repo/issues/1", "agent": "codex"}
@@ -937,6 +1004,9 @@ def test_main_code_reports_server_error_before_local_worktree(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             raise workdash_module.WorkdashControlError(
                 "unknown_agent",
@@ -963,6 +1033,9 @@ def test_main_read_human_output_prints_pane_content(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "pane/content"
             assert payload == {"pane_id": "terminal_23", "full": False}
@@ -982,6 +1055,9 @@ def test_main_read_json_outputs_server_response(
     response = {"pane_id": "terminal_23", "content": "history", "full": True}
 
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "pane/content"
             assert payload == {"pane_id": "terminal_23", "full": True}
@@ -999,6 +1075,9 @@ def test_main_write_human_output_confirms_accepted_input(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "pane/send"
             assert payload == {"pane_id": "terminal_23", "data": "continue", "raw": False}
@@ -1018,6 +1097,9 @@ def test_main_write_json_outputs_server_response(
     response = {"pane_id": "terminal_23", "raw": True, "accepted": True}
 
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "pane/send"
             assert payload == {"pane_id": "terminal_23", "data": "continue", "raw": True}
@@ -1035,6 +1117,9 @@ def test_main_info_human_output_formats_server_response(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "info"
             assert payload == {"include_all_panes": False}
@@ -1071,6 +1156,9 @@ def test_main_info_json_outputs_server_response(
     response = {"session": "workdash", "panes": []}
 
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "info"
             assert payload == {"include_all_panes": False}
@@ -1407,3 +1495,69 @@ def test_print_work_items_uses_review_label_for_review_requested_pr(
 
     output_line = capsys.readouterr().out.strip()
     assert output_line.startswith("REVIEW")
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--listen", "127.0.0.2@192.0.2.1"],
+        ["--server", "--listen"],
+        *[
+            ["--server", "--listen", value]
+            for value in (
+                "",
+                "127.0.0.2",
+                "@192.0.2.1",
+                "127.0.0.2@",
+                "127.0.0.2@,192.0.2.1",
+                "127.0.0.2@192.0.2.1,",
+                "127.0.0.2@192.0.2.1,,192.0.2.2",
+                "127.0.0.2@client.lan",
+                "127.0.0.2@192.0.2.0/24",
+                "127.0.0.2@999.0.0.1",
+                "127.0.0.2@192.0.2.1@192.0.2.2",
+                "0.0.0.0@192.0.2.1",
+                "*@192.0.2.1",
+                "::@192.0.2.1",
+                "dashboard.lan:9000@192.0.2.1",
+            )
+        ],
+    ],
+)
+def test_main_rejects_invalid_listeners_before_loading_local_state(
+    monkeypatch, capsys, argv
+) -> None:
+    def unexpected_preflight():
+        raise AssertionError("invalid CLI reached GitHub preflight")
+
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", unexpected_preflight)
+    with pytest.raises(SystemExit) as error:
+        workdash_module.main(argv)
+    assert error.value.code == 2
+    assert "--listen" in capsys.readouterr().err
+
+
+def test_server_listener_flags_reach_the_zellij_dashboard(monkeypatch, tmp_path) -> None:
+    import workdash.launcher as launcher_module
+
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setattr(launcher_module, "_resolve_zellij_binary", lambda: "/usr/bin/zellij")
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    captured = {}
+
+    def capture_layout(command, *, session_name):
+        captured["command"] = command
+        return str(tmp_path / "layout.kdl")
+
+    def execvp(_file, _args):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(launcher_module, "_write_zellij_startup_layout", capture_layout)
+    monkeypatch.setattr(launcher_module.os, "execvp", execvp)
+    argv = ["--server", "--listen", "dashboard.lan@192.0.2.1", "--listen", "192.0.2.5@192.0.2.2"]
+    with pytest.raises(SystemExit) as error:
+        workdash_module.main(argv)
+    assert error.value.code == 0
+    assert captured["command"][-len(argv) :] == argv
+    assert "--direct" in captured["command"]

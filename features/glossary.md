@@ -34,10 +34,10 @@ Canonical product vocabulary used by the feature files.
 - Supported coding agent: One of Claude, ChatGPT Codex, VSCode Copilot, or pi.
 - Terminal-backed work action: A work action that opens a shell or terminal-hosted coding agent for a work item.
 - CLI orchestration command: A non-interactive command that lets a user or automation client inspect or control the active server-backed Workdash session.
-- Workdash server: The localhost JSON API server started by `workdash --server` in the same process as the TUI.
-- Server-backed Workdash session: A Workdash TUI process started with `--server`, sharing one in-memory dashboard state with the local JSON API.
-- Local Workdash JSON API: The HTTP JSON API exposed by the Workdash server on `127.0.0.1:8765`.
-- API client: A local command or automation agent that sends JSON requests to the Workdash server.
+- Workdash server: The JSON API server started by `workdash --server` in the same process as the TUI.
+- Server-backed Workdash session: A Workdash TUI process started with `--server`, sharing one in-memory dashboard state with the JSON API.
+- Local Workdash JSON API: The HTTP JSON API exposed by the Workdash server on `127.0.0.1:8765` by default, optionally on explicit trusted LAN listeners.
+- API client: A command or trusted LAN automation agent that sends JSON requests to the Workdash server.
 - Pane ID: The copy/paste Zellij pane identifier reported by `workdash info`, used by pane content and send APIs.
 - Zellij session: A terminal multiplexer session used by the system to host terminal-backed work actions.
 - Workdash Zellij session: A Zellij session whose name starts with `workdash`, used by the system as the live terminal surface for orchestration commands and terminal-backed work actions.

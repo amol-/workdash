@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 import workdash.control as control_module
 from workdash.backend import IncludeResult
 from workdash.config import WorkdashConfig
@@ -251,7 +253,7 @@ def test_api_rejects_non_localhost_remote_addr() -> None:
         response.append((status, dict(headers)))
 
     body = b"".join(
-        control_module._localhost_only_wsgi_app(unexpected_app)(
+        control_module._source_filtered_wsgi_app(unexpected_app)(
             {"REMOTE_ADDR": "203.0.113.1"}, start_response
         )
     )
@@ -261,6 +263,181 @@ def test_api_rejects_non_localhost_remote_addr() -> None:
         "ok": False,
         "error": {
             "code": "forbidden",
-            "message": "Workdash V0 only accepts localhost clients.",
+            "message": "Workdash server does not accept this source IP.",
         },
     }
+
+
+def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -> None:
+    import socket
+    from http.client import HTTPConnection
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setattr(control_module, "SERVER_PORT", port)
+    monkeypatch.setattr(
+        control_module.urllib.request,
+        "urlopen",
+        control_module.urllib.request.build_opener(
+            control_module.urllib.request.ProxyHandler({})
+        ).open,
+    )
+    create_todo = MagicMock(side_effect=AssertionError("denied request executed a todo"))
+    monkeypatch.setattr(control_module, "create_todo", create_todo)
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="Shared item")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    hosts = ("127.0.0.1", "127.0.0.2", "127.0.0.3")
+    server = control_module.WorkdashControlServer(
+        session, listeners=((hosts[1], (hosts[2],)), (hosts[2], (hosts[1],)))
+    )
+    server.start()
+    httpds, threads = list(server._httpds), list(server._threads)
+    try:
+        # Both explicit sources can use every listener, including the default.
+        for host in hosts:
+            for source in hosts[1:]:
+                connection = HTTPConnection(host, port, timeout=2, source_address=(source, 0))
+                try:
+                    connection.request(
+                        "POST", "/api/v0/list", "{}", {"Content-Type": "application/json"}
+                    )
+                    response = connection.getresponse()
+                    assert response.status == 200
+                    assert (
+                        json.loads(response.read())["result"]["items"][0]["title"] == "Shared item"
+                    )
+                finally:
+                    connection.close()
+            denied = HTTPConnection(host, port, timeout=2, source_address=("127.0.0.4", 0))
+            try:
+                denied.request(
+                    "POST",
+                    "/api/v0/todo",
+                    '{"text":"not allowed"}',
+                    {
+                        "Content-Type": "application/json",
+                        "X-Forwarded-For": "127.0.0.1",
+                        "Forwarded": "for=127.0.0.1",
+                    },
+                )
+                response = denied.getresponse()
+                assert response.status == 403
+                assert json.loads(response.read())["error"]["code"] == "forbidden"
+            finally:
+                denied.close()
+        # The real urllib client reaches both hostname and alternate-IP listeners.
+        for host in ("localhost", hosts[1]):
+            result = control_module.WorkdashControlClient(host).request("list")
+            assert result["items"][0]["id"] == "owner/repo#ISSUE-1"
+        create_todo.assert_not_called()
+    finally:
+        server.stop()
+    assert all(not thread.is_alive() for thread in threads)
+    assert all(httpd.socket.fileno() == -1 for httpd in httpds)
+    for host in hosts:
+        with socket.socket() as replacement:
+            replacement.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            replacement.bind((host, port))
+
+
+@pytest.mark.parametrize("failing_host", ["127.0.0.3", "localhost"])
+def test_listener_bind_failure_releases_all_earlier_sockets(monkeypatch, failing_host) -> None:
+    import errno
+    import socket
+
+    bound = []
+    make_server = control_module.make_server
+
+    def record_server(host, port, app):
+        httpd = make_server(host, port, app)
+        bound.append(httpd)
+        return httpd
+
+    monkeypatch.setattr(control_module, "make_server", record_server)
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.3", 0))
+        occupied.listen()
+        port = occupied.getsockname()[1]
+        monkeypatch.setattr(control_module, "SERVER_PORT", port)
+        server = control_module.WorkdashControlServer(
+            MagicMock(), listeners=(("127.0.0.2", ("192.0.2.1",)), (failing_host, ("192.0.2.2",)))
+        )
+        with pytest.raises(RuntimeError, match=f"{failing_host}:{port}") as error:
+            server.start()
+        assert isinstance(error.value.__cause__, OSError)
+        assert error.value.__cause__.errno == errno.EADDRINUSE
+        assert len(bound) == 2
+        assert all(httpd.socket.fileno() == -1 for httpd in bound)
+        for host in ("127.0.0.1", "127.0.0.2"):
+            with socket.socket() as replacement:
+                replacement.bind((host, port))
+        server.stop()
+
+
+def test_resolved_wildcard_listener_is_rejected_and_closed(monkeypatch) -> None:
+    monkeypatch.setattr(control_module, "SERVER_PORT", 0)
+    bound = []
+    make_server = control_module.make_server
+
+    def record_server(host, port, app):
+        httpd = make_server(host, port, app)
+        bound.append(httpd)
+        return httpd
+
+    monkeypatch.setattr(control_module, "make_server", record_server)
+    server = control_module.WorkdashControlServer(MagicMock(), listeners=(("0", ("192.0.2.1",)),))
+    with pytest.raises(RuntimeError, match="Wildcard listener binds"):
+        server.start()
+    assert len(bound) == 2
+    assert all(httpd.socket.fileno() == -1 for httpd in bound)
+
+
+@pytest.mark.parametrize("body", [b"not json", b'{"ok":false}', b'{"ok":true,"result":[]}'])
+def test_client_names_selected_host_for_invalid_responses(monkeypatch, body) -> None:
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = body
+    urlopen = MagicMock(return_value=response)
+    monkeypatch.setattr(control_module.urllib.request, "urlopen", urlopen)
+    with pytest.raises(control_module.WorkdashControlError, match="dashboard.lan:8765") as error:
+        control_module.WorkdashControlClient("dashboard.lan").request("list", {"refresh": True})
+    assert error.value.code == "invalid_response"
+    request = urlopen.call_args.args[0]
+    assert request.full_url == "http://dashboard.lan:8765/api/v0/list"
+    assert json.loads(request.data) == {"refresh": True}
+
+
+def test_client_preserves_api_errors_and_names_selected_host(monkeypatch) -> None:
+    import io
+    import urllib.error
+
+    failure = urllib.error.HTTPError(
+        "http://dashboard.lan:8765/api/v0/list",
+        403,
+        "Forbidden",
+        {},
+        io.BytesIO(b'{"ok":false,"error":{"code":"forbidden","message":"Denied"}}'),
+    )
+    monkeypatch.setattr(control_module.urllib.request, "urlopen", MagicMock(side_effect=failure))
+    with pytest.raises(
+        control_module.WorkdashControlError, match="dashboard.lan:8765.*Denied"
+    ) as error:
+        control_module.WorkdashControlClient("dashboard.lan").request("list")
+    assert error.value.status == 403
+    assert error.value.code == "forbidden"
+    assert error.value.__cause__ is failure
+
+
+def test_client_names_selected_host_when_unreachable(monkeypatch) -> None:
+    failure = OSError("connection refused")
+    monkeypatch.setattr(control_module.urllib.request, "urlopen", MagicMock(side_effect=failure))
+    with pytest.raises(control_module.WorkdashControlError, match="dashboard.lan:8765") as error:
+        control_module.WorkdashControlClient("dashboard.lan").request("list")
+    assert error.value.status == 503
+    assert error.value.code == "server_unreachable"
+    assert error.value.__cause__ is failure

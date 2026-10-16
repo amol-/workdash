@@ -1,8 +1,8 @@
 @feature:F-API-JSON-CONTROL
 Feature: Local JSON control API
 
-  A server-backed Workdash session exposes a localhost JSON API so CLI commands
-  and local automation agents can inspect and control the same live dashboard
+  A server-backed Workdash session exposes a JSON API so CLI commands
+  and trusted LAN automation agents can inspect and control the same live dashboard
   state as the TUI.
 
   Rules:
@@ -10,9 +10,13 @@ Feature: Local JSON control API
     - The API server starts only after the initial dashboard items have loaded successfully.
     - The API server runs in the background and stops when the TUI process exits.
     - At most one server-backed Workdash session can be active in V0.
-    - The V0 server listens on fixed address `127.0.0.1:8765`.
-    - The V0 server rejects requests whose client address is not localhost.
-    - V0 has no authentication because the server is localhost-only.
+    - The server always listens on `127.0.0.1:8765`; repeatable `--listen HOST@IP1,IP2` adds listeners and requires `--server`.
+    - Each listener requires a nonempty list of exact source IPs, not hostnames or subnets; missing, malformed, or empty entries are rejected.
+    - Listener hosts may be IPs or DNS hostnames; wildcard binds and custom ports are not supported. The port is always 8765.
+    - All listeners share the union of accepted source IPs, automatically including localhost.
+    - Actual peer source IPs determine access, never forwarding headers; unlisted peers receive a forbidden JSON error without executing actions.
+    - If any listener cannot bind, startup fails without leaving other listeners active; exiting the TUI stops every listener.
+    - The API is intentionally unauthenticated plain HTTP for trusted LAN use only.
     - V0 exposes JSON APIs only, not an HTML browser UI.
     - API requests and responses use JSON objects.
     - V0 capabilities are exposed as `POST /api/v0/list`, `POST /api/v0/info`, `POST /api/v0/analyze`, `POST /api/v0/code`, `POST /api/v0/terminal`, `POST /api/v0/todo`, `POST /api/v0/show-config`, `POST /api/v0/pane/content`, `POST /api/v0/pane/send`, and `POST /api/v0/pane/close`.
@@ -184,3 +188,16 @@ Feature: Local JSON control API
     When a client requests pane close for a pane ID that Zellij rejects
     Then the API returns an error with an appropriate HTTP status
     And the error message includes the Zellij failure in user-readable form
+
+  @id:F-API-JSON-CONTROL-S021
+  Scenario: Explicit source IPs are shared across listeners
+    Given listeners accept source IPs `192.0.2.10` and `192.0.2.11`
+    When a client at `192.0.2.11` requests the list API
+    Then the API returns the current in-memory work items
+
+  @id:F-API-JSON-CONTROL-S022
+  Scenario: Forwarding headers cannot grant access
+    Given listeners accept source IPs `192.0.2.10` and `192.0.2.11`
+    When a client at `192.0.2.12` requests a todo with a forwarding header claiming `192.0.2.10`
+    Then the API returns a forbidden error
+    And the server does not create a GitHub issue

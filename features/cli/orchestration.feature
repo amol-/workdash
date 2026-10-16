@@ -7,9 +7,10 @@ Feature: CLI orchestration commands
 
   Rules:
     - `workdash list`, `workdash info`, `workdash analyze`, `workdash code`, `workdash terminal`, `workdash todo`, `workdash read`, `workdash write`, and `workdash close` require a running `workdash --server` session.
-    - Server-backed CLI commands connect to the local Workdash JSON API at `127.0.0.1:8765`.
+    - All nine server-backed CLI commands accept `--host HOST`, defaulting to `127.0.0.1`, using plain HTTP on fixed port 8765.
+    - Client hosts may be IPs or DNS hostnames; host selection preserves positional item targets and todo `--target owner/repo`.
     - Server-backed CLI commands do not load configuration, run GitHub preflight, inspect Zellij, or fetch GitHub directly.
-    - Server-backed CLI commands report a clear error when the local Workdash server is not reachable.
+    - Server-backed CLI commands report a clear error naming the selected host when the Workdash server is not reachable.
     - CLI commands that return information support `--json`.
     - `workdash info` reports live pane state from the server-backed Workdash session.
     - Live Zellij pane state is authoritative; pane identifiers are discovered on demand, not persisted.
@@ -264,3 +265,11 @@ Feature: CLI orchestration commands
     Then the command requests analysis from the local Workdash server
     And the server analysis response includes markdown content as base64 with a file name
     And the system returns JSON with the item ID, selected agent, local analysis path, cache status, and no server file content fields
+
+  @id:F-CLI-ORCHESTRATION-S034
+  Scenario: Todo selects a remote server without changing its target
+    Given a server-backed Workdash session is running
+    When the user runs `workdash todo "Fix the flaky test" --target owner/repo --host dashboard.lan`
+    Then the command connects to host `dashboard.lan`
+    And the command captures the todo through the local Workdash server
+    And the system reports the created Workdash item ID and issue URL

@@ -292,6 +292,9 @@ def _user_starts_server_backed_client_command(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             scenario_state.setdefault("control_requests", []).append(
                 {"endpoint": endpoint, "payload": dict(payload or {})}

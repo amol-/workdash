@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from pytest_bdd import given, then, when
+from pytest_bdd import given, parsers, then, when
 
 from workdash.backend import compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
@@ -115,6 +115,9 @@ def _run_workdash(
     if scenario_state.get("api_session") is not None:
 
         class FakeControlClient:
+            def __init__(self, host="127.0.0.1") -> None:
+                assert host == "127.0.0.1"
+
             def request(
                 self, endpoint: str, payload: dict[str, object] | None = None
             ) -> dict[str, object]:
@@ -1210,3 +1213,8 @@ def _formats_server_response(scenario_state: dict[str, Any]) -> None:
 def _reports_unknown_work_item(scenario_state: dict[str, Any]) -> None:
     assert "No dashboard item matches" in scenario_state["stderr"]
     assert "owner/repo#ISSUE-99" in scenario_state["stderr"]
+
+
+@then(parsers.parse("the command connects to host `{host}`"))
+def _command_connects_to_host(host: str, scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["client_host"] == host
