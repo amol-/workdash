@@ -20,6 +20,7 @@ Feature: Local JSON control API
     - V0 exposes JSON APIs only, not an HTML browser UI.
     - API requests and responses use JSON objects.
     - V0 capabilities are exposed as `POST /api/v0/list`, `POST /api/v0/info`, `POST /api/v0/analyze`, `POST /api/v0/code`, `POST /api/v0/terminal`, `POST /api/v0/todo`, `POST /api/v0/show-config`, `POST /api/v0/pane/content`, `POST /api/v0/pane/send`, and `POST /api/v0/pane/close`.
+    - `POST /api/v0/todo` accepts optional body text as long details separate from the title, appended unchanged after the metadata block.
     - Successful API responses use `{ "ok": true, "result": ... }`.
     - Failed API responses use an appropriate HTTP error status and `{ "ok": false, "error": { "code": ..., "message": ... } }`.
     - Work item actions accept Workdash item IDs exactly as emitted by `workdash list`.
@@ -201,3 +202,13 @@ Feature: Local JSON control API
     When a client at `192.0.2.12` requests a todo with a forwarding header claiming `192.0.2.10`
     Then the API returns a forbidden error
     And the server does not create a GitHub issue
+
+  @id:F-API-JSON-CONTROL-S023
+  Scenario: Todo API captures long details separately from its title
+    Given a server-backed Workdash session has loaded dashboard items
+    And the user has a multiline todo body longer than 256 characters
+    When a client requests a short todo title with that body and target `owner/repo`
+    Then the server creates the todo issue in the configured todo repository
+    And the created issue keeps the short title and the complete body after its metadata
+    And the new todo becomes part of the shared dashboard state
+    And the API returns the Workdash item ID, todo repository, target, issue number, and issue URL

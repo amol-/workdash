@@ -11,7 +11,7 @@ Feature: Capture a todo
     - The todo repository is a required configuration field naming one `owner/repo`.
     - A todo is created as an open GitHub issue in the todo repository.
     - The todo text is the issue title.
-    - The issue body is reserved for system-owned metadata and contains a JSON metadata block recording the todo format version and the todo target when one was given.
+    - The issue body starts with a system-owned JSON metadata block recording the todo format version and the todo target when one was given.
     - A todo issue is assigned to the user, so it appears in the dashboard through the assigned-issue source without any extra configuration.
     - A todo issue is labeled `workdash-todo`.
     - The system creates the `workdash-todo` label in the todo repository when it does not exist yet.
@@ -19,6 +19,7 @@ Feature: Capture a todo
     - The system rejects a todo whose text is empty and a target that is not in `owner/repo` form, without creating an issue.
     - When the todo repository does not exist or cannot be written to, the system reports the GitHub failure and tells the user to create the todo repository.
     - A created todo becomes part of the current dashboard state immediately, without waiting for the next refresh.
+    - CLI and JSON API capture accept optional body content, preserved after the metadata block; omitting it keeps the metadata-only body unchanged.
     - Todo capture is available from the TUI, from the command line, and from the local JSON API.
 
   @id:F-TODO-CREATE-S001

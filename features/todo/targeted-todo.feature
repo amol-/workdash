@@ -13,6 +13,7 @@ Feature: Targeted todo work actions
     - A targeted todo item's Workdash item ID is `<target>#ISSUE-WT<number>`, where the number is the todo issue number in the todo repository, so it never collides with the target repository's own issue of the same number.
     - Opening a targeted todo item in the browser opens the todo issue in the todo repository.
     - Analysis context for a targeted todo item is read from the todo issue in the todo repository.
+    - Free-form body text or JSON naming other repositories never overrides the metadata target, including after refresh.
     - Code, terminal, and analysis actions for a targeted todo item run in a worktree of the target repository.
     - A targeted todo item's worktree is checked out on a branch named "wt-<number>", created from the target repository's current default branch.
     - A targeted todo item keeps a worktree of its own, separate from the target repository's issue and pull request worktrees.
@@ -51,3 +52,14 @@ Feature: Targeted todo work actions
     When the user lists work items
     Then the item is shown for the todo repository
     And the item's Workdash item ID is the ordinary issue ID for that repository and number
+
+  @id:F-TODO-TARGET-S006
+  Scenario: Target metadata stays authoritative over body details after refresh
+    Given the user has a configured todo repository
+    When the user captures a targeted todo with body details naming a different repository
+    And the system prepares the item's worktree
+    Then the worktree belongs to the `owner/repo` main clone
+    When the system refreshes that captured todo from GitHub
+    And the system prepares the item's worktree
+    Then the worktree belongs to the `owner/repo` main clone
+    And the worktree is checked out on a branch named "wt-110"
