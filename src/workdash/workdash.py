@@ -112,6 +112,7 @@ class CLIOptions:
     include_all_panes: bool = False
     pane_id: str | None = None
     text: str | None = None
+    body: str | None = None
     full: bool = False
     raw: bool = False
     host: str = "127.0.0.1"
@@ -201,11 +202,16 @@ class WorkdashCommands:
             _print_terminal_result(result)
         return 0
 
-    def todo_cli(self, *, text: str, target: str | None, json_output: bool) -> int:
+    def todo_cli(
+        self, *, text: str, target: str | None, json_output: bool, body: str | None = None
+    ) -> int:
         """Capture a todo through the local Workdash server."""
 
+        payload = {"text": text, "target": target}
+        if body is not None:
+            payload["body"] = body
         try:
-            result = self._client.request("todo", {"text": text, "target": target})
+            result = self._client.request("todo", payload)
         except WorkdashControlError as error:
             _print_control_error(error)
             return 1
@@ -416,6 +422,7 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
         return commands.todo_cli(
             text=options.text or "",
             target=options.target,
+            body=options.body,
             json_output=options.json_output,
         )
     if options.command == "read":
@@ -589,6 +596,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         help="Repository the todo is about, as owner/repo.",
     )
     todo_parser.add_argument(
+        "--body",
+        help="Extra issue body content appended after the todo metadata.",
+    )
+    todo_parser.add_argument(
         "--json",
         dest="json_output",
         action="store_true",
@@ -714,6 +725,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         include_all_panes=getattr(namespace, "include_all_panes", False),
         pane_id=getattr(namespace, "pane_id", None),
         text=getattr(namespace, "text", None),
+        body=getattr(namespace, "body", None),
         full=getattr(namespace, "full", False),
         raw=getattr(namespace, "raw", False),
         host=getattr(namespace, "host", "127.0.0.1"),
