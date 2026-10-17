@@ -561,6 +561,19 @@ def test_select_workdash_session_treats_no_zellij_sessions_as_empty(
             "todo",
             {"text": "Fix it", "target": "owner/repo"},
         ),
+        (
+            [
+                "todo",
+                "Fix it",
+                "--target",
+                "owner/repo",
+                "--body",
+                "  Details\n\nMore context\n",
+                "--json",
+            ],
+            "todo",
+            {"text": "Fix it", "target": "owner/repo", "body": "  Details\n\nMore context\n"},
+        ),
         (["close", "terminal_23"], "pane/close", {"pane_id": "terminal_23"}),
         (["info", "--all"], "info", {"include_all_panes": True}),
         (
@@ -697,6 +710,13 @@ def test_main_server_backed_commands_are_pure_http_clients(
         )
         os.unlink(local_path)
     assert requests == [(expected_endpoint, expected_payload)]
+    if expected_endpoint == "todo" and "--json" in argv:
+        assert json.loads(output) == {
+            "item_id": "owner/repo#ISSUE-WT1",
+            "todo_repository": "me/todos",
+            "target": "owner/repo",
+            "url": "https://example.com/1",
+        }
 
 
 @pytest.mark.parametrize(

@@ -6,8 +6,10 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from webob import Request
 
 import workdash.control as control_module
+from gh_todo_fake import fake_gh_todo_run
 from workdash.backend import IncludeResult
 from workdash.config import WorkdashConfig
 from workdash.control import WorkdashSession, format_work_item_id
@@ -175,7 +177,8 @@ def test_agent_panes_map_an_authored_pr_to_the_worktree_of_the_issue_it_closes(
     assert [pane["item"] for pane in session.info()["panes"]] == ["owner/repo#PR-42149"]
 
 
-def test_todo_notifies_the_live_tui_after_capturing(monkeypatch) -> None:
+@pytest.mark.parametrize("body", [None, "  Context\n\nMore details\n  "])
+def test_todo_notifies_the_live_tui_after_capturing(body, monkeypatch) -> None:
     """A captured todo must reach a running TUI without waiting for the next refresh."""
 
     initial_item = _work_item(number=1, title="Initial")
@@ -197,13 +200,71 @@ def test_todo_notifies_the_live_tui_after_capturing(monkeypatch) -> None:
         ),
     )
 
-    result = session.todo(text="  Fix the flaky test  ", target="owner/repo")
+    result = session.todo(text="  Fix the flaky test  ", target="owner/repo", body=body)
 
     create_todo.assert_called_once_with(
-        todo_repository="testuser/todos", text="Fix the flaky test", target="owner/repo"
+        todo_repository="testuser/todos", text="Fix the flaky test", target="owner/repo", body=body
     )
     assert result["item_id"] == "owner/repo#ISSUE-WT10"
     assert repainted_item_ids == [["owner/repo#ISSUE-1", "owner/repo#ISSUE-WT10"]]
+
+
+@pytest.mark.parametrize(
+    ("body_fields", "expected_status"),
+    [
+        ({}, 200),
+        ({"body": None}, 200),
+        ({"body": "  Details\n\n  "}, 200),
+        ({"body": ""}, 400),
+        ({"body": 123}, 400),
+        ({"body": ["details"]}, 400),
+    ],
+)
+def test_todo_api_validates_optional_body_without_reformatting(
+    body_fields, expected_status, monkeypatch
+) -> None:
+    recorded: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", fake_gh_todo_run(recorded))
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="testuser/todos"),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    request = Request.blank(
+        "/api/v0/todo",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps({"text": "Short title", **body_fields}).encode(),
+    )
+
+    response = request.get_response(control_module._make_turbogears_app(session))
+
+    assert response.status_int == expected_status
+    payload = json.loads(response.text)
+    if expected_status == 400:
+        assert payload["error"]["code"] == "bad_request"
+        assert "Optional field 'body' must be a non-empty string." in payload["error"]["message"]
+        assert recorded == []
+        assert session.work_items == []
+    else:
+        command = recorded[-1]
+        metadata = '```json\n{\n  "workdash_todo_version": 1\n}\n```\n'
+        body = body_fields.get("body")
+        assert command[command.index("--body") + 1] == (
+            metadata if body is None else metadata + "\n" + body
+        )
+        assert payload == {
+            "ok": True,
+            "result": {
+                "item_id": "testuser/todos#ISSUE-110",
+                "todo_repository": "testuser/todos",
+                "target": None,
+                "number": 110,
+                "url": "https://github.com/testuser/todos/issues/110",
+            },
+        }
 
 
 def test_session_analyze_returns_cached_analysis_without_configured_agents(tmp_path) -> None:

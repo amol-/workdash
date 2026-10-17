@@ -37,7 +37,7 @@ Feature: CLI orchestration commands
     - `workdash close` closes a pane through the server-backed pane close API.
     - `workdash analyze` returns markdown analysis content as base64 in the server response with `content_type`, `file_name`, and `file_content`.
     - `workdash analyze` writes the server-returned analysis content to a secure temporary local file and reports that client-side path as `analysis_path`.
-    - `workdash todo` captures a todo through the server, taking the todo text as its argument and an optional `--target owner/repo`.
+    - `workdash todo` captures a todo through the server, taking the title as its text argument, an optional `--target owner/repo`, and optional long details via `--body BODY`.
     - `workdash todo` reports the created Workdash item ID and the created issue URL.
 
   @id:F-CLI-ORCHESTRATION-S003
@@ -272,4 +272,13 @@ Feature: CLI orchestration commands
     When the user runs `workdash todo "Fix the flaky test" --target owner/repo --host dashboard.lan`
     Then the command connects to host `dashboard.lan`
     And the command captures the todo through the local Workdash server
+    And the system reports the created Workdash item ID and issue URL
+
+  @id:F-CLI-ORCHESTRATION-S035
+  Scenario: Todo captures long details separately from its title
+    Given a server-backed Workdash session is running
+    And the user has a multiline todo body longer than 256 characters
+    When the user captures a short todo title with that body using the CLI
+    Then the command captures the todo through the local Workdash server
+    And the created issue keeps the short title and the complete body after its metadata
     And the system reports the created Workdash item ID and issue URL
