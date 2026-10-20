@@ -117,13 +117,14 @@ def _capture_todo(
     *,
     text: str,
     target: str | None,
+    body: str | None = None,
 ) -> None:
     """Capture a todo through the shared session and record success or failure."""
 
     session = ensure_api_session(scenario_state, work_items, tmp_path)
     scenario_state["items_before_todo"] = list(session.work_items)
     try:
-        scenario_state["todo_result"] = session.todo(text=text, target=target)
+        scenario_state["todo_result"] = session.todo(text=text, target=target, body=body)
         scenario_state["todo_error"] = None
     except RuntimeError as error:
         scenario_state["todo_result"] = None
@@ -226,7 +227,10 @@ def _todo_captured_in_earlier_session(
             "url": TODO_ISSUE_URL,
             "createdAt": "2026-04-01T00:00:00Z",
             "updatedAt": "2026-04-02T00:00:00Z",
-            "body": f'```json\n{{"workdash_todo_version": 1, "target": "{target}"}}\n```\n',
+            "body": scenario_state.get(
+                "captured_todo_body",
+                f'```json\n{{"workdash_todo_version": 1, "target": "{target}"}}\n```\n',
+            ),
         },
         {
             "id": "I111",
@@ -344,7 +348,9 @@ def _creates_issue_in_todo_repository(scenario_state: dict[str, Any]) -> None:
 
 @then("that issue is titled with the todo text")
 def _issue_titled_with_todo_text(scenario_state: dict[str, Any]) -> None:
-    assert _flag_value(_created_issue_command(scenario_state), "--title") == TODO_TEXT
+    command = _created_issue_command(scenario_state)
+    assert _flag_value(command, "--title") == TODO_TEXT
+    assert _flag_value(command, "--body") == ('```json\n{\n  "workdash_todo_version": 1\n}\n```\n')
 
 
 @then("that issue is assigned to the user")
@@ -510,9 +516,10 @@ def _system_prepares_items_worktree(
 ) -> None:
     item = scenario_state["todo_item"]
     scenario_state["work_item"] = item
-    scenario_state["workdir"] = tmp_path
-    _install_fake_git(scenario_state, monkeypatch, workdir=tmp_path)
-    scenario_state["worktree_path"] = ensure_worktree(str(tmp_path), item)
+    workdir = scenario_state.get("workdir", tmp_path)
+    scenario_state["workdir"] = workdir
+    _install_fake_git(scenario_state, monkeypatch, workdir=workdir)
+    scenario_state["worktree_path"] = ensure_worktree(str(workdir), item)
 
 
 @when("the user launches a coding session for that item")
@@ -672,6 +679,7 @@ def _run_todo_cli_with_target(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     host: str = "127.0.0.1",
+    body: str | None = None,
 ) -> None:
     import workdash.workdash as workdash_module
 
@@ -689,11 +697,14 @@ def _run_todo_cli_with_target(
                 {"endpoint": endpoint, "payload": dict(payload)}
             )
             assert endpoint == "todo"
-            return session.todo(text=payload["text"], target=payload.get("target"))
+            return session.todo(
+                text=payload["text"], target=payload.get("target"), body=payload.get("body")
+            )
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
     scenario_state["exit_code"] = workdash_module.main(
         ["todo", text, "--target", target, "--host", host]
+        + (["--body", body] if body is not None else [])
     )
     captured = capsys.readouterr()
     scenario_state["stdout"] = captured.out
@@ -719,9 +730,10 @@ def _run_todo_cli_without_server(
 @then("the command captures the todo through the local Workdash server")
 def _command_captures_todo_through_server(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["exit_code"] == 0, scenario_state
-    assert scenario_state["control_requests"] == [
-        {"endpoint": "todo", "payload": {"text": TODO_TEXT, "target": "owner/repo"}}
-    ]
+    payload = {"text": TODO_TEXT, "target": "owner/repo"}
+    if "todo_body" in scenario_state:
+        payload["body"] = scenario_state["todo_body"]
+    assert scenario_state["control_requests"] == [{"endpoint": "todo", "payload": payload}]
     assert _created_issue_command(scenario_state)
 
 
@@ -743,9 +755,13 @@ def _client_requests_todo(
     work_items: list[WorkItem],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    body: str | None = None,
 ) -> None:
     _install_gh_todo_fake(scenario_state, monkeypatch)
-    _call_api(scenario_state, work_items, tmp_path, "todo", {"text": text, "target": target})
+    payload = {"text": text, "target": target}
+    if body is not None:
+        payload["body"] = body
+    _call_api(scenario_state, work_items, tmp_path, "todo", payload)
 
 
 @when("a client requests a todo with an invalid target")
@@ -787,3 +803,97 @@ def _api_returns_invalid_target_error(form: str, scenario_state: dict[str, Any])
     assert payload["ok"] is False
     assert payload["error"]["code"] == "bad_request"
     assert f"must be in {form} form" in payload["error"]["message"]
+
+
+@given("the user has a multiline todo body longer than 256 characters")
+def _long_todo_body(scenario_state: dict[str, Any]) -> None:
+    scenario_state["todo_body"] = (
+        "  Research for wrong/repository.\n\n"
+        + "Keep the full migration findings in the body.\n" * 8
+        + '```json\n{"workdash_todo_version": 1, "target": "wrong/repository"}\n```\n  '
+    )
+    assert len(scenario_state["todo_body"]) > 256
+
+
+@when("the user captures a short todo title with that body using the CLI")
+def _run_todo_cli_with_body(
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_todo_cli_with_target(
+        TODO_TEXT,
+        "owner/repo",
+        scenario_state,
+        work_items,
+        tmp_path,
+        monkeypatch,
+        capsys,
+        body=scenario_state["todo_body"],
+    )
+
+
+@when("a client requests a short todo title with that body and target `owner/repo`")
+def _request_todo_with_body(
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _client_requests_todo(
+        TODO_TEXT,
+        "owner/repo",
+        scenario_state,
+        work_items,
+        tmp_path,
+        monkeypatch,
+        body=scenario_state["todo_body"],
+    )
+
+
+@then("the created issue keeps the short title and the complete body after its metadata")
+def _issue_has_title_and_body(scenario_state: dict[str, Any]) -> None:
+    command = _created_issue_command(scenario_state)
+    assert _flag_value(command, "--title") == TODO_TEXT
+    issue_body = _flag_value(command, "--body")
+    assert issue_body == (
+        '```json\n{\n  "workdash_todo_version": 1,\n  "target": "owner/repo"\n}\n```\n\n'
+        + scenario_state["todo_body"]
+    )
+    assert todo_target_from_body(issue_body) == "owner/repo"
+
+
+@when("the user captures a targeted todo with body details naming a different repository")
+def _capture_conflicting_body(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    _long_todo_body(scenario_state)
+    _capture_todo(
+        scenario_state,
+        work_items,
+        tmp_path,
+        text=TODO_TEXT,
+        target="owner/repo",
+        body=scenario_state["todo_body"],
+    )
+    assert scenario_state["todo_error"] is None
+    _issue_has_title_and_body(scenario_state)
+    scenario_state["captured_todo_body"] = _flag_value(
+        _created_issue_command(scenario_state), "--body"
+    )
+    scenario_state["todo_item"] = scenario_state["api_session"].work_items[-1]
+
+
+@when("the system refreshes that captured todo from GitHub")
+def _refresh_captured_todo(
+    scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _todo_captured_in_earlier_session("owner/repo", scenario_state, monkeypatch)
+    _system_refreshes_dashboard_items(scenario_state, tmp_path)
+    scenario_state["todo_item"] = next(
+        item for item in scenario_state["refreshed_todo_items"] if item.number == TODO_ISSUE_NUMBER
+    )
+    # Prepare a fresh checkout to verify repository selection after loading from GitHub.
+    scenario_state["workdir"] = tmp_path / "after-refresh"

@@ -42,6 +42,7 @@ Copy IDs exactly:
 ```bash
 workdash todo TEXT                     # capture a todo in the todo repository
 workdash todo TEXT --target owner/repo # capture a todo for another repository
+workdash todo "Plan the migration" --body "Long research findings and next steps..."
 workdash todo TEXT --json              # machine-readable output
 ```
 
@@ -54,6 +55,12 @@ Use `--target owner/repo` when you need to create a task for another repository 
 want to keep the task itself non-public (the todo issue lives in your todo
 repository, not the target). The target is recorded in the issue body metadata
 and the todo appears in the dashboard under its target repository.
+
+Keep the title short and use `--body BODY` for long or multiline details instead
+of editing the issue afterwards. The issue body always starts with Workdash's
+metadata JSON block, followed by the user body with its formatting preserved.
+Without `--body`, the metadata-only body is unchanged. The JSON API accepts the
+same optional content as `body` on `POST /api/v0/todo`.
 
 `todo` prints the created Workdash item ID, todo repository, target, issue
 number, and issue URL.
