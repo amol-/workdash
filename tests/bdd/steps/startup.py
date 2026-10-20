@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -448,6 +449,48 @@ def _zellij_process_disables_resurrection_state(scenario_state: dict[str, Any]) 
 def _dashboard_pane_closes_when_dashboard_exits(scenario_state: dict[str, Any]) -> None:
     layout = _read_startup_layout(scenario_state)
     assert "close_on_exit=true" in layout
+
+
+@then("the first tab is named `workdash`")
+def _first_tab_is_named_workdash(scenario_state: dict[str, Any]) -> None:
+    layout = _read_startup_layout(scenario_state)
+    tab_names = re.findall(r'^\s*tab name="([^"]*)"', layout, re.MULTILINE)
+    assert tab_names[0] == "workdash"
+
+
+@then("the dashboard runs in a pane on the left")
+def _dashboard_runs_in_left_pane(scenario_state: dict[str, Any]) -> None:
+    layout = _read_startup_layout(scenario_state)
+    assert re.search(
+        r'split_direction="vertical" \{\s+'
+        r'pane size="50%" split_direction="horizontal" \{\s+'
+        r"pane command=",
+        layout,
+    )
+
+
+@then("a small terminal pane sits under the dashboard pane")
+def _small_terminal_pane_under_dashboard(scenario_state: dict[str, Any]) -> None:
+    layout = _read_startup_layout(scenario_state)
+    assert re.search(r'args [^\n]*\n\s+\}\s+pane size="25%"\n', layout)
+
+
+@then("a full-height terminal pane sits on the right")
+def _full_height_terminal_pane_on_right(scenario_state: dict[str, Any]) -> None:
+    layout = _read_startup_layout(scenario_state)
+    assert re.search(r'pane size="25%"\n\s+\}\s+pane size="50%"\n', layout)
+
+
+@then("the Zellij session shows the tab bar at the top")
+def _session_shows_tab_bar_at_top(scenario_state: dict[str, Any]) -> None:
+    layout = _read_startup_layout(scenario_state)
+    assert layout.index("zellij:tab-bar") < layout.index("children")
+
+
+@then("the Zellij session shows the status bar at the bottom")
+def _session_shows_status_bar_at_bottom(scenario_state: dict[str, Any]) -> None:
+    layout = _read_startup_layout(scenario_state)
+    assert layout.index("children") < layout.index("zellij:status-bar")
 
 
 @then("the system starts the dashboard directly")

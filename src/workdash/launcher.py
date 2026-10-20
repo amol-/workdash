@@ -389,9 +389,24 @@ def _write_zellij_startup_layout(workdash_command: Sequence[str], *, session_nam
         "show_startup_tips false\n"
         "attach_to_session false\n"
         "layout {\n"
+        "    default_tab_template {\n"
+        "        pane size=1 borderless=true {\n"
+        '            plugin location="zellij:tab-bar"\n'
+        "        }\n"
+        "        children\n"
+        "        pane size=2 borderless=true {\n"
+        '            plugin location="zellij:status-bar"\n'
+        "        }\n"
+        "    }\n"
         '    tab name="workdash" {\n'
-        f"        pane command={command} close_on_exit=true {{\n"
-        f"            args {args}\n"
+        '        pane split_direction="vertical" {\n'
+        '            pane size="50%" split_direction="horizontal" {\n'
+        f'                pane command={command} close_on_exit=true size="75%" {{\n'
+        f"                    args {args}\n"
+        "                }\n"
+        '                pane size="25%"\n'
+        "            }\n"
+        '            pane size="50%"\n'
         "        }\n"
         "    }\n"
         "}\n"

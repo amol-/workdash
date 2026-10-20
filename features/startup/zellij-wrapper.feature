@@ -10,6 +10,8 @@ Feature: Start the interactive dashboard inside Zellij
     - Before locating Zellij at startup, the system appends the workdash-local bin directory to PATH so a global Zellij wins when present and the local downloaded binary is a fallback.
     - If no Zellij binary can be found after extending PATH, startup exits with a clear message telling the user to run the configuration wizard.
     - The replacement Zellij process starts a new `workdash-<random>` session and runs the dashboard with `--direct`.
+    - The session's first tab is named `workdash` and holds three panes: the dashboard on the left, a small terminal pane under it, and a full-height terminal pane on the right.
+    - The session shows Zellij's tab bar at the top and status bar at the bottom.
     - If the user starts the interactive dashboard inside Zellij, the system starts directly.
     - If the user passes `--direct`, the system starts directly even when Zellij is not detected.
     - Non-interactive command modes do not wrap themselves in Zellij.
@@ -72,3 +74,21 @@ Feature: Start the interactive dashboard inside Zellij
     Then the system replaces itself with a Zellij process
     And the Zellij process starts a fresh workdash-prefixed session
     And the Zellij process runs the dashboard with `--direct --server`
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S008
+  Scenario: The generated Zellij session starts with a three-pane workdash tab
+    Given the system is not running inside a Zellij session
+    And Zellij is installed on PATH
+    When the user starts the interactive dashboard
+    Then the first tab is named `workdash`
+    And the dashboard runs in a pane on the left
+    And a small terminal pane sits under the dashboard pane
+    And a full-height terminal pane sits on the right
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S009
+  Scenario: The generated Zellij session shows the tab bar and the status bar
+    Given the system is not running inside a Zellij session
+    And Zellij is installed on PATH
+    When the user starts the interactive dashboard
+    Then the Zellij session shows the tab bar at the top
+    And the Zellij session shows the status bar at the bottom
