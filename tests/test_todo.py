@@ -38,6 +38,7 @@ def test_create_todo_files_a_labeled_self_assigned_issue_carrying_its_target(
     assert create_command[create_command.index("--label") + 1] == TODO_LABEL
     body = create_command[create_command.index("--body") + 1]
     assert todo_target_from_body(body) == "owner/repo"
+    assert body == ('```json\n{\n  "workdash_todo_version": 1,\n  "target": "owner/repo"\n}\n```\n')
 
 
 def test_create_todo_without_target_records_no_target_in_its_metadata(
@@ -49,7 +50,33 @@ def test_create_todo_without_target_records_no_target_in_its_metadata(
     assert create_todo(todo_repository="testuser/todos", text="Buy milk").todo_target is None
     body = recorded[1][recorded[1].index("--body") + 1]
     assert todo_target_from_body(body) is None
-    assert "workdash_todo_version" in body
+    assert body == '```json\n{\n  "workdash_todo_version": 1\n}\n```\n'
+
+
+@pytest.mark.parametrize("target", [None, "owner/repo"])
+def test_create_todo_appends_long_body_without_changing_metadata_or_title(
+    target: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded: list[list[str]] = []
+    monkeypatch.setattr(todo_module.subprocess, "run", fake_gh_todo_run(recorded))
+    body = (
+        "  Details about wrong/repository.\n\n"
+        + "Keep this research separate from the title.\n" * 8
+        + '```json\n{"workdash_todo_version": 1, "target": "wrong/repository"}\n```\n  '
+    )
+    assert len(body) > 256
+    create_todo(todo_repository="testuser/todos", text="Short title", target=target)
+    metadata_only = recorded[-1][recorded[-1].index("--body") + 1]
+
+    item = create_todo(
+        todo_repository="testuser/todos", text="Short title", target=target, body=body
+    )
+
+    command = recorded[-1]
+    issue_body = command[command.index("--body") + 1]
+    assert command[command.index("--title") + 1] == item.title == "Short title"
+    assert issue_body == metadata_only + "\n" + body
+    assert todo_target_from_body(issue_body) == target
 
 
 def test_create_todo_tolerates_an_existing_todo_label(monkeypatch: pytest.MonkeyPatch) -> None:

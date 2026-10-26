@@ -101,7 +101,7 @@ workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
 workdash analyze ITEM [--agent NAME] [--json]  # analyze a current server item
 workdash code ITEM [--agent NAME] [--json]  # launch a terminal-backed coding agent
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
-workdash todo TEXT [--target owner/repo] [--json]  # capture a todo
+workdash todo TEXT [--target owner/repo] [--body BODY] [--json]  # capture a todo
 workdash read PANE_ID [--full] [--json]  # read text from a live pane
 workdash write PANE_ID TEXT [--raw] [--json]  # send text to a live pane
 workdash show-config [--json] # show configured agents and fixed server address
@@ -160,6 +160,17 @@ issue created in the single `todo_repository` from `config.json`, assigned to
 you and labeled `workdash-todo`, so it shows up on the dashboard like any other
 assigned issue. Create the repository on GitHub yourself; the label is created
 on first use.
+
+For long details, keep the title short and pass `--body`:
+
+```bash
+workdash todo "Plan the migration" --body "Research findings and next steps..."
+```
+
+`POST /api/v0/todo` likewise accepts an optional `body` string alongside `text`
+and `target`. The issue body starts with Workdash's metadata block; user content
+is appended after it without changing formatting. Omitting the body keeps the
+existing metadata-only output. The TUI continues to capture title-only todos.
 
 A todo may name a target repository (`--target owner/repo`). The issue still
 lives in the todo repository, but the item is listed under its target and its

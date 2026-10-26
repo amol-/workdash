@@ -2,8 +2,8 @@
 
 A todo is an ordinary GitHub issue in one configured repository, assigned to
 the user and labeled so Workdash recognizes it again on later refreshes. The
-issue body is reserved for the metadata block written here, which is the only
-place a todo's target repository is recorded.
+issue body starts with the metadata block written here, which records the
+target repository, followed by optional user content.
 """
 
 from __future__ import annotations
@@ -23,12 +23,15 @@ _METADATA_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 _ISSUE_NUMBER_RE = re.compile(r"/issues/(\d+)$")
 
 
-def create_todo(*, todo_repository: str, text: str, target: str | None = None) -> WorkItem:
+def create_todo(
+    *, todo_repository: str, text: str, target: str | None = None, body: str | None = None
+) -> WorkItem:
     """Create a labeled, self-assigned todo issue and return it as a dashboard item.
 
     :param str todo_repository: Repository that hosts todos, as ``owner/repo``.
     :param str text: Todo text, used as the issue title.
     :param str | None target: Optional repository the todo is about.
+    :param str | None body: Optional content appended after the metadata block.
     """
 
     # gh exits non-zero when the label is already there, which is the steady
@@ -58,7 +61,7 @@ def create_todo(*, todo_repository: str, text: str, target: str | None = None) -
             "--title",
             text,
             "--body",
-            _encode_todo_metadata(target),
+            _encode_todo_metadata(target) + ("\n" + body if body is not None else ""),
             "--assignee",
             "@me",
             "--label",

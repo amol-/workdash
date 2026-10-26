@@ -127,11 +127,14 @@ class WorkdashSession:
             self._notify_items_changed()
         return result
 
-    def todo(self, *, text: str, target: str | None = None) -> dict[str, object]:
+    def todo(
+        self, *, text: str, target: str | None = None, body: str | None = None
+    ) -> dict[str, object]:
         """Capture a todo as an issue in the configured todo repository.
 
         :param str text: Todo text, used as the issue title.
         :param str | None target: Optional repository the todo is about.
+        :param str | None body: Optional content appended after the metadata block.
         """
 
         todo_text = text.strip()
@@ -148,7 +151,7 @@ class WorkdashSession:
                 status=HTTPStatus.BAD_REQUEST,
             )
         item = create_todo(
-            todo_repository=self.config.todo_repository, text=todo_text, target=target
+            todo_repository=self.config.todo_repository, text=todo_text, target=target, body=body
         )
         with self._lock:
             self.work_items.append(item)
@@ -685,6 +688,7 @@ def _make_turbogears_app(session: WorkdashSession):
                 lambda payload: self._session.todo(
                     text=_required_text(payload, "text"),
                     target=_optional_text(payload, "target"),
+                    body=_optional_text(payload, "body"),
                 ),
             )
 
