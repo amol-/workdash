@@ -20,6 +20,7 @@ Feature: Local JSON control API
     - V0 exposes JSON APIs only, not an HTML browser UI.
     - API requests and responses use JSON objects.
     - V0 capabilities are exposed as `POST /api/v0/list`, `POST /api/v0/info`, `POST /api/v0/analyze`, `POST /api/v0/code`, `POST /api/v0/terminal`, `POST /api/v0/todo`, `POST /api/v0/show-config`, `POST /api/v0/pane/content`, `POST /api/v0/pane/send`, and `POST /api/v0/pane/close`.
+    - `POST /api/v0/todo` accepts an optional target as a GitHub `owner/repo` name or a git URL on any hosting service.
     - `POST /api/v0/todo` accepts optional body text as long details separate from the title, appended unchanged after the metadata block.
     - Successful API responses use `{ "ok": true, "result": ... }`.
     - Failed API responses use an appropriate HTTP error status and `{ "ok": false, "error": { "code": ..., "message": ... } }`.
@@ -120,18 +121,24 @@ Feature: Local JSON control API
     And the server does not prepare a worktree
 
   @id:F-API-JSON-CONTROL-S015
-  Scenario: Todo API captures a todo in the configured todo repository
+  Scenario Outline: Todo API captures a todo in the configured todo repository
     Given a server-backed Workdash session has loaded dashboard items
-    When a client requests a todo with text `Fix the flaky test` and target `owner/repo`
+    When a client requests a todo with text `Fix the flaky test` and target `<target>`
     Then the server creates the todo issue in the configured todo repository
     And the new todo becomes part of the shared dashboard state
     And the API returns the Workdash item ID, todo repository, target, issue number, and issue URL
+
+    Examples:
+      | target                                   |
+      | owner/repo                               |
+      | https://gitlab.com/owner/repo.git        |
+      | https://codeberg.org/owner/repo.git      |
 
   @id:F-API-JSON-CONTROL-S016
   Scenario: Todo API rejects invalid input
     Given a server-backed Workdash session has loaded dashboard items
     When a client requests a todo with an invalid target
-    Then the API returns an error saying the target must be in `owner/repo` form
+    Then the API returns an error saying the target must be a GitHub `owner/repo` or a supported git URL
     And the server does not create a GitHub issue
 
   @id:F-API-JSON-CONTROL-S010

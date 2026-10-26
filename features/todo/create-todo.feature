@@ -15,8 +15,10 @@ Feature: Capture a todo
     - A todo issue is assigned to the user, so it appears in the dashboard through the assigned-issue source without any extra configuration.
     - A todo issue is labeled `workdash-todo`.
     - The system creates the `workdash-todo` label in the todo repository when it does not exist yet.
-    - A todo may name a target repository as `owner/repo`; the target is optional and empty by default.
-    - The system rejects a todo whose text is empty and a target that is not in `owner/repo` form, without creating an issue.
+    - A todo may name a target as a GitHub `owner/repo` or a git URL on any hosting service; the target is optional and empty by default.
+    - URL targets accept HTTPS, SSH, and scp-like git remote forms and are preserved in the issue body metadata.
+    - Existing `owner/repo` todos keep working without edits or migration.
+    - The system rejects a todo whose text is empty or whose target is neither `owner/repo` nor a supported git URL, without creating an issue.
     - When the todo repository does not exist or cannot be written to, the system reports the GitHub failure and tells the user to create the todo repository.
     - A created todo becomes part of the current dashboard state immediately, without waiting for the next refresh.
     - CLI and JSON API capture accept optional body content, preserved after the metadata block; omitting it keeps the metadata-only body unchanged.
@@ -34,12 +36,18 @@ Feature: Capture a todo
     And the new todo appears in the dashboard as an item of the todo repository
 
   @id:F-TODO-CREATE-S002
-  Scenario: Capture a todo with a target repository
+  Scenario Outline: Capture a todo with a target repository
     Given the user has a configured todo repository
-    When the user captures a todo with target `owner/repo`
+    When the user captures a todo with target `<target>`
     Then the system creates the issue in the todo repository
-    And the issue body metadata records `owner/repo` as the todo target
-    And the new todo appears in the dashboard as an item of `owner/repo`
+    And the issue body metadata records `<target>` as the todo target
+    And the new todo appears in the dashboard as an item of `<repository>`
+
+    Examples:
+      | target                                   | repository      |
+      | owner/repo                               | owner/repo      |
+      | https://gitlab.com/owner/repo.git        | owner/repo      |
+      | https://codeberg.org/owner/repo.git      | owner/repo      |
 
   @id:F-TODO-CREATE-S003
   Scenario: The todo label is created on first use
@@ -64,12 +72,19 @@ Feature: Capture a todo
     Then the system reports that the todo text is required
     And no issue is created
     When the user captures a todo with target `not-a-repo`
-    Then the system reports that the target must be in `owner/repo` form
+    Then the system reports that the target must be a GitHub `owner/repo` or a supported git URL
     And no issue is created
 
   @id:F-TODO-CREATE-S006
-  Scenario: Todo items are recognized again on later refreshes
-    Given the user captured a todo with target `owner/repo` in an earlier session
+  Scenario Outline: Todo items are recognized again on later refreshes
+    Given the user captured a todo with target `<target>` in an earlier session
     When the system refreshes dashboard items
     Then the open `workdash-todo` issues of the todo repository are recognized as todo items
     And each todo item's target is read from its issue body metadata
+    And the refreshed todo is listed under `<repository>`
+
+    Examples:
+      | target                                   | repository      |
+      | owner/repo                               | owner/repo      |
+      | https://gitlab.com/owner/repo.git        | owner/repo      |
+      | https://codeberg.org/owner/repo.git      | owner/repo      |
