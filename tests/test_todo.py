@@ -189,3 +189,46 @@ def test_todo_target_from_body_treats_unusable_metadata_as_no_target(body: objec
 )
 def test_is_repository_name_accepts_only_owner_slash_repo(value: str, expected: bool) -> None:
     assert is_repository_name(value) is expected
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "https://github.com/owner/repo",
+        "https://gitlab.com/group/owner/repo.git",
+        "https://codeberg.org/owner/repo.git",
+        "ssh://git@forge.example/owner/repo.git",
+        "git@forge.example:owner/repo.git",
+        "git://forge.example/owner/repo.git",
+    ],
+)
+def test_create_todo_round_trips_original_git_url(target, monkeypatch):
+    recorded = []
+    monkeypatch.setattr(todo_module.subprocess, "run", fake_gh_todo_run(recorded))
+
+    item = create_todo(todo_repository="testuser/todos", text="Task", target=target)
+
+    command = recorded[-1]
+    body = command[command.index("--body") + 1]
+    assert item.todo_target == todo_target_from_body(body) == target
+    assert '"workdash_todo_version": 1' in body
+    assert not is_repository_name(target)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "http://host/owner/repo",
+        "file:///owner/repo",
+        "https://host/repo",
+        "https://host/owner/../repo",
+        "https://host/owner/repo?query",
+        "git@host:",
+        "https://host/owner/re po",
+        "not-a-repo",
+    ],
+)
+def test_invalid_git_target_is_ignored_during_refresh(target):
+    import json
+
+    assert todo_target_from_body(f"```json\n{json.dumps({'target': target})}\n```") is None

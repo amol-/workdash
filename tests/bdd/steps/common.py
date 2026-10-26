@@ -410,7 +410,7 @@ class FakeApiBackend:
         self._state["work_items"] = items
         return items, compute_suggestion_markers(items)
 
-    def analyze_item(self, item: WorkItem, tool: str = "codex") -> str | None:
+    def analyze_item(self, item: WorkItem, tool: str = "codex", *, cwd=None) -> str | None:
         self._state.setdefault("analyze_calls", []).append((format_work_item_id(item), tool))
         if tool == "cached":
             return None

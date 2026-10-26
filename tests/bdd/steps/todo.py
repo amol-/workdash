@@ -29,9 +29,10 @@ from gh_todo_fake import (
 from workdash.backend import WorkdashBackend
 from workdash.config import load_config
 from workdash.control import format_work_item_id
+from workdash.git import GitHelper
 from workdash.github_client import GitHubClient
 from workdash.included_items import IncludedItemsStore
-from workdash.models import WorkItem, WorkItemKind, WorkItemType
+from workdash.models import WorkItem, WorkItemKind, WorkItemType, display_repo
 from workdash.repo_worktree import ensure_worktree
 from workdash.todo import TODO_LABEL, todo_target_from_body
 from workdash.tui import TodoDialog
@@ -425,11 +426,11 @@ def _system_reports_todo_text_required(scenario_state: dict[str, Any]) -> None:
     assert "todo text is required" in str(error), error
 
 
-@then(parsers.parse("the system reports that the target must be in `{form}` form"))
-def _system_reports_target_form(form: str, scenario_state: dict[str, Any]) -> None:
+@then("the system reports that the target must be a GitHub `owner/repo` or a supported git URL")
+def _system_reports_target_form(scenario_state: dict[str, Any]) -> None:
     error = scenario_state["todo_error"]
     assert error is not None, scenario_state
-    assert f"must be in {form} form" in str(error), error
+    assert "must be a GitHub owner/repo or a supported git URL" in str(error), error
 
 
 @then("no issue is created")
@@ -599,16 +600,15 @@ def _system_opens_todo_issue(scenario_state: dict[str, Any]) -> None:
 @then(parsers.parse("the worktree belongs to the `{target}` main clone"))
 def _worktree_belongs_to_target_main_clone(target: str, scenario_state: dict[str, Any]) -> None:
     worktree = Path(scenario_state["worktree_path"])
-    owner, _, name = target.partition("/")
+    owner, _, name = GitHelper.repo_from_remote_url(target).partition("/")
     number = scenario_state["todo_item"].number
     assert worktree.name == f"{owner}_{name}_todo_{number}", worktree
-    assert [
-        "gh",
-        "repo",
-        "clone",
-        target,
-        str(worktree.parent / f"{owner}_{name}"),
-    ] in scenario_state["_recorded_git_calls"]
+    command = ["gh", "repo", "clone"] if target == f"{owner}/{name}" else ["git", "clone"]
+    assert [*command, target, str(worktree.parent / f"{owner}_{name}")] in scenario_state[
+        "_recorded_git_calls"
+    ]
+    if command == ["git", "clone"]:
+        assert not any(cmd[0] == "gh" for cmd in scenario_state["_recorded_git_calls"])
 
 
 @then("that branch was created from the target repository's current default branch")
@@ -624,7 +624,7 @@ def _session_starts_in_target_todo_worktree(scenario_state: dict[str, Any]) -> N
     launches = scenario_state["todo_launches"]
     assert launches, scenario_state
     item = scenario_state["todo_item"]
-    owner, _, name = item.todo_target.partition("/")
+    owner, _, name = display_repo(item).partition("/")
     assert launches[0][0] == str(
         Path(scenario_state["workdir"]) / f"{owner}_{name}_todo_{item.number}"
     )
@@ -702,6 +702,7 @@ def _run_todo_cli_with_target(
             )
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+    scenario_state["requested_target"] = target
     scenario_state["exit_code"] = workdash_module.main(
         ["todo", text, "--target", target, "--host", host]
         + (["--body", body] if body is not None else [])
@@ -730,7 +731,7 @@ def _run_todo_cli_without_server(
 @then("the command captures the todo through the local Workdash server")
 def _command_captures_todo_through_server(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["exit_code"] == 0, scenario_state
-    payload = {"text": TODO_TEXT, "target": "owner/repo"}
+    payload = {"text": TODO_TEXT, "target": scenario_state["requested_target"]}
     if "todo_body" in scenario_state:
         payload["body"] = scenario_state["todo_body"]
     assert scenario_state["control_requests"] == [{"endpoint": "todo", "payload": payload}]
@@ -758,6 +759,7 @@ def _client_requests_todo(
     body: str | None = None,
 ) -> None:
     _install_gh_todo_fake(scenario_state, monkeypatch)
+    scenario_state["requested_target"] = target
     payload = {"text": text, "target": target}
     if body is not None:
         payload["body"] = body
@@ -790,19 +792,21 @@ def _api_returns_todo_result(scenario_state: dict[str, Any]) -> None:
     assert _api_result(scenario_state) == {
         "item_id": f"owner/repo#ISSUE-WT{TODO_ISSUE_NUMBER}",
         "todo_repository": TODO_REPOSITORY,
-        "target": "owner/repo",
+        "target": scenario_state["requested_target"],
         "number": TODO_ISSUE_NUMBER,
         "url": TODO_ISSUE_URL,
     }
 
 
-@then(parsers.parse("the API returns an error saying the target must be in `{form}` form"))
-def _api_returns_invalid_target_error(form: str, scenario_state: dict[str, Any]) -> None:
+@then(
+    "the API returns an error saying the target must be a GitHub `owner/repo` or a supported git URL"
+)
+def _api_returns_invalid_target_error(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["api_status"] == 400, scenario_state["api_payload"]
     payload = scenario_state["api_payload"]
     assert payload["ok"] is False
     assert payload["error"]["code"] == "bad_request"
-    assert f"must be in {form} form" in payload["error"]["message"]
+    assert "must be a GitHub owner/repo or a supported git URL" in payload["error"]["message"]
 
 
 @given("the user has a multiline todo body longer than 256 characters")
@@ -897,3 +901,125 @@ def _refresh_captured_todo(
     )
     # Prepare a fresh checkout to verify repository selection after loading from GitHub.
     scenario_state["workdir"] = tmp_path / "after-refresh"
+
+
+@then(parsers.parse("the refreshed todo is listed under `{repository}`"))
+def _refreshed_repository(repository, scenario_state):
+    item = next(
+        item for item in scenario_state["refreshed_todo_items"] if item.number == TODO_ISSUE_NUMBER
+    )
+    assert display_repo(item) == repository
+    assert format_work_item_id(item) == f"{repository}#ISSUE-WT{TODO_ISSUE_NUMBER}"
+
+
+@given("the target repository has no local clone or worktree")
+def _target_not_prepared(scenario_state):
+    session = scenario_state["api_session"]
+    workdir = Path(session.config.workdir)
+    assert not (workdir / "owner_repo").exists()
+    assert not (workdir / "owner_repo_todo_110").exists()
+
+
+@then(parsers.parse("the worktree directory is named `{directory}`"))
+def _target_worktree_directory(directory, scenario_state):
+    assert Path(scenario_state["worktree_path"]).name == directory
+
+
+@when("the user opens a terminal for that item")
+def _open_target_terminal(scenario_state, monkeypatch):
+    import workdash.control as control_module
+
+    session = scenario_state["api_session"]
+    workdir = Path(session.config.workdir)
+    scenario_state["workdir"] = workdir
+    _install_fake_git(scenario_state, monkeypatch, workdir=workdir)
+    launches = []
+
+    def launch(repo_path, *, zellij_session=None):
+        launches.append(repo_path)
+        return SimpleNamespace(
+            session=zellij_session, pane_id="terminal_23", pane_title="todo", cwd=repo_path
+        )
+
+    monkeypatch.setattr(control_module, "launch_terminal_context", launch)
+    try:
+        result = session.terminal(target=format_work_item_id(scenario_state["todo_item"]))
+        scenario_state["worktree_path"] = result["cwd"]
+    except RuntimeError as error:
+        scenario_state["terminal_error"] = error
+    scenario_state["terminal_calls"] = launches
+
+
+@then("the terminal starts in the target repository's todo worktree")
+def _terminal_in_target(scenario_state):
+    expected = str(scenario_state["workdir"] / "owner_repo_todo_110")
+    assert scenario_state["terminal_calls"] == [expected]
+
+
+@given(parsers.parse("the local clone directory `{directory}` belongs to `{origin}`"))
+def _conflicting_clone(directory, origin, scenario_state):
+    path = Path(scenario_state["api_session"].config.workdir) / directory
+    path.mkdir(parents=True)
+    (path / "work.txt").write_text("local changes")
+    scenario_state["origin_url"] = origin
+    scenario_state["conflicting_clone"] = path
+
+
+@then("the system reports that the local directory belongs to a different repository")
+def _reports_clone_conflict(scenario_state):
+    assert "belongs to a different repository" in str(scenario_state["terminal_error"])
+
+
+@then("the existing clone and its worktrees remain untouched")
+def _conflicting_clone_untouched(scenario_state):
+    assert (scenario_state["conflicting_clone"] / "work.txt").read_text() == "local changes"
+    assert all(
+        cmd[:4] == ["git", "config", "--local", "--get"]
+        or cmd == ["git", "rev-parse", "--show-toplevel"]
+        for cmd in scenario_state["_recorded_git_calls"]
+    )
+
+
+@given(parsers.parse("the target repository contains a source file `{path}`"))
+def _target_has_source(path, scenario_state):
+    scenario_state["target_source"] = {path: "\n" * 11 + "def cards(): return 42\n"}
+
+
+@given("the todo issue has a description and comments on GitHub")
+def _todo_has_discussion(scenario_state):
+    item = scenario_state["todo_item"]
+    scenario_state["discussion"] = {
+        "title": item.title,
+        "body": "Todo description from GitHub",
+        "comments": [{"body": "Todo comment from GitHub", "author": {"login": "owner"}}],
+    }
+
+
+@when("the user generates a fresh analysis for that item")
+def _analyze_targeted_todo(scenario_state, monkeypatch, tmp_path):
+    from .analysis import run_source_analysis
+
+    run_source_analysis(scenario_state, monkeypatch, tmp_path)
+
+
+@then("the analysis agent starts inside the target repository's todo worktree")
+def _analysis_in_target_worktree(scenario_state):
+    assert (
+        scenario_state["agent_cwd"]
+        == Path(scenario_state["api_session"].config.workdir) / "owner_repo_todo_110"
+    )
+
+
+@then(parsers.parse("the agent can inspect `{path}` in the target repository"))
+def _agent_inspects_target_source(path, scenario_state):
+    assert scenario_state["agent_sources"][path] == scenario_state["target_source"][path]
+
+
+@then("the agent receives the todo issue's title, body, and comments from GitHub")
+def _agent_receives_todo_discussion(scenario_state):
+    discussion = scenario_state["discussion"]
+    prompt = scenario_state["agent_prompt"]
+    assert discussion["title"] in prompt
+    assert discussion["body"] in prompt
+    assert discussion["comments"][0]["body"] in prompt
+    assert "testuser/todos" in scenario_state["discussion_command"]

@@ -2,9 +2,9 @@ You are analyzing a GitHub issue to map out what is being asked, trace the
 relevant behavior back to the code, and surface the context needed for a later
 design discussion between developer and coding agent.
 
-Use only the provided metadata and discussion context. Do not invent facts, code,
-or history that is not present in the input. Your goal is exploration and
-grounding, not solution design. Do not propose a specific implementation, API, or
+Inspect the local source code in your working directory alongside the provided
+metadata and discussion context. Do not invent facts, code, or history. Your goal
+is exploration and grounding, not solution design. Do not propose a specific implementation, API, or
 code change — that conversation happens separately, informed by this analysis.
 
 If the issue lacks enough detail to understand the ask or trace involved code,
@@ -21,8 +21,8 @@ TASK:
    components the issue touches. For bug reports, focus on the code that produces
    the observed behavior. For feature requests, focus on the code that would need
    to change or be extended and where the new behavior would fit. Only name code
-   whose location is evident from the issue metadata or discussion; do not invent
-   paths.
+   whose location you verify in the local source or supplied context; do not
+   invent paths.
 
 3. Trace cause or motivation — For bugs, explain what in the current code path
    most plausibly produces the observed behavior, based on the discussion and any
@@ -46,17 +46,21 @@ When using lists, use valid Markdown list syntax (`1.` for ordered lists or `-`
 for bullets) and leave a blank line before the first list item.
 
 Whenever you mention a specific struct, type, class, interface, function, method,
-or file from the repository — in ANY section of the document — wrap it in a
-Markdown link that points to the definition on GitHub using the default branch.
-- Preferred format: [`StructName`](https://github.com/{code_repo}/blob/main/path/to/file.go#L42)
-- For file+line references: [`path/to/file.py:123`](https://github.com/{code_repo}/blob/main/path/to/file.py#L123)
-- For line ranges: `#L10-L20`
-- Keep backtick formatting around the symbol name — the link wraps the backticked text.
-- Only link symbols whose file path and location are evident from the issue
-  discussion or metadata. Do not fabricate paths or line numbers.
-- If you cannot determine the exact file or line for a symbol, you may still
-  mention it in backticks without a link, but prefer linked references when
-  the information is available.
+or file from the repository, cite its verified file path and line number.
+The code repository is {code_repo} (a bare owner/repo name means GitHub), not
+necessarily the repository hosting the GitHub issue. Inspect the local Git
+checkout to determine the default branch and source locations.
+Use Markdown links on the code repository's own hosting service when the URL
+format is immediately obvious. Examples for a repository's default branch main:
+
+- GitHub: [`src/cards.py:12`](https://github.com/owner/repo/blob/main/src/cards.py#L12)
+- GitLab: [`src/cards.py:12`](https://gitlab.com/owner/repo/-/blob/main/src/cards.py#L12)
+- Codeberg: [`src/cards.py:12`](https://codeberg.org/owner/repo/src/branch/main/src/cards.py#L12)
+
+Keep backticks around symbol names inside links. Use the actual repository and
+branch, not the example values. If forming a correct URL is not immediately
+obvious, cite the file path and line number without a URL. Never invent a URL,
+file path, or line number.
 
 Output the Markdown document directly. Your response must begin with the `# `
 heading shown below and end with the last line of the template. Do not wrap
@@ -88,10 +92,9 @@ existing code does not already cover the case.
 ## Code Paths Involved
 
 The concrete files, functions, types, or components the issue touches. Use
-GitHub-linked references per the rules above. Group related entries and briefly
-explain each one's role in the behavior under discussion. If the issue does not
-pin down exact locations, say so and describe the involved area at the level of
-granularity the discussion supports.
+source citations per the rules above. Group related entries and briefly
+explain each one's role in the behavior under discussion. Use the local source to
+verify exact locations; if you cannot locate the code, say so rather than guessing.
 
 ## Evaluation
 

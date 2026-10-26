@@ -56,6 +56,15 @@ want to keep the task itself non-public (the todo issue lives in your todo
 repository, not the target). The target is recorded in the issue body metadata
 and the todo appears in the dashboard under its target repository.
 
+Todo `--target` accepts a GitHub `owner/repo` or a git URL on any hosting service,
+for example `https://codeberg.org/owner/repo.git`. HTTPS (with or without `.git`),
+`ssh://`, `git://`, and scp-like `git@host:owner/repo.git` targets are supported.
+Code, terminal, and fresh analysis actions prepare the target clone and worktree
+automatically. Todos and their discussion still live in the GitHub todo repository.
+URL targets retain their original URL in metadata and API responses, but display
+and item IDs use the final `owner/repo` path segments. Same-name targets can share
+an ID; a conflicting local directory is reported without changing existing work.
+
 Keep the title short and use `--body BODY` for long or multiline details instead
 of editing the issue afterwards. The issue body always starts with Workdash's
 metadata JSON block, followed by the user body with its formatting preserved.

@@ -354,7 +354,7 @@ def test_main_tui_analyze_callback_uses_worktree_and_backend(
     item = _issue()
     analysis_path = tmp_path / "analysis.md"
     ensure_calls: list[tuple[str | None, WorkItem]] = []
-    analyze_calls: list[tuple[WorkItem, str]] = []
+    analyze_calls: list[tuple[WorkItem, str, str | None]] = []
     captured_callback: dict[str, object] = {}
 
     class FakeBackend:
@@ -365,8 +365,8 @@ def test_main_tui_analyze_callback_uses_worktree_and_backend(
             assert progress_callback is not None
             return [item], {}
 
-        def analyze_item(self, item, tool="codex"):
-            analyze_calls.append((item, tool))
+        def analyze_item(self, item, tool="codex", *, cwd=None):
+            analyze_calls.append((item, tool, cwd))
             analysis_path.write_text("analysis body\n", encoding="utf-8")
             return str(analysis_path)
 
@@ -397,7 +397,7 @@ def test_main_tui_analyze_callback_uses_worktree_and_backend(
     result = captured_callback["analyze"](item, tool="codex")
 
     assert ensure_calls == [(_VALID_CONFIG.workdir, item)]
-    assert analyze_calls == [(item, "codex")]
+    assert analyze_calls == [(item, "codex", "/tmp/worktree")]
     assert result == str(analysis_path)
 
 

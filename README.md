@@ -101,7 +101,7 @@ workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
 workdash analyze ITEM [--agent NAME] [--json]  # analyze a current server item
 workdash code ITEM [--agent NAME] [--json]  # launch a terminal-backed coding agent
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
-workdash todo TEXT [--target owner/repo] [--body BODY] [--json]  # capture a todo
+workdash todo TEXT [--target REPOSITORY] [--body BODY] [--json]  # capture a todo
 workdash read PANE_ID [--full] [--json]  # read text from a live pane
 workdash write PANE_ID TEXT [--raw] [--json]  # send text to a live pane
 workdash show-config [--json] # show configured agents and fixed server address
@@ -172,10 +172,17 @@ and `target`. The issue body starts with Workdash's metadata block; user content
 is appended after it without changing formatting. Omitting the body keeps the
 existing metadata-only output. The TUI continues to capture title-only todos.
 
-A todo may name a target repository (`--target owner/repo`). The issue still
+A todo may name a GitHub target (`--target owner/repo`) or a git URL on any
+hosting service (`--target https://codeberg.org/owner/repo.git`). HTTPS (with or
+without `.git`), `ssh://`, `git://`, and scp-like `git@host:owner/repo.git` URLs
+are supported. URL targets are cloned with Git automatically; no manual clone
+or worktree preparation is needed. The issue still
 lives in the todo repository, but the item is listed under its target and its
 coding, terminal, and analysis actions run in a worktree of the target checked
-out on a `wt-<number>` branch.
+out on a `wt-<number>` branch. URL targets display as their final `owner/repo`
+path segments, while metadata keeps the original URL. Targets with the same
+`owner/repo` on different hosts can have the same item ID; conflicting local
+directories are reported rather than reused.
 
 ## Worktrees
 
