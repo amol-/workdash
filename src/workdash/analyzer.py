@@ -12,7 +12,7 @@ from typing import Any
 
 from .agent_context import render_github_context
 from .github import GithubHelper
-from .models import WorkItem, WorkItemType, display_repo
+from .models import WorkItem, WorkItemType
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class Analyzer:
             "repo": item.repo,
             # Source links must point at the code being analyzed, which for a
             # targeted todo is the target and not the todo repository.
-            "code_repo": display_repo(item),
+            "code_repo": item.todo_target or item.repo,
             "number": item.number,
             "title": item.title,
             "url": item.url,
@@ -70,7 +70,7 @@ class Analyzer:
         return template.format(**format_kwargs)
 
     def _run_analysis_command(
-        self, *, item: WorkItem, prompt: str, command_tokens: list[str]
+        self, *, item: WorkItem, prompt: str, command_tokens: list[str], cwd: str | None
     ) -> str:
         user_shell = os.environ.get("SHELL", "/bin/sh")
         shell_command = shlex.join([*command_tokens, prompt])
@@ -80,6 +80,7 @@ class Analyzer:
                 check=True,
                 capture_output=True,
                 text=True,
+                cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
             )
@@ -96,7 +97,9 @@ class Analyzer:
             ) from error
         return completed.stdout
 
-    def analyze(self, item: WorkItem, command_tokens: list[str] | None = None) -> str | None:
+    def analyze(
+        self, item: WorkItem, command_tokens: list[str] | None = None, *, cwd: str | None = None
+    ) -> str | None:
         """Collect GitHub context, build the prompt, and run analysis.
 
         For pull requests, the full unified diff is fetched via ``gh pr diff``
@@ -126,7 +129,9 @@ class Analyzer:
 
         try:
             prompt = self._build_agent_prompt(item, github_context, diff_path=diff_file_path)
-            output = self._run_analysis_command(item=item, prompt=prompt, command_tokens=tokens)
+            output = self._run_analysis_command(
+                item=item, prompt=prompt, command_tokens=tokens, cwd=cwd
+            )
         finally:
             if diff_file_path is not None:
                 try:

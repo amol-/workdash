@@ -18,7 +18,8 @@ def main_repo_path(workdir: str, repo: str) -> Path:
     :param str workdir: Base working directory (may use ~ for home).
     :param str repo: Repository in "owner/repo" format.
     """
-    parts = repo.split("/")
+    name = GitHelper.repo_from_remote_url(repo) if ":" in repo else repo
+    parts = name.split("/")
     if len(parts) != 2 or not parts[0] or not parts[1]:
         raise ValueError(f"Invalid repo format {repo!r}, expected 'owner/repo'")
     return Path(workdir).expanduser() / f"{parts[0]}_{parts[1]}"
@@ -68,6 +69,13 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
     :param WorkItem item: The work item to prepare a worktree for.
     """
     git = GitHelper()
+    if item.todo_target is not None or item.item_type != WorkItemType.PR:
+        repo = item.todo_target or item.repo
+        _require_repository_paths(
+            repo,
+            main_repo_path(workdir, repo),
+            worktree_path(workdir, repo, item.number, todo=item.todo_target is not None),
+        )
     existing = existing_worktree_path(workdir, item)
     if existing is not None:
         # Local divergence or missing upstream shouldn't block the user.
@@ -100,10 +108,13 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
 
     wt = worktree_path(workdir, repo, worktree_item_number(item), todo=todo_target is not None)
     main = main_repo_path(workdir, repo)
+    if item.item_type == WorkItemType.PR and todo_target is None:
+        _require_repository_paths(repo, main, wt)
 
     # Check if git already tracks a worktree for this branch before creating another one.
     git_existing = git.find_worktree_for_branch(main, branch)
     if git_existing is not None:
+        _require_repository_paths(repo, git_existing)
         with contextlib.suppress(subprocess.CalledProcessError, OSError):
             git.pull_ff_only(git_existing)
         if item.item_type == WorkItemType.PR and head_repo != item.repo:
@@ -113,7 +124,10 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
 
     Path(workdir).expanduser().mkdir(parents=True, exist_ok=True)
     if not main.exists():
-        GithubHelper().clone_repository(repo, main)
+        if todo_target is not None and ":" in repo:
+            git.clone_repository(repo, main)
+        else:
+            GithubHelper().clone_repository(repo, main)
     git.fetch_remote(main, "origin")
     git.fast_forward_default_branch(main)
     if item.item_type == WorkItemType.PR:
@@ -150,3 +164,13 @@ def _worktree_candidates(base: Path, item: WorkItem) -> list[Path]:
         ),
         key=lambda candidate: candidate.name,
     )
+
+
+def _require_repository_paths(repo: str, *paths: Path) -> None:
+    """Reject occupied paths before any repository reuse can pull or fetch."""
+    git = GitHelper()
+    for path in paths:
+        if path.exists() and not git.repository_matches(path, repo):
+            raise RuntimeError(
+                f"Local directory {path} belongs to a different repository than {repo}."
+            )

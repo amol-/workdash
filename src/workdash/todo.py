@@ -13,6 +13,7 @@ import re
 import subprocess
 from datetime import UTC, datetime
 
+from .git import GitHelper
 from .models import WorkItem, WorkItemKind, WorkItemType
 
 TODO_LABEL = "workdash-todo"
@@ -111,7 +112,7 @@ def todo_target_from_body(body: object) -> str | None:
     if not isinstance(metadata, dict):
         return None
     target = metadata.get("target")
-    if isinstance(target, str) and is_repository_name(target):
+    if isinstance(target, str) and is_todo_target(target):
         return target
     return None
 
@@ -120,6 +121,11 @@ def is_repository_name(value: str) -> bool:
     """Report whether ``value`` names a repository as ``owner/repo``."""
 
     return bool(_REPOSITORY_RE.match(value))
+
+
+def is_todo_target(value: str) -> bool:
+    """Accept GitHub repository names and supported Git remote URLs for todos."""
+    return is_repository_name(value) or GitHelper.repository_identity(value) is not None
 
 
 def is_missing_repository_error(gh_message: str) -> bool:

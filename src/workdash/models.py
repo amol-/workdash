@@ -143,4 +143,8 @@ def display_repo(item: WorkItem) -> str:
     in the todo repository, so the target is what the user should see.
     """
 
+    if item.todo_target is not None and ":" in item.todo_target:
+        from .git import GitHelper
+
+        return GitHelper.repo_from_remote_url(item.todo_target)
     return item.todo_target or item.repo

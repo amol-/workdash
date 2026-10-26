@@ -593,7 +593,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     todo_parser.add_argument(
         "--target",
         default=argparse.SUPPRESS,
-        help="Repository the todo is about, as owner/repo.",
+        help="Repository the todo is about: GitHub owner/repo or git URL.",
     )
     todo_parser.add_argument(
         "--body",
