@@ -16,7 +16,7 @@ Feature: Capture a todo
     - A todo issue is labeled `workdash-todo`.
     - The system creates the `workdash-todo` label in the todo repository when it does not exist yet.
     - A todo may name a target as a GitHub `owner/repo` or a git URL on any hosting service; the target is optional and empty by default.
-    - URL targets accept HTTPS, SSH, and scp-like git remote forms and are preserved in the issue body metadata.
+    - URL targets accept HTTPS, SSH, the `git://` protocol, and scp-like SSH forms and are preserved in the issue body metadata.
     - Existing `owner/repo` todos keep working without edits or migration.
     - The system rejects a todo whose text is empty or whose target is neither `owner/repo` nor a supported git URL, without creating an issue.
     - When the todo repository does not exist or cannot be written to, the system reports the GitHub failure and tells the user to create the todo repository.
