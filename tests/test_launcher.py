@@ -84,6 +84,60 @@ def test_open_in_browser_uses_configured_command(monkeypatch: pytest.MonkeyPatch
     assert captured["command"] == ["term-copy", "--quiet", "https://example.com/issues/11"]
 
 
+@pytest.mark.parametrize("session", [None, "workdash-selected"])
+def test_viewer_fullscreens_its_returned_pane_in_current_or_selected_session(monkeypatch, session):
+    commands = []
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-current")
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/zellij")
+
+    def run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="terminal_23\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    url = "https://example.com/?q=$(touch nope);&literal=two words"
+    open_in_browser(url, 'viewer --label "two words"', needs_pane=True, zellij_session=session)
+    prefix = ["/usr/bin/zellij", "--session", session or "workdash-current", "action"]
+    assert commands == [
+        [*prefix, "new-pane", "--", "viewer", "--label", "two words", url],
+        [*prefix, "toggle-fullscreen", "-p", "terminal_23"],
+    ]
+
+
+def test_direct_viewer_does_not_require_zellij(monkeypatch):
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    commands = []
+
+    def run(command, **kwargs):
+        assert kwargs["timeout"] == 4
+        commands.append(command)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    open_in_browser("https://example.com", "term-copy --quiet")
+    assert commands == [["term-copy", "--quiet", "https://example.com"]]
+    with pytest.raises(RuntimeError, match="term-copy --quiet.*active Zellij session"):
+        open_in_browser("https://example.com", "term-copy --quiet", needs_pane=True)
+    assert len(commands) == 1
+
+
+@pytest.mark.parametrize("failure", ["new-pane", "toggle-fullscreen"])
+def test_viewer_pane_errors_include_command_and_details(monkeypatch, failure):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/zellij")
+
+    def run(command, **kwargs):
+        if failure in command:
+            raise subprocess.CalledProcessError(1, command, stderr="session operation failed")
+        return subprocess.CompletedProcess(command, 0, stdout="terminal_23\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="viewer --quiet.*session operation failed"):
+        open_in_browser(
+            "https://example.com", "viewer --quiet", needs_pane=True, zellij_session="workdash-live"
+        )
+
+
 def test_open_in_browser_uses_open_when_xdg_open_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
