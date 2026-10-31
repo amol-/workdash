@@ -11,7 +11,7 @@ analysis, or a full coding session in a dedicated worktree.
 
 ## Platform
 
-Linux and macOS. `workdash` relies on `xdg-open` or `open` and expects `zellij`
+Linux and macOS. `workdash` uses a configured viewer and expects `zellij`
 for the interactive dashboard and terminal-backed work actions. It has not
 been tested on Windows.
 
@@ -20,7 +20,8 @@ been tested on Windows.
 - Python `>=3.12`.
 - Authenticated [`gh`](https://cli.github.com/) for GitHub access.
   `workdash --configure` installs a local copy when `gh` is not available.
-- `xdg-open` or `open` for opening links and rendered analyses in your browser.
+- An executable viewer command for opening links and rendered analyses (for example
+  `xdg-open`, `open`, a terminal viewer, or a clipboard wrapper).
 - `zellij` for the interactive dashboard, terminal panes, and agent sessions.
   `workdash --configure` installs a local copy when `zellij` is not available.
 - Global `gh` and `zellij` binaries are preferred; configured local copies are
@@ -71,14 +72,43 @@ The wizard fills in:
 - The analyze and launch commands for Claude and Codex (auto-detected when the
   tools are on your `PATH`).
 
-You can edit `~/.config/workdash/config.json` by hand at any time. The `open`
-setting controls the command used to open URLs and rendered analyses. The wizard
-prompts for `open` when it is missing or malformed. Re-running `--configure`
-only prompts for fields that are still empty, except for Zellij:
-the wizard always checks for a global `zellij` first and downloads a fresh
-local binary when no global binary exists. It does the same for `gh`, checking
-for a global GitHub CLI first and downloading a fresh local copy when none is
-available.
+### URL and analysis viewer
+
+The same viewer opens selected issue/PR URLs (`o`) and rendered analysis HTML
+(fresh or cached). Configure it with `workdash --configure`, or edit
+`~/.config/workdash/config.json` for advanced commands:
+
+```json
+{
+  "open": "term-copy --quiet",
+  "open_needs_pane": false
+}
+```
+
+`open` remains a command string. Quoted arguments are supported; Workdash appends
+one literal URL or HTML file path as the final argument. There are no templates,
+shell expansion, or implicit shell commands. Explicit executable paths are allowed;
+quote paths containing spaces. A missing `open` command prevents startup and tells
+you to run `--configure`; there is no runtime default.
+
+The wizard repairs missing, malformed, or unavailable viewer commands, checking
+that the first command token identifies an executable on PATH or at an explicit
+path. It suggests only an available `xdg-open` on Linux or `open` on macOS;
+Enter accepts the displayed suggestion. With no suggestion, empty input is rejected.
+Valid existing commands and unrelated settings are preserved.
+
+For a missing or invalid `open_needs_pane`, the wizard asks
+`Does the viewer require its own terminal window? [y/N]` (Enter means No).
+Explicit boolean choices are preserved. Legacy configurations without this flag
+continue to open directly. Direct viewers do not require Zellij and must finish
+within four seconds. Set the flag to `true` for a terminal viewer: Workdash launches
+it fullscreen in the current/selected active Zellij session, without creating a
+session or worktree. Launch/fullscreen failures report the configured command;
+viewer child errors stay visible in the pane.
+
+Re-running `--configure` otherwise only prompts for empty fields, except for
+Zellij and GitHub CLI: the wizard always checks for global binaries first and
+downloads fresh local copies when none are available.
 
 ## Usage
 
@@ -138,11 +168,11 @@ The `repositories` list in `config.json` accepts:
 
 - `/` — search/filter the listed items by Type, Repo, or Title. Press `/` again
   to clear.
-- `o` — open the selected item in your browser.
+- `o` — open the selected item with your configured viewer.
 - `r` — refresh the list from GitHub.
 - `a` — analyze the selected item. Opens a dialog to open the cached analysis
   (if any), or run a fresh analysis with Claude or Codex. Fresh analyses are
-  cached and rendered as HTML in your browser.
+  cached and rendered as HTML with your configured viewer.
 - `c` — launch a coding session on the selected item. Opens a dialog to pick
   Claude, Codex, VSCode Copilot, or pi. `workdash` prepares a dedicated git
   worktree for the item and starts the chosen tool in it, preloaded with

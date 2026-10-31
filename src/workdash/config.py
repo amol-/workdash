@@ -79,6 +79,7 @@ class WorkdashConfig:
 
     github_username: str = ""
     open_command: str = ""
+    open_needs_pane: bool = False
     claude: AgentConfig = field(default_factory=AgentConfig)
     codex: AgentConfig = field(default_factory=AgentConfig)
     pi: AgentConfig = field(default_factory=AgentConfig)
@@ -89,6 +90,8 @@ class WorkdashConfig:
     def require_valid(self) -> WorkdashConfig:
         missing = validate_config(self)
         invalid = _invalid_config_command_fields(self)
+        if not isinstance(self.open_needs_pane, bool):
+            invalid.append("open_needs_pane: expected a boolean")
         # A hand-edited todo repository that is present but not owner/repo is
         # invalid rather than missing, so the message tells the user what to fix.
         if self.todo_repository and not is_repository_name(self.todo_repository):
@@ -164,6 +167,7 @@ def _config_to_json(config: WorkdashConfig) -> str:
             {
                 "github_username": config.github_username,
                 "open": config.open_command,
+                "open_needs_pane": config.open_needs_pane,
                 "agents": {
                     "claude": {"analyze": config.claude.analyze, "launch": config.claude.launch},
                     "codex": {"analyze": config.codex.analyze, "launch": config.codex.launch},
@@ -230,6 +234,7 @@ def load_config(path: Path = CONFIG_PATH) -> WorkdashConfig:
     return WorkdashConfig(
         github_username=raw.get("github_username", ""),
         open_command=raw.get("open", ""),
+        open_needs_pane=raw.get("open_needs_pane", False),
         claude=claude_config,
         codex=codex_config,
         pi=pi_config,
@@ -252,7 +257,9 @@ def validate_config(config: WorkdashConfig) -> list[str]:
     missing: list[str] = []
     if not config.github_username:
         missing.append("github_username")
-    if not config.open_command:
+    if not config.open_command or (
+        isinstance(config.open_command, str) and not config.open_command.strip()
+    ):
         missing.append("open")
     if not config.repositories:
         missing.append("repositories")
@@ -554,12 +561,35 @@ def configure(
         print(f"Installed GitHub CLI to: {installed_gh}")
 
     open_command = config.open_command
-    if not _is_configured_command(open_command):
-        suggested_open_command = _default_open_command()
-        detected_open = which_fn(suggested_open_command)
-        if detected_open:
-            print(f"Detected '{suggested_open_command}' on PATH: {detected_open}")
-        open_command = _prompt_with_default(input_fn, "Open command", suggested_open_command)
+    suggested_open_command = _default_open_command()
+    if not which_fn(suggested_open_command):
+        suggested_open_command = ""
+    while not (_is_configured_command(open_command) and which_fn(shlex.split(open_command)[0])):
+        if suggested_open_command:
+            open_command = (
+                input_fn(f"Open command [{suggested_open_command}] (Enter to accept): ").strip()
+                or suggested_open_command
+            )
+        else:
+            open_command = input_fn("Open command (required): ").strip()
+        if not (_is_configured_command(open_command) and which_fn(shlex.split(open_command)[0])):
+            print("Enter a valid command whose executable exists on PATH or at an explicit path.")
+
+    # Legacy runtime configs default to direct opening, but setup must ask for the choice.
+    open_needs_pane = (
+        json.loads(path.read_text(encoding="utf-8")).get("open_needs_pane")
+        if path.exists()
+        else None
+    )
+    while not isinstance(open_needs_pane, bool):
+        response = (
+            input_fn("Does the viewer require its own terminal window? [y/N] ").strip().lower()
+        )
+        if response in {"", "n", "no", "y", "yes"}:
+            open_needs_pane = response in {"y", "yes"}
+        else:
+            print("Please answer yes or no.")
+    print(f"For advanced viewer commands, edit 'open' and 'open_needs_pane' in {path}.")
 
     claude = config.claude
     if not claude.analyze or not claude.launch:
@@ -635,6 +665,7 @@ def configure(
     new_config = WorkdashConfig(
         github_username=github_username,
         open_command=open_command,
+        open_needs_pane=open_needs_pane,
         claude=claude,
         codex=codex,
         pi=pi,

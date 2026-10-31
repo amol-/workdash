@@ -16,6 +16,11 @@ from workdash.models import WorkItem
 from .common import modal_screen_names, run_app
 
 
+@given("the configured viewer requires its own terminal")
+def _terminal_viewer(scenario_state: dict[str, Any]) -> None:
+    scenario_state["viewer_needs_pane"] = True
+
+
 @given("the next browser open will fail")
 def _next_browser_open_will_fail(scenario_state: dict[str, Any]) -> None:
     scenario_state["browser_open_fails"] = True
@@ -49,15 +54,20 @@ def run_open_scenario(
             if scenario_state.get("browser_open_hangs"):
                 assert kwargs.get("timeout") == 4
                 raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs["timeout"])
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout="terminal_19\n", stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         monkeypatch.setattr(
             shutil,
             "which",
-            lambda name: f"/usr/bin/{name}" if name == "xdg-open" else None,
+            lambda name: f"/usr/bin/{name}" if name in {"xdg-open", "zellij"} else None,
         )
-        open_in_browser(item.url)
+        open_in_browser(
+            item.url,
+            "xdg-open",
+            needs_pane=scenario_state.get("viewer_needs_pane", False),
+            zellij_session="workdash-current",
+        )
 
     captured: dict[str, Any] = {}
 
@@ -86,12 +96,21 @@ def run_open_scenario(
     scenario_state["modal_screen_names"] = captured["modal_screen_names"]
 
 
-@then("the selected work item's GitHub URL is opened in the user's default browser")
+@then("the selected work item's GitHub URL is opened with the configured viewer")
 def _url_opened(scenario_state: dict[str, Any]) -> None:
     invocations = scenario_state["open_invocations"]
     assert invocations, "Expected a browser-open command to be invoked"
     assert invocations[0][0] in {"xdg-open", "open"}
     assert invocations[0][1] == scenario_state["selected_item"].url
+
+
+@then("the selected URL opens fullscreen in the current session")
+def _terminal_url_opened(scenario_state: dict[str, Any]) -> None:
+    prefix = ["/usr/bin/zellij", "--session", "workdash-current", "action"]
+    assert scenario_state["open_invocations"] == [
+        [*prefix, "new-pane", "--", "xdg-open", scenario_state["selected_item"].url],
+        [*prefix, "toggle-fullscreen", "-p", "terminal_19"],
+    ]
 
 
 @then("the TUI reports that the item was opened")
