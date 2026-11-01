@@ -1,7 +1,9 @@
 """Git command helpers for Workdash-owned repositories."""
 
+import re
 import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .models import WorkItem, WorkItemType, accepted_worktree_numbers
 
@@ -41,15 +43,15 @@ class GitHelper:
     """Local git command helpers used to prepare and prove Workdash worktrees."""
 
     def worktree_proves_item(self, candidate: Path, item: WorkItem) -> bool:
-        if not self.is_worktree_root(candidate):
-            return False
-        origin_repo = self.remote_repo(candidate, "origin")
         if item.todo_target is not None:
             # A targeted todo works on the target's code, so its worktree is a
             # clone of the target under a name of its own.
-            return origin_repo == item.todo_target and candidate.name == self.worktree_name(
-                item.todo_target, item.number, todo=True
-            )
+            return self.repository_matches(
+                candidate, item.todo_target
+            ) and candidate.name == self.worktree_name(item.todo_target, item.number, todo=True)
+        if not self.is_worktree_root(candidate):
+            return False
+        origin_repo = self.remote_repo(candidate, "origin")
         if origin_repo is None:
             return False
         accepted_names = {
@@ -80,9 +82,10 @@ class GitHelper:
 
     def remote_repo(self, candidate: Path, remote_name: str) -> str | None:
         remote_url = self.remote_url(candidate, remote_name)
-        if remote_url is None:
+        identity = self.repository_identity(remote_url or "")
+        if identity is None or identity[0] != "github.com":
             return None
-        return self.repo_from_remote_url(remote_url) or None
+        return identity[1]
 
     def worktree_name(self, repo: str, number: int, *, todo: bool = False) -> str:
         """Return the Workdash-owned worktree directory name for a work item.
@@ -92,7 +95,7 @@ class GitHelper:
         :param bool todo: Name a targeted todo worktree, which must not collide
             with the target repository's own worktree for the same number.
         """
-        owner, _, name = repo.partition("/")
+        owner, _, name = (self.repo_from_remote_url(repo) if ":" in repo else repo).partition("/")
         if not owner or not name:
             return ""
         return f"{owner}_{name}_todo_{number}" if todo else f"{owner}_{name}_{number}"
@@ -110,6 +113,60 @@ class GitHelper:
         if result.returncode != 0:
             return None
         return result.stdout.strip() or None
+
+    def repository_matches(self, candidate: Path, target: str) -> bool:
+        """Prove repository identity using the origin host and full repository path."""
+        if not self.is_worktree_root(candidate):
+            return False
+        origin = self.remote_url(candidate, "origin")
+        identity = self.repository_identity(target)
+        return identity is not None and self.repository_identity(origin or "") == identity
+
+    @staticmethod
+    def repository_identity(target: str) -> tuple[str, str] | None:
+        """Normalize supported remote syntaxes without conflating hosts or nested paths."""
+        if re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", target):
+            return "github.com", target
+        if not target or any(char.isspace() for char in target):
+            return None
+        if "://" not in target:
+            match = re.fullmatch(r"[^/@:]+@([^/:]+):(.+)", target)
+            if match is None:
+                return None
+            host, path = match.groups()
+        else:
+            try:
+                url = urlsplit(target)
+                if url.scheme not in {"https", "ssh", "git"} or not url.hostname:
+                    return None
+                if url.query or url.fragment:
+                    return None
+                host, path = url.netloc.rsplit("@", 1)[-1], url.path.lstrip("/")
+            except ValueError:
+                return None
+        path = path.rstrip("/").removesuffix(".git")
+        parts = path.split("/")
+        if len(parts) < 2 or any(part in {"", ".", ".."} for part in parts):
+            return None
+        return host.lower(), path
+
+    def clone_repository(self, url: str, destination: Path) -> None:
+        """Clone a URL target with Git rather than a hosting-service CLI."""
+        try:
+            subprocess.run(
+                ["git", "clone", url, str(destination)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as error:
+            raise RuntimeError(
+                f"Failed to clone {url}: git is not installed or not on PATH."
+            ) from error
+        except subprocess.CalledProcessError as error:
+            raise RuntimeError(
+                f"Failed to clone {url}: {(error.stderr or '').strip() or f'exit code {error.returncode}'}"
+            ) from error
 
     def pull_ff_only(self, worktree: Path) -> None:
         subprocess.run(
@@ -145,13 +202,22 @@ class GitHelper:
         on the default branch; item branches live in dedicated worktrees.
         """
         try:
-            origin_head = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
-                cwd=main_path,
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
+            head_command = ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]
+            try:
+                origin_head = subprocess.run(
+                    head_command, cwd=main_path, check=True, capture_output=True, text=True
+                ).stdout.strip()
+            except subprocess.CalledProcessError:
+                subprocess.run(
+                    ["git", "remote", "set-head", "origin", "--auto"],
+                    cwd=main_path,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                origin_head = subprocess.run(
+                    head_command, cwd=main_path, check=True, capture_output=True, text=True
+                ).stdout.strip()
             default_branch = origin_head.partition("/")[2]
             subprocess.run(
                 ["git", "switch", default_branch],

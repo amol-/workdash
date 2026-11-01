@@ -284,7 +284,9 @@ class WorkdashBackend:
     def resolve_analyze_command_tokens(self, tool: str) -> list[str]:
         return self.config.analyze_agent_command_tokens(tool)
 
-    def analyze_item(self, item: WorkItem, tool: str = "codex") -> str | None:
+    def analyze_item(
+        self, item: WorkItem, tool: str = "codex", *, cwd: str | None = None
+    ) -> str | None:
         """Generate or retrieve analysis, returning the markdown file path.
 
         :param str tool: ``"cached"`` to return existing analysis,
@@ -298,7 +300,7 @@ class WorkdashBackend:
                 return str(self.analysis_cache.build_analysis_path(item))
             return None
         command_tokens = self.resolve_analyze_command_tokens(tool)
-        analysis_content = self.analyzer.analyze(item, command_tokens=command_tokens)
+        analysis_content = self.analyzer.analyze(item, command_tokens=command_tokens, cwd=cwd)
         if analysis_content is None:
             return None
         self.analysis_cache.save(item, analysis_content)

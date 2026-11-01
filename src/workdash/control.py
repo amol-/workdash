@@ -29,7 +29,7 @@ from .launcher import (
 )
 from .models import WorkItem, display_repo, format_type_label
 from .repo_worktree import ensure_worktree, existing_worktree_path, get_merge_base
-from .todo import create_todo, is_repository_name
+from .todo import create_todo, is_todo_target
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8765
@@ -144,10 +144,10 @@ class WorkdashSession:
                 "The todo text is required.",
                 status=HTTPStatus.BAD_REQUEST,
             )
-        if target is not None and not is_repository_name(target):
+        if target is not None and not is_todo_target(target):
             raise WorkdashControlError(
                 "bad_request",
-                f"The todo target {target!r} must be in owner/repo form.",
+                f"The todo target {target!r} must be a GitHub owner/repo or a supported git URL.",
                 status=HTTPStatus.BAD_REQUEST,
             )
         item = create_todo(
@@ -345,9 +345,8 @@ class WorkdashSession:
             cached_path = self.backend.analyze_item(item, tool="cached")
             if cached_path is not None:
                 return cached_path
-        if tool != "cached":
-            ensure_worktree(self.config.workdir, item)
-        return self.backend.analyze_item(item, tool=tool)
+        cwd = ensure_worktree(self.config.workdir, item) if tool != "cached" else None
+        return self.backend.analyze_item(item, tool=tool, cwd=cwd)
 
     def _require_item(self, target: str) -> WorkItem:
         item = resolve_work_item_target(target, self.work_items)
@@ -494,7 +493,7 @@ def format_work_item_id(item: WorkItem) -> str:
     if item.todo_target is not None:
         # A targeted todo is listed under its target, so the ID is marked to
         # never collide with the target's own issue of the same number.
-        return f"{item.todo_target}#{item_type}-WT{item.number}"
+        return f"{display_repo(item)}#{item_type}-WT{item.number}"
     return f"{item.repo}#{item_type}-{item.number}"
 
 

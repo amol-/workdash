@@ -283,6 +283,12 @@ def test_ensure_worktree_fetches_existing_main_for_pr(
     def fake_run(*args, **kwargs):
         cmd = args[0]
         calls.append(cmd)
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git", stderr=""
+            )
         if cmd[0] == "gh" and cmd[1] == "pr" and cmd[2] == "view":
             return subprocess.CompletedProcess(cmd, 0, stdout=_SAME_REPO_HEAD_INFO, stderr="")
         if cmd[0] == "git" and cmd[1] == "fetch":
@@ -326,6 +332,12 @@ def test_ensure_worktree_fetches_existing_main_for_issue(
     def fake_run(*args, **kwargs):
         cmd = args[0]
         calls.append(cmd)
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git", stderr=""
+            )
         if cmd[0] == "git" and cmd[1] == "fetch":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd == ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]:
@@ -918,11 +930,11 @@ def test_ensure_worktree_does_not_pull_unrelated_direct_worktree(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    with pytest.raises(RuntimeError, match="Failed to create worktree"):
+    with pytest.raises(RuntimeError, match="belongs to a different repository"):
         ensure_worktree(str(tmp_path), make_pr())
 
     assert ["git", "pull", "--ff-only"] not in calls
-    assert any(c[0] == "git" and c[1] == "worktree" and c[2] == "add" for c in calls)
+    assert not any(c[0] == "git" and c[1] == "worktree" and c[2] == "add" for c in calls)
 
 
 def test_ensure_worktree_does_not_pull_unrelated_number_suffix_dir(
@@ -1081,6 +1093,12 @@ def test_ensure_worktree_pr_with_existing_local_branch(
     def fake_run(*args, **kwargs):
         cmd = args[0]
         calls.append(cmd)
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git", stderr=""
+            )
         if cmd[0] == "gh" and cmd[1] == "pr" and cmd[2] == "view":
             return subprocess.CompletedProcess(cmd, 0, stdout=_SAME_REPO_HEAD_INFO, stderr="")
         if cmd[0] == "git" and cmd[1] == "fetch":
@@ -1222,8 +1240,12 @@ def test_ensure_worktree_found_by_git_worktree_list(
     def fake_run(*args, **kwargs):
         cmd = args[0]
         calls.append(cmd)
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(cmd, kwargs["cwd"])
         if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
-            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/repo.git", stderr=""
+            )
         if cmd[0] == "gh" and cmd[1] == "pr" and cmd[2] == "view":
             return subprocess.CompletedProcess(cmd, 0, stdout=_SAME_REPO_HEAD_INFO, stderr="")
         if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "list":
@@ -1270,6 +1292,7 @@ def test_find_worktree_for_branch_returns_none_when_main_missing() -> None:
 
 def test_ensure_new_issue_worktree_fast_forwards_parent_and_child_to_origin_default(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A fresh issue worktree and its reserved clone use the fetched default commit."""
     origin = tmp_path / "origin.git"
@@ -1294,7 +1317,16 @@ def test_ensure_new_issue_worktree_fast_forwards_parent_and_child_to_origin_defa
         check=True,
     )
     workdir.mkdir()
-    subprocess.run(["git", "clone", str(origin), str(main)], check=True, capture_output=True)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{origin}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/owner/repo.git")
+    subprocess.run(
+        ["git", "clone", "https://github.com/owner/repo.git", str(main)],
+        check=True,
+        capture_output=True,
+    )
 
     (seed / "README.md").write_text("updated\n", encoding="utf-8")
     subprocess.run(["git", "commit", "-am", "updated"], cwd=seed, check=True, capture_output=True)
@@ -1313,3 +1345,163 @@ def test_ensure_new_issue_worktree_fast_forwards_parent_and_child_to_origin_defa
     ).stdout.strip()
     assert parent_ref == latest
     assert child_ref == latest
+
+
+@pytest.mark.parametrize(
+    ("target", "origin", "matches"),
+    [
+        ("https://codeberg.org/owner/repo.git", "git@codeberg.org:owner/repo", True),
+        ("ssh://git@gitlab.com/group/owner/repo", "git://gitlab.com/group/owner/repo.git", True),
+        ("https://codeberg.org/owner/repo", "https://github.com/owner/repo", False),
+        ("owner/repo", "https://codeberg.org/owner/repo", False),
+        ("owner/repo", "git@github.com:owner/repo.git", True),
+        ("https://gitlab.com/group/owner/repo", "https://gitlab.com/other/owner/repo", False),
+    ],
+)
+def test_targeted_todo_discovery_requires_host_and_full_path(
+    tmp_path, monkeypatch, target, origin, matches
+):
+    candidate = tmp_path / "owner_repo_todo_110"
+    candidate.mkdir()
+    item = make_targeted_todo()
+    item.todo_target = target
+
+    def fake_run(command, **kwargs):
+        if command == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(command, kwargs["cwd"])
+        assert command == ["git", "config", "--local", "--get", "remote.origin.url"]
+        return subprocess.CompletedProcess(command, 0, stdout=origin, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert existing_worktree_path(str(tmp_path), item) == (candidate if matches else None)
+
+
+@pytest.mark.parametrize("occupied", ["main", "worktree", "branch"])
+def test_targeted_todo_conflicts_never_mutate_another_repository(tmp_path, monkeypatch, occupied):
+    main = tmp_path / "owner_repo"
+    main.mkdir()
+    candidate = tmp_path / ("custom" if occupied == "branch" else "owner_repo_todo_110")
+    candidate.mkdir()
+    marker = candidate / "work.txt"
+    marker.write_text("uncommitted work")
+    item = make_targeted_todo()
+    item.todo_target = "https://codeberg.org/owner/repo.git"
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            wrong = kwargs["cwd"] == (main if occupied == "main" else candidate)
+            origin = "https://github.com/owner/repo" if wrong else item.todo_target
+            return subprocess.CompletedProcess(command, 0, stdout=origin, stderr="")
+        if command == ["git", "rev-parse", "--show-toplevel"]:
+            return _git_show_toplevel(command, kwargs["cwd"])
+        if command == ["git", "worktree", "list", "--porcelain"]:
+            return subprocess.CompletedProcess(
+                command, 0, stdout=f"worktree {candidate}\nbranch refs/heads/wt-110\n", stderr=""
+            )
+        raise AssertionError(f"Unexpected mutation: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="belongs to a different repository"):
+        ensure_worktree(str(tmp_path), item)
+    assert marker.read_text() == "uncommitted work"
+    assert all(command[0] == "git" for command in calls)
+
+
+def test_url_target_clone_worktree_reuse_and_missing_default_head(tmp_path, monkeypatch):
+    # Redirect Git transport to a disposable local origin; no forge is contacted.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    origin = tmp_path / "origin"
+    subprocess.run(["git", "init", "-b", "main", str(origin)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=origin, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=origin, check=True)
+    (origin / "source.py").write_text("value = 42\n")
+    subprocess.run(["git", "add", "."], cwd=origin, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=origin, check=True, capture_output=True)
+    target = "https://gitlab.com/group/owner/repo.git"
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{origin}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", target)
+    item = make_targeted_todo()
+    item.todo_target = target
+    workdir = tmp_path / "workdir"
+
+    worktree = Path(ensure_worktree(str(workdir), item))
+
+    assert worktree.name == "owner_repo_todo_110"
+    assert (worktree / "source.py").read_text() == "value = 42\n"
+    assert existing_worktree_path(str(workdir), item) == worktree
+    assert ensure_worktree(str(workdir), item) == str(worktree)
+    main = workdir / "owner_repo"
+    subprocess.run(
+        ["git", "symbolic-ref", "--delete", "refs/remotes/origin/HEAD"], cwd=main, check=True
+    )
+    item.number = 111
+    next_worktree = Path(ensure_worktree(str(workdir), item))
+    assert (next_worktree / "source.py").read_text() == "value = 42\n"
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=next_worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert branch.stdout.strip() == "wt-111"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        FileNotFoundError("git"),
+        subprocess.CalledProcessError(128, ["git", "clone"], stderr="repository not found"),
+    ],
+)
+def test_url_clone_failures_have_context_and_preserve_cause(tmp_path, monkeypatch, failure):
+    item = make_targeted_todo()
+    item.todo_target = "https://forge.example/owner/repo.git"
+
+    def fake_run(command, **kwargs):
+        assert command == ["git", "clone", item.todo_target, str(tmp_path / "owner_repo")]
+        raise failure
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(
+        RuntimeError, match="Failed to clone https://forge.example/owner/repo.git"
+    ) as error:
+        ensure_worktree(str(tmp_path), item)
+    assert error.value.__cause__ is failure
+
+
+@pytest.mark.parametrize("occupied", ["owner_repo", "owner_repo_42"])
+def test_github_issue_rejects_same_named_clone_or_worktree_on_another_host(
+    tmp_path, monkeypatch, occupied
+):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    candidate = tmp_path / occupied
+    subprocess.run(["git", "init", str(candidate)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://codeberg.org/owner/repo.git"],
+        cwd=candidate,
+        check=True,
+    )
+    (candidate / "work.txt").write_text("local work")
+    real_run = subprocess.run
+
+    def read_only_run(command, **kwargs):
+        assert command == ["git", "rev-parse", "--show-toplevel"] or command == [
+            "git",
+            "config",
+            "--local",
+            "--get",
+            "remote.origin.url",
+        ]
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", read_only_run)
+    assert existing_worktree_path(str(tmp_path), make_issue()) is None
+    with pytest.raises(RuntimeError, match="belongs to a different repository"):
+        ensure_worktree(str(tmp_path), make_issue())
+    assert (candidate / "work.txt").read_text() == "local work"

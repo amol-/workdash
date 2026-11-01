@@ -8,7 +8,7 @@ Feature: CLI orchestration commands
   Rules:
     - `workdash list`, `workdash info`, `workdash analyze`, `workdash code`, `workdash terminal`, `workdash todo`, `workdash read`, `workdash write`, and `workdash close` require a running `workdash --server` session.
     - All nine server-backed CLI commands accept `--host HOST`, defaulting to `127.0.0.1`, using plain HTTP on fixed port 8765.
-    - Client hosts may be IPs or DNS hostnames; host selection preserves positional item targets and todo `--target owner/repo`.
+    - Client hosts may be IPs or DNS hostnames; host selection preserves positional item targets and todo targets, whether GitHub `owner/repo` names or git URLs.
     - Server-backed CLI commands do not load configuration, run GitHub preflight, inspect Zellij, or fetch GitHub directly.
     - Server-backed CLI commands report a clear error naming the selected host when the Workdash server is not reachable.
     - CLI commands that return information support `--json`.
@@ -37,7 +37,7 @@ Feature: CLI orchestration commands
     - `workdash close` closes a pane through the server-backed pane close API.
     - `workdash analyze` returns markdown analysis content as base64 in the server response with `content_type`, `file_name`, and `file_content`.
     - `workdash analyze` writes the server-returned analysis content to a secure temporary local file and reports that client-side path as `analysis_path`.
-    - `workdash todo` captures a todo through the server, taking the title as its text argument, an optional `--target owner/repo`, and optional long details via `--body BODY`.
+    - `workdash todo` captures a todo through the server, taking the title as its text argument, an optional `--target` GitHub `owner/repo` name or git URL, and optional long details via `--body BODY`.
     - `workdash todo` reports the created Workdash item ID and the created issue URL.
 
   @id:F-CLI-ORCHESTRATION-S003
@@ -236,11 +236,17 @@ Feature: CLI orchestration commands
     And the system returns JSON with the pane ID and accepted status
 
   @id:F-CLI-ORCHESTRATION-S030
-  Scenario: Todo captures a work item through the local Workdash server
+  Scenario Outline: Todo captures a work item through the local Workdash server
     Given a server-backed Workdash session is running
-    When the user runs `workdash todo "Fix the flaky test" --target owner/repo`
+    When the user runs `workdash todo "Fix the flaky test" --target <target>`
     Then the command captures the todo through the local Workdash server
     And the system reports the created Workdash item ID and issue URL
+
+    Examples:
+      | target                                   |
+      | owner/repo                               |
+      | https://gitlab.com/owner/repo.git        |
+      | https://codeberg.org/owner/repo.git      |
 
   @id:F-CLI-ORCHESTRATION-S031
   Scenario: Todo requires the local Workdash server

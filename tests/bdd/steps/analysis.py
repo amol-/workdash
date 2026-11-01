@@ -7,18 +7,22 @@ the WorkdashBackend + AnalysisCache layer for cache-freshness scenarios.
 
 from __future__ import annotations
 
+import json
+import shlex
+import subprocess
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
-from pytest_bdd import given, then, when
+from pytest_bdd import given, parsers, then, when
 from textual.widgets import Static
 
 from workdash.analysis_cache import AnalysisCache
+from workdash.analyzer import Analyzer
 from workdash.backend import WorkdashBackend
 from workdash.config import WorkdashConfig
+from workdash.control import WorkdashSession, format_work_item_id
 from workdash.models import WorkItem
 from workdash.tui import AnalyzeDialog, WorkdashApp
 
@@ -350,13 +354,7 @@ def _run_generate_fresh(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Drive the fresh-analysis flow through a real backend + cache.
-
-    The scenario patches the ``Analyzer`` boundary so no subprocess is
-    spawned, but the generated markdown flows through the real
-    ``AnalysisCache.save`` so the Then steps can read the cached file off
-    disk to prove persistence.
-    """
+    """Drive fresh analysis through the TUI, session, analyzer and cache."""
 
     from workdash.config import AgentConfig
 
@@ -366,11 +364,9 @@ def _run_generate_fresh(
     fresh_body = "# fresh analysis\nproduction-generated body"
 
     cache = AnalysisCache(tmp_path / "cache")
-    analyzer = MagicMock()
-    if scenario_state.get("_fresh_fails"):
-        analyzer.analyze.side_effect = RuntimeError("analysis failed")
-    else:
-        analyzer.analyze.return_value = fresh_body
+    analyzer = Analyzer()
+    scenario_state["target_source"] = {"src/cards.py": "value = 42\n"}
+    _install_analysis_agent(scenario_state, monkeypatch, output=fresh_body)
 
     config = WorkdashConfig(
         github_username="testuser",
@@ -388,14 +384,28 @@ def _run_generate_fresh(
 
     def worktree_callback(item: WorkItem) -> str:
         worktree_calls.append(item)
-        return str(tmp_path / "wt")
+        root = tmp_path / "wt"
+        for name, content in scenario_state["target_source"].items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        return str(root)
+
+    session = WorkdashSession(
+        config=config,
+        backend=backend,
+        work_items=list(work_items),
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    monkeypatch.setattr(
+        "workdash.control.ensure_worktree", lambda workdir, item: worktree_callback(item)
+    )
 
     def analyze_callback(item: WorkItem, tool: str = "codex") -> str | None:
         analyze_calls.append((item, tool))
-        if tool != "cached":
-            backend.resolve_analyze_command_tokens(tool)
-            worktree_callback(item)
-        return backend.analyze_item(item, tool=tool)
+        result = session.analyze(target=format_work_item_id(item), agent=tool, prefer_cache=False)
+        return result["path"]
 
     monkeypatch.setattr("workdash.tui.open_markdown", lambda path: opened_paths.append(path))
     busy_messages: list[str] = []
@@ -509,3 +519,98 @@ def _previous_cache_preserved(scenario_state: dict[str, Any]) -> None:
     cache: AnalysisCache = scenario_state["cache"]
     item = scenario_state["selected_item"]
     assert cache.load_analysis(item) == "# cached analysis\nbody"
+
+
+def _install_analysis_agent(
+    scenario_state, monkeypatch, *, output="# Analysis\nSource inspection complete."
+):
+    """Fake only GitHub and the external agent, inspecting its cwd and prompt."""
+    previous_run = subprocess.run
+
+    def fake_run(command, **kwargs):
+        if command[:3] == ["gh", "issue", "view"]:
+            scenario_state["discussion_command"] = command
+            discussion = scenario_state.get(
+                "discussion", {"title": "Issue title", "body": "Issue discussion"}
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(discussion), stderr="")
+        if len(command) > 1 and command[1] == "-ic":
+            if scenario_state.get("_fresh_fails"):
+                raise subprocess.CalledProcessError(1, command, stderr="analysis failed")
+            root = Path(kwargs["cwd"])
+            prompt = shlex.split(command[2])[-1]
+            scenario_state["agent_cwd"] = root
+            scenario_state["agent_prompt"] = prompt
+            scenario_state["agent_sources"] = {
+                path: (root / path).read_text() for path in scenario_state["target_source"]
+            }
+            assert "Inspect the local source code" in prompt
+            assert "file path and line number without a URL" in prompt
+            return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+        return previous_run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+def run_source_analysis(scenario_state, monkeypatch, tmp_path):
+    from .worktrees import _install_fake_git
+
+    session = scenario_state["api_session"]
+    _install_fake_git(scenario_state, monkeypatch, workdir=Path(session.config.workdir))
+    _install_analysis_agent(scenario_state, monkeypatch)
+    session.backend = WorkdashBackend(config=session.config, cache_root=tmp_path / "analysis-cache")
+    session.analyze(target=format_work_item_id(scenario_state["todo_item"]), prefer_cache=False)
+    scenario_state["worktree_path"] = str(scenario_state["agent_cwd"])
+
+
+@then(
+    "the analysis agent starts inside that worktree with access to the code and the work item's discussion"
+)
+def _fresh_agent_has_source_and_discussion(scenario_state, tmp_path):
+    assert scenario_state["agent_cwd"] == tmp_path / "wt"
+    assert scenario_state["agent_sources"]["src/cards.py"] == "value = 42\n"
+    assert "Issue discussion" in scenario_state["agent_prompt"]
+
+
+@given(parsers.parse("the selected work item's code is hosted at `{repository}`"))
+def _code_hosted_at(repository, scenario_state, work_items, tmp_path):
+    from .todo import _seed_todo_item
+
+    _seed_todo_item(scenario_state, work_items, tmp_path, number=110, target=repository)
+
+
+@given(parsers.parse("the code relevant to the work item is in `{path}` at line {line:d}"))
+def _source_at_line(path, line, scenario_state):
+    scenario_state["target_source"] = {path: "\n" * (line - 1) + "def cards(): return 42\n"}
+
+
+@when("the user generates a fresh analysis")
+def _generate_source_analysis(scenario_state, monkeypatch, tmp_path):
+    run_source_analysis(scenario_state, monkeypatch, tmp_path)
+
+
+@then(
+    parsers.parse(
+        "the analysis cites `{path}` at line {line:d} using a link on `{hosting_service}`"
+    )
+)
+def _citation_on_host(path, line, hosting_service, scenario_state):
+    """Verify citation guidance delivered to the agent, not model output compliance."""
+    prompt = " ".join(scenario_state["agent_prompt"].split())
+    target = scenario_state["todo_item"].todo_target
+    assert f"The code repository is {target}" in prompt
+    assert "code repository's own hosting service" in prompt
+    assert "Inspect the local Git checkout to determine the default branch" in prompt
+    assert "Use the actual repository and branch, not the example values" in prompt
+    assert "file path and line number without a URL" in prompt
+    prefix = {
+        "GitHub": "https://github.com/owner/repo/blob/main/",
+        "GitLab": "https://gitlab.com/owner/repo/-/blob/main/",
+        "Codeberg": "https://codeberg.org/owner/repo/src/branch/main/",
+    }[hosting_service]
+    assert f"- {hosting_service}: [`{path}:{line}`]({prefix}{path}#L{line})" in prompt
+    assert scenario_state["agent_sources"][path].splitlines()[line - 1] == "def cards(): return 42"
+    pytest.skip(
+        "Generated citations require a live analysis agent with working source access; "
+        "prompt checks are not output evidence."
+    )

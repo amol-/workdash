@@ -71,6 +71,10 @@ def test_analyze_for_pr_writes_diff_to_tempfile_and_injects_path(
         assert "well-formed CommonMark Markdown" in shell_cmd
         assert "Markdown link that points to the exact definition line on GitHub" in shell_cmd
         assert "headRefName" in shell_cmd
+        assert (
+            "](https://github.com/owner/repo/blob/<headRefName>/path/to/file.go#L42)" in shell_cmd
+        )
+        assert "https://github.com/https://" not in shell_cmd
         # The diff content must NOT be embedded in the argv — that's what blew
         # past the kernel's per-argv-string limit. Only the temp file path is.
         assert "+print('hello')" not in shell_cmd
@@ -241,6 +245,7 @@ def test_analyze_for_a_targeted_todo_links_sources_in_the_target_repository(
     # Context still comes from the todo issue, which lives in the todo repository.
     assert "testuser/todos" in calls[0]
     prompt = calls[1][2]
+    assert "The code repository is owner/repo" in prompt
     assert "https://github.com/owner/repo/blob/main/" in prompt
     assert "https://github.com/testuser/todos/blob" not in prompt
     # The analysis header must name the issue it was written from.
@@ -460,3 +465,48 @@ def test_analyze_raises_runtime_error_when_shell_missing(
 
     with pytest.raises(RuntimeError, match="shell '/nonexistent/shell' not found"):
         Analyzer().analyze(make_work_item(WorkItemType.PR))
+
+
+@pytest.mark.parametrize(
+    "target", ["https://gitlab.com/owner/repo.git", "git@codeberg.org:owner/repo.git"]
+)
+def test_analysis_process_runs_in_worktree_with_code_and_todo_discussion(
+    target, tmp_path, monkeypatch
+):
+    import json
+    import sys
+
+    item = make_work_item(WorkItemType.ISSUE)
+    item.repo = "testuser/todos"
+    item.todo_target = target
+    (tmp_path / "source.py").write_text("local source")
+    initial_cwd = Path.cwd()
+    real_run = subprocess.run
+
+    def run(command, **kwargs):
+        if command[:3] == ["gh", "issue", "view"]:
+            assert command[command.index("--repo") + 1] == "testuser/todos"
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"title": item.title, "body": "todo discussion"}),
+                stderr="",
+            )
+        assert Path(kwargs["cwd"]) == tmp_path
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    script = (
+        "import pathlib,sys; prompt=sys.argv[1]; "
+        f"assert 'The code repository is {target}' in prompt; "
+        "assert 'todo discussion' in prompt; "
+        "assert 'file path and line number without a URL' in prompt; "
+        "print(pathlib.Path('source.py').read_text())"
+    )
+
+    assert (
+        Analyzer().analyze(item, [sys.executable, "-c", script], cwd=str(tmp_path))
+        == "local source"
+    )
+    assert Path.cwd() == initial_cwd
