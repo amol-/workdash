@@ -118,7 +118,7 @@ class WorkdashBackend:
 
         report_progress("Fetching open review-requested pull requests...")
         review_requested_pull_requests = self.github_client.list_open_review_requested_prs(
-            github_username, progress_callback=report_progress
+            github_username
         )
         report_progress(
             f"Fetched {len(review_requested_pull_requests)} open review-requested pull request(s)."

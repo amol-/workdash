@@ -62,9 +62,8 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
                 }
             ]
 
-        def list_open_review_requested_prs(self, login, progress_callback=None):
+        def list_open_review_requested_prs(self, login):
             captured["review_requested_called"] = True
-            captured["review_requested_progress_callback"] = progress_callback is not None
             return [
                 {
                     "id": "REVIEW-DUPLICATE-PR",
@@ -201,7 +200,6 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
 
     assert captured["authored_called"] is True
     assert captured["review_requested_called"] is True
-    assert captured["review_requested_progress_callback"] is True
     assert captured["reviewed_called"] is True
     assert captured["assigned_called"] is True
     assert captured["tracked_search_scope"] == "user:owner"

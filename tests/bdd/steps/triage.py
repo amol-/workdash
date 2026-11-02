@@ -459,21 +459,12 @@ def _pr_team_only_request(scenario_state: dict[str, Any]) -> None:
 @given("a separate pull request has requested the user directly")
 def _pr_direct_request(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
     scenario_state["direct_pr_number"] = 202
-    # Run the github_client against patched subprocess so only the direct
-    # review request survives the team-only filter.
+    # Run the github_client against patched subprocess. The search qualifier
+    # makes GitHub return direct requests only, so the team-only pull request
+    # is absent from the response.
     from workdash import github_client as gc
 
-    team_only_search = [
-        {
-            "id": "PR-TEAM",
-            "number": 201,
-            "title": "Team only review request",
-            "url": "https://github.com/owner/repo/pull/201",
-            "createdAt": "2026-04-20T00:00:00Z",
-            "updatedAt": "2026-04-21T00:00:00Z",
-            "isDraft": False,
-            "repository": {"nameWithOwner": "owner/repo"},
-        },
+    direct_search = [
         {
             "id": "PR-DIRECT",
             "number": 202,
@@ -485,26 +476,15 @@ def _pr_direct_request(scenario_state: dict[str, Any], work_items: list[WorkItem
             "repository": {"nameWithOwner": "owner/repo"},
         },
     ]
-    team_only_reviewer = {"requestedReviewer": {"__typename": "Team", "name": "team-reviewers"}}
-    direct_reviewer = {"requestedReviewer": {"__typename": "User", "login": "testuser"}}
 
     def fake_run(command, **kwargs):
         import json
 
-        if command[:3] == ["gh", "search", "prs"] and "--review-requested" in command:
+        if command[:3] == ["gh", "search", "prs"]:
+            assert command[3] == "user-review-requested:testuser"
             return subprocess.CompletedProcess(
-                command, 0, stdout=json.dumps(team_only_search), stderr=""
+                command, 0, stdout=json.dumps(direct_search), stderr=""
             )
-        if command[:3] == ["gh", "api", "graphql"]:
-            # Aliases are positional to the search order defined above.
-            assert "number: 201" in command[4] and "number: 202" in command[4]
-            payload = {
-                "data": {
-                    "p0": {"pullRequest": {"reviewRequests": {"nodes": [team_only_reviewer]}}},
-                    "p1": {"pullRequest": {"reviewRequests": {"nodes": [direct_reviewer]}}},
-                }
-            }
-            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
         raise AssertionError(f"Unexpected gh command in scenario: {command}")
 
     scenario_state["_subprocess_patch"] = fake_run
@@ -665,13 +645,12 @@ def _system_reports_empty_from_open(scenario_state: dict[str, Any], capsys) -> N
     assert "No work items found." in capsys.readouterr().out
 
 
-# -- S007: review-request metadata auth failures --------------------------
+# -- S007: review-request authorization failure ---------------------------
 
 
 @given("one review-requested pull request requires additional GitHub authorization")
-def _one_review_requested_pr_requires_authorization(scenario_state: dict[str, Any]) -> None:
-    scenario_state["unauthorized_review_repo"] = "protected-org/protected-repo"
-    scenario_state["unauthorized_review_number"] = 860
+def _one_review_requested_pr_requires_authorization() -> None:
+    """Modeled by the search fake, which omits that pull request."""
 
 
 @given("another review-requested pull request has requested the user directly")
@@ -680,16 +659,10 @@ def _another_review_requested_pr_has_direct_request(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    unauthorized_repo = scenario_state["unauthorized_review_repo"]
-    unauthorized_number = scenario_state["unauthorized_review_number"]
     authorized_repo = "owner/repo"
     authorized_number = 42
     scenario_state["authorized_review_repo"] = authorized_repo
     scenario_state["authorized_review_number"] = authorized_number
-    saml_error = (
-        "GraphQL: Resource protected by organization SAML enforcement. "
-        "You must grant your OAuth token access to this organization."
-    )
 
     monkeypatch.setattr(
         GitHubClient, "list_open_authored_prs", lambda self, login, progress_callback=None: []
@@ -708,18 +681,11 @@ def _another_review_requested_pr_has_direct_request(
     )
 
     def fake_run(command, **kwargs):
-        if command[:3] == ["gh", "search", "prs"] and "--review-requested" in command:
+        if command[:3] == ["gh", "search", "prs"]:
+            # GitHub returns direct requests only and omits the pull request
+            # the user cannot access.
+            assert command[3] == "user-review-requested:testuser"
             payload = [
-                {
-                    "id": "UNAUTHORIZED-REVIEW",
-                    "number": unauthorized_number,
-                    "title": "Unauthorized review request",
-                    "url": f"https://github.com/{unauthorized_repo}/pull/{unauthorized_number}",
-                    "createdAt": "2026-04-20T00:00:00Z",
-                    "updatedAt": "2026-04-21T00:00:00Z",
-                    "isDraft": False,
-                    "repository": {"nameWithOwner": unauthorized_repo},
-                },
                 {
                     "id": "AUTHORIZED-REVIEW",
                     "number": authorized_number,
@@ -734,40 +700,11 @@ def _another_review_requested_pr_has_direct_request(
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
         if is_linked_issues_query(command):
             return linked_issues_response(command)
-        if command[:3] == ["gh", "api", "graphql"]:
-            # GitHub answers the readable alias and reports the denied one as an
-            # error, which gh surfaces as a non-zero exit.
-            assert f"number: {unauthorized_number}" in command[4]
-            assert f"number: {authorized_number}" in command[4]
-            payload = {
-                "data": {
-                    "p0": None,
-                    "p1": {
-                        "pullRequest": {
-                            "reviewRequests": {
-                                "nodes": [
-                                    {
-                                        "requestedReviewer": {
-                                            "__typename": "User",
-                                            "login": "testuser",
-                                        }
-                                    }
-                                ]
-                            }
-                        }
-                    },
-                },
-                "errors": [{"type": "FORBIDDEN", "path": ["p0"], "message": saml_error}],
-            }
-            raise subprocess.CalledProcessError(
-                1, command, output=json.dumps(payload), stderr=saml_error
-            )
         raise AssertionError(f"Unexpected gh command in review auth scenario: {command}")
 
     monkeypatch.setattr("workdash.github_client.subprocess.run", fake_run)
 
     def hook(state: dict[str, Any], items: list[WorkItem], _mp: pytest.MonkeyPatch) -> None:
-        progress_messages: list[str] = []
         config = WorkdashConfig(
             github_username="testuser",
             agents={
@@ -784,11 +721,10 @@ def _another_review_requested_pr_has_direct_request(
             config=config,
             included_items_store=IncludedItemsStore(tmp_path / "included.json"),
         )
-        fetched, markers = backend.load_items(progress_callback=progress_messages.append)
+        fetched, markers = backend.load_items()
         items[:] = list(fetched)
         state["work_items"] = list(fetched)
         state["suggestion_markers"] = dict(markers)
-        state["progress_messages"] = progress_messages
 
     scenario_state["_open_dashboard_hook"] = hook
 
@@ -800,22 +736,6 @@ def _authorized_review_requested_pr_appears(scenario_state: dict[str, Any]) -> N
         and item.number == scenario_state["authorized_review_number"]
         and item.kind == WorkItemKind.REVIEW_REQUESTED_PR
         for item in scenario_state["work_items"]
-    )
-
-
-@then("the system warns that the unauthorized review-requested pull request was skipped")
-def _warns_unauthorized_review_requested_pr_skipped(
-    scenario_state: dict[str, Any],
-) -> None:
-    item_label = (
-        f"{scenario_state['unauthorized_review_repo']}"
-        f"#{scenario_state['unauthorized_review_number']}"
-    )
-    assert any(
-        "Warning: skipped review-requested pull request" in message
-        and item_label in message
-        and "SAML enforcement" in message
-        for message in scenario_state["progress_messages"]
     )
 
 

@@ -214,12 +214,12 @@ def _open_dashboard(
 ) -> None:
     """Capture the items/markers the dashboard would see on startup.
 
-    Some scenarios (e.g. the review-filter case) set ``_subprocess_patch`` +
-    ``_github_client`` so we actually run the real github_client and filter
-    out the team-only review requests. Include-store scenarios wire an
-    ``_open_dashboard_hook`` that drives the real ``WorkdashBackend``
-    through a patched ``gh`` subprocess boundary. Others simply compute
-    suggestion markers over the pre-populated ``work_items`` list.
+    Some scenarios (e.g. the review-request case) set ``_subprocess_patch`` +
+    ``_github_client`` so we actually run the real github_client. Include-store
+    scenarios wire an ``_open_dashboard_hook`` that drives the real
+    ``WorkdashBackend`` through a patched ``gh`` subprocess boundary. Others
+    simply compute suggestion markers over the pre-populated ``work_items``
+    list.
     """
 
     hook = scenario_state.get("_open_dashboard_hook")
