@@ -7,7 +7,10 @@ Feature: Generate an analysis
 
   Rules:
     - A fresh analysis can be generated with any supported coding agent configured for analysis.
-    - Before generating an analysis, the system prepares the work item's worktree so the agent has access to the code.
+    - Before generating an analysis, the system prepares the work item's worktree and starts the analysis agent inside it.
+    - The agent can inspect the local source code alongside the supplied issue or pull request discussion.
+    - Source citations link to the code repository's own hosting service, including GitHub, GitLab, and Codeberg.
+    - When the source-link format is not immediately obvious, the agent cites the file path and line number without inventing a URL.
     - While the analysis runs, the system shows the user that work is in progress.
     - After a successful fresh analysis, the system caches the result and opens the rendered HTML with the same configured viewer used for work item URLs.
     - Opening a cached analysis also renders it and uses that viewer, including its fullscreen terminal choice and current session.
@@ -19,6 +22,7 @@ Feature: Generate an analysis
     Given the user has the analyze dialog open on a work item
     When the user chooses to generate a fresh analysis with a supported coding agent
     Then the system prepares the work item's worktree
+    And the analysis agent starts inside that worktree with access to the code and the work item's discussion
     And the system shows that the analysis is in progress
     And the generated analysis is cached
     And the rendered analysis is opened with the configured viewer
@@ -38,3 +42,16 @@ Feature: Generate an analysis
     Then the system reports the failure to the user
     And no dialog or progress overlay remains
     And the previously cached analysis is preserved
+
+  @id:F-ANALYSIS-GENERATE-S004
+  Scenario Outline: Analysis source citations follow the code repository's hosting service
+    Given the selected work item's code is hosted at `<repository>`
+    And the code relevant to the work item is in `src/cards.py` at line 12
+    When the user generates a fresh analysis
+    Then the analysis cites `src/cards.py` at line 12 using a link on `<hosting_service>`
+
+    Examples:
+      | repository                           | hosting_service |
+      | https://github.com/owner/repo        | GitHub          |
+      | https://gitlab.com/owner/repo        | GitLab          |
+      | https://codeberg.org/owner/repo      | Codeberg        |

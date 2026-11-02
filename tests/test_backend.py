@@ -705,7 +705,9 @@ def test_analyze_item_uses_cache_then_falls_back_to_analyzer_and_saves() -> None
         def __init__(self) -> None:
             self.analyze_calls: list[tuple[int, list[str] | None]] = []
 
-        def analyze(self, item: WorkItem, command_tokens: list[str] | None = None) -> str | None:
+        def analyze(
+            self, item: WorkItem, command_tokens: list[str] | None = None, *, cwd=None
+        ) -> str | None:
             self.analyze_calls.append((item.number, command_tokens))
             return f"## Summary\nanalysis {item.number}"
 
@@ -792,7 +794,9 @@ def test_analyze_item_tool_claude_bypasses_cache() -> None:
         def __init__(self) -> None:
             self.analyze_calls: list[tuple[int, list[str] | None]] = []
 
-        def analyze(self, item: WorkItem, command_tokens: list[str] | None = None) -> str | None:
+        def analyze(
+            self, item: WorkItem, command_tokens: list[str] | None = None, *, cwd=None
+        ) -> str | None:
             self.analyze_calls.append((item.number, command_tokens))
             return f"## Summary\nfresh analysis {item.number}"
 

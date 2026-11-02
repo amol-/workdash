@@ -61,10 +61,21 @@ def _install_fake_git(
         recorded.append(list(cmd))
         if cmd[:3] == ["gh", "pr", "view"]:
             return subprocess.CompletedProcess(cmd, 0, stdout=head_info, stderr="")
-        if cmd[:3] == ["gh", "repo", "clone"]:
+        if cmd[:3] == ["gh", "repo", "clone"] or cmd[:2] == ["git", "clone"]:
             target = Path(cmd[-1])
             target.mkdir(parents=True, exist_ok=True)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=str(kwargs["cwd"]), stderr="")
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            origin = scenario_state.get("origin_url") or (
+                scenario_state["todo_item"].todo_target
+                if "todo_item" in scenario_state
+                else f"https://github.com/{head_repo_owner}/{head_repo_name}.git"
+            )
+            if ":" not in origin:
+                origin = f"https://github.com/{origin}.git"
+            return subprocess.CompletedProcess(cmd, 0, stdout=origin, stderr="")
         if cmd[:2] == ["git", "fetch"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd == ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]:
@@ -94,6 +105,10 @@ def _install_fake_git(
             else:
                 wt_path = Path(cmd[3])
             wt_path.mkdir(parents=True, exist_ok=True)
+            for name, content in scenario_state.get("target_source", {}).items():
+                source = wt_path / name
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(content)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[:2] == ["git", "config"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
