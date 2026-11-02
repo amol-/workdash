@@ -143,6 +143,7 @@ def run_analyze_dialog_scenario(scenario_state: dict[str, Any], work_items: list
         work_items=list(work_items),
         interactions=interactions,
         analyze_callback=analyze_callback,
+        config=make_valid_config(scenario_state.get("agents")),
     )
     scenario_state["dialog_lines"] = captured["dialog_lines"]
     scenario_state["analyze_calls"] = analyze_calls
@@ -165,6 +166,12 @@ def _dialog_offers_fresh(scenario_state: dict[str, Any]) -> None:
     lines = scenario_state["dialog_lines"]
     for choice in make_valid_config().tui_analyze_choices():
         assert any(choice.label in line for line in lines), lines
+
+
+@then(parsers.parse('the dialog offers "{label}" as option {number:d}'))
+def _dialog_offers_labelled_option(label: str, number: int, scenario_state: dict[str, Any]) -> None:
+    lines = scenario_state["dialog_lines"]
+    assert any(line == f"({number}) {label}" for line in lines), lines
 
 
 @then("the dialog tells the user there is no previous analysis")
@@ -331,7 +338,7 @@ def _next_fresh_fails(scenario_state: dict[str, Any]) -> None:
     scenario_state["_fresh_fails"] = True
 
 
-@when("the user chooses to generate a fresh analysis with a supported coding agent")
+@when("the user chooses to generate a fresh analysis with a configured analysis agent")
 def _choose_generate_fresh(
     scenario_state: dict[str, Any],
     work_items: list[WorkItem],
@@ -373,9 +380,11 @@ def _run_generate_fresh(
 
     config = WorkdashConfig(
         github_username="testuser",
-        claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze="codex exec", launch="codex"),
-        pi=AgentConfig(launch="pi"),
+        agents={
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+            "claude": AgentConfig(analyze="claude -p", launch="claude"),
+            "pi": AgentConfig(launch="pi"),
+        },
         repositories=("owner/repo",),
         workdir=str(tmp_path / "wrk"),
     )

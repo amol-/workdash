@@ -17,9 +17,11 @@ from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import AnalyzeDialog, CodeDialog, SearchDialog, WorkdashApp
 
 _DEFAULT_TUI_CONFIG = WorkdashConfig(
-    claude=AgentConfig(analyze="claude -p", launch="claude"),
-    codex=AgentConfig(analyze="codex exec", launch="codex"),
-    pi=AgentConfig(launch="pi"),
+    agents={
+        "claude": AgentConfig(analyze="claude -p", launch="claude"),
+        "codex": AgentConfig(analyze="codex exec", launch="codex"),
+        "pi": AgentConfig(launch="pi"),
+    },
 )
 
 
@@ -331,13 +333,13 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
             await pilot.press("2")
             await pilot.pause()
 
-            # Press "c" to open CodeDialog, then "3" to choose VSCode
+            # Press "c" to open CodeDialog, then "3" to choose pi
             await pilot.press("c")
             await pilot.pause()
             await pilot.press("3")
             await pilot.pause()
 
-            # Press "c" to open CodeDialog, then "4" to choose pi
+            # Press "c" to open CodeDialog, then "4" to choose VSCode (always last)
             await pilot.press("c")
             await pilot.pause()
             await pilot.press("4")
@@ -352,8 +354,8 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
             assert analyze_calls == [(WorkItemType.PR, 22, "claude")]
             assert launch_calls == [
                 (WorkItemType.PR, 22, "codex"),
-                (WorkItemType.PR, 22, "vscode"),
                 (WorkItemType.PR, 22, "pi"),
+                (WorkItemType.PR, 22, "vscode"),
             ]
             assert terminal_calls == [(WorkItemType.PR, 22)]
             assert [str(c) for c in table.get_row_at(0)] == [
@@ -586,28 +588,28 @@ def test_workdash_app_footer_shows_success_status_for_actions(
             await pilot.pause()
             await pilot.press("1")
             await pilot.pause()
-            assert footer.render().plain == "Analyzed pr owner/repo#22 with Claude."
+            assert footer.render().plain == "Analyzed pr owner/repo#22 with claude."
 
             # Press "c" to open CodeDialog, then "2" to choose Codex
             await pilot.press("c")
             await pilot.pause()
             await pilot.press("2")
             await pilot.pause()
-            assert footer.render().plain == "Launched Codex for pr owner/repo#22."
+            assert footer.render().plain == "Launched codex for pr owner/repo#22."
 
-            # Press "c" to open CodeDialog, then "3" to choose VSCode
+            # Press "c" to open CodeDialog, then "3" to choose pi
             await pilot.press("c")
             await pilot.pause()
             await pilot.press("3")
             await pilot.pause()
-            assert footer.render().plain == "Launched VSCode for pr owner/repo#22."
+            assert footer.render().plain == "Launched pi for pr owner/repo#22."
 
-            # Press "c" to open CodeDialog, then "4" to choose pi
+            # Press "c" to open CodeDialog, then "4" to choose VSCode
             await pilot.press("c")
             await pilot.pause()
             await pilot.press("4")
             await pilot.pause()
-            assert footer.render().plain == "Launched pi for pr owner/repo#22."
+            assert footer.render().plain == "Launched VSCode for pr owner/repo#22."
 
             await pilot.press("t")
             await pilot.pause()
@@ -746,6 +748,112 @@ async def _wait_for_footer(footer: Static, expected: str, pilot) -> None:
     assert footer.render().plain == expected
 
 
+def test_analyze_dialog_shows_nine_agents_and_cached_analysis_without_scrolling() -> None:
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+        analyzed_at=datetime(2026, 2, 24, 0, 0, 0, tzinfo=UTC),
+    )
+    config = WorkdashConfig(
+        agents={f"agent{number}": AgentConfig(analyze="agent -p") for number in range(1, 10)}
+    )
+    app = WorkdashApp(
+        work_items=[work_item],
+        analyze_callback=lambda item, tool: None,
+        analyze_choices=config.tui_analyze_choices(),
+        now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await pilot.press("a")
+            await pilot.pause()
+            assert isinstance(app.screen, AnalyzeDialog)
+            lines = [str(line.render()) for line in app.screen.query(".analyze-line")]
+            assert lines[-2:] == ["(9) Analyze with agent9", "(Esc) Cancel"]
+            assert app.screen.query_one("#analyze-shell").max_scroll_y == 0
+
+    asyncio.run(run_smoke())
+
+
+def test_code_dialog_shows_eight_agents_vscode_and_focus_option_without_scrolling() -> None:
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+    )
+    config = WorkdashConfig(
+        agents={f"agent{number}": AgentConfig(launch="agent") for number in range(1, 9)}
+    )
+    app = WorkdashApp(
+        work_items=[work_item],
+        code_choices=config.tui_code_choices(),
+        launch_callback=lambda item, tool: None,
+        list_agent_panes_callback=lambda item: [{"pane_id": "terminal_1"}],
+        now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await pilot.press("c")
+            await pilot.pause()
+            assert isinstance(app.screen, CodeDialog)
+            lines = [str(line.render()) for line in app.screen.query(".code-line")]
+            assert lines[1] == "(0) Focus active agent"
+            assert lines[-2:] == ["(9) VSCode Copilot", "(Esc) Cancel"]
+            assert app.screen.query_one("#code-shell").max_scroll_y == 0
+
+    asyncio.run(run_smoke())
+
+
+def test_agent_names_with_markup_characters_are_shown_literally() -> None:
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+    )
+    config = WorkdashConfig(agents={"a[/b]": AgentConfig(launch="agent")})
+    app = WorkdashApp(
+        work_items=[work_item],
+        code_choices=config.tui_code_choices(),
+        worktree_callback=lambda item: "/tmp/worktree",
+        launch_callback=lambda item, tool: None,
+        now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await pilot.press("c")
+            await pilot.pause()
+            assert isinstance(app.screen, CodeDialog)
+            lines = [str(line.render()) for line in app.screen.query(".code-line")]
+            assert "(1) a[/b]" in lines
+            await pilot.press("1")
+            await _wait_for_footer(
+                app.query_one("#status-footer", Static),
+                "Launched a[/b] for pr owner/repo#22.",
+                pilot,
+            )
+
+    asyncio.run(run_smoke())
+
+
 def test_workdash_app_uses_only_configured_tui_agent_choices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -773,7 +881,7 @@ def test_workdash_app_uses_only_configured_tui_agent_choices(
         worktree_callback=lambda item: worktree_attempts.append(item) or "/tmp/worktree",
         launch_callback=lambda item, tool="codex": launch_calls.append((item, tool)),
         analyze_choices=WorkdashConfig(
-            codex=AgentConfig(analyze="codex exec")
+            agents={"codex": AgentConfig(analyze="codex exec")}
         ).tui_analyze_choices(),
         code_choices=WorkdashConfig().tui_code_choices(),
         now_utc=now_utc,
@@ -1592,7 +1700,7 @@ def test_workdash_app_analyze_keeps_the_active_search_filter() -> None:
             await pilot.press("1")
             await _wait_for_footer(
                 app.query_one("#status-footer", Static),
-                "Analyzed issue owner/repo#11 with Claude.",
+                "Analyzed issue owner/repo#11 with claude.",
                 pilot,
             )
             assert _listed_titles(app) == ["Fix the parser"]

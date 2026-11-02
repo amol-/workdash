@@ -257,10 +257,32 @@ def _client_requests_show_config_api(
     _call_api(scenario_state, work_items, tmp_path, "show-config")
 
 
+@when(parsers.parse("a client requests analysis for `{item_id}` without an agent"))
+def _client_requests_analysis_without_agent(
+    item_id: str,
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _request_analysis(item_id, None, scenario_state, work_items, tmp_path, monkeypatch)
+
+
 @when(parsers.parse("a client requests analysis for `{item_id}` with agent `{agent}`"))
 def _client_requests_analysis(
     item_id: str,
     agent: str,
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _request_analysis(item_id, agent, scenario_state, work_items, tmp_path, monkeypatch)
+
+
+def _request_analysis(
+    item_id: str,
+    agent: str | None,
     scenario_state: dict[str, Any],
     work_items: list[WorkItem],
     tmp_path: Path,
@@ -274,7 +296,8 @@ def _client_requests_analysis(
             or str(tmp_path / "wrk" / "owner_repo_1")
         ),
     )
-    _call_api(scenario_state, work_items, tmp_path, "analyze", {"target": item_id, "agent": agent})
+    payload = {"target": item_id} if agent is None else {"target": item_id, "agent": agent}
+    _call_api(scenario_state, work_items, tmp_path, "analyze", payload)
 
 
 @when(parsers.parse("a client requests code for `{item_id}` with agent `{agent}`"))
@@ -639,6 +662,21 @@ def _server_analyzes_known_item_with_agent(scenario_state: dict[str, Any]) -> No
         ("owner/repo#ISSUE-1", "cached"),
         ("owner/repo#ISSUE-1", "codex"),
     ]
+
+
+@then(parsers.parse("the server analyzes the known item with `{agent}`"))
+def _server_analyzes_known_item_with_named_agent(
+    agent: str, scenario_state: dict[str, Any]
+) -> None:
+    assert scenario_state.get("analyze_calls") == [
+        ("owner/repo#ISSUE-1", "cached"),
+        ("owner/repo#ISSUE-1", agent),
+    ]
+
+
+@then(parsers.parse("the API returns `{agent}` as the selected agent"))
+def _api_returns_selected_agent(agent: str, scenario_state: dict[str, Any]) -> None:
+    assert _api_result(scenario_state)["agent"] == agent
 
 
 @then(

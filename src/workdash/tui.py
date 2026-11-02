@@ -97,7 +97,7 @@ class BusyScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="busy-shell"):
-            yield Static(self._message, id="busy-message")
+            yield Static(self._message, id="busy-message", markup=False)
 
 
 class AnalyzeDialog(ModalScreen[str | None]):
@@ -108,7 +108,7 @@ class AnalyzeDialog(ModalScreen[str | None]):
             align: center middle;
             width: 50;
             height: auto;
-            max-height: 14;
+            max-height: 19;
             border: solid $accent;
             background: $surface;
             padding: 1 2;
@@ -149,7 +149,7 @@ class AnalyzeDialog(ModalScreen[str | None]):
                 yield Static("No previous analysis.", classes="analyze-line")
             yield Static("")
             for choice in self._choices:
-                yield Static(f"({choice.key}) {choice.label}", classes="analyze-line")
+                yield Static(f"({choice.key}) {choice.label}", classes="analyze-line", markup=False)
             if not self._choices:
                 yield Static("No analysis agents configured.", classes="analyze-line")
             yield Static("")
@@ -177,7 +177,7 @@ class CodeDialog(ModalScreen[str | None]):
             align: center middle;
             width: 50;
             height: auto;
-            max-height: 12;
+            max-height: 18;
             border: solid $accent;
             background: $surface;
             padding: 1 2;
@@ -207,7 +207,7 @@ class CodeDialog(ModalScreen[str | None]):
             if self._active_agent_panes:
                 yield Static("(0) Focus active agent", classes="code-line")
             for choice in self._choices:
-                yield Static(f"({choice.key}) {choice.label}", classes="code-line")
+                yield Static(f"({choice.key}) {choice.label}", classes="code-line", markup=False)
             if not self._choices:
                 yield Static("No coding agents configured.", classes="code-line")
             yield Static("")
@@ -420,7 +420,7 @@ class WorkdashApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield DataTable(id="work-items")
-        yield Static(self._status_message, id="status-footer")
+        yield Static(self._status_message, id="status-footer", markup=False)
         yield Static(self._command_hint(), id="command-footer")
 
     def on_mount(self) -> None:
@@ -668,7 +668,7 @@ class WorkdashApp(App[None]):
                 self._render_table()
         except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
             self._update_status(f"Analyze failed: {error}")
-            self.notify(f"Analyze failed: {error}", severity="error", timeout=10)
+            self.notify(f"Analyze failed: {error}", severity="error", timeout=10, markup=False)
             return
         if analysis_path is not None:
             try:
@@ -777,7 +777,7 @@ class WorkdashApp(App[None]):
             )
         except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
             self._update_status(f"Launch failed: {error}")
-            self.notify(f"Launch failed: {error}", severity="error", timeout=10)
+            self.notify(f"Launch failed: {error}", severity="error", timeout=10, markup=False)
             return
         self._update_status(
             f"Launched {tool_label} for {item.item_type.value} {item.repo}#{item.number}."

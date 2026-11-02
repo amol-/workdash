@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,7 @@ from pytest_bdd import given, parsers, then, when
 
 import workdash.config as config_module
 import workdash.workdash as workdash_module
-from workdash.config import WorkdashConfig, load_config
+from workdash.config import AgentConfig, WorkdashConfig, load_config
 
 
 @pytest.fixture
@@ -23,20 +24,15 @@ def config_path(tmp_path: Path) -> Path:
 def _no_config(scenario_state: dict[str, Any], config_path: Path) -> None:
     assert not config_path.exists()
     scenario_state["config_path"] = config_path
+    # A typical machine: claude is installed, so the wizard needs no custom agent.
     scenario_state.setdefault(
-        "on_path_tools", {"zellij", "gh", config_module._default_open_command()}
+        "on_path_tools", {"zellij", "gh", config_module._default_open_command(), "claude"}
     )
-    # Fresh-config scenario (S001): no agents on PATH, so the wizard offers agent defaults too.
     scenario_state.setdefault(
         "input_responses",
         [
             "",  # open command default
             "",  # viewer terminal default
-            "claude -p",  # claude analyze
-            "claude",  # claude launch
-            "codex exec",  # codex analyze
-            "codex",  # codex launch
-            "pi",  # pi launch
             "octocat",  # github username
             "~/projects",  # workdir
             "",  # todo repository default
@@ -44,22 +40,21 @@ def _no_config(scenario_state: dict[str, Any], config_path: Path) -> None:
     )
 
 
-@given("a supported coding agent's command-line tool is on PATH")
+@given("a supported agent's command-line tool is on PATH")
 def _agent_on_path(scenario_state: dict[str, Any]) -> None:
-    # Expose 'claude' only; codex will be prompted interactively.
     scenario_state.setdefault("on_path_tools", set()).add("claude")
-    # Interactive inputs: open command, codex analyze, codex launch, pi launch,
-    # username, workdir, todo repository.
-    scenario_state["input_responses"] = [
-        "",  # open command default
-        "",  # viewer terminal default
-        "codex exec",
-        "codex",
-        "pi",
-        "octocat",
-        "~/projects",
-        "",
-    ]
+
+
+@given("the command-line tools of Claude and pi are on PATH")
+def _claude_and_pi_on_path(scenario_state: dict[str, Any]) -> None:
+    scenario_state.setdefault("on_path_tools", set()).update({"claude", "pi"})
+
+
+@given("no supported agent's command-line tool is on PATH")
+def _no_agent_on_path(scenario_state: dict[str, Any]) -> None:
+    scenario_state.setdefault("on_path_tools", set()).difference_update({"claude", "codex", "pi"})
+    # The user has not answered any agent prompt yet; the wizard waits for them.
+    scenario_state["agent_answers"] = []
 
 
 @given("the user provides a GitHub username during configuration")
@@ -90,7 +85,7 @@ def _partial_configuration(scenario_state: dict[str, Any], config_path: Path) ->
                         "analyze": "existing-codex-analyze",
                         "launch": "existing-codex-launch",
                     },
-                    "pi": {"launch": "existing-pi-launch"},
+                    "pi": {"analyze": "existing-pi-analyze", "launch": "existing-pi-launch"},
                 },
             }
         ),
@@ -105,15 +100,15 @@ def _partial_configuration(scenario_state: dict[str, Any], config_path: Path) ->
 
 @given("the user submits empty answers for defaults and then provides a username")
 def _empty_defaults_then_username(scenario_state: dict[str, Any]) -> None:
-    scenario_state["on_path_tools"] = {"zellij", "gh", config_module._default_open_command()}
+    scenario_state["on_path_tools"] = {
+        "zellij",
+        "gh",
+        config_module._default_open_command(),
+        "claude",
+    }
     scenario_state["input_responses"] = [
         "",  # viewer terminal default
         "",  # open command default
-        "",  # claude analyze default
-        "",  # claude launch default
-        "",  # codex analyze default
-        "",  # codex launch default
-        "",  # pi launch default
         "",  # username has no default, prompt again
         "octocat",
         "",  # workdir default
@@ -156,6 +151,33 @@ def _custom_viewer_saved(scenario_state: dict[str, Any]) -> None:
     assert "advanced viewer commands" in scenario_state["output"]
 
 
+@given("the user already has a configuration with agents")
+def _configuration_with_agents(scenario_state: dict[str, Any], config_path: Path) -> None:
+    config_path.write_text(
+        json.dumps(
+            {
+                "github_username": "existing-user",
+                "open": "existing-open",
+                "open_needs_pane": False,
+                "agents": {
+                    "pi": {"analyze": "pi -p", "launch": "pi"},
+                    "aider": {"analyze": "aider --yes", "launch": ""},
+                    "claude": {"analyze": "", "launch": "claude"},
+                },
+                "repositories": ["existing-user/*"],
+                "workdir": "~/src",
+                "todo_repository": "existing-user/todos",
+            }
+        ),
+        encoding="utf-8",
+    )
+    scenario_state["config_path"] = config_path
+    # codex is installed but must not be added to an already configured set of agents.
+    scenario_state["on_path_tools"] = {"zellij", "gh", "existing-open", "codex"}
+    scenario_state["input_responses"] = []
+    scenario_state["prior_config"] = load_config(config_path)
+
+
 @given("Zellij is not installed on PATH")
 def _zellij_not_on_path(scenario_state: dict[str, Any]) -> None:
     scenario_state.setdefault("on_path_tools", set()).discard("zellij")
@@ -166,6 +188,10 @@ def _gh_not_on_path(scenario_state: dict[str, Any]) -> None:
     scenario_state.setdefault("on_path_tools", set()).discard("gh")
 
 
+class _UserHasNotAnswered(Exception):
+    """The wizard asked an agent question the scenario's user has not answered (yet)."""
+
+
 def _run_configure_with_fakes(
     scenario_state: dict[str, Any],
     config_path: Path,
@@ -174,10 +200,18 @@ def _run_configure_with_fakes(
 ) -> WorkdashConfig:
     on_path_tools = scenario_state.get("on_path_tools", set())
     responses = iter(scenario_state.get("input_responses", []))
+    # By default the user ends both agent sections without adding agents.
+    agent_answers = iter(scenario_state.get("agent_answers", ["", ""]))
     prompts: list[str] = []
 
     def input_fn(prompt: str) -> str:
         prompts.append(prompt)
+        print(prompt)
+        if prompt.startswith(("Agents for", "Agent name")):
+            try:
+                return next(agent_answers)
+            except StopIteration as exc:
+                raise _UserHasNotAnswered(prompt) from exc
         try:
             return next(responses)
         except StopIteration as exc:
@@ -204,8 +238,19 @@ def _run_configure_with_fakes(
             install_gh_fn=install_gh_fn,
         ),
     )
-    exit_code = workdash_module.main(["--configure"])
-    scenario_state["exit_code"] = exit_code
+    # Agents run through the user's shell, so the wizard checks programs with it: a
+    # private PATH holding only an `aider` executable keeps the check hermetic.
+    shell_bin = config_path.parent / "shell-bin"
+    shell_bin.mkdir(exist_ok=True)
+    (shell_bin / "aider").write_text("#!/bin/sh\n", encoding="utf-8")
+    (shell_bin / "aider").chmod(0o755)
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.delenv("ENV", raising=False)  # an interactive shell would source it
+    monkeypatch.setenv("PATH", str(shell_bin))
+    try:
+        scenario_state["exit_code"] = workdash_module.main(["--configure"])
+    except _UserHasNotAnswered:
+        scenario_state["exit_code"] = None
     scenario_state["output"] = capsys.readouterr().out
     scenario_state["prompts"] = prompts
     written_config = load_config(config_path)
@@ -227,16 +272,11 @@ def _wizard_completes(
 ) -> None:
     # Scenario S003: username is provided and repositories list is empty.
     scenario_state.setdefault(
-        "on_path_tools", {"zellij", "gh", config_module._default_open_command()}
+        "on_path_tools", {"zellij", "gh", config_module._default_open_command(), "claude"}
     )
     scenario_state["input_responses"] = [
         "",  # viewer terminal default
         "",  # open command default
-        "my-claude -p",  # claude analyze
-        "my-claude",  # claude launch
-        "my-codex",  # codex analyze
-        "my-codex",  # codex launch
-        "my-pi",  # pi launch
         scenario_state["provided_username"],
         "~/projects",
         "",  # todo repository default
@@ -273,13 +313,6 @@ def _reports_saved_path(scenario_state: dict[str, Any], config_path: Path) -> No
     assert f"Configuration saved to {config_path}" in scenario_state["output"]
 
 
-@then("the system fills in that agent's commands automatically")
-def _auto_fill_agent_commands(scenario_state: dict[str, Any]) -> None:
-    written = scenario_state["written_config"]
-    assert written.claude.analyze == "claude -p"
-    assert written.claude.launch == "claude"
-
-
 @then("the system tells the user which Zellij binary was detected")
 def _tells_detected_zellij_binary(scenario_state: dict[str, Any]) -> None:
     assert "Detected 'zellij' on PATH: /usr/bin/zellij" in scenario_state["output"]
@@ -299,12 +332,6 @@ def _installs_gh_under_config_dir(scenario_state: dict[str, Any]) -> None:
     assert "GitHub CLI is not on PATH. Installing a local GitHub CLI binary from" in output
     assert "To use a global GitHub CLI instead" in output
     assert "Installed GitHub CLI to: /tmp/workdash-config/bin/gh" in output
-
-
-@then("the system tells the user which commands were detected")
-def _tells_detected(scenario_state: dict[str, Any]) -> None:
-    output = scenario_state["output"]
-    assert "Detected 'claude'" in output
 
 
 @then(parsers.parse('the repositories list contains "{template}"'))
@@ -333,17 +360,13 @@ def _preserves_prior_fields(scenario_state: dict[str, Any]) -> None:
     written = scenario_state["written_config"]
     prior = scenario_state["prior_config"]
     assert written.github_username == prior.github_username
-    assert written.claude == prior.claude
-    assert written.codex == prior.codex
+    assert written.agents == prior.agents
 
 
 @then("the system writes default values for configurable fields")
 def _writes_default_values(scenario_state: dict[str, Any]) -> None:
     written = scenario_state["written_config"]
-    assert written.claude.analyze == "claude -p"
-    assert written.claude.launch == "claude"
-    assert written.codex.analyze == "codex exec"
-    assert written.codex.launch == "codex"
+    assert written.agents == {"claude": AgentConfig(analyze="claude -p", launch="claude")}
     assert written.open_command == config_module._default_open_command()
     assert written.workdir == "~/wrk"
 
@@ -359,3 +382,220 @@ def _empty_open_command_stores_default(scenario_state: dict[str, Any]) -> None:
 def _prompts_again_for_username(scenario_state: dict[str, Any]) -> None:
     prompts = scenario_state["prompts"]
     assert sum("GitHub username" in prompt for prompt in prompts) == 2, prompts
+
+
+# -- Agents ------------------------------------------------------------------
+
+
+def _user_answers_agent_prompts(
+    scenario_state: dict[str, Any],
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *answers: str,
+) -> None:
+    """Give the wizard more answers by replaying it from the start with every answer so far."""
+
+    scenario_state.setdefault("agent_answers", []).extend(answers)
+    config_path.unlink(missing_ok=True)
+    _run_configure_with_fakes(scenario_state, config_path, monkeypatch, capsys)
+
+
+def _section(output: str, title: str) -> str:
+    """The output printed for the section *title*, from its header to the next section's."""
+
+    parts = re.split(r"(?=Agents for \w+ \(at most)", output)
+    return next(part for part in parts if part.startswith(f"{title} (at most"))
+
+
+@when(parsers.parse("the user adds the analyze command `{command}` named `{name}`"))
+def _user_adds_analyze_command(
+    command: str,
+    name: str,
+    scenario_state: dict[str, Any],
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _user_answers_agent_prompts(scenario_state, config_path, monkeypatch, capsys, command, name)
+
+
+@when(parsers.parse("the user enters the analyze command `{command}`, which no program matches"))
+def _user_enters_unknown_analyze_command(
+    command: str,
+    scenario_state: dict[str, Any],
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _user_answers_agent_prompts(scenario_state, config_path, monkeypatch, capsys, command)
+
+
+@when("the user adds no more agents")
+@when("the user adds no agents")
+def _user_adds_no_agents(
+    scenario_state: dict[str, Any],
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _user_answers_agent_prompts(scenario_state, config_path, monkeypatch, capsys, "", "")
+
+
+@when(parsers.parse("the user adds {count:d} analyze commands"))
+def _user_adds_analyze_commands(
+    count: int,
+    scenario_state: dict[str, Any],
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    answers = [answer for number in range(count) for answer in ("aider --yes", f"aider-{number}")]
+    _user_answers_agent_prompts(scenario_state, config_path, monkeypatch, capsys, *answers)
+
+
+@then("the system tells the user which agents were detected")
+def _tells_detected_agents(scenario_state: dict[str, Any]) -> None:
+    assert "Detected 'claude' on PATH" in scenario_state["output"]
+
+
+@then("the system adds each detected agent with its default analyze and launch commands")
+def _adds_detected_agents_with_defaults(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["written_config"].agents == {
+        "claude": AgentConfig(analyze="claude -p", launch="claude")
+    }
+
+
+@then(parsers.parse('the system shows an "{title}" section listing `{first}` and `{second}`'))
+def _shows_section_listing_agents(
+    title: str, first: str, second: str, scenario_state: dict[str, Any]
+) -> None:
+    # The listing lines, not the header, whose example command also names an agent.
+    section = _section(scenario_state["output"], title)
+    for name in (first, second):
+        assert f"  {name}:" in section, section
+
+
+@then("each section states how many agents it accepts")
+def _sections_state_their_limits(scenario_state: dict[str, Any]) -> None:
+    output = scenario_state["output"]
+    assert "at most 9" in _section(output, "Agents for analyze")
+    assert "at most 8" in _section(output, "Agents for code")
+
+
+@then("each section asks for another command until the user answers with an empty line")
+def _sections_ask_until_empty_line(scenario_state: dict[str, Any]) -> None:
+    prompts = scenario_state["prompts"]
+    for title in ("Agents for analyze", "Agents for code"):
+        assert sum(prompt.startswith(title) for prompt in prompts) == 1, prompts
+    assert scenario_state["exit_code"] == 0
+
+
+@then("the saved configuration has an agent named `aider` with the analyze command `aider --yes`")
+def _saved_configuration_has_aider(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["written_config"].agents["aider"].analyze == "aider --yes"
+
+
+@then("that agent has no launch command")
+def _agent_has_no_launch_command(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["written_config"].agents["aider"].launch == ""
+
+
+@then(
+    "before asking for an agent command the system tells the user that the task prompt is "
+    "appended as the command's last argument"
+)
+def _tells_prompt_is_appended(scenario_state: dict[str, Any]) -> None:
+    output = scenario_state["output"]
+    first_command_prompt = next(
+        prompt for prompt in scenario_state["prompts"] if prompt.startswith("Agents for")
+    )
+    notice = output.index("task prompt")
+    assert "last argument" in output[notice : notice + 200]
+    assert notice < output.index(first_command_prompt)
+
+
+@then("each section tells the user what kind of command it asks for, with an example")
+def _sections_say_what_they_ask_for(scenario_state: dict[str, Any]) -> None:
+    output = scenario_state["output"]
+    for title, purpose in (
+        ("Agents for analyze", "print the analysis"),
+        ("Agents for code", "interactive coding session"),
+    ):
+        header = _section(output, title).splitlines()[0]
+        assert purpose in header, header
+        assert re.search(r"e\.g\. \S+", header), header
+
+
+@then("the system tells the user that no supported agent was detected")
+def _tells_no_agent_was_detected(scenario_state: dict[str, Any]) -> None:
+    output = scenario_state["output"]
+    line = next(line for line in output.splitlines() if "No supported agent found" in line)
+    assert all(name in line for name in ("claude", "codex", "pi")), line
+    assert output.index(line) < output.index("At least one agent")
+
+
+@then("the system tells the user that at least one agent is required")
+def _tells_one_agent_is_required(scenario_state: dict[str, Any]) -> None:
+    assert "At least one agent is required" in scenario_state["output"]
+
+
+@then("the system asks for agents again")
+def _asks_for_agents_again(scenario_state: dict[str, Any]) -> None:
+    prompts = scenario_state["prompts"]
+    assert sum(prompt.startswith("Agents for analyze") for prompt in prompts) == 2, prompts
+
+
+@then("no configuration is saved until an agent has been added")
+def _no_configuration_saved(scenario_state: dict[str, Any], config_path: Path) -> None:
+    assert not config_path.exists()
+
+
+@then(parsers.parse("the system tells the user that `{program}` was not found"))
+def _tells_program_was_not_found(program: str, scenario_state: dict[str, Any]) -> None:
+    assert f"`{program}` was not found" in scenario_state["output"]
+
+
+@then("the system asks for the analyze command again")
+def _asks_for_analyze_command_again(scenario_state: dict[str, Any]) -> None:
+    prompts = scenario_state["prompts"]
+    assert sum(prompt.startswith("Agents for analyze") for prompt in prompts) == 2, prompts
+    assert prompts[-1].startswith("Agents for analyze"), prompts
+
+
+@then("the system tells the user that the analyze section is full")
+def _tells_analyze_section_is_full(scenario_state: dict[str, Any]) -> None:
+    assert "section is full" in _section(scenario_state["output"], "Agents for analyze")
+
+
+@then("the system does not ask for another analyze command")
+def _does_not_ask_for_another_analyze_command(scenario_state: dict[str, Any]) -> None:
+    prompts = scenario_state["prompts"]
+    assert sum(prompt.startswith("Agents for analyze") for prompt in prompts) == 9, prompts
+
+
+@then(
+    parsers.parse(
+        'the system tells the user that agents can be added or edited later in "{path_template}"'
+    )
+)
+def _tells_agents_can_be_edited_later(
+    path_template: str, scenario_state: dict[str, Any], config_path: Path
+) -> None:
+    # The scenario names the canonical path; the wizard ran against a tmp path.
+    hint = next(line for line in scenario_state["output"].splitlines() if "edit 'agents'" in line)
+    assert str(config_path) in hint, hint
+    assert scenario_state["output"].index(hint) < scenario_state["output"].index("GitHub username")
+
+
+@then("the system does not ask about agents")
+def _does_not_ask_about_agents(scenario_state: dict[str, Any]) -> None:
+    assert not any(prompt.startswith("Agent") for prompt in scenario_state["prompts"])
+    assert "Agents for" not in scenario_state["output"]
+
+
+@then("the saved configuration keeps the same agents in the same order")
+def _saved_configuration_keeps_agents_in_order(scenario_state: dict[str, Any]) -> None:
+    written = scenario_state["written_config"]
+    assert list(written.agents.items()) == list(scenario_state["prior_config"].agents.items())
+    assert list(written.agents) == ["pi", "aider", "claude"]

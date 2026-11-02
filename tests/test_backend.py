@@ -715,9 +715,11 @@ def test_analyze_item_uses_cache_then_falls_back_to_analyzer_and_saves() -> None
     analyzer = FakeAnalyzer()
     config = WorkdashConfig(
         github_username="testuser",
-        claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze="codex exec", launch="codex"),
-        pi=AgentConfig(launch="pi"),
+        agents={
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+            "claude": AgentConfig(analyze="claude -p", launch="claude"),
+            "pi": AgentConfig(launch="pi"),
+        },
         repositories=("owner/*",),
         workdir="~/src",
     )
@@ -804,9 +806,11 @@ def test_analyze_item_tool_claude_bypasses_cache() -> None:
     analyzer = FakeAnalyzer()
     config = WorkdashConfig(
         github_username="testuser",
-        claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze="codex exec", launch="codex"),
-        pi=AgentConfig(launch="pi"),
+        agents={
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+            "claude": AgentConfig(analyze="claude -p", launch="claude"),
+            "pi": AgentConfig(launch="pi"),
+        },
         repositories=("owner/*",),
         workdir="~/src",
     )
@@ -834,8 +838,10 @@ def test_analyze_item_uses_config_boundary_for_malformed_agent_command() -> None
     analyzer = MagicMock()
     config = WorkdashConfig(
         github_username="testuser",
-        claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze="codex 'broken", launch="codex"),
+        agents={
+            "codex": AgentConfig(analyze="codex 'broken", launch="codex"),
+            "claude": AgentConfig(analyze="claude -p", launch="claude"),
+        },
         repositories=("owner/*",),
         workdir="~/src",
     )
@@ -862,8 +868,10 @@ def test_analyze_item_uses_config_boundary_for_non_string_agent_command() -> Non
     analyzer = MagicMock()
     config = WorkdashConfig(
         github_username="testuser",
-        claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze=["codex", "exec"], launch="codex"),
+        agents={
+            "codex": AgentConfig(analyze=["codex", "exec"], launch="codex"),
+            "claude": AgentConfig(analyze="claude -p", launch="claude"),
+        },
         repositories=("owner/*",),
         workdir="~/src",
     )
@@ -886,11 +894,49 @@ def test_analyze_item_uses_config_boundary_for_non_string_agent_command() -> Non
     analyzer.analyze.assert_not_called()
 
 
+def test_analyze_item_runs_pi_with_its_configured_analyze_command() -> None:
+    analyzer = MagicMock()
+    analyzer.analyze.return_value = "## Summary\nanalysis"
+    cache = MagicMock()
+    config = WorkdashConfig(
+        github_username="testuser",
+        agents={
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+            "pi": AgentConfig(analyze="pi --no-session --tools read,grep,find,ls -p"),
+        },
+        repositories=("owner/*",),
+        workdir="~/src",
+    )
+    backend = WorkdashBackend(
+        github_client=MagicMock(),
+        analysis_cache=cache,
+        analyzer=analyzer,
+        config=config,
+    )
+    item = make_work_item(
+        item_type=WorkItemType.ISSUE,
+        kind=WorkItemKind.TRACKED_ISSUE,
+        number=101,
+        created_at=datetime(2026, 2, 2, 0, 0, 0, tzinfo=UTC),
+    )
+
+    backend.analyze_item(item, tool="pi")
+
+    analyzer.analyze.assert_called_once_with(
+        item,
+        command_tokens=["pi", "--no-session", "--tools", "read,grep,find,ls", "-p"],
+        cwd=None,
+    )
+    cache.save.assert_called_once_with(item, "## Summary\nanalysis")
+
+
 def test_analyze_item_rejects_unsupported_agent_without_codex_fallback() -> None:
     analyzer = MagicMock()
     config = WorkdashConfig(
         github_username="testuser",
-        codex=AgentConfig(analyze="codex exec", launch="codex"),
+        agents={
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+        },
         repositories=("owner/*",),
         workdir="~/src",
     )
@@ -906,8 +952,8 @@ def test_analyze_item_rejects_unsupported_agent_without_codex_fallback() -> None
         created_at=datetime(2026, 2, 2, 0, 0, 0, tzinfo=UTC),
     )
 
-    with pytest.raises(ValueError, match="Unsupported analyze agent: 'pi'"):
-        backend.analyze_item(item, tool="pi")
+    with pytest.raises(ValueError, match="Unsupported analyze agent: 'vscode'"):
+        backend.analyze_item(item, tool="vscode")
 
     analyzer.analyze.assert_not_called()
 

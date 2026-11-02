@@ -26,11 +26,9 @@ been tested on Windows.
   `workdash --configure` installs a local copy when `zellij` is not available.
 - Global `gh` and `zellij` binaries are preferred; configured local copies are
   used as fallbacks.
-- Optional, depending on which actions you use from the TUI:
-  - `claude` — to analyze or launch a Claude coding session.
-  - `codex` — to analyze or launch a ChatGPT Codex session.
-  - `code` — to launch a VSCode + Copilot coding session.
-  - `pi` — to launch a pi coding agent session.
+- At least one agent command-line tool (for example `claude`, `codex`, or `pi`;
+  see *Agents* below) to analyze items or launch coding sessions.
+- Optional: `code` — to launch a VSCode + Copilot coding session.
 
 ## Installation
 
@@ -69,8 +67,8 @@ The wizard fills in:
 - The todo repository where captured todos are created (defaults to
   `<username>/todos`, see *Todos* below).
 - A working directory where per-item git worktrees will live.
-- The analyze and launch commands for Claude and Codex (auto-detected when the
-  tools are on your `PATH`).
+- The agents (see *Agents* below): `claude`, `codex`, and `pi` are added with
+  their default commands when they are on your `PATH`, and you can add more.
 
 ### URL and analysis viewer
 
@@ -109,6 +107,31 @@ viewer child errors stay visible in the pane.
 Re-running `--configure` otherwise only prompts for empty fields, except for
 Zellij and GitHub CLI: the wizard always checks for global binaries first and
 downloads fresh local copies when none are available.
+
+### Agents
+
+An agent is a command-line tool that analyzes items, codes on them, or both. The
+`agents` map in `config.json` gives each agent a name you choose, an `analyze`
+command, a `launch` command, or both:
+
+```json
+"agents": {
+  "pi": {"analyze": "pi --no-session --tools read,grep,find,ls -p", "launch": "pi"},
+  "aider": {"analyze": "aider --yes"}
+}
+```
+
+The order in the file is the order of the TUI dialogs, and the first agent is
+the default for `workdash analyze` and `workdash code` without `--agent`. The
+names `cached` and `vscode` are reserved. Workdash appends the task prompt to
+the command as its last argument and runs it through your `$SHELL`, so aliases
+work too. At least one agent is required.
+
+The wizard asks about agents only when none is configured: it adds `claude`,
+`codex`, and `pi` when found on your `PATH`, then asks for more analyze and
+launch commands, each with a name. The TUI numbers its entries with single
+keys, so the wizard accepts at most 9 analysis agents and 8 coding agents
+(VSCode Copilot takes the last number in the code dialog).
 
 ## Usage
 
@@ -171,12 +194,12 @@ The `repositories` list in `config.json` accepts:
 - `o` — open the selected item with your configured viewer.
 - `r` — refresh the list from GitHub.
 - `a` — analyze the selected item. Opens a dialog to open the cached analysis
-  (if any), or run a fresh analysis with Claude or Codex. Fresh analyses are
-  cached and rendered as HTML with your configured viewer.
+  (if any), or run a fresh analysis with any configured analysis agent. Fresh
+  analyses are cached and rendered as HTML with your configured viewer.
 - `c` — launch a coding session on the selected item. Opens a dialog to pick
-  Claude, Codex, VSCode Copilot, or pi. `workdash` prepares a dedicated git
-  worktree for the item and starts the chosen tool in it, preloaded with
-  context about the issue or PR.
+  one of your configured coding agents or VSCode Copilot. `workdash` prepares a
+  dedicated git worktree for the item and starts the chosen tool in it, preloaded
+  with context about the issue or PR.
 - `t` — open a terminal in the selected item's worktree (no agent launched).
 - `w` — capture a todo. Opens a dialog asking for the todo text and an
   optional target repository.
@@ -308,7 +331,7 @@ base64 content.
 
 `workdash code ITEM [--agent NAME] [--json]` requires a running
 `workdash --server` session and launches a configured terminal-backed coding
-agent (`claude`, `codex`, or `pi`) for a current server-known Workdash item.
+agent for a current server-known Workdash item.
 `ITEM` accepts the same row IDs and GitHub URLs as `workdash analyze`.
 
 Human output reports the item, agent, selected session, cwd, pane title, and pane

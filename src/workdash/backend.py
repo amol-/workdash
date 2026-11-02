@@ -289,8 +289,8 @@ class WorkdashBackend:
     ) -> str | None:
         """Generate or retrieve analysis, returning the markdown file path.
 
-        :param str tool: ``"cached"`` to return existing analysis,
-            ``"claude"`` or ``"codex"`` to force a fresh run with that backend.
+        :param str tool: ``"cached"`` to return existing analysis, or the name of a
+            configured analysis agent to force a fresh run with it.
         """
 
         if tool == "cached":
