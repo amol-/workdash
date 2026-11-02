@@ -970,7 +970,7 @@ def test_main_analyze_reports_server_error(
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             raise workdash_module.WorkdashControlError(
-                "unknown_agent", "Analysis agent 'vscode' is not configured."
+                "unknown_agent", "Agent 'vscode' is not configured."
             )
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
@@ -979,7 +979,7 @@ def test_main_analyze_reports_server_error(
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "Analysis agent 'vscode' is not configured" in captured.err
+    assert "Agent 'vscode' is not configured" in captured.err
 
 
 def test_main_code_human_output_formats_server_response(
@@ -1060,7 +1060,7 @@ def test_main_code_reports_server_error_before_local_worktree(
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             raise workdash_module.WorkdashControlError(
                 "unknown_agent",
-                "Coding agent 'vscode' is not a configured terminal-backed agent.",
+                "Agent 'vscode' is not configured.",
             )
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
@@ -1074,7 +1074,7 @@ def test_main_code_reports_server_error_before_local_worktree(
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "not a configured terminal-backed agent" in captured.err
+    assert "Agent 'vscode' is not configured." in captured.err
     assert "vscode" in captured.err
 
 
@@ -1487,7 +1487,9 @@ def test_main_launch_callback_raises_on_unknown_tool(
 
     assert workdash_module.main([]) == 0
 
-    with pytest.raises(control_module.WorkdashControlError, match="Coding agent 'bogus'"):
+    with pytest.raises(
+        control_module.WorkdashControlError, match="Agent 'bogus' is not configured"
+    ):
         captured_callback["launch"](item, "bogus")
 
 

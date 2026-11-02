@@ -645,7 +645,9 @@ def test_launch_agent_context_uses_new_zellij_pane_when_in_zellij(
     )
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    launch = launch_agent_context("/tmp/amol-_repoze.who_52", "review this change")
+    launch = launch_agent_context(
+        "/tmp/amol-_repoze.who_52", "review this change", agent_command_tokens=["codex"]
+    )
 
     assert launch.session is None
     assert launch.pane_id is None
@@ -804,7 +806,7 @@ def test_launch_agent_context_raises_clear_error_when_zellij_launch_fails(
     with pytest.raises(
         RuntimeError, match="Failed to launch coding agent in zellij: pane launch failed"
     ):
-        launch_agent_context("/tmp/repo", "review this change")
+        launch_agent_context("/tmp/repo", "review this change", agent_command_tokens=["codex"])
 
 
 def test_launch_terminal_context_uses_new_zellij_pane_when_in_zellij(
@@ -992,7 +994,7 @@ def test_launch_agent_context_requires_active_zellij_session(
     monkeypatch.delenv("ZELLIJ", raising=False)
 
     with pytest.raises(RuntimeError, match="require an active Zellij session"):
-        launch_agent_context("/tmp/repo", "review this change")
+        launch_agent_context("/tmp/repo", "review this change", agent_command_tokens=["codex"])
 
 
 def test_exec_zellij_wrapped_workdash_replaces_process_with_layout(

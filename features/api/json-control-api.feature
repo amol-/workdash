@@ -111,7 +111,7 @@ Feature: Local JSON control API
     Given a server-backed Workdash session has loaded dashboard items
     And the current dashboard items include `owner/repo#ISSUE-1`
     When a client requests code for `owner/repo#ISSUE-1` with agent `pi`
-    Then the server launches the selected configured terminal-backed agent for the known item
+    Then the server launches the selected configured agent for the known item
     And the API returns the item ID, selected agent, selected session, cwd, pane title, and pane ID
 
   @id:F-API-JSON-CONTROL-S018

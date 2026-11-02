@@ -9,6 +9,8 @@ import workdash.analyzer as analyzer_module
 from workdash.analyzer import Analyzer
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 
+AGENT_COMMAND = ["codex", "exec"]
+
 
 def make_work_item(
     item_type: WorkItemType,
@@ -96,7 +98,7 @@ def test_analyze_for_pr_writes_diff_to_tempfile_and_injects_path(
     monkeypatch.setenv("SHELL", "/bin/sh")
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    output = Analyzer().analyze(make_work_item(WorkItemType.PR))
+    output = Analyzer().analyze(make_work_item(WorkItemType.PR), AGENT_COMMAND)
 
     assert output == "## Summary\nLooks good."
     assert len(calls) == 3
@@ -137,7 +139,7 @@ def test_analyze_for_issue_uses_issue_template_and_no_diff(
     monkeypatch.setenv("SHELL", "/bin/sh")
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    output = Analyzer().analyze(make_work_item(WorkItemType.ISSUE))
+    output = Analyzer().analyze(make_work_item(WorkItemType.ISSUE), AGENT_COMMAND)
 
     assert output == "## Summary\nNeeds investigation."
     assert len(calls) == 2
@@ -164,7 +166,7 @@ def test_analyze_passes_non_ascii_issue_body_to_the_agent_unescaped(
     monkeypatch.setenv("SHELL", "/bin/sh")
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    Analyzer().analyze(make_work_item(WorkItemType.ISSUE))
+    Analyzer().analyze(make_work_item(WorkItemType.ISSUE), AGENT_COMMAND)
 
     assert 'Crash on café ✓ with `{x}` and "quotes"' in shell_commands[0]
 
@@ -199,7 +201,7 @@ def test_analyze_flags_the_item_authors_own_comments_for_the_agent(
     monkeypatch.setenv("SHELL", "/bin/sh")
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    Analyzer().analyze(make_work_item(item_type))
+    Analyzer().analyze(make_work_item(item_type), AGENT_COMMAND)
 
     assert shell_commands[0].count(f'{flag}="true"') == 1
     assert (
@@ -241,7 +243,7 @@ def test_analyze_for_a_targeted_todo_links_sources_in_the_target_repository(
     monkeypatch.setenv("SHELL", "/bin/sh")
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    assert Analyzer().analyze(item) == "# done"
+    assert Analyzer().analyze(item, AGENT_COMMAND) == "# done"
     # Context still comes from the todo issue, which lives in the todo repository.
     assert "testuser/todos" in calls[0]
     prompt = calls[1][2]
@@ -295,7 +297,8 @@ def test_analyze_for_review_requested_pr_also_fetches_diff(
         make_work_item(
             WorkItemType.PR,
             kind=WorkItemKind.REVIEW_REQUESTED_PR,
-        )
+        ),
+        AGENT_COMMAND,
     )
 
     assert output == "## Summary\nReview completed."
@@ -360,7 +363,7 @@ def test_analyze_returns_none_for_empty_agent_output(
     monkeypatch.setenv("SHELL", "/bin/sh")
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    assert Analyzer().analyze(make_work_item(WorkItemType.ISSUE)) is None
+    assert Analyzer().analyze(make_work_item(WorkItemType.ISSUE), AGENT_COMMAND) is None
 
 
 def test_analyze_raises_runtime_error_when_gh_context_fails(
@@ -384,7 +387,7 @@ def test_analyze_raises_runtime_error_when_gh_context_fails(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="Failed to gather gh context for pr owner/repo#42"):
-        Analyzer().analyze(make_work_item(WorkItemType.PR))
+        Analyzer().analyze(make_work_item(WorkItemType.PR), AGENT_COMMAND)
 
 
 def test_analyze_raises_runtime_error_when_gh_context_command_missing(
@@ -404,7 +407,7 @@ def test_analyze_raises_runtime_error_when_gh_context_command_missing(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="gh CLI is not installed or not on PATH"):
-        Analyzer().analyze(make_work_item(WorkItemType.PR))
+        Analyzer().analyze(make_work_item(WorkItemType.PR), AGENT_COMMAND)
 
 
 def test_analyze_raises_runtime_error_when_agent_fails(
@@ -436,7 +439,7 @@ def test_analyze_raises_runtime_error_when_agent_fails(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="Failed to generate analysis for pr owner/repo#42"):
-        Analyzer().analyze(make_work_item(WorkItemType.PR))
+        Analyzer().analyze(make_work_item(WorkItemType.PR), AGENT_COMMAND)
 
 
 def test_analyze_raises_runtime_error_when_shell_missing(
@@ -464,7 +467,7 @@ def test_analyze_raises_runtime_error_when_shell_missing(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="shell '/nonexistent/shell' not found"):
-        Analyzer().analyze(make_work_item(WorkItemType.PR))
+        Analyzer().analyze(make_work_item(WorkItemType.PR), AGENT_COMMAND)
 
 
 @pytest.mark.parametrize(

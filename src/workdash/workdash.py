@@ -346,10 +346,10 @@ class WorkdashCommands:
                 and (session.work_items, session.suggestion_markers)
             ),
             worktree_callback=lambda item: ensure_worktree(config.workdir, item),
-            analyze_callback=lambda item, tool="codex": session.analyze(
+            analyze_callback=lambda item, tool: session.analyze(
                 target=format_work_item_id(item), agent=tool, prefer_cache=(tool == "cached")
             )["path"],
-            launch_callback=lambda item, tool="codex": session.code(
+            launch_callback=lambda item, tool: session.code(
                 target=format_work_item_id(item), agent=tool, allow_vscode=True
             ),
             analyze_choices=config.tui_analyze_choices(),
@@ -569,12 +569,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     )
     code_parser = subparsers.add_parser(
         "code",
-        help="Launch a terminal-backed coding agent for a current Workdash item.",
+        help="Launch a coding agent for a current Workdash item.",
     )
     code_parser.add_argument("target", metavar="ITEM", help="Workdash item ID or GitHub URL.")
     code_parser.add_argument(
         "--agent",
-        help="Configured terminal-backed coding agent to launch.",
+        help="Configured coding agent to launch.",
     )
     code_parser.add_argument(
         "--json",

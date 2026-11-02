@@ -717,7 +717,7 @@ def _server_does_not_prepare_worktree(scenario_state: dict[str, Any]) -> None:
     assert scenario_state.get("ensure_calls", []) == []
 
 
-@then("the server launches the selected configured terminal-backed agent for the known item")
+@then("the server launches the selected configured agent for the known item")
 def _server_launches_selected_coding_agent(scenario_state: dict[str, Any]) -> None:
     assert scenario_state.get("launch_calls") == [
         (
