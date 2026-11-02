@@ -43,6 +43,16 @@ def _config_missing_fields(scenario_state: dict[str, Any]) -> None:
     )
 
 
+@given("the configuration file has no open command")
+def _config_has_no_open(scenario_state: dict[str, Any]) -> None:
+    scenario_state["_malformed_config"] = WorkdashConfig(
+        github_username="testuser",
+        repositories=("owner/repo",),
+        workdir="~/wrk",
+        todo_repository="testuser/todos",
+    )
+
+
 @given("the configuration file has a malformed configured agent command")
 def _config_has_malformed_agent_command(scenario_state: dict[str, Any]) -> None:
     scenario_state["_malformed_config"] = WorkdashConfig(

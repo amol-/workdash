@@ -288,15 +288,18 @@ def test_main_server_refresh_callback_reraises_unrelated_runtime_errors(
     assert captured["server_stopped"] is True
 
 
-def test_main_passes_configured_agent_choices_to_tui(
+@pytest.mark.parametrize("needs_pane", [False, True])
+def test_main_passes_configured_agent_choices_and_shared_viewer_to_tui(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    needs_pane: bool,
 ) -> None:
     captured_kwargs: dict[str, object] = {}
-    open_calls: list[tuple[str, str]] = []
-    markdown_calls: list[tuple[str, str]] = []
+    commands: list[list[str]] = []
     config = WorkdashConfig(
         github_username="testuser",
-        open_command="xdg-open",
+        open_command='term-copy --label "two words"',
+        open_needs_pane=needs_pane,
         codex=AgentConfig(analyze="codex exec"),
         repositories=("owner/*",),
         workdir="~/wrk",
@@ -320,31 +323,44 @@ def test_main_passes_configured_agent_choices_to_tui(
         def run(self, *, mouse: bool) -> None:
             return None
 
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
     _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: config)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
-    monkeypatch.setattr(
-        workdash_module,
-        "open_in_browser",
-        lambda url, command: open_calls.append((url, command)),
-    )
-    monkeypatch.setattr(
-        workdash_module,
-        "open_markdown",
-        lambda path, command: markdown_calls.append((path, command)),
-    )
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="terminal_17\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-selected")
 
     assert workdash_module.main([]) == 0
 
     assert captured_kwargs["analyze_choices"] == config.tui_analyze_choices()
     assert captured_kwargs["code_choices"] == config.tui_code_choices()
-    captured_kwargs["open_callback"](_issue())
-    captured_kwargs["open_markdown_callback"]("/tmp/analysis.md")
-    assert open_calls == [("https://example.com/1", "xdg-open")]
-    assert markdown_calls == [("/tmp/analysis.md", "xdg-open")]
+    commands.clear()
+    item = replace(_issue(), url="https://example.com/1?q=$(touch nope);&x=two words")
+    analysis_path = tmp_path / "analysis ; literal.md"
+    analysis_path.write_text("# Viewer analysis\n\n**Rendered content**")
+    captured_kwargs["open_callback"](item)
+    captured_kwargs["open_markdown_callback"](str(analysis_path))
+    html_path = analysis_path.with_suffix(".html")
+    assert "<h1>Viewer analysis</h1>" in html_path.read_text()
+    assert "<strong>Rendered content</strong>" in html_path.read_text()
+    viewer_argv = ["term-copy", "--label", "two words"]
+    if needs_pane:
+        prefix = ["/usr/bin/zellij", "--session", "workdash-selected", "action"]
+        assert commands == [
+            [*prefix, "new-pane", "--", *viewer_argv, item.url],
+            [*prefix, "toggle-fullscreen", "-p", "terminal_17"],
+            [*prefix, "new-pane", "--", *viewer_argv, str(html_path)],
+            [*prefix, "toggle-fullscreen", "-p", "terminal_17"],
+        ]
+    else:
+        assert commands == [[*viewer_argv, item.url], [*viewer_argv, str(html_path)]]
 
 
 def test_main_tui_analyze_callback_uses_worktree_and_backend(
@@ -478,10 +494,11 @@ def test_main_exits_with_error_when_config_incomplete(
     assert "--configure" in captured.err
 
 
-def test_main_exits_with_config_guidance_when_open_command_is_malformed(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("command", ["", "   ", "open 'broken"])
+def test_main_rejects_missing_or_malformed_viewer_before_zellij_wrapping(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], command: str
 ) -> None:
-    config = replace(_VALID_CONFIG, open_command="open 'broken")
+    config = replace(_VALID_CONFIG, open_command=command)
 
     monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
@@ -493,11 +510,20 @@ def test_main_exits_with_config_guidance_when_open_command_is_malformed(
             AssertionError("backend should not load invalid runtime config")
         ),
     )
-    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setattr(
+        workdash_module,
+        "exec_zellij_wrapped_workdash",
+        lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
+    )
+    monkeypatch.delenv("ZELLIJ", raising=False)
 
     assert workdash_module.main([]) == 1
     captured = capsys.readouterr()
-    assert "invalid configuration fields: open: No closing quotation" in captured.err
+    assert "open" in captured.err
+    if command.strip():
+        assert "No closing quotation" in captured.err
+    else:
+        assert "missing configuration fields: open" in captured.err
     assert "workdash --configure" in captured.err
 
 

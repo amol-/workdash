@@ -23,12 +23,15 @@ def config_path(tmp_path: Path) -> Path:
 def _no_config(scenario_state: dict[str, Any], config_path: Path) -> None:
     assert not config_path.exists()
     scenario_state["config_path"] = config_path
-    scenario_state.setdefault("on_path_tools", {"zellij", "gh"})
+    scenario_state.setdefault(
+        "on_path_tools", {"zellij", "gh", config_module._default_open_command()}
+    )
     # Fresh-config scenario (S001): no agents on PATH, so the wizard offers agent defaults too.
     scenario_state.setdefault(
         "input_responses",
         [
             "",  # open command default
+            "",  # viewer terminal default
             "claude -p",  # claude analyze
             "claude",  # claude launch
             "codex exec",  # codex analyze
@@ -49,6 +52,7 @@ def _agent_on_path(scenario_state: dict[str, Any]) -> None:
     # username, workdir, todo repository.
     scenario_state["input_responses"] = [
         "",  # open command default
+        "",  # viewer terminal default
         "codex exec",
         "codex",
         "pi",
@@ -76,6 +80,7 @@ def _partial_configuration(scenario_state: dict[str, Any], config_path: Path) ->
             {
                 "github_username": "existing-user",
                 "open": "existing-open",
+                "open_needs_pane": False,
                 "agents": {
                     "claude": {
                         "analyze": "existing-claude-analyze",
@@ -92,7 +97,7 @@ def _partial_configuration(scenario_state: dict[str, Any], config_path: Path) ->
         encoding="utf-8",
     )
     scenario_state["config_path"] = config_path
-    scenario_state["on_path_tools"] = {"zellij", "gh"}
+    scenario_state["on_path_tools"] = {"zellij", "gh", "existing-open"}
     # Only the workdir and the todo repository are still empty.
     scenario_state["input_responses"] = ["~/src", ""]
     scenario_state["prior_config"] = load_config(config_path)
@@ -100,8 +105,9 @@ def _partial_configuration(scenario_state: dict[str, Any], config_path: Path) ->
 
 @given("the user submits empty answers for defaults and then provides a username")
 def _empty_defaults_then_username(scenario_state: dict[str, Any]) -> None:
-    scenario_state["on_path_tools"] = {"zellij", "gh"}
+    scenario_state["on_path_tools"] = {"zellij", "gh", config_module._default_open_command()}
     scenario_state["input_responses"] = [
+        "",  # viewer terminal default
         "",  # open command default
         "",  # claude analyze default
         "",  # claude launch default
@@ -113,6 +119,41 @@ def _empty_defaults_then_username(scenario_state: dict[str, Any]) -> None:
         "",  # workdir default
         "",  # todo repository default
     ]
+
+
+@given("the platform opener is available")
+def _platform_opener_available(scenario_state: dict[str, Any]) -> None:
+    scenario_state.setdefault("on_path_tools", set()).add(config_module._default_open_command())
+
+
+@given("the user has a configured viewer whose executable is unavailable")
+def _unavailable_viewer(scenario_state: dict[str, Any], config_path: Path) -> None:
+    _partial_configuration(scenario_state, config_path)
+    raw = json.loads(config_path.read_text())
+    raw["open"] = "unavailable-viewer"
+    raw.pop("open_needs_pane")
+    raw["repositories"] = ["owner/repo"]
+    raw["workdir"] = "~/src"
+    raw["todo_repository"] = "existing-user/todos"
+    config_path.write_text(json.dumps(raw))
+    scenario_state["prior_config"] = load_config(config_path)
+    scenario_state["on_path_tools"].add("term-view")
+    scenario_state["input_responses"] = [
+        "",
+        "bad 'quote",
+        "unavailable-viewer",
+        "term-view --quiet",
+        "y",
+    ]
+
+
+@then("the wizard saves a working custom viewer and its terminal choice")
+def _custom_viewer_saved(scenario_state: dict[str, Any]) -> None:
+    written = scenario_state["written_config"]
+    assert written.open_command == "term-view --quiet"
+    assert written.open_needs_pane is True
+    assert sum("Open command" in prompt for prompt in scenario_state["prompts"]) == 4
+    assert "advanced viewer commands" in scenario_state["output"]
 
 
 @given("Zellij is not installed on PATH")
@@ -185,8 +226,11 @@ def _wizard_completes(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Scenario S003: username is provided and repositories list is empty.
-    scenario_state.setdefault("on_path_tools", {"zellij", "gh"})
+    scenario_state.setdefault(
+        "on_path_tools", {"zellij", "gh", config_module._default_open_command()}
+    )
     scenario_state["input_responses"] = [
+        "",  # viewer terminal default
         "",  # open command default
         "my-claude -p",  # claude analyze
         "my-claude",  # claude launch
@@ -307,6 +351,8 @@ def _writes_default_values(scenario_state: dict[str, Any]) -> None:
 @then("submitting an empty open command stores the platform default")
 def _empty_open_command_stores_default(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["written_config"].open_command == config_module._default_open_command()
+    assert scenario_state["written_config"].open_needs_pane is False
+    assert any("Enter to accept" in prompt for prompt in scenario_state["prompts"])
 
 
 @then("the system prompts again for the GitHub username")

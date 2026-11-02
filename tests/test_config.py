@@ -1,5 +1,7 @@
 import json
 import platform
+import shlex
+import shutil
 import tarfile
 import zipfile
 from io import BytesIO
@@ -56,6 +58,7 @@ def test_load_config_reads_existing_config(tmp_path):
 
     assert config.github_username == "octocat"
     assert config.open_command == "xdg-open"
+    assert config.open_needs_pane is False
     assert config.claude.analyze == "claude -p"
     assert config.claude.launch == "claude"
     assert config.codex.analyze == "codex exec"
@@ -112,6 +115,7 @@ def test_save_config_creates_parent_dirs_and_writes_json(tmp_path):
     assert written == {
         "github_username": "octocat",
         "open": "xdg-open",
+        "open_needs_pane": False,
         "agents": {
             "claude": {"analyze": "claude -p", "launch": "claude"},
             "codex": {"analyze": "codex exec", "launch": "codex"},
@@ -288,13 +292,17 @@ def test_validate_config_returns_subset_of_missing_fields():
 
 def test_configure_fresh_auto_detects_and_asks_username(tmp_path, capsys):
     config_path = tmp_path / "config.json"
-    inputs = iter(["", "octocat", "~/projects", ""])  # open, username, workdir, todo default
+    inputs = iter(
+        ["", "", "octocat", "~/projects", ""]
+    )  # viewer, terminal, username, workdir, todo
 
     config = configure(
         config_path,
         input_fn=lambda prompt: next(inputs),
         which_fn=lambda cmd: (
-            f"/usr/bin/{cmd}" if cmd in ("zellij", "gh", "claude", "codex", "pi") else None
+            f"/usr/bin/{cmd}"
+            if cmd in ("zellij", "gh", "claude", "codex", "pi", "xdg-open")
+            else None
         ),
     )
 
@@ -318,20 +326,21 @@ def test_configure_fresh_auto_detects_and_asks_username(tmp_path, capsys):
 def test_configure_suggests_the_macos_open_command(tmp_path, monkeypatch):
     config_path = tmp_path / "config.json"
     prompts: list[str] = []
-    inputs = iter(["", "octocat", "", ""])
+    inputs = iter(["", "", "octocat", "", ""])
 
     monkeypatch.setattr(platform, "system", lambda: "Darwin")
     config = configure(
         config_path,
         input_fn=lambda prompt: (prompts.append(prompt), next(inputs))[1],
         which_fn=lambda cmd: (
-            f"/usr/bin/{cmd}" if cmd in ("zellij", "gh", "claude", "codex", "pi") else None
+            f"/usr/bin/{cmd}" if cmd in ("zellij", "gh", "claude", "codex", "pi", "open") else None
         ),
     )
 
     assert config.open_command == "open"
     assert prompts == [
-        "Open command [open]: ",
+        "Open command [open] (Enter to accept): ",
+        "Does the viewer require its own terminal window? [y/N] ",
         "GitHub username: ",
         "Work directory [~/wrk]: ",
         "Todo repository [octocat/todos]: ",
@@ -359,14 +368,77 @@ def test_configure_reprompts_for_an_invalid_open_command(tmp_path):
     )
 
     prompts: list[str] = []
+    inputs = iter(["term-copy", ""])
     config = configure(
         config_path,
-        input_fn=lambda prompt: (prompts.append(prompt), "term-copy")[1],
-        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "gh") else None,
+        input_fn=lambda prompt: (prompts.append(prompt), next(inputs))[1],
+        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "gh", "term-copy") else None,
     )
 
     assert config.open_command == "term-copy"
-    assert prompts == ["Open command [xdg-open]: "]
+    assert config.open_needs_pane is False
+    assert prompts == [
+        "Open command (required): ",
+        "Does the viewer require its own terminal window? [y/N] ",
+    ]
+
+
+@pytest.mark.parametrize("pane_choice", [None, "false", False, True])
+def test_configure_repairs_viewer_executable_and_preserves_other_settings(
+    tmp_path, capsys, pane_choice
+):
+    config_path = tmp_path / "config.json"
+    original = WorkdashConfig(
+        github_username="octocat",
+        open_command="missing-viewer --quiet",
+        claude=AgentConfig(analyze="claude -p", launch="claude"),
+        codex=AgentConfig(analyze="codex exec", launch="codex"),
+        pi=AgentConfig(launch="pi"),
+        repositories=("specific/repo",),
+        workdir="~/src",
+        todo_repository="octocat/todos",
+    )
+    save_config(original, config_path)
+    raw = json.loads(config_path.read_text())
+    if pane_choice is None:
+        del raw["open_needs_pane"]
+    else:
+        raw["open_needs_pane"] = pane_choice
+    config_path.write_text(json.dumps(raw))
+    viewer = tmp_path / "safe viewer"
+    viewer.write_text("#!/bin/sh\nexit 0\n")
+    viewer.chmod(0o755)
+    not_executable = tmp_path / "not-executable"
+    not_executable.write_text("not executable")
+    command = f'{shlex.quote(str(viewer))} --label "two words"'
+    responses = ["", "viewer 'broken", "missing-viewer", str(not_executable), command]
+    if not isinstance(pane_choice, bool):
+        responses += ["maybe", "y"]
+    inputs = iter(responses)
+    prompts = []
+
+    def which(cmd):
+        if cmd in {"zellij", "gh"}:
+            return f"/usr/bin/{cmd}"
+        return shutil.which(cmd, path=str(tmp_path))
+
+    configured = configure(
+        config_path,
+        input_fn=lambda prompt: (prompts.append(prompt), next(inputs))[1],
+        which_fn=which,
+    )
+    expected = json.loads(config_path.read_text())
+    assert expected == {
+        **raw,
+        "open": command,
+        "open_needs_pane": pane_choice if isinstance(pane_choice, bool) else True,
+    }
+    assert configured.require_valid() is configured
+    assert sum("Open command" in prompt for prompt in prompts) == 5
+    assert sum("Does the viewer" in prompt for prompt in prompts) == (
+        0 if isinstance(pane_choice, bool) else 2
+    )
+    assert "executable exists" in capsys.readouterr().out
 
 
 def test_configure_asks_interactively_when_commands_not_on_path(tmp_path):
@@ -374,6 +446,7 @@ def test_configure_asks_interactively_when_commands_not_on_path(tmp_path):
     inputs = iter(
         [
             "term-copy",  # open command
+            "y",  # viewer terminal
             "my-claude -p",  # claude analyze
             "my-claude",  # claude launch
             "my-codex run",  # codex analyze
@@ -388,9 +461,12 @@ def test_configure_asks_interactively_when_commands_not_on_path(tmp_path):
     config = configure(
         config_path,
         input_fn=lambda prompt: next(inputs),
-        which_fn=lambda cmd: f"/usr/local/bin/{cmd}" if cmd in ("zellij", "gh") else None,
+        which_fn=lambda cmd: (
+            f"/usr/local/bin/{cmd}" if cmd in ("zellij", "gh", "term-copy") else None
+        ),
     )
     assert config.open_command == "term-copy"
+    assert config.open_needs_pane is True
     assert config.claude.analyze == "my-claude -p"
     assert config.claude.launch == "my-claude"
     assert config.codex.analyze == "my-codex run"
@@ -407,6 +483,7 @@ def test_configure_accepts_defaults_for_empty_optional_responses(tmp_path):
     inputs = iter(
         [
             "",  # open command default
+            "",  # viewer terminal default
             "",  # claude analyze default
             "",  # claude launch default
             "",  # codex analyze default
@@ -421,7 +498,7 @@ def test_configure_accepts_defaults_for_empty_optional_responses(tmp_path):
     config = configure(
         config_path,
         input_fn=lambda prompt: next(inputs),
-        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "gh") else None,
+        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "gh", "xdg-open") else None,
     )
     assert config.claude.analyze == "claude -p"
     assert config.claude.launch == "claude"
@@ -437,14 +514,16 @@ def test_configure_accepts_defaults_for_empty_optional_responses(tmp_path):
 def test_configure_reprompts_for_required_fields_without_defaults(tmp_path):
     config_path = tmp_path / "config.json"
     prompts: list[str] = []
-    # Open command default, username retry, then workdir and todo defaults.
-    inputs = iter(["", "", "octocat", "", ""])
+    # Viewer defaults, username retry, then workdir and todo defaults.
+    inputs = iter(["", "", "", "octocat", "", ""])
 
     config = configure(
         config_path,
         input_fn=lambda prompt: (prompts.append(prompt), next(inputs))[1],
         which_fn=lambda cmd: (
-            f"/usr/bin/{cmd}" if cmd in ("zellij", "gh", "claude", "codex", "pi") else None
+            f"/usr/bin/{cmd}"
+            if cmd in ("zellij", "gh", "claude", "codex", "pi", "xdg-open")
+            else None
         ),
     )
 
@@ -460,6 +539,7 @@ def test_configure_fills_only_missing_fields(tmp_path):
             {
                 "github_username": "existing-user",
                 "open": "existing-open",
+                "open_needs_pane": True,
                 "agents": {
                     "claude": {
                         "analyze": "existing-claude-analyze",
@@ -480,7 +560,9 @@ def test_configure_fills_only_missing_fields(tmp_path):
     config = configure(
         config_path,
         input_fn=lambda prompt: next(inputs),
-        which_fn=lambda cmd: f"/opt/homebrew/bin/{cmd}" if cmd in ("zellij", "gh") else None,
+        which_fn=lambda cmd: (
+            f"/opt/homebrew/bin/{cmd}" if cmd in ("zellij", "gh", "existing-open") else None
+        ),
     )
     assert config.github_username == "existing-user"
     assert config.claude.analyze == "existing-claude-analyze"
@@ -523,10 +605,13 @@ def test_configure_reprompts_for_a_malformed_todo_repository(tmp_path):
     config = configure(
         config_path,
         input_fn=input_fn,
-        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "gh") else None,
+        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "gh", "xdg-open") else None,
     )
 
-    assert prompts == ["Todo repository [octocat/todos]: "]
+    assert prompts == [
+        "Does the viewer require its own terminal window? [y/N] ",
+        "Todo repository [octocat/todos]: ",
+    ]
     assert config.todo_repository == "octocat/todos"
     assert config.require_valid() is config
 
@@ -546,6 +631,7 @@ def test_configure_preserves_existing_repositories(tmp_path):
                 "repositories": ["specific/repo"],
                 "workdir": "~/src",
                 "todo_repository": "octocat/todos",
+                "open_needs_pane": False,
             }
         ),
         encoding="utf-8",
@@ -554,7 +640,7 @@ def test_configure_preserves_existing_repositories(tmp_path):
     config = configure(
         config_path,
         input_fn=lambda prompt: (_ for _ in ()).throw(AssertionError("should not prompt")),
-        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "gh") else None,
+        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "gh", "xdg-open") else None,
     )
 
     assert config.repositories == ("specific/repo",)
@@ -585,7 +671,9 @@ def test_configure_installs_zellij_when_not_on_path(tmp_path, capsys):
     configure(
         config_path,
         input_fn=lambda prompt: next(inputs),
-        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("gh", "claude", "codex") else None,
+        which_fn=lambda cmd: (
+            f"/usr/bin/{cmd}" if cmd in ("gh", "claude", "codex", "xdg-open") else None
+        ),
         install_zellij_fn=fake_install,
     )
 
@@ -603,6 +691,7 @@ def test_configure_redownloads_zellij_when_no_global_binary_exists(tmp_path):
             {
                 "github_username": "octocat",
                 "open": "xdg-open",
+                "open_needs_pane": False,
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},
                     "codex": {"analyze": "codex exec", "launch": "codex"},
@@ -626,7 +715,7 @@ def test_configure_redownloads_zellij_when_no_global_binary_exists(tmp_path):
         input_fn=lambda prompt: (_ for _ in ()).throw(
             AssertionError(f"Unexpected prompt {prompt}")
         ),
-        which_fn=lambda cmd: None,
+        which_fn=lambda cmd: "/usr/bin/xdg-open" if cmd == "xdg-open" else None,
         install_zellij_fn=fake_install,
         install_gh_fn=lambda: "/new/local/gh",
     )
@@ -639,6 +728,7 @@ def test_configure_installs_gh_when_not_on_path(tmp_path, capsys):
     inputs = iter(
         [
             "",  # open command default
+            "",  # viewer terminal default
             "",  # claude analyze default
             "",  # claude launch default
             "",  # codex analyze default
@@ -658,7 +748,7 @@ def test_configure_installs_gh_when_not_on_path(tmp_path, capsys):
     configure(
         config_path,
         input_fn=lambda prompt: next(inputs),
-        which_fn=lambda cmd: "/usr/bin/zellij" if cmd == "zellij" else None,
+        which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "xdg-open") else None,
         install_gh_fn=fake_install,
     )
 
@@ -676,6 +766,7 @@ def test_configure_redownloads_gh_when_no_global_binary_exists(tmp_path):
             {
                 "github_username": "octocat",
                 "open": "xdg-open",
+                "open_needs_pane": False,
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},
                     "codex": {"analyze": "codex exec", "launch": "codex"},
@@ -699,7 +790,7 @@ def test_configure_redownloads_gh_when_no_global_binary_exists(tmp_path):
         input_fn=lambda prompt: (_ for _ in ()).throw(
             AssertionError(f"Unexpected prompt {prompt}")
         ),
-        which_fn=lambda cmd: None,
+        which_fn=lambda cmd: "/usr/bin/xdg-open" if cmd == "xdg-open" else None,
         install_zellij_fn=lambda: "/new/local/zellij",
         install_gh_fn=fake_install,
     )

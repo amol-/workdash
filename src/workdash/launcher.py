@@ -51,13 +51,44 @@ def _run_browser_open(
     *,
     command: str | None = None,
     kind: str,
+    needs_pane: bool = False,
+    zellij_session: str | None = None,
 ) -> None:
-    command_tokens = (
-        shlex.split(command) if command is not None else [_resolve_browser_open_command()]
-    )
+    try:
+        command_tokens = (
+            shlex.split(command) if command is not None else [_resolve_browser_open_command()]
+        )
+    except ValueError as error:
+        raise RuntimeError(f"Failed to open {kind} via {command!r}: {error}") from error
     if not command_tokens:
         raise RuntimeError(f"Failed to open {kind}: command is empty.")
-    command_name = command_tokens[0]
+    command_name = command or command_tokens[0]
+    if needs_pane:
+        session = zellij_session or os.getenv("ZELLIJ_SESSION_NAME")
+        if not session:
+            raise RuntimeError(
+                f"Failed to open {kind} via {command_name}: viewer requires an active Zellij session."
+            )
+        try:
+            zellij = _resolve_zellij_binary()
+            completed = subprocess.run(
+                [zellij, "--session", session, "action", "new-pane", "--", *command_tokens, target],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            pane_id = completed.stdout.strip()
+            if not pane_id.startswith("terminal_"):
+                raise RuntimeError("Zellij did not return the viewer pane ID.")
+            _toggle_zellij_pane_fullscreen(session, pane_id)
+        except subprocess.CalledProcessError as error:
+            details = (error.stderr or "").strip() or (error.stdout or "").strip()
+            raise RuntimeError(
+                f"Failed to open {kind} via {command_name}: {details or error}"
+            ) from error
+        except (OSError, RuntimeError) as error:
+            raise RuntimeError(f"Failed to open {kind} via {command_name}: {error}") from error
+        return
     try:
         subprocess.run(
             [*command_tokens, target],
@@ -66,8 +97,8 @@ def _run_browser_open(
             text=True,
             timeout=_BROWSER_OPEN_TIMEOUT_SECONDS,
         )
-    except FileNotFoundError as error:
-        raise RuntimeError(f"{command_name} is not installed or not on PATH.") from error
+    except OSError as error:
+        raise RuntimeError(f"Failed to open {kind} via {command_name}: {error}") from error
     except subprocess.TimeoutExpired as error:
         raise RuntimeError(
             f"Failed to open {kind} via {command_name}: command did not finish within "
@@ -81,10 +112,18 @@ def _run_browser_open(
         raise RuntimeError(f"Failed to open {kind} via {command_name}: {details}") from error
 
 
-def open_in_browser(url: str, command: str | None = None) -> None:
+def open_in_browser(
+    url: str,
+    command: str | None = None,
+    *,
+    needs_pane: bool = False,
+    zellij_session: str | None = None,
+) -> None:
     if not isinstance(url, str) or not url.strip():
         raise ValueError("URL must be a non-empty string.")
-    _run_browser_open(url, command=command, kind="URL")
+    _run_browser_open(
+        url, command=command, kind="URL", needs_pane=needs_pane, zellij_session=zellij_session
+    )
 
 
 _HTML_TEMPLATE = """\
@@ -104,7 +143,13 @@ table {{ border-collapse: collapse; }} th, td {{ border: 1px solid #d0d7de; padd
 """
 
 
-def open_markdown(path: str, command: str | None = None) -> None:
+def open_markdown(
+    path: str,
+    command: str | None = None,
+    *,
+    needs_pane: bool = False,
+    zellij_session: str | None = None,
+) -> None:
     """Render a markdown file to HTML and open it in the browser."""
 
     if not isinstance(path, str) or not path.strip():
@@ -115,7 +160,13 @@ def open_markdown(path: str, command: str | None = None) -> None:
     html = _HTML_TEMPLATE.format(title=md_path.stem, body=html_body)
     html_path = md_path.with_suffix(".html")
     html_path.write_text(html, encoding="utf-8")
-    _run_browser_open(str(html_path), command=command, kind="file")
+    _run_browser_open(
+        str(html_path),
+        command=command,
+        kind="file",
+        needs_pane=needs_pane,
+        zellij_session=zellij_session,
+    )
 
 
 def _run_launch_command(command: list[str], *, context: str) -> None:

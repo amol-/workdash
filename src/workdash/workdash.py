@@ -329,8 +329,18 @@ class WorkdashCommands:
         app = WorkdashApp(
             work_items=session.work_items,
             suggestion_markers=session.suggestion_markers,
-            open_callback=lambda item: open_in_browser(item.url, config.open_command),
-            open_markdown_callback=lambda path: open_markdown(path, config.open_command),
+            open_callback=lambda item: open_in_browser(
+                item.url,
+                config.open_command,
+                needs_pane=config.open_needs_pane,
+                zellij_session=zellij_session,
+            ),
+            open_markdown_callback=lambda path: open_markdown(
+                path,
+                config.open_command,
+                needs_pane=config.open_needs_pane,
+                zellij_session=zellij_session,
+            ),
             refresh_callback=lambda: (
                 session.list_items(refresh=True)
                 and (session.work_items, session.suggestion_markers)

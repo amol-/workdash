@@ -14,10 +14,13 @@ Feature: First-time configuration
     - The configuration lives at ~/.config/workdash/config.json.
     - Required configuration fields are the GitHub username, open command, at least one repository selector, the work directory, and the todo repository.
     - Every required field must be present for the system to start; the wizard backfills missing required fields, using a default when one exists.
-    - When the open command is missing or invalid, the wizard prompts for it with the platform default: `xdg-open` on Linux and `open` on macOS.
+    - When the open command is missing, malformed, or its executable is unavailable, the wizard prompts until a valid executable command is supplied, allowing arguments and explicit executable paths.
+    - The wizard suggests only an available platform opener: `xdg-open` on Linux or `open` on macOS, explicitly explaining that Enter accepts it. Without a suggestion, empty input is rejected.
+    - For a missing or invalid viewer terminal choice, the wizard asks "Does the viewer require its own terminal window? [y/N]", defaulting to No and preserving explicit boolean choices.
+    - The wizard explains that advanced viewer commands can be edited in config.json.
     - When the todo repository is empty or not in "owner/repo" form, the wizard prompts for it with the default "<username>/todos"; the repository does not have to exist yet.
     - Present agent command fields must be valid command lines; each valid command enables that agent action.
-    - The wizard only prompts for fields that are currently empty; previously filled fields are left untouched.
+    - The wizard preserves previously filled valid fields while repairing missing or invalid viewer settings.
     - When a supported coding agent's command-line tool is detected on PATH, the wizard fills in its commands automatically and tells the user what was detected.
     - When Zellij is detected on PATH, the wizard tells the user what was detected.
     - When Zellij is not detected on PATH, the wizard tells the user it will install a local Zellij binary from the latest release URL and that a global Zellij install can be used instead when it is on PATH.
@@ -51,8 +54,16 @@ Feature: First-time configuration
   @id:F-SETUP-CONFIGURE-S010
   Scenario: Missing open command accepts the platform default
     Given the user has no configuration file
+    And the platform opener is available
     When the user runs the system with "--configure"
     Then submitting an empty open command stores the platform default
+
+  @id:F-SETUP-CONFIGURE-S011
+  Scenario: Repair an unavailable viewer without changing other settings
+    Given the user has a configured viewer whose executable is unavailable
+    When the user runs the system with "--configure"
+    Then the wizard saves a working custom viewer and its terminal choice
+    And previously set fields are preserved in the saved configuration
 
   @id:F-SETUP-CONFIGURE-S006
   Scenario: Detected Zellij binary is reported automatically
