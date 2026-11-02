@@ -10,6 +10,7 @@ Feature: Show configured automation options
     - The show-config API reports the same configured agents from the server-backed session.
     - Configured analysis agents are agents with an analyze command configured.
     - Configured coding agents are terminal-backed agents with a launch command configured.
+    - Agents are reported by their configured names, in the order of the configuration file.
     - V0 coding agents do not include non-terminal editors such as VSCode.
     - The server address is reported as `127.0.0.1:8765`.
     - JSON output is available for automation clients.
@@ -48,3 +49,12 @@ Feature: Show configured automation options
     Then the system reports `codex` as an analysis agent
     And the system does not report `claude` as an analysis agent
     And the system does not report `pi` as a coding agent
+
+  @id:F-CONFIG-SHOW-CONFIG-S005
+  Scenario: Agents are reported by name in configuration order
+    Given the configuration lists the agents `pi`, `aider`, and `claude` in that order
+    And all three agents have an analyze command
+    And `aider` has no launch command
+    When the user runs `workdash show-config --json`
+    Then the system reports `pi`, `aider`, and `claude` as analysis agents in that order
+    And the system reports `pi` and `claude` as coding agents in that order

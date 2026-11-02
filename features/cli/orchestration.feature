@@ -28,6 +28,7 @@ Feature: CLI orchestration commands
     - Missing optional agent commands mean that agent operation is not configured, not that the whole config is invalid.
     - `workdash analyze` accepts only configured analysis agents reported by `workdash show-config`.
     - `workdash code` launches only configured terminal-backed coding agents reported by `workdash show-config`.
+    - Without `--agent`, `workdash analyze` and `workdash code` use the first configured agent for that action, in configuration order.
     - `workdash code` reports the created Zellij pane ID from live session state without persisting it.
     - `workdash terminal` opens a plain terminal in the item's worktree and reports the created Zellij pane ID.
     - `workdash terminal` does not accept an agent parameter.

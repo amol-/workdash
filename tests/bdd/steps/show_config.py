@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 import pytest
-from pytest_bdd import given, then, when
+from pytest_bdd import given, parsers, then, when
 
 from workdash.config import AgentConfig, WorkdashConfig
 
@@ -32,6 +32,31 @@ def _config_has_no_pi_launch(scenario_state: dict[str, Any]) -> None:
     scenario_state.setdefault("config_overrides", {})["pi_launch"] = ""
 
 
+@given(
+    parsers.parse(
+        "the configuration lists the agents `{first}`, `{second}`, and `{third}` in that order"
+    )
+)
+def _config_lists_agents(first: str, second: str, third: str, scenario_state: dict[str, Any]):
+    scenario_state["config_agents"] = {
+        name: AgentConfig(launch=name) for name in (first, second, third)
+    }
+
+
+@given("all three agents have an analyze command")
+def _all_agents_have_analyze_command(scenario_state: dict[str, Any]) -> None:
+    scenario_state["config_agents"] = {
+        name: AgentConfig(analyze=f"{name} -p", launch=agent.launch)
+        for name, agent in scenario_state["config_agents"].items()
+    }
+
+
+@given(parsers.parse("`{name}` has no launch command"))
+def _agent_has_no_launch_command(name: str, scenario_state: dict[str, Any]) -> None:
+    agents = scenario_state["config_agents"]
+    agents[name] = AgentConfig(analyze=agents[name].analyze)
+
+
 @when("the user runs `workdash show-config --json`")
 def _run_show_config_json(
     scenario_state: dict[str, Any],
@@ -40,19 +65,18 @@ def _run_show_config_json(
 ) -> None:
     import workdash.workdash as workdash_module
 
-    # Build config based on overrides
     config_overrides = scenario_state.get("config_overrides", {})
-    config = WorkdashConfig(
-        github_username="testuser",
-        claude=AgentConfig(analyze=config_overrides.get("claude_analyze", ""), launch=""),
-        codex=AgentConfig(
+    agents = scenario_state.get("config_agents") or {
+        "codex": AgentConfig(
             analyze=config_overrides.get("codex_analyze", ""),
             launch=config_overrides.get("codex_launch", ""),
         ),
-        pi=AgentConfig(
-            analyze="",
-            launch=config_overrides.get("pi_launch", ""),
-        ),
+        "claude": AgentConfig(analyze=config_overrides.get("claude_analyze", "")),
+        "pi": AgentConfig(launch=config_overrides.get("pi_launch", "")),
+    }
+    config = WorkdashConfig(
+        github_username="testuser",
+        agents=agents,
         repositories=("owner/repo",),
         workdir="/tmp/workdash-bdd",
     )
@@ -78,9 +102,11 @@ def _run_show_config(
 
     config = WorkdashConfig(
         github_username="testuser",
-        claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze="codex exec", launch="codex"),
-        pi=AgentConfig(launch="pi"),
+        agents={
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+            "claude": AgentConfig(analyze="claude -p", launch="claude"),
+            "pi": AgentConfig(launch="pi"),
+        },
         repositories=("owner/repo",),
         workdir="/tmp/workdash-bdd",
     )
@@ -108,6 +134,24 @@ def _reports_codex_and_pi_code_agents(scenario_state: dict[str, Any]) -> None:
     code_agents = payload["agents"]["code"]
     assert "codex" in code_agents
     assert "pi" in code_agents
+
+
+@then(
+    parsers.parse(
+        "the system reports `{first}`, `{second}`, and `{third}` as analysis agents in that order"
+    )
+)
+def _reports_analysis_agents_in_order(
+    first: str, second: str, third: str, scenario_state: dict[str, Any]
+) -> None:
+    assert json.loads(scenario_state["stdout"])["agents"]["analyze"] == [first, second, third]
+
+
+@then(parsers.parse("the system reports `{first}` and `{second}` as coding agents in that order"))
+def _reports_coding_agents_in_order(
+    first: str, second: str, scenario_state: dict[str, Any]
+) -> None:
+    assert json.loads(scenario_state["stdout"])["agents"]["code"] == [first, second]
 
 
 @then("the system reports the server host `127.0.0.1`")

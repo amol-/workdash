@@ -10,6 +10,7 @@ Feature: Analyze dialog
     - If an analysis already exists for the item, the dialog shows how long ago it was produced and offers to open it.
     - If no analysis exists, the dialog tells the user there is no previous analysis.
     - The dialog offers fresh analysis only for configured analysis agents.
+    - Each configured analysis agent is offered as "Analyze with <name>", numbered from 1 in configuration order.
     - The user can cancel the dialog without triggering any action.
 
   @id:F-ANALYSIS-DIALOG-S001
@@ -26,6 +27,14 @@ Feature: Analyze dialog
     When the user presses "a"
     Then the dialog tells the user there is no previous analysis
     And the dialog offers to generate a fresh analysis
+
+  @id:F-ANALYSIS-DIALOG-S004
+  Scenario: Dialog offers each configured analysis agent in configuration order
+    Given the selected work item has no cached analysis
+    And the analysis agents `pi` and `claude` are configured in that order
+    When the user presses "a"
+    Then the dialog offers "Analyze with pi" as option 1
+    And the dialog offers "Analyze with claude" as option 2
 
   @id:F-ANALYSIS-DIALOG-S003
   Scenario: User cancels the dialog without side effects

@@ -8,7 +8,8 @@ Feature: Launch a coding session
 
   Rules:
     - Pressing "c" in the TUI opens a dialog to pick a configured coding agent.
-    - The configured coding agents can be Claude, ChatGPT Codex, and pi; the TUI also supports VSCode Copilot as an editor launch.
+    - Any agent configured with a launch command is a coding agent; the TUI also supports VSCode Copilot as an editor launch.
+    - The dialog lists the configured coding agents by name in configuration order, followed by VSCode Copilot.
     - Before launching a session, the system prepares the worktree for the selected work item.
     - The launched coding agent is started inside the work item's worktree.
     - The launched coding agent is preloaded with the work item's GitHub context and, when available, the cached analysis for that item.
@@ -153,3 +154,10 @@ Feature: Launch a coding session
     When the user launches a coding session with a supported coding agent
     Then the agent is not told the spam comments
     And the agent is told the outdated comment
+
+  @id:F-CODING-LAUNCH-S018
+  Scenario: Dialog lists the configured coding agents in configuration order followed by VSCode Copilot
+    Given the coding agents `pi` and `claude` are configured in that order
+    And the TUI has a work item selected
+    When the user presses "c"
+    Then the dialog offers `pi`, `claude`, and VSCode Copilot in that order

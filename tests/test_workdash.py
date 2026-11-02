@@ -18,9 +18,11 @@ from workdash.workdash import _print_work_items, _print_work_items_result
 _VALID_CONFIG = WorkdashConfig(
     github_username="testuser",
     open_command="xdg-open",
-    claude=AgentConfig(analyze="claude -p", launch="claude"),
-    codex=AgentConfig(analyze="codex exec", launch="codex"),
-    pi=AgentConfig(launch="pi --no-tips"),
+    agents={
+        "codex": AgentConfig(analyze="codex exec", launch="codex"),
+        "claude": AgentConfig(analyze="claude -p", launch="claude"),
+        "pi": AgentConfig(launch="pi --no-tips"),
+    },
     repositories=("owner/*",),
     workdir="~/wrk",
     todo_repository="testuser/todos",
@@ -300,7 +302,7 @@ def test_main_passes_configured_agent_choices_and_shared_viewer_to_tui(
         github_username="testuser",
         open_command='term-copy --label "two words"',
         open_needs_pane=needs_pane,
-        codex=AgentConfig(analyze="codex exec"),
+        agents={"codex": AgentConfig(analyze="codex exec")},
         repositories=("owner/*",),
         workdir="~/wrk",
         todo_repository="testuser/todos",
@@ -534,9 +536,11 @@ def test_main_exits_with_config_guidance_when_startup_config_command_is_malforme
     config = WorkdashConfig(
         github_username="testuser",
         open_command="xdg-open",
-        claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze="codex exec", launch="codex"),
-        pi=AgentConfig(launch="pi 'broken"),
+        agents={
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+            "claude": AgentConfig(analyze="claude -p", launch="claude"),
+            "pi": AgentConfig(launch="pi 'broken"),
+        },
         repositories=("owner/repo",),
         workdir="~/wrk",
         todo_repository="testuser/todos",

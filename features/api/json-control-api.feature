@@ -25,6 +25,7 @@ Feature: Local JSON control API
     - Successful API responses use `{ "ok": true, "result": ... }`.
     - Failed API responses use an appropriate HTTP error status and `{ "ok": false, "error": { "code": ..., "message": ... } }`.
     - Work item actions accept Workdash item IDs exactly as emitted by `workdash list`.
+    - Analyze and code requests without an agent use the first configured agent for that action, in configuration order.
     - A refresh request may arrive before the TUI event loop is running; it still succeeds and updates shared state, and the first TUI render uses that shared state.
     - Pane actions accept pane IDs exactly as emitted by `workdash info`.
     - Analyze responses include `content_type`, `file_name`, and base64 `file_content`; there is no `content_encoding` field because content is always base64.
@@ -86,6 +87,15 @@ Feature: Local JSON control API
     When a client requests analysis for `owner/repo#ISSUE-1` with agent `codex`
     Then the server analyzes the known item with the selected configured agent
     And the API returns the item ID, selected agent, analysis path, cache status, and base64 markdown content
+
+  @id:F-API-JSON-CONTROL-S024
+  Scenario: Analyze API without an agent uses the first configured analysis agent
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current dashboard items include `owner/repo#ISSUE-1`
+    And the analysis agents `pi` and `claude` are configured in that order
+    When a client requests analysis for `owner/repo#ISSUE-1` without an agent
+    Then the server analyzes the known item with `pi`
+    And the API returns `pi` as the selected agent
 
   @id:F-API-JSON-CONTROL-S008
   Scenario: Analyze API rejects an unknown item

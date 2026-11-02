@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
+import re
 import shlex
 import shutil
 import stat
+import subprocess
 import tarfile
 import urllib.request
 import zipfile
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from io import BytesIO
 from pathlib import Path
 
@@ -25,11 +28,23 @@ GH_LATEST_RELEASE_API_URL = "https://api.github.com/repos/cli/cli/releases/lates
 GH_LATEST_RELEASE_PAGE_URL = "https://github.com/cli/cli/releases/latest"
 
 _REQUIRED_FIELDS = ("github_username", "repositories", "workdir")
-_DEFAULT_CLAUDE_ANALYZE = "claude -p"
-_DEFAULT_CLAUDE_LAUNCH = "claude"
-_DEFAULT_CODEX_ANALYZE = "codex exec"
-_DEFAULT_CODEX_LAUNCH = "codex"
-_DEFAULT_PI_LAUNCH = "pi"
+# Agents the wizard detects on PATH, in detection order, with their (analyze, launch) commands.
+_DETECTABLE_AGENTS = {
+    "claude": ("claude -p", "claude"),
+    "codex": ("codex exec", "codex"),
+    "pi": ("pi --no-session --tools read,grep,find,ls -p", "pi"),
+}
+# Names that mean something else inside Workdash (the analyze dialog's cached analysis and
+# the code dialog's editor launch).
+_RESERVED_AGENT_NAMES = frozenset({"cached", "vscode"})
+# The TUI dialogs number entries with single keys; VSCode Copilot takes the last code number.
+_MAX_ANALYZE_AGENTS = 9
+_MAX_CODE_AGENTS = 8
+# What each section of the wizard's agent step asks for: the command's purpose and an example.
+_AGENT_SECTION_HELP = {
+    "analyze": ("commands that run once and print the analysis", "claude -p"),
+    "launch": ("commands that start an interactive coding session", "claude"),
+}
 _DEFAULT_WORKDIR = "~/wrk"
 
 
@@ -80,9 +95,7 @@ class WorkdashConfig:
     github_username: str = ""
     open_command: str = ""
     open_needs_pane: bool = False
-    claude: AgentConfig = field(default_factory=AgentConfig)
-    codex: AgentConfig = field(default_factory=AgentConfig)
-    pi: AgentConfig = field(default_factory=AgentConfig)
+    agents: dict[str, AgentConfig] = field(default_factory=dict)
     repositories: tuple[str, ...] = ()
     workdir: str = ""
     todo_repository: str = ""
@@ -96,69 +109,45 @@ class WorkdashConfig:
         # invalid rather than missing, so the message tells the user what to fix.
         if self.todo_repository and not is_repository_name(self.todo_repository):
             invalid.append("todo_repository: expected owner/repo")
+        invalid.extend(
+            f"agents.{name}: reserved name" for name in self.agents if name in _RESERVED_AGENT_NAMES
+        )
         if missing or invalid:
             raise WorkdashConfigValidationError(missing, invalid)
         return self
 
     def configured_analyze_agents(self) -> list[str]:
-        agents = []
-        if _is_configured_command(self.codex.analyze):
-            agents.append("codex")
-        if _is_configured_command(self.claude.analyze):
-            agents.append("claude")
-        return agents
+        return [
+            name for name, agent in self.agents.items() if _is_configured_command(agent.analyze)
+        ]
 
     def configured_code_agents(self) -> list[str]:
-        agents = []
-        if _is_configured_command(self.codex.launch):
-            agents.append("codex")
-        if _is_configured_command(self.claude.launch):
-            agents.append("claude")
-        if _is_configured_command(self.pi.launch):
-            agents.append("pi")
-        return agents
+        return [name for name, agent in self.agents.items() if _is_configured_command(agent.launch)]
 
     def tui_analyze_choices(self) -> list[WorkdashAgentChoice]:
-        choices = []
-        if _is_configured_command(self.claude.analyze):
-            choices.append(("claude", "Analyze with Claude", "Claude"))
-        if _is_configured_command(self.codex.analyze):
-            choices.append(("codex", "Analyze with ChatGPT Codex", "Codex"))
-        return _numbered_agent_choices(choices)
+        return _numbered_agent_choices(
+            [(name, f"Analyze with {name}", name) for name in self.configured_analyze_agents()]
+        )
 
     def tui_code_choices(self) -> list[WorkdashAgentChoice]:
-        choices = []
-        if _is_configured_command(self.claude.launch):
-            choices.append(("claude", "Claude", "Claude"))
-        if _is_configured_command(self.codex.launch):
-            choices.append(("codex", "ChatGPT Codex", "Codex"))
-        choices.append(("vscode", "VSCode Copilot", "VSCode"))
-        if _is_configured_command(self.pi.launch):
-            choices.append(("pi", "pi", "pi"))
-        return _numbered_agent_choices(choices)
+        return _numbered_agent_choices(
+            [(name, name, name) for name in self.configured_code_agents()]
+            + [("vscode", "VSCode Copilot", "VSCode")]
+        )
 
     def analyze_agent_command_tokens(self, agent: str) -> list[str]:
-        analyze_commands = {
-            "claude": ("agents.claude.analyze", self.claude.analyze),
-            "codex": ("agents.codex.analyze", self.codex.analyze),
-        }
         try:
-            field, command = analyze_commands[agent]
+            command = self.agents[agent].analyze
         except KeyError as error:
             raise ValueError(f"Unsupported analyze agent: {agent!r}") from error
-        return _config_command_tokens(field, command)
+        return _config_command_tokens(f"agents.{agent}.analyze", command)
 
     def code_agent_launch_command_tokens(self, agent: str) -> list[str]:
-        launch_commands = {
-            "claude": ("agents.claude.launch", self.claude.launch),
-            "codex": ("agents.codex.launch", self.codex.launch),
-            "pi": ("agents.pi.launch", self.pi.launch),
-        }
         try:
-            field, command = launch_commands[agent]
+            command = self.agents[agent].launch
         except KeyError as error:
             raise ValueError(f"Unsupported coding agent: {agent!r}") from error
-        return _config_command_tokens(field, command)
+        return _config_command_tokens(f"agents.{agent}.launch", command)
 
 
 def _config_to_json(config: WorkdashConfig) -> str:
@@ -169,9 +158,8 @@ def _config_to_json(config: WorkdashConfig) -> str:
                 "open": config.open_command,
                 "open_needs_pane": config.open_needs_pane,
                 "agents": {
-                    "claude": {"analyze": config.claude.analyze, "launch": config.claude.launch},
-                    "codex": {"analyze": config.codex.analyze, "launch": config.codex.launch},
-                    "pi": {"launch": config.pi.launch},
+                    name: {"analyze": agent.analyze, "launch": agent.launch}
+                    for name, agent in config.agents.items()
                 },
                 "repositories": list(config.repositories),
                 "workdir": config.workdir,
@@ -212,32 +200,17 @@ def load_config(path: Path = CONFIG_PATH) -> WorkdashConfig:
     repositories_raw = raw.get("repositories")
     repositories = tuple(repositories_raw) if isinstance(repositories_raw, list) else ()
     agents_raw = raw.get("agents")
-    claude_config = AgentConfig()
-    codex_config = AgentConfig()
-    pi_config = AgentConfig()
-    if isinstance(agents_raw, dict):
-        claude_raw = agents_raw.get("claude")
-        if isinstance(claude_raw, dict):
-            claude_config = AgentConfig(
-                analyze=claude_raw.get("analyze", ""),
-                launch=claude_raw.get("launch", ""),
-            )
-        codex_raw = agents_raw.get("codex")
-        if isinstance(codex_raw, dict):
-            codex_config = AgentConfig(
-                analyze=codex_raw.get("analyze", ""),
-                launch=codex_raw.get("launch", ""),
-            )
-        pi_raw = agents_raw.get("pi")
-        if isinstance(pi_raw, dict):
-            pi_config = AgentConfig(launch=pi_raw.get("launch", ""))
+    if not isinstance(agents_raw, dict):
+        agents_raw = {}
     return WorkdashConfig(
         github_username=raw.get("github_username", ""),
         open_command=raw.get("open", ""),
         open_needs_pane=raw.get("open_needs_pane", False),
-        claude=claude_config,
-        codex=codex_config,
-        pi=pi_config,
+        agents={
+            name: AgentConfig(analyze=entry.get("analyze", ""), launch=entry.get("launch", ""))
+            for name, entry in agents_raw.items()
+            if isinstance(entry, dict)
+        },
         repositories=repositories,
         workdir=raw.get("workdir", "") or raw.get("source_directory", ""),
         todo_repository=raw.get("todo_repository", ""),
@@ -267,7 +240,19 @@ def validate_config(config: WorkdashConfig) -> list[str]:
         missing.append("workdir")
     if not config.todo_repository:
         missing.append("todo_repository")
+    if not _has_agent(config.agents):
+        missing.append("agents")
     return missing
+
+
+def _has_agent(agents: dict[str, AgentConfig]) -> bool:
+    """An agent needs at least one non-blank command; an entry with none is not an agent."""
+
+    return any(
+        isinstance(command, str) and command.strip()
+        for agent in agents.values()
+        for command in (agent.analyze, agent.launch)
+    )
 
 
 def _numbered_agent_choices(choices: list[tuple[str, str, str]]) -> list[WorkdashAgentChoice]:
@@ -278,14 +263,11 @@ def _numbered_agent_choices(choices: list[tuple[str, str, str]]) -> list[Workdas
 
 
 def _config_command_fields(config: WorkdashConfig) -> tuple[tuple[str, object], ...]:
-    return (
-        ("open", config.open_command),
-        ("agents.claude.analyze", config.claude.analyze),
-        ("agents.claude.launch", config.claude.launch),
-        ("agents.codex.analyze", config.codex.analyze),
-        ("agents.codex.launch", config.codex.launch),
-        ("agents.pi.launch", config.pi.launch),
-    )
+    fields: list[tuple[str, object]] = [("open", config.open_command)]
+    for name, agent in config.agents.items():
+        fields.append((f"agents.{name}.analyze", agent.analyze))
+        fields.append((f"agents.{name}.launch", agent.launch))
+    return tuple(fields)
 
 
 def _invalid_config_command_fields(config: WorkdashConfig) -> list[str]:
@@ -591,55 +573,23 @@ def configure(
             print("Please answer yes or no.")
     print(f"For advanced viewer commands, edit 'open' and 'open_needs_pane' in {path}.")
 
-    claude = config.claude
-    if not claude.analyze or not claude.launch:
-        if which_fn("claude"):
-            if not claude.analyze:
-                print(f"Detected 'claude' on PATH, using analyze: {_DEFAULT_CLAUDE_ANALYZE}")
-            if not claude.launch:
-                print(f"Detected 'claude' on PATH, using launch: {_DEFAULT_CLAUDE_LAUNCH}")
-            claude = AgentConfig(
-                analyze=claude.analyze or _DEFAULT_CLAUDE_ANALYZE,
-                launch=claude.launch or _DEFAULT_CLAUDE_LAUNCH,
-            )
-        else:
-            claude = AgentConfig(
-                analyze=claude.analyze
-                or _prompt_with_default(
-                    input_fn, "Claude analyze command", _DEFAULT_CLAUDE_ANALYZE
-                ),
-                launch=claude.launch
-                or _prompt_with_default(input_fn, "Claude launch command", _DEFAULT_CLAUDE_LAUNCH),
-            )
-
-    codex = config.codex
-    if not codex.analyze or not codex.launch:
-        if which_fn("codex"):
-            if not codex.analyze:
-                print(f"Detected 'codex' on PATH, using analyze: {_DEFAULT_CODEX_ANALYZE}")
-            if not codex.launch:
-                print(f"Detected 'codex' on PATH, using launch: {_DEFAULT_CODEX_LAUNCH}")
-            codex = AgentConfig(
-                analyze=codex.analyze or _DEFAULT_CODEX_ANALYZE,
-                launch=codex.launch or _DEFAULT_CODEX_LAUNCH,
-            )
-        else:
-            codex = AgentConfig(
-                analyze=codex.analyze
-                or _prompt_with_default(input_fn, "Codex analyze command", _DEFAULT_CODEX_ANALYZE),
-                launch=codex.launch
-                or _prompt_with_default(input_fn, "Codex launch command", _DEFAULT_CODEX_LAUNCH),
-            )
-
-    pi = config.pi
-    if not pi.launch:
-        if which_fn("pi"):
-            print(f"Detected 'pi' on PATH, using launch: {_DEFAULT_PI_LAUNCH}")
-            pi = AgentConfig(launch=_DEFAULT_PI_LAUNCH)
-        else:
-            pi = AgentConfig(
-                launch=_prompt_with_default(input_fn, "pi launch command", _DEFAULT_PI_LAUNCH),
-            )
+    agents = config.agents
+    if not _has_agent(agents):
+        agents = {}
+        for name, (analyze, launch) in _DETECTABLE_AGENTS.items():
+            if which_fn(name):
+                print(f"Detected '{name}' on PATH, using analyze: {analyze}, launch: {launch}")
+                agents[name] = AgentConfig(analyze=analyze, launch=launch)
+        if not agents:
+            print(f"No supported agent found on PATH (looked for {', '.join(_DETECTABLE_AGENTS)}).")
+        print("Each agent command is run with the task prompt appended as its last argument.")
+        while True:
+            _prompt_agents(input_fn, agents, "Agents for analyze", "analyze", _MAX_ANALYZE_AGENTS)
+            _prompt_agents(input_fn, agents, "Agents for code", "launch", _MAX_CODE_AGENTS)
+            if agents:
+                break
+            print("At least one agent is required.")
+    print(f"To add or edit agents later, edit 'agents' in {path}.")
 
     github_username = config.github_username
     if not github_username:
@@ -666,9 +616,7 @@ def configure(
         github_username=github_username,
         open_command=open_command,
         open_needs_pane=open_needs_pane,
-        claude=claude,
-        codex=codex,
-        pi=pi,
+        agents=agents,
         repositories=repositories,
         workdir=workdir,
         todo_repository=todo_repository,
@@ -676,3 +624,75 @@ def configure(
     save_config(new_config, path)
     print(f"Configuration saved to {path}")
     return new_config
+
+
+def _prompt_agents(
+    input_fn: Callable[[str], str],
+    agents: dict[str, AgentConfig],
+    title: str,
+    command_field: str,
+    limit: int,
+) -> None:
+    """Ask for more agents of one kind until an empty answer or until the section is full.
+
+    :param dict agents: Agents collected so far; extended in place.
+    :param str title: Section title shown to the user.
+    :param str command_field: Command this section collects: ``analyze`` or ``launch``.
+    :param int limit: Maximum number of agents with that command.
+    """
+
+    purpose, example = _AGENT_SECTION_HELP[command_field]
+    print(f"{title} (at most {limit}), {purpose}, e.g. {example}:")
+    for name, agent in agents.items():
+        if getattr(agent, command_field):
+            print(f"  {name}: {getattr(agent, command_field)}")
+    while sum(1 for agent in agents.values() if getattr(agent, command_field)) < limit:
+        command = input_fn(f"{title}, add a command (empty to finish): ").strip()
+        if not command:
+            return
+        problem = _config_command_problem(command)
+        if problem is not None:
+            print(f"Invalid command: {problem}")
+            continue
+        # Leading NAME=value tokens set the environment; the program is the next token.
+        program = next(
+            (token for token in shlex.split(command) if not re.match(r"[A-Za-z_]\w*=", token)),
+            command,
+        )
+        if not _shell_finds_program(program):
+            print(f"`{program}` was not found by your shell.")
+            continue
+        while True:
+            name = input_fn(f"Agent name for `{command}`: ").strip()
+            existing = agents.get(name, AgentConfig())
+            if not name:
+                print("The agent name is required.")
+            elif name in _RESERVED_AGENT_NAMES:
+                print(f"'{name}' is reserved, choose another name.")
+            elif getattr(existing, command_field):
+                print(f"'{name}' is already used in this section, choose another name.")
+            else:
+                break
+        agents[name] = replace(existing, **{command_field: command})
+    print(f'The "{title}" section is full ({limit} agents).')
+
+
+def _shell_finds_program(program: str) -> bool:
+    """Whether the user's shell resolves *program*.
+
+    Agents run through ``$SHELL -ic``, so aliases and shell functions work as agents
+    even though they are not executables on PATH. A shell that cannot start or does
+    not answer within 10 seconds resolves nothing.
+    """
+
+    try:
+        result = subprocess.run(
+            [os.environ.get("SHELL", "/bin/sh"), "-ic", f"command -v {shlex.quote(program)}"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pytest_bdd import given, then, when
+from pytest_bdd import given, parsers, then, when
 from textual.widgets import Static
 
 from workdash.analysis_cache import AnalysisCache
@@ -16,7 +16,7 @@ from workdash.github import GithubHelper
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import CodeDialog
 
-from .common import make_work_item, modal_screen_names
+from .common import make_valid_config, make_work_item, modal_screen_names
 
 
 async def _open_code_dialog(app, pilot) -> CodeDialog:
@@ -463,7 +463,8 @@ def run_code_dialog_scenario(
     captured: dict[str, Any] = {}
 
     async def interactions(app, pilot) -> None:
-        await _open_code_dialog(app, pilot)
+        dialog = await _open_code_dialog(app, pilot)
+        captured["dialog_lines"] = [static.render().plain for static in dialog.query(Static)]
         await pilot.press("1")
         for _ in range(40):
             await pilot.pause()
@@ -480,7 +481,9 @@ def run_code_dialog_scenario(
         worktree_callback=worktree_callback,
         launch_callback=launch_callback,
         interactions=interactions,
+        config=make_valid_config(scenario_state.get("agents")),
     )
+    scenario_state["dialog_lines"] = captured["dialog_lines"]
     scenario_state["worktree_calls"] = worktree_calls
     scenario_state["launch_calls"] = launch_calls
     scenario_state["launched_prompts"] = launched_prompts
@@ -497,6 +500,15 @@ def _picks_coding_agent(scenario_state: dict[str, Any]) -> None:
         assert "Worktree setup failed" in scenario_state["coding_status"]
     else:
         assert scenario_state["launch_calls"], "Expected the launch callback to have fired"
+
+
+@then(parsers.parse("the dialog offers `{first}`, `{second}`, and VSCode Copilot in that order"))
+def _dialog_offers_agents_then_vscode(
+    first: str, second: str, scenario_state: dict[str, Any]
+) -> None:
+    lines = scenario_state["dialog_lines"]
+    expected = [f"(1) {first}", f"(2) {second}", "(3) VSCode Copilot"]
+    assert [line for line in lines if line in expected] == expected, lines
 
 
 @then("the system prepares the worktree for the selected work item")

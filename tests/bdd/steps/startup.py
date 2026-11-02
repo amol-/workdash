@@ -35,9 +35,11 @@ def _config_missing_fields(scenario_state: dict[str, Any]) -> None:
     # leaves required fields empty — matches the "missing fields" spec.
     scenario_state["_incomplete_config"] = WorkdashConfig(
         github_username="",
-        claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze="codex exec", launch="codex"),
-        pi=AgentConfig(launch="pi"),
+        agents={
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+            "claude": AgentConfig(analyze="claude -p", launch="claude"),
+            "pi": AgentConfig(launch="pi"),
+        },
         repositories=(),
         workdir="",
     )
@@ -47,6 +49,18 @@ def _config_missing_fields(scenario_state: dict[str, Any]) -> None:
 def _config_has_no_open(scenario_state: dict[str, Any]) -> None:
     scenario_state["_malformed_config"] = WorkdashConfig(
         github_username="testuser",
+        agents={"claude": AgentConfig(analyze="claude -p", launch="claude")},
+        repositories=("owner/repo",),
+        workdir="~/wrk",
+        todo_repository="testuser/todos",
+    )
+
+
+@given("the configuration file configures no agent")
+def _config_has_no_agent(scenario_state: dict[str, Any]) -> None:
+    scenario_state["_incomplete_config"] = WorkdashConfig(
+        github_username="testuser",
+        open_command="xdg-open",
         repositories=("owner/repo",),
         workdir="~/wrk",
         todo_repository="testuser/todos",
@@ -58,9 +72,11 @@ def _config_has_malformed_agent_command(scenario_state: dict[str, Any]) -> None:
     scenario_state["_malformed_config"] = WorkdashConfig(
         github_username="testuser",
         open_command="xdg-open",
-        claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze="codex exec", launch="codex"),
-        pi=AgentConfig(launch="pi 'broken"),
+        agents={
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+            "claude": AgentConfig(analyze="claude -p", launch="claude"),
+            "pi": AgentConfig(launch="pi 'broken"),
+        },
         repositories=("owner/repo",),
         workdir="~/wrk",
         todo_repository="testuser/todos",
@@ -109,9 +125,11 @@ def _run_system(
             lambda: WorkdashConfig(
                 github_username="testuser",
                 open_command="xdg-open",
-                claude=AgentConfig(analyze="claude -p", launch="claude"),
-                codex=AgentConfig(analyze="codex exec", launch="codex"),
-                pi=AgentConfig(launch="pi"),
+                agents={
+                    "codex": AgentConfig(analyze="codex exec", launch="codex"),
+                    "claude": AgentConfig(analyze="claude -p", launch="claude"),
+                    "pi": AgentConfig(launch="pi"),
+                },
                 repositories=("owner/repo",),
                 workdir="~/wrk",
                 todo_repository="testuser/todos",
@@ -132,9 +150,11 @@ def _run_system(
             lambda: WorkdashConfig(
                 github_username="testuser",
                 open_command="xdg-open",
-                claude=AgentConfig(analyze="claude -p", launch="claude"),
-                codex=AgentConfig(analyze="codex exec", launch="codex"),
-                pi=AgentConfig(launch="pi"),
+                agents={
+                    "codex": AgentConfig(analyze="codex exec", launch="codex"),
+                    "claude": AgentConfig(analyze="claude -p", launch="claude"),
+                    "pi": AgentConfig(launch="pi"),
+                },
                 repositories=("owner/repo",),
                 workdir="~/wrk",
                 todo_repository="testuser/todos",
@@ -200,9 +220,11 @@ def _install_direct_start_fakes(
         lambda: WorkdashConfig(
             github_username="testuser",
             open_command="xdg-open",
-            claude=AgentConfig(analyze="claude -p", launch="claude"),
-            codex=AgentConfig(analyze="codex exec", launch="codex"),
-            pi=AgentConfig(launch="pi"),
+            agents={
+                "codex": AgentConfig(analyze="codex exec", launch="codex"),
+                "claude": AgentConfig(analyze="claude -p", launch="claude"),
+                "pi": AgentConfig(launch="pi"),
+            },
             repositories=("owner/repo",),
             workdir="~/wrk",
             todo_repository="testuser/todos",
@@ -357,9 +379,11 @@ def _user_starts_list_command(
         lambda: WorkdashConfig(
             github_username="testuser",
             open_command="xdg-open",
-            claude=AgentConfig(analyze="claude -p", launch="claude"),
-            codex=AgentConfig(analyze="codex exec", launch="codex"),
-            pi=AgentConfig(launch="pi"),
+            agents={
+                "codex": AgentConfig(analyze="codex exec", launch="codex"),
+                "claude": AgentConfig(analyze="claude -p", launch="claude"),
+                "pi": AgentConfig(launch="pi"),
+            },
             repositories=("owner/repo",),
             workdir="~/wrk",
             todo_repository="testuser/todos",
@@ -527,6 +551,11 @@ def _lists_missing(scenario_state: dict[str, Any]) -> None:
     assert "github_username" in output
     assert "repositories" in output
     assert "workdir" in output
+
+
+@then("the system lists `agents` as a missing field")
+def _lists_agents_missing(scenario_state: dict[str, Any]) -> None:
+    assert "missing configuration fields: agents" in scenario_state["output"]
 
 
 @then("the system tells the user to run the configuration wizard")

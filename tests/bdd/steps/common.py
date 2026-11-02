@@ -9,13 +9,14 @@ selected") so there is exactly one binding per unique phrase, avoiding
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from pytest_bdd import given, then, when
+from pytest_bdd import given, parsers, then, when
 from textual.screen import ModalScreen
 
 from workdash.backend import IncludeResult, compute_suggestion_markers
@@ -78,13 +79,16 @@ def work_items() -> list[WorkItem]:
     return []
 
 
-def make_valid_config() -> WorkdashConfig:
+def make_valid_config(agents: dict[str, AgentConfig] | None = None) -> WorkdashConfig:
     return WorkdashConfig(
         github_username="testuser",
         open_command="xdg-open",
-        claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze="codex exec", launch="codex"),
-        pi=AgentConfig(launch="pi"),
+        agents=agents
+        or {
+            "claude": AgentConfig(analyze="claude -p", launch="claude"),
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+            "pi": AgentConfig(launch="pi"),
+        },
         repositories=("owner/repo",),
         workdir="/tmp/workdash-bdd",
         todo_repository="testuser/todos",
@@ -94,6 +98,27 @@ def make_valid_config() -> WorkdashConfig:
 @pytest.fixture
 def valid_config() -> WorkdashConfig:
     return make_valid_config()
+
+
+def _configure_agents(scenario_state: dict[str, Any], agents: dict[str, AgentConfig]) -> None:
+    scenario_state["agents"] = agents
+    session = scenario_state.get("api_session")
+    if session is not None:
+        session.config = replace(session.config, agents=agents)
+
+
+@given(parsers.parse("the analysis agents `{first}` and `{second}` are configured in that order"))
+def _analysis_agents_configured_in_order(
+    first: str, second: str, scenario_state: dict[str, Any]
+) -> None:
+    _configure_agents(scenario_state, {name: AgentConfig(analyze=name) for name in (first, second)})
+
+
+@given(parsers.parse("the coding agents `{first}` and `{second}` are configured in that order"))
+def _coding_agents_configured_in_order(
+    first: str, second: str, scenario_state: dict[str, Any]
+) -> None:
+    _configure_agents(scenario_state, {name: AgentConfig(launch=name) for name in (first, second)})
 
 
 # -- Reusable TUI harness ---------------------------------------------------
@@ -322,9 +347,11 @@ def api_config(tmp_path: Path) -> WorkdashConfig:
     return WorkdashConfig(
         github_username="testuser",
         open_command="xdg-open",
-        claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze="codex exec", launch="codex"),
-        pi=AgentConfig(launch="pi"),
+        agents={
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+            "claude": AgentConfig(analyze="claude -p", launch="claude"),
+            "pi": AgentConfig(launch="pi"),
+        },
         repositories=("owner/repo",),
         workdir=str(tmp_path / "wrk"),
         todo_repository="testuser/todos",

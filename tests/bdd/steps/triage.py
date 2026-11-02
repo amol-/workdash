@@ -770,9 +770,11 @@ def _another_review_requested_pr_has_direct_request(
         progress_messages: list[str] = []
         config = WorkdashConfig(
             github_username="testuser",
-            claude=AgentConfig(analyze="claude -p", launch="claude"),
-            codex=AgentConfig(analyze="codex exec", launch="codex"),
-            pi=AgentConfig(launch="pi"),
+            agents={
+                "codex": AgentConfig(analyze="codex exec", launch="codex"),
+                "claude": AgentConfig(analyze="claude -p", launch="claude"),
+                "pi": AgentConfig(launch="pi"),
+            },
             repositories=("owner/repo",),
             workdir=str(tmp_path / "wrk"),
             todo_repository="testuser/todos",
@@ -1974,9 +1976,11 @@ def _make_backend(
     scenario_state["included_store"] = store
     config = WorkdashConfig(
         github_username="testuser",
-        claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze="codex exec", launch="codex"),
-        pi=AgentConfig(launch="pi"),
+        agents={
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+            "claude": AgentConfig(analyze="claude -p", launch="claude"),
+            "pi": AgentConfig(launch="pi"),
+        },
         repositories=("owner/repo",),
         workdir=str(tmp_path / "wrk"),
         todo_repository="testuser/todos",

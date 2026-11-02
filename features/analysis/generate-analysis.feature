@@ -6,7 +6,7 @@ Feature: Generate an analysis
   browser-friendly format.
 
   Rules:
-    - A fresh analysis can be generated with any supported coding agent configured for analysis.
+    - A fresh analysis can be generated with any agent configured for analysis.
     - Before generating an analysis, the system prepares the work item's worktree and starts the analysis agent inside it.
     - The agent can inspect the local source code alongside the supplied issue or pull request discussion.
     - Source citations link to the code repository's own hosting service, including GitHub, GitLab, and Codeberg.
@@ -20,7 +20,7 @@ Feature: Generate an analysis
   @id:F-ANALYSIS-GENERATE-S001
   Scenario: Fresh analysis is cached and opened in the browser
     Given the user has the analyze dialog open on a work item
-    When the user chooses to generate a fresh analysis with a supported coding agent
+    When the user chooses to generate a fresh analysis with a configured analysis agent
     Then the system prepares the work item's worktree
     And the analysis agent starts inside that worktree with access to the code and the work item's discussion
     And the system shows that the analysis is in progress

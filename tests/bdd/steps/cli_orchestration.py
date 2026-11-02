@@ -28,9 +28,11 @@ def _cli_config(
 ) -> WorkdashConfig:
     return WorkdashConfig(
         github_username="testuser",
-        claude=AgentConfig(analyze="claude -p", launch="claude"),
-        codex=AgentConfig(analyze=codex_analyze, launch=codex_launch),
-        pi=AgentConfig(launch="pi"),
+        agents={
+            "codex": AgentConfig(analyze=codex_analyze, launch=codex_launch),
+            "claude": AgentConfig(analyze="claude -p", launch="claude"),
+            "pi": AgentConfig(launch="pi"),
+        },
         repositories=("owner/repo",),
         workdir=workdir,
         todo_repository="testuser/todos",
@@ -51,7 +53,9 @@ def _run_workdash(
     if scenario_state.get("only_codex_analyze_configured"):
         config = WorkdashConfig(
             github_username="testuser",
-            codex=AgentConfig(analyze=scenario_state.get("codex_analyze", "codex exec")),
+            agents={
+                "codex": AgentConfig(analyze=scenario_state.get("codex_analyze", "codex exec")),
+            },
             repositories=("owner/repo",),
             workdir=workdir,
             todo_repository="testuser/todos",
@@ -1052,7 +1056,9 @@ def _reports_session_required(scenario_state: dict[str, Any]) -> None:
 def _show_config_reports_only_codex_analyze(scenario_state: dict[str, Any]) -> None:
     config = WorkdashConfig(
         github_username="testuser",
-        codex=AgentConfig(analyze="codex exec"),
+        agents={
+            "codex": AgentConfig(analyze="codex exec"),
+        },
         repositories=("owner/repo",),
         workdir=scenario_state.get("workdir", "/tmp/workdash-bdd"),
         todo_repository="testuser/todos",
