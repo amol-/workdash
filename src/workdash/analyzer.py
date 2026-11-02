@@ -1,4 +1,4 @@
-"""Codex issue and pull request analysis generation."""
+"""Issue and pull request analysis generation."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from .models import WorkItem, WorkItemType
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_AGENT_COMMAND_TOKENS = ("codex", "exec")
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 
@@ -26,13 +25,6 @@ def _load_prompt_template(name: str) -> str:
 
 class Analyzer:
     """Generate analysis by collecting GitHub context and invoking a coding agent."""
-
-    def __init__(self, agent_command_tokens: list[str] | None = None) -> None:
-        self.agent_command_tokens = (
-            agent_command_tokens
-            if agent_command_tokens is not None
-            else list(_DEFAULT_AGENT_COMMAND_TOKENS)
-        )
 
     def _collect_github_context(self, item: WorkItem) -> dict[str, Any]:
         return GithubHelper().fetch_analysis_context(item)
@@ -98,7 +90,7 @@ class Analyzer:
         return completed.stdout
 
     def analyze(
-        self, item: WorkItem, command_tokens: list[str] | None = None, *, cwd: str | None = None
+        self, item: WorkItem, command_tokens: list[str], *, cwd: str | None = None
     ) -> str | None:
         """Collect GitHub context, build the prompt, and run analysis.
 
@@ -107,12 +99,10 @@ class Analyzer:
         the agent can read it without its own ``gh`` access and without
         pushing the argv above the kernel's per-string limit.
 
-        :param list[str] | None command_tokens: Override the default command
-            tokens used to invoke the analysis backend.
+        :param list[str] command_tokens: Command tokens used to invoke the analysis agent.
         """
 
         github_context = self._collect_github_context(item)
-        tokens = command_tokens if command_tokens is not None else self.agent_command_tokens
 
         diff_file_path: str | None = None
         if item.item_type != WorkItemType.ISSUE:
@@ -130,7 +120,7 @@ class Analyzer:
         try:
             prompt = self._build_agent_prompt(item, github_context, diff_path=diff_file_path)
             output = self._run_analysis_command(
-                item=item, prompt=prompt, command_tokens=tokens, cwd=cwd
+                item=item, prompt=prompt, command_tokens=command_tokens, cwd=cwd
             )
         finally:
             if diff_file_path is not None:

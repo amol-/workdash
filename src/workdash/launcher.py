@@ -666,7 +666,7 @@ def prepare_launch_agent_prompt(
 def launch_agent_context(
     repo_path: str,
     prompt: str,
-    agent_command_tokens: list[str] | None = None,
+    agent_command_tokens: list[str],
     *,
     zellij_session: str | None = None,
 ) -> ZellijPaneLaunch:
@@ -675,13 +675,12 @@ def launch_agent_context(
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("Prompt must be a non-empty string.")
 
-    command_tokens = agent_command_tokens if agent_command_tokens is not None else ["codex"]
-    if not command_tokens or any(
-        not isinstance(token, str) or not token.strip() for token in command_tokens
+    if not agent_command_tokens or any(
+        not isinstance(token, str) or not token.strip() for token in agent_command_tokens
     ):
         raise ValueError("Agent command tokens must be a non-empty list of non-empty strings.")
     user_shell = os.environ.get("SHELL", "/bin/sh")
-    agent_command = [user_shell, "-ic", shlex.join([*command_tokens, prompt])]
+    agent_command = [user_shell, "-ic", shlex.join([*agent_command_tokens, prompt])]
     return _launch_zellij_command(
         repo_path,
         agent_command,

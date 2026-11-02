@@ -11,7 +11,7 @@ from webob import Request
 import workdash.control as control_module
 from gh_todo_fake import fake_gh_todo_run
 from workdash.backend import IncludeResult
-from workdash.config import WorkdashConfig
+from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession, format_work_item_id
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 
@@ -302,6 +302,67 @@ def test_session_analyze_returns_cached_analysis_without_configured_agents(tmp_p
         "file_content": base64.b64encode(b"# cached analysis\n").decode("ascii"),
     }
     assert analyze_calls == [(item, "cached")]
+
+
+@pytest.mark.parametrize(
+    ("action", "agent", "code", "message"),
+    [
+        ("analyze", "ghost", "unknown_agent", "Agent 'ghost' is not configured."),
+        ("code", "ghost", "unknown_agent", "Agent 'ghost' is not configured."),
+        ("code", "vscode", "unknown_agent", "Agent 'vscode' is not configured."),
+        (
+            "analyze",
+            "pi",
+            "unsupported_agent",
+            "Agent 'pi' cannot analyze: it has no analyze command.",
+        ),
+        (
+            "code",
+            "aider",
+            "unsupported_agent",
+            "Agent 'aider' cannot code: it has no launch command.",
+        ),
+    ],
+)
+def test_session_rejects_agents_that_are_unknown_or_cannot_do_the_action(
+    action, agent, code, message
+) -> None:
+    session = WorkdashSession(
+        config=WorkdashConfig(
+            agents={"pi": AgentConfig(launch="pi"), "aider": AgentConfig(analyze="aider")}
+        ),
+        backend=object(),  # type: ignore[arg-type]
+        work_items=[_work_item(number=1, title="Issue")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    with pytest.raises(control_module.WorkdashControlError) as error:
+        getattr(session, action)(target="owner/repo#ISSUE-1", agent=agent)
+
+    assert (error.value.code, error.value.status, str(error.value)) == (code, 400, message)
+
+
+def test_session_without_agents_reports_no_agent_for_each_action() -> None:
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=object(),  # type: ignore[arg-type]
+        work_items=[_work_item(number=1, title="Issue")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    for action, message in [
+        ("analyze", "No analysis agents are configured."),
+        ("code", "No coding agents are configured."),
+    ]:
+        with pytest.raises(control_module.WorkdashControlError) as error:
+            getattr(session, action)(target="owner/repo#ISSUE-1")
+        assert (error.value.code, error.value.status, str(error.value)) == (
+            "no_agent",
+            409,
+            message,
+        )
 
 
 def test_api_rejects_non_localhost_remote_addr() -> None:

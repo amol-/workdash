@@ -152,7 +152,7 @@ workdash list --refresh      # ask the server to refresh items before listing
 workdash list --json         # list items as machine-readable JSON
 workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
 workdash analyze ITEM [--agent NAME] [--json]  # analyze a current server item
-workdash code ITEM [--agent NAME] [--json]  # launch a terminal-backed coding agent
+workdash code ITEM [--agent NAME] [--json]  # launch a coding agent
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
 workdash todo TEXT [--target REPOSITORY] [--body BODY] [--json]  # capture a todo
 workdash read PANE_ID [--full] [--json]  # read text from a live pane
@@ -330,8 +330,8 @@ base64 content.
 ## Code command
 
 `workdash code ITEM [--agent NAME] [--json]` requires a running
-`workdash --server` session and launches a configured terminal-backed coding
-agent for a current server-known Workdash item.
+`workdash --server` session and launches a configured coding agent for a
+current server-known Workdash item.
 `ITEM` accepts the same row IDs and GitHub URLs as `workdash analyze`.
 
 Human output reports the item, agent, selected session, cwd, pane title, and pane
@@ -351,9 +351,9 @@ text exactly. Human output confirms that the pane accepted the input.
 ## Show-config command
 
 `workdash show-config [--json]` reports configured analysis agents, configured
-terminal-backed coding agents, and the fixed V0 server address. It does not
-require a running server. The same information is also available from the JSON
-API for HTTP clients.
+coding agents, and the fixed V0 server address. It does not require a running
+server. The same information is also available from the JSON API for HTTP
+clients.
 
 ## Analysis cache
 

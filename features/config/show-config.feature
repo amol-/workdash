@@ -9,7 +9,7 @@ Feature: Show configured automation options
     - `workdash show-config` reports configured agents, not a live executable health check.
     - The show-config API reports the same configured agents from the server-backed session.
     - Configured analysis agents are agents with an analyze command configured.
-    - Configured coding agents are terminal-backed agents with a launch command configured.
+    - Configured coding agents are agents with a launch command configured.
     - Agents are reported by their configured names, in the order of the configuration file.
     - V0 coding agents do not include non-terminal editors such as VSCode.
     - The server address is reported as `127.0.0.1:8765`.

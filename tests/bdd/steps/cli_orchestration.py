@@ -672,6 +672,22 @@ def _run_code_vscode_json(
     )
 
 
+@when(parsers.parse("the user runs `workdash {action:w} owner/repo#ISSUE-1 --agent {agent:w}`"))
+def _run_action_with_agent(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    action: str,
+    agent: str,
+) -> None:
+    _run_workdash(
+        [action, "owner/repo#ISSUE-1", "--agent", agent],
+        scenario_state,
+        monkeypatch,
+        capsys,
+    )
+
+
 @when("the user runs `workdash terminal owner/repo#ISSUE-1 --json`")
 def _run_terminal_json(
     scenario_state: dict[str, Any],
@@ -1040,10 +1056,9 @@ def _returns_terminal_json(scenario_state: dict[str, Any]) -> None:
     }
 
 
-@then("the system reports that the coding agent is not a configured terminal-backed agent")
-def _reports_non_terminal_agent_rejected(scenario_state: dict[str, Any]) -> None:
-    assert "not a configured terminal-backed agent" in scenario_state["stderr"]
-    assert "vscode" in scenario_state["stderr"]
+@then(parsers.parse('the system reports "{message}"'))
+def _reports_error_message(scenario_state: dict[str, Any], message: str) -> None:
+    assert f"Error: {message}" in scenario_state["stderr"]
 
 
 @then("the system reports that an active Workdash-owned Zellij session is required")
@@ -1064,6 +1079,23 @@ def _show_config_reports_only_codex_analyze(scenario_state: dict[str, Any]) -> N
         todo_repository="testuser/todos",
     )
     scenario_state["api_session"].config = config
+
+
+@given(
+    "the configured agents are `pi` with only a launch command "
+    "and `aider` with only an analyze command"
+)
+def _configured_agents_pi_launch_only_aider_analyze_only(scenario_state: dict[str, Any]) -> None:
+    scenario_state["api_session"].config = WorkdashConfig(
+        github_username="testuser",
+        agents={
+            "pi": AgentConfig(launch="pi"),
+            "aider": AgentConfig(analyze="aider --message"),
+        },
+        repositories=("owner/repo",),
+        workdir=scenario_state.get("workdir", "/tmp/workdash-bdd"),
+        todo_repository="testuser/todos",
+    )
 
 
 @given("the current Workdash items do not include `owner/repo#ISSUE-99`")

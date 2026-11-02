@@ -27,7 +27,8 @@ Feature: CLI orchestration commands
     - `workdash info --all` also reports live non-plugin panes in the server-backed Workdash session, but extra panes are `unknown` kind with unknown item mapping.
     - Missing optional agent commands mean that agent operation is not configured, not that the whole config is invalid.
     - `workdash analyze` accepts only configured analysis agents reported by `workdash show-config`.
-    - `workdash code` launches only configured terminal-backed coding agents reported by `workdash show-config`.
+    - `workdash code` launches only configured coding agents reported by `workdash show-config`.
+    - A configured agent that lacks the command for the requested action is reported as unable to do that action, not as unconfigured.
     - Without `--agent`, `workdash analyze` and `workdash code` use the first configured agent for that action, in configuration order.
     - `workdash code` reports the created Zellij pane ID from live session state without persisting it.
     - `workdash terminal` opens a plain terminal in the item's worktree and reports the created Zellij pane ID.
@@ -121,7 +122,7 @@ Feature: CLI orchestration commands
     And the system does not report exited, held, or plugin panes
 
   @id:F-CLI-ORCHESTRATION-S013
-  Scenario: Code launches a terminal-backed agent through the local Workdash server
+  Scenario: Code launches an agent through the local Workdash server
     Given a server-backed Workdash session has loaded dashboard items
     And the current Workdash items include an assigned issue without cached analysis
     When the user runs `workdash code owner/repo#ISSUE-1 --agent codex --json`
@@ -158,7 +159,7 @@ Feature: CLI orchestration commands
     And the current Workdash items include an assigned issue without cached analysis
     When the user runs `workdash code owner/repo#ISSUE-1 --agent vscode --json`
     Then the command requests code launch from the local Workdash server
-    And the system reports that the coding agent is not a configured terminal-backed agent
+    And the system reports "Agent 'vscode' is not configured."
     And the command exits with a non-zero status
 
   @id:F-CLI-ORCHESTRATION-S016
@@ -289,3 +290,17 @@ Feature: CLI orchestration commands
     Then the command captures the todo through the local Workdash server
     And the created issue keeps the short title and the complete body after its metadata
     And the system reports the created Workdash item ID and issue URL
+
+  @id:F-CLI-ORCHESTRATION-S036
+  Scenario Outline: A configured agent without the command for the action is reported as unable to do it
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current Workdash items include an assigned issue without cached analysis
+    And the configured agents are `pi` with only a launch command and `aider` with only an analyze command
+    When the user runs `workdash <action> owner/repo#ISSUE-1 --agent <agent>`
+    Then the system reports "<error>"
+    And the command exits with a non-zero status
+
+    Examples:
+      | action  | agent | error                                                 |
+      | analyze | pi    | Agent 'pi' cannot analyze: it has no analyze command. |
+      | code    | aider | Agent 'aider' cannot code: it has no launch command.  |

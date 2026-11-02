@@ -178,13 +178,9 @@ class WorkdashSession:
                 selected_agent = "cached"
             else:
                 agents = self.config.configured_analyze_agents()
-                selected_agent = agent or (agents[0] if agents else None)
                 if agent is not None and agent not in agents:
-                    raise WorkdashControlError(
-                        "unknown_agent",
-                        f"Analysis agent {agent!r} is not configured.",
-                        status=HTTPStatus.BAD_REQUEST,
-                    )
+                    raise self._unusable_agent_error(agent, "analyze", "analyze")
+                selected_agent = agent or (agents[0] if agents else None)
                 if selected_agent is None and cache_used:
                     selected_agent = "cached"
                 if selected_agent is None:
@@ -233,18 +229,18 @@ class WorkdashSession:
             item = self._require_item(target)
             item_id = format_work_item_id(item)
             agents = self.config.configured_code_agents()
+            if (
+                agent is not None
+                and agent not in agents
+                and not (allow_vscode and agent == "vscode")
+            ):
+                raise self._unusable_agent_error(agent, "code", "launch")
             selected_agent = agent or (agents[0] if agents else None)
             if selected_agent is None:
                 raise WorkdashControlError(
                     "no_agent",
-                    "No terminal-backed coding agents are configured.",
+                    "No coding agents are configured.",
                     status=HTTPStatus.CONFLICT,
-                )
-            if selected_agent not in agents and not (allow_vscode and selected_agent == "vscode"):
-                raise WorkdashControlError(
-                    "unknown_agent",
-                    f"Coding agent {selected_agent!r} is not a configured terminal-backed agent.",
-                    status=HTTPStatus.BAD_REQUEST,
                 )
             repo_path = ensure_worktree(self.config.workdir, item)
             prompt = prepare_launch_agent_prompt(
@@ -357,6 +353,20 @@ class WorkdashSession:
                 status=HTTPStatus.NOT_FOUND,
             )
         return item
+
+    def _unusable_agent_error(self, agent: str, action: str, command: str) -> WorkdashControlError:
+        """Explain why an agent cannot perform an action: unknown name or missing command."""
+        if agent not in self.config.agents:
+            return WorkdashControlError(
+                "unknown_agent",
+                f"Agent {agent!r} is not configured.",
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        return WorkdashControlError(
+            "unsupported_agent",
+            f"Agent {agent!r} cannot {action}: it has no {command} command.",
+            status=HTTPStatus.BAD_REQUEST,
+        )
 
     def get_agent_panes_for_item(self, item: WorkItem) -> list[dict[str, object]]:
         """Return live agent panes for the given work item.
