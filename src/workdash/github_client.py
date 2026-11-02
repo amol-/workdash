@@ -69,8 +69,9 @@ def parse_github_item_url(url: str) -> ParsedGitHubItemURL | None:
     )
 
 
-_DEFAULT_PR_SEARCH_LIMIT = 1000
-_DEFAULT_ASSIGNED_ISSUE_LIMIT = 20
+# GitHub returns at most 100 results per page, which matches the 100 most
+# recently updated discovered items the backend keeps.
+_ITEMS_FETCH_LIMIT = 100
 _PR_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,isDraft,repository"
 # `gh search prs` cannot report the CI result, review decision, or pending
 # review requests shown next to authored PRs.
@@ -78,19 +79,10 @@ _AUTHORED_CI_SELECTION = (
     "commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } "
     "reviewDecision reviewRequests { totalCount }"
 )
-# GraphQL search returns at most 100 nodes per page, and nobody triages more
-# open authored pull requests than that.
-_AUTHORED_PR_SEARCH_LIMIT = 100
 # GraphQL selection for the review threads of an authored pull request, so a
 # reviewer's comment nobody resolved yet can be told apart from no review at
 # all. Nobody leaves more than 100 threads on one pull request.
 _UNRESOLVED_THREADS_SELECTION = "reviewThreads(first: 100) { nodes { isResolved } }"
-# GraphQL selection listing the reviewers a pull request asked for, so a
-# direct user request can be told apart from a team-wide one.
-_REVIEW_REQUESTS_SELECTION = (
-    "reviewRequests(first: 100) "
-    "{ nodes { requestedReviewer { __typename ... on User { login } } } }"
-)
 # GraphQL selection naming the issues a pull request closes, so the pull request
 # can take the place of that issue on the dashboard. Nobody links a pull request
 # to more than a handful of issues.
@@ -101,9 +93,6 @@ _ISSUE_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,repository"
 # `gh issue list` runs inside one repository and cannot report `repository`,
 # but it can report the body that carries the todo target metadata.
 _TODO_ISSUE_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,body"
-_DEFAULT_TODO_ISSUE_LIMIT = 200
-_DEFAULT_RECENT_SEARCH_LIMIT = 200
-_RECENT_SEARCH_PAGE_SIZE = 100
 # `search` returns a union type, so PullRequest and Issue each need their own
 # inline fragment even though they ask for the same fields.
 _RECENT_TRACKED_ITEM_FRAGMENT = (
@@ -241,13 +230,12 @@ def _is_unresolvable_item_error(message: str) -> bool:
     return "could not resolve to a" in message.lower()
 
 
-def _recent_tracked_items_selection(query: str, first: int, after: str | None) -> str:
-    """Build one page's ``search`` selection for the tracked-items GraphQL query."""
+def _recent_tracked_items_selection(query: str) -> str:
+    """Build the single-page ``search`` selection for the tracked-items GraphQL query."""
 
-    after_argument = f", after: {json.dumps(after)}" if after is not None else ""
     return (
-        f"tracked: search(type: ISSUE, first: {first}, query: {json.dumps(query)}{after_argument}) "
-        f"{{ pageInfo {{ hasNextPage endCursor }} nodes {{ {_RECENT_TRACKED_ITEM_FRAGMENT} }} }}"
+        f"tracked: search(type: ISSUE, first: {_ITEMS_FETCH_LIMIT}, query: {json.dumps(query)}) "
+        f"{{ nodes {{ {_RECENT_TRACKED_ITEM_FRAGMENT} }} }}"
     )
 
 
@@ -717,7 +705,6 @@ class GitHubClient:
     def list_open_authored_prs(
         self,
         author_login: str,
-        limit: int = _AUTHORED_PR_SEARCH_LIMIT,
         progress_callback: Callable[[str], None] | None = None,
     ) -> list[AuthoredPullRequest]:
         """List open authored PRs and their CI results across accessible repositories."""
@@ -734,7 +721,7 @@ class GitHubClient:
             "--state",
             "open",
             "--limit",
-            str(limit),
+            str(_ITEMS_FETCH_LIMIT),
             "--json",
             _PR_JSON_FIELDS,
         ]
@@ -852,24 +839,18 @@ class GitHubClient:
     def list_open_review_requested_prs(
         self,
         reviewer_login: str,
-        limit: int = _DEFAULT_PR_SEARCH_LIMIT,
-        progress_callback: Callable[[str], None] | None = None,
     ) -> list[ReviewRequestedPullRequest]:
-        """List open PRs where the given user is a requested reviewer."""
+        """List open PRs where the given user is directly a requested reviewer."""
 
-        report_progress = (
-            progress_callback if progress_callback is not None else _noop_progress_callback
-        )
         command = [
             "gh",
             "search",
             "prs",
-            "--review-requested",
-            reviewer_login,
+            f"user-review-requested:{reviewer_login}",
             "--state",
             "open",
             "--limit",
-            str(limit),
+            str(_ITEMS_FETCH_LIMIT),
             "--json",
             _PR_JSON_FIELDS,
         ]
@@ -889,147 +870,17 @@ class GitHubClient:
             raise RuntimeError(
                 f"Failed to parse gh review-requested PR JSON for {reviewer_login!r}: {error.msg}"
             ) from error
-        parsed_items = [
+        return [
             ReviewRequestedPullRequest(**item)
             for item in self._parse_open_pull_request_payload(
                 payload,
                 context=f"review-requested for {reviewer_login!r}",
             )
         ]
-        if not parsed_items:
-            return []
-
-        # Ask for every pull request's reviewers in a single aliased GraphQL
-        # document: one `gh pr view` per pull request cost ~10s for 15 results,
-        # this costs ~1.6s.
-        alias_selections: list[str] = []
-        for index, item in enumerate(parsed_items):
-            owner, _, name = item["repo"].partition("/")
-            alias_selections.append(
-                f"p{index}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
-                f"{{ pullRequest(number: {item['number']}) {{ {_REVIEW_REQUESTS_SELECTION} }} }}"
-            )
-        review_request_command = [
-            "gh",
-            "api",
-            "graphql",
-            "-f",
-            f"query={{ {' '.join(alias_selections)} }}",
-        ]
-        failure_message_prefix = (
-            f"Failed to inspect review-request metadata for {reviewer_login!r} via gh"
-        )
-        review_request_completed = _run_gh_command_with_retry(
-            review_request_command,
-            not_found_message=(
-                "Failed to run gh review-request metadata lookup: "
-                "gh CLI is not installed or not on PATH."
-            ),
-            failure_message_prefix=failure_message_prefix,
-            # A query where some aliases are denied still answers for the
-            # others, and gh reports that partial answer as a failure.
-            tolerate_partial_response=True,
-        )
-        try:
-            review_request_payload = json.loads(review_request_completed.stdout)
-        except json.JSONDecodeError as error:
-            raise RuntimeError(
-                "Failed to parse gh review-request metadata JSON for "
-                f"{reviewer_login!r}: {error.msg}"
-            ) from error
-        # A response without `data` is a whole-query failure such as expired
-        # credentials, which must not be mistaken for "no direct requests".
-        repositories_by_alias = (
-            review_request_payload.get("data") if isinstance(review_request_payload, dict) else None
-        )
-        if not isinstance(repositories_by_alias, dict):
-            raise RuntimeError(
-                f"{failure_message_prefix}: "
-                f"{review_request_completed.stderr.strip() or 'response contained no data'}"
-            )
-        # Only the alias in an error's path attributes a failure to one pull
-        # request; the merged stderr concatenates every alias's message. A
-        # failure that leaves the item unreachable skips just that item, while
-        # anything else stays a hard failure.
-        errors = review_request_payload.get("errors")
-        skips_by_alias: dict[str, str] = {}
-        subjects_by_alias = {
-            f"p{index}": f"{item['repo']}#{item['number']}"
-            for index, item in enumerate(parsed_items)
-        }
-        for entry in errors if isinstance(errors, list) else []:
-            entry_fields = entry if isinstance(entry, dict) else {}
-            message = entry_fields.get("message")
-            path = entry_fields.get("path")
-            alias = path[0] if isinstance(path, list) and path else None
-            # A failure we cannot attribute to one alias would drop that pull
-            # request without warning, so it stays a hard failure.
-            subject = subjects_by_alias.get(alias)
-            if subject is None:
-                raise RuntimeError(f"{failure_message_prefix}: {message or 'unknown error'}")
-            # One stderr covers every alias, so naming the subject is the only
-            # way the operator learns which pull request broke.
-            if not isinstance(message, str) or not (
-                _is_repository_authorization_error(message) or _is_unresolvable_item_error(message)
-            ):
-                raise RuntimeError(
-                    f"{failure_message_prefix} ({subject}): {message or 'unknown error'}"
-                )
-            skips_by_alias[alias] = message
-
-        direct_review_requested_items: list[ReviewRequestedPullRequest] = []
-        normalized_reviewer_login = reviewer_login.strip().lower()
-        for index, item in enumerate(parsed_items):
-            alias = f"p{index}"
-            subject = subjects_by_alias[alias]
-            skip_reason = skips_by_alias.get(alias)
-            if skip_reason is not None:
-                report_progress(
-                    f"Warning: skipped review-requested pull request {subject}: {skip_reason}"
-                )
-                continue
-            if normalized_reviewer_login in self._direct_review_requesters(
-                repositories_by_alias.get(alias),
-                subject=subject,
-            ):
-                direct_review_requested_items.append(item)
-        return direct_review_requested_items
-
-    @staticmethod
-    def _direct_review_requesters(repository_node: object, *, subject: str) -> set[str]:
-        """Collect the normalized logins whose review one pull request requested.
-
-        Team requests and reviewers GitHub no longer resolves are ignored, so
-        only a pull request that named the user keeps its REVIEW item.
-
-        :param object repository_node: One aliased ``repository`` GraphQL node.
-        :param str subject: ``owner/repo#number`` used in error messages.
-        """
-
-        context = f"Invalid gh review-request metadata payload for {subject}"
-        if not isinstance(repository_node, dict):
-            raise RuntimeError(f"{context}: expected an object.")
-        pull_request = repository_node.get("pullRequest")
-        if not isinstance(pull_request, dict):
-            raise RuntimeError(f"{context}: expected an object.")
-        review_requests = pull_request.get("reviewRequests")
-        nodes = review_requests.get("nodes") if isinstance(review_requests, dict) else None
-        if not isinstance(nodes, list):
-            raise RuntimeError(f"{context}: missing or invalid reviewRequests.")
-        logins: set[str] = set()
-        for node in nodes:
-            reviewer = node.get("requestedReviewer") if isinstance(node, dict) else None
-            if not isinstance(reviewer, dict) or reviewer.get("__typename") != "User":
-                continue
-            login = reviewer.get("login")
-            if isinstance(login, str):
-                logins.add(login.strip().lower())
-        return logins
 
     def list_open_reviewed_prs(
         self,
         reviewer_login: str,
-        limit: int = _DEFAULT_PR_SEARCH_LIMIT,
     ) -> list[ReviewRequestedPullRequest]:
         """List open PRs that the given user has already reviewed."""
 
@@ -1042,7 +893,7 @@ class GitHubClient:
             "--state",
             "open",
             "--limit",
-            str(limit),
+            str(_ITEMS_FETCH_LIMIT),
             "--json",
             _PR_JSON_FIELDS,
         ]
@@ -1072,7 +923,6 @@ class GitHubClient:
     def list_open_assigned_issues(
         self,
         assignee_login: str,
-        limit: int = _DEFAULT_ASSIGNED_ISSUE_LIMIT,
     ) -> list[AssignedIssue]:
         """List open issues assigned to the given user, most recently updated first."""
 
@@ -1089,7 +939,7 @@ class GitHubClient:
             "--order",
             "desc",
             "--limit",
-            str(limit),
+            str(_ITEMS_FETCH_LIMIT),
             "--json",
             _ISSUE_JSON_FIELDS,
         ]
@@ -1116,7 +966,6 @@ class GitHubClient:
     def list_open_todo_issues(
         self,
         todo_repository: str,
-        limit: int = _DEFAULT_TODO_ISSUE_LIMIT,
         progress_callback: Callable[[str], None] | None = None,
     ) -> list[TodoIssue]:
         """List the open todo issues of the todo repository with their targets.
@@ -1139,7 +988,7 @@ class GitHubClient:
             "--label",
             TODO_LABEL,
             "--limit",
-            str(limit),
+            str(_ITEMS_FETCH_LIMIT),
             "--json",
             _TODO_ISSUE_JSON_FIELDS,
         ]
@@ -1212,18 +1061,16 @@ class GitHubClient:
     def list_recent_tracked_items(
         self,
         search_scope: str,
-        limit: int = _DEFAULT_RECENT_SEARCH_LIMIT,
         progress_callback: Callable[[str], None] | None = None,
     ) -> list[RecentTrackedItem]:
         """List recently updated open issues/PRs across the tracked search scope.
 
         ``search_scope`` is the space-joined ``user:``/``repo:`` GitHub search
         qualifiers built from the configured repository selectors; an empty
-        scope means nothing is tracked. One aggregated, paginated GraphQL
-        ``search`` query replaces the old per-repository-batch REST searches,
-        continuing to the next page until GitHub says there is none left or
-        ``limit`` is reached. A repository or item the scope cannot reach is
-        silently absent from the results, exactly like any other GitHub search.
+        scope means nothing is tracked. One aggregated GraphQL ``search`` query
+        replaces the old per-repository-batch REST searches. A repository or
+        item the scope cannot reach is silently absent from the results,
+        exactly like any other GitHub search.
         """
 
         report_progress = (
@@ -1233,81 +1080,66 @@ class GitHubClient:
             return []
 
         query = f"is:open sort:updated-desc {search_scope}"
+        command = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            "query={ " + _recent_tracked_items_selection(query) + " }",
+        ]
+        completed = _run_gh_command_with_retry(
+            command,
+            not_found_message=(
+                "Failed to run gh recent tracked item search: "
+                "gh CLI is not installed or not on PATH."
+            ),
+            failure_message_prefix="Failed to list recent tracked items via gh",
+            report_progress=report_progress,
+            # A repository or item denied mid-scan still answers for the rest
+            # of the scope, and gh reports that partial answer as a failure.
+            tolerate_partial_response=True,
+        )
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                f"Failed to parse gh recent tracked item JSON: {error.msg}"
+            ) from error
+        data = payload.get("data") if isinstance(payload, dict) else None
+        alias_data = data.get("tracked") if isinstance(data, dict) else None
+        errors = payload.get("errors") if isinstance(payload, dict) else None
+
         nodes: list[object] = []
-        cursor: str | None = None
-        round_number = 1
-        while True:
-            command = [
-                "gh",
-                "api",
-                "graphql",
-                "-f",
-                "query={ "
-                + _recent_tracked_items_selection(query, _RECENT_SEARCH_PAGE_SIZE, cursor)
-                + " }",
-            ]
-            completed = _run_gh_command_with_retry(
-                command,
-                not_found_message=(
-                    "Failed to run gh recent tracked item search: "
-                    "gh CLI is not installed or not on PATH."
-                ),
-                failure_message_prefix="Failed to list recent tracked items via gh",
-                report_progress=report_progress,
-                retry_label=f"Recent tracked item search round {round_number}",
-                # A repository or item denied mid-scan still answers for the
-                # rest of the scope, and gh reports that partial answer as a
-                # failure.
-                tolerate_partial_response=True,
-            )
-            try:
-                payload = json.loads(completed.stdout)
-            except json.JSONDecodeError as error:
-                raise RuntimeError(
-                    f"Failed to parse gh recent tracked item JSON: {error.msg}"
-                ) from error
-            data = payload.get("data") if isinstance(payload, dict) else None
-            alias_data = data.get("tracked") if isinstance(data, dict) else None
-            errors = payload.get("errors") if isinstance(payload, dict) else None
-            if isinstance(errors, list) and errors:
-                for entry in errors:
-                    message = entry.get("message") if isinstance(entry, dict) else None
-                    if not isinstance(message, str) or not (
-                        _is_repository_authorization_error(message)
-                        or _is_unresolvable_item_error(message)
-                    ):
-                        raise RuntimeError(
-                            "Failed to list recent tracked items via gh: "
-                            f"{message or 'unknown error'}"
-                        )
-                # A denied or unresolvable repository/item in the scope still
-                # answers with whatever it could resolve; keep that instead of
-                # losing every already-fetched page to it.
-                page_nodes = alias_data.get("nodes") if isinstance(alias_data, dict) else None
-                if isinstance(page_nodes, list):
-                    nodes.extend(page_nodes)
-                break
+        if isinstance(errors, list) and errors:
+            for entry in errors:
+                message = entry.get("message") if isinstance(entry, dict) else None
+                if not isinstance(message, str) or not (
+                    _is_repository_authorization_error(message)
+                    or _is_unresolvable_item_error(message)
+                ):
+                    raise RuntimeError(
+                        f"Failed to list recent tracked items via gh: {message or 'unknown error'}"
+                    )
+            # A denied or unresolvable repository/item in the scope still
+            # answers with whatever it could resolve.
+            resolved_nodes = alias_data.get("nodes") if isinstance(alias_data, dict) else None
+            if isinstance(resolved_nodes, list):
+                nodes.extend(resolved_nodes)
+        else:
             if not isinstance(alias_data, dict):
                 raise RuntimeError(
                     "Failed to list recent tracked items via gh: "
                     f"{completed.stderr.strip() or 'response contained no data'}"
                 )
-            page_nodes = alias_data.get("nodes")
-            if not isinstance(page_nodes, list):
+            resolved_nodes = alias_data.get("nodes")
+            if not isinstance(resolved_nodes, list):
                 raise RuntimeError(
                     "Invalid gh recent tracked item payload: expected a nodes array."
                 )
-            nodes.extend(page_nodes)
-            page_info = alias_data.get("pageInfo")
-            has_next_page = isinstance(page_info, dict) and page_info.get("hasNextPage")
-            if has_next_page and len(nodes) < limit:
-                cursor = page_info["endCursor"]
-                round_number += 1
-                continue
-            break
+            nodes.extend(resolved_nodes)
 
         return self._parse_recent_tracked_item_payload(
-            [_recent_tracked_item_node_entry(node) for node in nodes[:limit]],
+            [_recent_tracked_item_node_entry(node) for node in nodes],
             repositories=[search_scope],
         )
 

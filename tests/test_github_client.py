@@ -419,7 +419,7 @@ def test_list_open_authored_prs_rejects_ci_response_missing_authored_alias(
     assert progress_messages == []
 
 
-def test_list_open_authored_prs_accepts_custom_author_and_limit(
+def test_list_open_authored_prs_accepts_custom_author(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -434,7 +434,7 @@ def test_list_open_authored_prs_accepts_custom_author_and_limit(
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    result = GitHubClient().list_open_authored_prs(author_login="octocat", limit=25)
+    result = GitHubClient().list_open_authored_prs(author_login="octocat")
 
     assert result == []
     assert captured["command"] == [
@@ -446,7 +446,7 @@ def test_list_open_authored_prs_accepts_custom_author_and_limit(
         "--state",
         "open",
         "--limit",
-        "25",
+        "100",
         "--json",
         "id,number,title,url,createdAt,updatedAt,isDraft,repository",
     ]
@@ -561,7 +561,7 @@ def test_list_open_authored_prs_raises_error_for_invalid_payload_entry(
         GitHubClient().list_open_authored_prs("testuser")
 
 
-def test_list_open_review_requested_prs_returns_directly_requested_prs_in_one_graphql_call(
+def test_list_open_review_requested_prs_searches_direct_requests_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_commands: list[list[str]] = []
@@ -576,57 +576,7 @@ def test_list_open_review_requested_prs_returns_directly_requested_prs_in_one_gr
                 stdout=(
                     '[{"id":"R1","number":42,"title":"needs review","url":"https://example.com/pull/42",'
                     '"createdAt":"2026-02-05T00:00:00Z","updatedAt":"2026-02-06T00:00:00Z","isDraft":false,'
-                    '"repository":{"name":"repo","nameWithOwner":"owner/repo"}},'
-                    '{"id":"R2","number":43,"title":"team review","url":"https://example.com/pull/43",'
-                    '"createdAt":"2026-02-05T00:00:00Z","updatedAt":"2026-02-06T00:00:00Z","isDraft":false,'
-                    '"repository":{"name":"other","nameWithOwner":"owner/other"}}]'
-                ),
-                stderr="",
-            )
-        if command[:3] == ["gh", "api", "graphql"]:
-            assert 'repository(owner: "owner", name: "repo")' in command[4]
-            assert "pullRequest(number: 42)" in command[4]
-            assert 'repository(owner: "owner", name: "other")' in command[4]
-            assert "pullRequest(number: 43)" in command[4]
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
-                stdout=json.dumps(
-                    {
-                        "data": {
-                            "p0": {
-                                "pullRequest": {
-                                    "reviewRequests": {
-                                        "nodes": [
-                                            # GitHub emits a null reviewer for a
-                                            # request it can no longer resolve.
-                                            {"requestedReviewer": None},
-                                            {
-                                                "requestedReviewer": {
-                                                    "__typename": "User",
-                                                    "login": "testuser",
-                                                }
-                                            },
-                                        ]
-                                    },
-                                }
-                            },
-                            "p1": {
-                                "pullRequest": {
-                                    "reviewRequests": {
-                                        "nodes": [
-                                            {
-                                                "requestedReviewer": {
-                                                    "__typename": "Team",
-                                                    "slug": "owner/reviewers",
-                                                }
-                                            }
-                                        ]
-                                    },
-                                }
-                            },
-                        }
-                    }
+                    '"repository":{"name":"repo","nameWithOwner":"owner/repo"}}]'
                 ),
                 stderr="",
             )
@@ -636,27 +586,20 @@ def test_list_open_review_requested_prs_returns_directly_requested_prs_in_one_gr
 
     result = GitHubClient().list_open_review_requested_prs("testuser")
 
-    assert captured_commands[0] == [
-        "gh",
-        "search",
-        "prs",
-        "--review-requested",
-        "testuser",
-        "--state",
-        "open",
-        "--limit",
-        "1000",
-        "--json",
-        "id,number,title,url,createdAt,updatedAt,isDraft,repository",
+    assert captured_commands == [
+        [
+            "gh",
+            "search",
+            "prs",
+            "user-review-requested:testuser",
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            "id,number,title,url,createdAt,updatedAt,isDraft,repository",
+        ]
     ]
-    # Every pull request's reviewers come from one aliased query, no matter how
-    # many pull requests the search returned.
-    assert [
-        command for command in captured_commands if command[:3] == ["gh", "api", "graphql"]
-    ] == [captured_commands[1]]
-    assert captured_commands[1][3] == "-f"
-    # Only the pull request that named the reviewer survives; the team-only one
-    # is dropped.
     assert result == [
         {
             "id": "R1",
@@ -677,274 +620,7 @@ def test_list_open_review_requested_prs_returns_directly_requested_prs_in_one_gr
     ]
 
 
-@pytest.mark.parametrize(
-    ("error_type", "skip_error", "expected_fragment"),
-    [
-        (
-            "FORBIDDEN",
-            "GraphQL: Resource protected by organization SAML enforcement. "
-            "You must grant your OAuth token access to this organization.",
-            "SAML enforcement",
-        ),
-        (
-            "NOT_FOUND",
-            "Could not resolve to a Repository with the name 'protected-org/protected-repo'.",
-            "Could not resolve to a Repository",
-        ),
-    ],
-)
-def test_list_open_review_requested_prs_warns_and_skips_an_unreachable_pull_request(
-    monkeypatch: pytest.MonkeyPatch,
-    error_type: str,
-    skip_error: str,
-    expected_fragment: str,
-) -> None:
-    warnings: list[str] = []
-
-    def fake_run(*args, **kwargs):
-        command = args[0]
-        if command[:3] == ["gh", "search", "prs"]:
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
-                stdout=(
-                    '[{"id":"PRIVATE","number":860,"title":"private review",'
-                    '"url":"https://example.com/pull/860",'
-                    '"createdAt":"2026-02-05T00:00:00Z",'
-                    '"updatedAt":"2026-02-06T00:00:00Z","isDraft":false,'
-                    '"repository":{"name":"protected-repo","nameWithOwner":"protected-org/protected-repo"}},'
-                    '{"id":"PUBLIC","number":42,"title":"public review",'
-                    '"url":"https://example.com/pull/42",'
-                    '"createdAt":"2026-02-07T00:00:00Z",'
-                    '"updatedAt":"2026-02-08T00:00:00Z","isDraft":false,'
-                    '"repository":{"name":"repo","nameWithOwner":"owner/repo"}}]'
-                ),
-                stderr="",
-            )
-        if command[:3] == ["gh", "api", "graphql"]:
-            # GitHub answers the readable aliases and reports the denied one as
-            # an error, which gh surfaces as a non-zero exit.
-            raise subprocess.CalledProcessError(
-                returncode=1,
-                cmd=command,
-                output=json.dumps(
-                    {
-                        "data": {
-                            "p0": None,
-                            "p1": {
-                                "pullRequest": {
-                                    "reviewRequests": {
-                                        "nodes": [
-                                            {
-                                                "requestedReviewer": {
-                                                    "__typename": "User",
-                                                    "login": "testuser",
-                                                }
-                                            }
-                                        ]
-                                    }
-                                }
-                            },
-                        },
-                        "errors": [
-                            {
-                                "type": error_type,
-                                "path": ["p0"],
-                                "message": skip_error,
-                            }
-                        ],
-                    }
-                ),
-                stderr=skip_error,
-            )
-        raise AssertionError(f"Unexpected command: {command}")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    result = GitHubClient().list_open_review_requested_prs(
-        "testuser",
-        progress_callback=warnings.append,
-    )
-
-    assert [item["number"] for item in result] == [42]
-    assert any(
-        "Warning: skipped review-requested pull request protected-org/protected-repo#860" in warning
-        and expected_fragment in warning
-        for warning in warnings
-    )
-
-
-def test_list_open_review_requested_prs_reraises_non_auth_metadata_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    warnings: list[str] = []
-
-    def fake_run(*args, **kwargs):
-        command = args[0]
-        if command[:3] == ["gh", "search", "prs"]:
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
-                stdout=(
-                    '[{"id":"BROKEN","number":42,"title":"broken review",'
-                    '"url":"https://example.com/pull/42",'
-                    '"createdAt":"2026-02-07T00:00:00Z",'
-                    '"updatedAt":"2026-02-08T00:00:00Z","isDraft":false,'
-                    '"repository":{"name":"repo","nameWithOwner":"owner/repo"}}]'
-                ),
-                stderr="",
-            )
-        if command[:3] == ["gh", "api", "graphql"]:
-            raise subprocess.CalledProcessError(
-                returncode=1,
-                cmd=command,
-                stderr="permission denied",
-            )
-        raise AssertionError(f"Unexpected command: {command}")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    with pytest.raises(RuntimeError, match="permission denied"):
-        GitHubClient().list_open_review_requested_prs(
-            "testuser",
-            progress_callback=warnings.append,
-        )
-
-    assert not any(
-        "Warning: skipped review-requested pull request" in warning for warning in warnings
-    )
-
-
-def test_list_open_review_requested_prs_retries_a_graphql_execution_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # A batched query that times out comes back as a partial answer plus this
-    # error, which one retry usually cures; the dashboard must keep the previous
-    # REVIEW list instead of failing the whole refresh.
-    timeout_error = (
-        "Something went wrong while executing your query. This may be the result "
-        "of a timeout, or it could be a GitHub bug. Please include "
-        "`AB12:CD34:5678` when reporting this issue."
-    )
-    graphql_attempts = 0
-
-    def fake_run(*args, **kwargs):
-        nonlocal graphql_attempts
-        command = args[0]
-        if command[:3] == ["gh", "search", "prs"]:
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
-                stdout=(
-                    '[{"id":"R1","number":42,"title":"needs review",'
-                    '"url":"https://example.com/pull/42",'
-                    '"createdAt":"2026-02-05T00:00:00Z",'
-                    '"updatedAt":"2026-02-06T00:00:00Z","isDraft":false,'
-                    '"repository":{"name":"repo","nameWithOwner":"owner/repo"}}]'
-                ),
-                stderr="",
-            )
-        if command[:3] == ["gh", "api", "graphql"]:
-            graphql_attempts += 1
-            raise subprocess.CalledProcessError(
-                returncode=1,
-                cmd=command,
-                output=json.dumps({"data": {"p0": None}, "errors": [{"message": timeout_error}]}),
-                stderr=timeout_error,
-            )
-        raise AssertionError(f"Unexpected command: {command}")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr("workdash.github_client.time.sleep", lambda _: None)
-
-    with pytest.raises(TransientFetchError, match="result of a timeout"):
-        GitHubClient().list_open_review_requested_prs("testuser")
-
-    # One attempt plus the two retries the retry budget allows.
-    assert graphql_attempts == 3
-
-
-@pytest.mark.parametrize(
-    ("metadata_stdout", "metadata_stderr", "expected_message"),
-    [
-        # A whole-query failure must not be read as "nobody requested a review".
-        ('{"message":"Bad credentials","status":"401"}', "Bad credentials", "Bad credentials"),
-        # The payload gate fires on its own, even with nothing on stderr to echo.
-        ('{"message":"Bad credentials","status":"401"}', "", "response contained no data"),
-        # An error that leaves the pull request reachable is not a reason to
-        # skip it, so it stays a hard failure that names the pull request.
-        (
-            '{"data":{"p0":null},"errors":[{"type":"INTERNAL","path":["p0"],'
-            '"message":"Something went wrong."}]}',
-            "Something went wrong",
-            r"\(owner/repo#42\): Something went wrong",
-        ),
-        # A skip with no path, or with an alias this query never asked for,
-        # cannot be attributed to one pull request: dropping it silently would
-        # hide the pull request from the REVIEW section.
-        (
-            '{"data":{"p0":null},"errors":[{"type":"FORBIDDEN",'
-            '"message":"Resource protected by organization SAML enforcement."}]}',
-            "SAML enforcement",
-            "SAML enforcement",
-        ),
-        (
-            '{"data":{"p0":null},"errors":[{"type":"FORBIDDEN","path":["p7"],'
-            '"message":"Resource protected by organization SAML enforcement."}]}',
-            "SAML enforcement",
-            "SAML enforcement",
-        ),
-        # Output gh printed but we cannot parse is not "no direct request"
-        # either.
-        ("not json", "not json", "Failed to parse gh review-request metadata JSON"),
-        # A nulled alias with no error to explain it, and a reviewRequests object
-        # missing its nodes, are both unreadable metadata rather than "no direct
-        # request".
-        ('{"data":{"p0":null}}', "", "owner/repo#42: expected an object"),
-        (
-            '{"data":{"p0":{"pullRequest":{"reviewRequests":{}}}}}',
-            "",
-            "owner/repo#42: missing or invalid reviewRequests",
-        ),
-    ],
-)
-def test_list_open_review_requested_prs_raises_on_unusable_metadata_response(
-    monkeypatch: pytest.MonkeyPatch,
-    metadata_stdout: str,
-    metadata_stderr: str,
-    expected_message: str,
-) -> None:
-    def fake_run(*args, **kwargs):
-        command = args[0]
-        if command[:3] == ["gh", "search", "prs"]:
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
-                stdout=(
-                    '[{"id":"R1","number":42,"title":"needs review",'
-                    '"url":"https://example.com/pull/42",'
-                    '"createdAt":"2026-02-07T00:00:00Z",'
-                    '"updatedAt":"2026-02-08T00:00:00Z","isDraft":false,'
-                    '"repository":{"name":"repo","nameWithOwner":"owner/repo"}}]'
-                ),
-                stderr="",
-            )
-        if command[:3] == ["gh", "api", "graphql"]:
-            raise subprocess.CalledProcessError(
-                returncode=1,
-                cmd=command,
-                output=metadata_stdout,
-                stderr=metadata_stderr,
-            )
-        raise AssertionError(f"Unexpected command: {command}")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    with pytest.raises(RuntimeError, match=expected_message):
-        GitHubClient().list_open_review_requested_prs("testuser")
-
-
-def test_list_open_review_requested_prs_accepts_custom_reviewer_and_limit(
+def test_list_open_review_requested_prs_accepts_custom_reviewer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -960,14 +636,10 @@ def test_list_open_review_requested_prs_accepts_custom_reviewer_and_limit(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    result = GitHubClient().list_open_review_requested_prs(
-        reviewer_login="octocat",
-        limit=25,
-    )
+    result = GitHubClient().list_open_review_requested_prs(reviewer_login="octocat")
 
     assert result == []
-    assert captured["command"][4] == "octocat"
-    assert captured["command"][8] == "25"
+    assert captured["command"][3] == "user-review-requested:octocat"
 
 
 def test_list_open_review_requested_prs_raises_clear_error_when_gh_fails(
@@ -1195,7 +867,7 @@ def test_list_open_reviewed_prs_returns_open_prs_reviewed_by_user(
         "--state",
         "open",
         "--limit",
-        "1000",
+        "100",
         "--json",
         "id,number,title,url,createdAt,updatedAt,isDraft,repository",
     ]
@@ -1219,7 +891,7 @@ def test_list_open_reviewed_prs_returns_open_prs_reviewed_by_user(
     ]
 
 
-def test_list_open_reviewed_prs_accepts_custom_reviewer_and_limit(
+def test_list_open_reviewed_prs_accepts_custom_reviewer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -1235,11 +907,10 @@ def test_list_open_reviewed_prs_accepts_custom_reviewer_and_limit(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    result = GitHubClient().list_open_reviewed_prs(reviewer_login="octocat", limit=25)
+    result = GitHubClient().list_open_reviewed_prs(reviewer_login="octocat")
 
     assert result == []
     assert captured["command"][4] == "octocat"
-    assert captured["command"][8] == "25"
 
 
 def test_list_open_reviewed_prs_raises_clear_error_when_gh_fails(
@@ -1297,10 +968,8 @@ def _tracked_issue_node(
     return node
 
 
-def _tracked_search_page(
-    nodes: list[dict[str, object]], *, has_next_page: bool = False, end_cursor: str | None = None
-) -> dict[str, object]:
-    return {"pageInfo": {"hasNextPage": has_next_page, "endCursor": end_cursor}, "nodes": nodes}
+def _tracked_search_response(nodes: list[dict[str, object]]) -> dict[str, object]:
+    return {"nodes": nodes}
 
 
 def test_list_recent_tracked_items_returns_issue_and_pr_results(
@@ -1315,7 +984,7 @@ def test_list_recent_tracked_items_returns_issue_and_pr_results(
         assert command[4] == (
             "query={ tracked: search(type: ISSUE, first: 100, "
             'query: "is:open sort:updated-desc user:owner") '
-            "{ pageInfo { hasNextPage endCursor } nodes { __typename "
+            "{ nodes { __typename "
             "... on PullRequest { id number title url createdAt updatedAt state "
             "repository { nameWithOwner } } "
             "... on Issue { id number title url createdAt updatedAt state "
@@ -1327,7 +996,7 @@ def test_list_recent_tracked_items_returns_issue_and_pr_results(
             stdout=json.dumps(
                 {
                     "data": {
-                        "tracked": _tracked_search_page(
+                        "tracked": _tracked_search_response(
                             [_tracked_issue_node(1), _tracked_pr_node(2)]
                         )
                     }
@@ -1376,114 +1045,6 @@ def test_list_recent_tracked_items_returns_empty_list_for_an_empty_search_scope(
     assert GitHubClient().list_recent_tracked_items("") == []
 
 
-def test_list_recent_tracked_items_continues_pagination_until_no_next_page(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    queries: list[str] = []
-
-    def fake_run(*args, **kwargs):
-        command = args[0]
-        queries.append(command[4])
-        if len(queries) == 1:
-            assert "CURSOR-1" not in command[4]
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
-                stdout=json.dumps(
-                    {
-                        "data": {
-                            "tracked": _tracked_search_page(
-                                [_tracked_issue_node(1)],
-                                has_next_page=True,
-                                end_cursor="CURSOR-1",
-                            )
-                        }
-                    }
-                ),
-                stderr="",
-            )
-        assert "CURSOR-1" in command[4]
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout=json.dumps(
-                {"data": {"tracked": _tracked_search_page([_tracked_issue_node(2)])}}
-            ),
-            stderr="",
-        )
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    result = GitHubClient().list_recent_tracked_items("user:owner")
-
-    assert len(queries) == 2
-    assert [item["number"] for item in result] == [1, 2]
-
-
-def test_list_recent_tracked_items_stops_pagination_once_the_limit_is_reached(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[list[str]] = []
-
-    def fake_run(*args, **kwargs):
-        command = args[0]
-        calls.append(command)
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout=json.dumps(
-                {
-                    "data": {
-                        "tracked": _tracked_search_page(
-                            [_tracked_issue_node(1), _tracked_issue_node(2)],
-                            has_next_page=True,
-                            end_cursor="CURSOR-1",
-                        )
-                    }
-                }
-            ),
-            stderr="",
-        )
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    result = GitHubClient().list_recent_tracked_items("user:owner", limit=2)
-
-    assert len(calls) == 1
-    assert [item["number"] for item in result] == [1, 2]
-
-
-def test_list_recent_tracked_items_truncates_a_single_page_that_exceeds_the_limit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_run(*args, **kwargs):
-        return subprocess.CompletedProcess(
-            args=args[0],
-            returncode=0,
-            stdout=json.dumps(
-                {
-                    "data": {
-                        "tracked": _tracked_search_page(
-                            [
-                                _tracked_issue_node(1),
-                                _tracked_issue_node(2),
-                                _tracked_issue_node(3),
-                            ],
-                            has_next_page=False,
-                        )
-                    }
-                }
-            ),
-            stderr="",
-        )
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    result = GitHubClient().list_recent_tracked_items("user:owner", limit=2)
-
-    assert [item["number"] for item in result] == [1, 2]
-
-
 def test_list_recent_tracked_items_filters_out_closed_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1494,7 +1055,7 @@ def test_list_recent_tracked_items_filters_out_closed_rows(
             stdout=json.dumps(
                 {
                     "data": {
-                        "tracked": _tracked_search_page(
+                        "tracked": _tracked_search_response(
                             [
                                 _tracked_pr_node(1, state="CLOSED"),
                                 _tracked_issue_node(2, state="CLOSED"),
@@ -1550,37 +1111,19 @@ def test_list_recent_tracked_items_raises_clear_error_when_gh_fails(
     ],
     ids=["denied_repository", "unresolvable_item"],
 )
-def test_list_recent_tracked_items_degrades_to_what_was_fetched_on_a_mid_scan_error(
+def test_list_recent_tracked_items_keeps_the_resolved_items_when_scope_entry_is_denied(
     error_message: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A denied repo or unresolvable item mid-scan keeps prior pages instead of raising."""
-    call_count = 0
+    """A denied repo or unresolvable item still answers for the rest of the scope."""
+    calls: list[list[str]] = []
 
     def fake_run(*args, **kwargs):
-        nonlocal call_count
-        call_count += 1
         command = args[0]
-        if call_count == 1:
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
-                stdout=json.dumps(
-                    {
-                        "data": {
-                            "tracked": _tracked_search_page(
-                                [_tracked_issue_node(1)],
-                                has_next_page=True,
-                                end_cursor="CURSOR-1",
-                            )
-                        }
-                    }
-                ),
-                stderr="",
-            )
+        calls.append(command)
         error_stdout = json.dumps(
             {
-                "data": {"tracked": None},
+                "data": {"tracked": _tracked_search_response([_tracked_issue_node(1)])},
                 "errors": [{"message": error_message}],
             }
         )
@@ -1595,40 +1138,20 @@ def test_list_recent_tracked_items_degrades_to_what_was_fetched_on_a_mid_scan_er
 
     result = GitHubClient().list_recent_tracked_items("user:owner")
 
-    assert call_count == 2
+    assert len(calls) == 1
     assert [item["number"] for item in result] == [1]
 
 
 def test_list_recent_tracked_items_raises_when_an_error_does_not_classify(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unrelated, unclassified error must raise, even alongside a well-formed page."""
-    call_count = 0
+    """An unrelated, unclassified error must raise, even alongside a well-formed response."""
 
     def fake_run(*args, **kwargs):
-        nonlocal call_count
-        call_count += 1
         command = args[0]
-        if call_count == 1:
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
-                stdout=json.dumps(
-                    {
-                        "data": {
-                            "tracked": _tracked_search_page(
-                                [_tracked_issue_node(1)],
-                                has_next_page=True,
-                                end_cursor="CURSOR-1",
-                            )
-                        }
-                    }
-                ),
-                stderr="",
-            )
         error_stdout = json.dumps(
             {
-                "data": {"tracked": _tracked_search_page([_tracked_issue_node(2)])},
+                "data": {"tracked": _tracked_search_response([_tracked_issue_node(2)])},
                 "errors": [
                     {"message": "Resource protected by organization SAML enforcement."},
                     {"message": "Something else entirely went wrong."},
@@ -1665,7 +1188,7 @@ def test_list_recent_tracked_items_retries_on_transient_http_5xx(
         return subprocess.CompletedProcess(
             args=args[0],
             returncode=0,
-            stdout=json.dumps({"data": {"tracked": _tracked_search_page([])}}),
+            stdout=json.dumps({"data": {"tracked": _tracked_search_response([])}}),
             stderr="",
         )
 
@@ -1698,7 +1221,7 @@ def test_list_recent_tracked_items_waits_longer_for_a_secondary_rate_limit(
         return subprocess.CompletedProcess(
             args=args[0],
             returncode=0,
-            stdout=json.dumps({"data": {"tracked": _tracked_search_page([])}}),
+            stdout=json.dumps({"data": {"tracked": _tracked_search_response([])}}),
             stderr="",
         )
 
@@ -1756,7 +1279,7 @@ def test_list_recent_tracked_items_raises_error_for_invalid_payload_entry(
             stdout=json.dumps(
                 {
                     "data": {
-                        "tracked": _tracked_search_page(
+                        "tracked": _tracked_search_response(
                             [{"__typename": "Issue", "id": "A", "number": 1, "title": "x"}]
                         )
                     }
@@ -1806,7 +1329,7 @@ def test_list_open_assigned_issues_returns_assigned_issues(
         "--order",
         "desc",
         "--limit",
-        "20",
+        "100",
         "--json",
         "id,number,title,url,createdAt,updatedAt,repository",
     ]
@@ -2029,7 +1552,7 @@ def test_list_open_todo_issues_reads_targets_from_issue_body_metadata(
         "--label",
         "workdash-todo",
         "--limit",
-        "200",
+        "100",
         "--json",
         "id,number,title,url,createdAt,updatedAt,body",
     ]

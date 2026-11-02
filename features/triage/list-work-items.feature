@@ -82,7 +82,6 @@ Feature: List work items
     And another review-requested pull request has requested the user directly
     When the user opens the dashboard
     Then the authorized review-requested pull request appears
-    And the system warns that the unauthorized review-requested pull request was skipped
 
   @id:F-TRIAGE-LIST-S010
   Scenario: Repository authorization failure skips one authored pull request
