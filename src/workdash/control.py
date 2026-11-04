@@ -34,6 +34,7 @@ from .models import WorkItem, WorkItemType, display_repo, format_type_label
 from .repo_resolver import validate_repository_selectors
 from .repo_worktree import ensure_worktree, existing_worktree_path, get_merge_base
 from .todo import create_todo, is_repository_name, is_todo_target
+from .work_instruction import autostart_briefing
 from .work_state import ReadyWork, find_ready_work
 
 SERVER_HOST = "127.0.0.1"
@@ -240,12 +241,20 @@ class WorkdashSession:
             }
 
     def code(
-        self, *, target: str, agent: str | None = None, allow_vscode: bool = False
+        self,
+        *,
+        target: str,
+        agent: str | None = None,
+        allow_vscode: bool = False,
+        autostart: bool = False,
     ) -> dict[str, object]:
         """Launch a coding agent for an explicit target unless one already works in its worktree.
 
         The live agent pane in a worktree is the claim on it, so instead of starting
         a second agent there this reports that pane with status ``already_running``.
+
+        :param bool autostart: Brief a newly launched agent to work autonomously from the
+            current GitHub state of the work, instead of proposing a plan first.
         """
 
         item = self._require_item(target)
@@ -260,38 +269,43 @@ class WorkdashSession:
                 "No coding agents are configured.",
                 status=HTTPStatus.CONFLICT,
             )
+        # Without Zellij no agent pane can exist, and VSCode needs none to launch.
+        no_zellij_vscode = self.zellij_session is None and selected_agent == "vscode"
+        if autostart:
+            # A live agent answers without reading GitHub, so an outage cannot hide it. Only
+            # a worktree known locally is checked here; the briefing may redirect the work to
+            # another item, whose claim is checked below.
+            with self._lock:
+                repo_path = existing_worktree_path(self.config.workdir, item)
+                if repo_path is not None:
+                    panes = [] if no_zellij_vscode else self._live_panes()
+                    claimed = self._claimed_launch(item_id, repo_path, panes)
+                    if claimed is not None:
+                        return claimed
+            try:
+                item, autostart_text = autostart_briefing(
+                    item,
+                    github_username=self.config.github_username,
+                    todo_repository=self.config.todo_repository,
+                )
+            except RuntimeError as error:
+                raise WorkdashControlError(
+                    "github_error",
+                    f"GitHub lookup for {target!r} failed: {error}",
+                    status=HTTPStatus.BAD_GATEWAY,
+                ) from error
         with self._lock:
-            # Without Zellij no agent pane can exist, and VSCode needs none to launch.
-            no_zellij_vscode = self.zellij_session is None and selected_agent == "vscode"
             panes = [] if no_zellij_vscode else self._live_panes()
             # Checked before ensure_worktree so an agent in a locally proven worktree is
             # reused without pulling its checkout. A worktree that only ensure_worktree
             # finds (e.g. by branch) may be pulled before the second check.
             repo_path = existing_worktree_path(self.config.workdir, item)
-            running = _agent_panes_in_worktree(panes, repo_path) if repo_path else []
-            if not running:
+            if repo_path is None or not _agent_panes_in_worktree(panes, repo_path):
                 repo_path = ensure_worktree(self.config.workdir, item)
-                running = _agent_panes_in_worktree(panes, repo_path)
+            claimed = self._claimed_launch(item_id, repo_path, panes)
+            if claimed is not None:
+                return claimed
             launch_key = _normalized_path(repo_path)
-            if running:
-                # The live pane now holds the claim, settling any unconfirmed launch.
-                self._unconfirmed_launches.pop(launch_key, None)
-                return {
-                    "status": "already_running",
-                    "item_id": item_id,
-                    "session": self.zellij_session,
-                    "agent": None,
-                    "cwd": running[0].get("pane_cwd"),
-                    "pane_title": running[0].get("title"),
-                    "pane_id": _format_pane_id(running[0]["id"]),
-                }
-            if self._unconfirmed_launches.get(launch_key, 0.0) > time.monotonic():
-                raise WorkdashControlError(
-                    "launch_unconfirmed",
-                    f"An earlier coding agent launch for {item_id} is still unconfirmed; "
-                    "check `workdash info` or retry in a minute.",
-                    status=HTTPStatus.CONFLICT,
-                )
             prompt = prepare_launch_agent_prompt(
                 item,
                 repo_path,
@@ -300,6 +314,8 @@ class WorkdashSession:
                 else None,
                 merge_base=get_merge_base(repo_path),
             )
+            if autostart:
+                prompt = f"{prompt.rstrip()}\n\n{autostart_text}"
             if selected_agent == "vscode":
                 # VSCode leaves no pane behind, so it never holds the claim.
                 launch_vscode_context(repo_path, prompt)
@@ -359,6 +375,37 @@ class WorkdashSession:
                 "pane_title": launch.pane_title,
                 "pane_id": _format_pane_id(running[0]["id"]),
             }
+
+    def _claimed_launch(
+        self, item_id: str, repo_path: os.PathLike[str] | str, panes: list[dict[str, object]]
+    ) -> dict[str, object] | None:
+        """Report the live agent holding a worktree, or fail while its launch is unconfirmed.
+
+        Called with the session lock held. ``None`` means nothing holds the worktree.
+        """
+
+        running = _agent_panes_in_worktree(panes, repo_path)
+        launch_key = _normalized_path(repo_path)
+        if running:
+            # The live pane now holds the claim, settling any unconfirmed launch.
+            self._unconfirmed_launches.pop(launch_key, None)
+            return {
+                "status": "already_running",
+                "item_id": item_id,
+                "session": self.zellij_session,
+                "agent": None,
+                "cwd": running[0].get("pane_cwd"),
+                "pane_title": running[0].get("title"),
+                "pane_id": _format_pane_id(running[0]["id"]),
+            }
+        if self._unconfirmed_launches.get(launch_key, 0.0) > time.monotonic():
+            raise WorkdashControlError(
+                "launch_unconfirmed",
+                f"An earlier coding agent launch for {item_id} is still unconfirmed; "
+                "check `workdash info` or retry in a minute.",
+                status=HTTPStatus.CONFLICT,
+            )
+        return None
 
     def terminal(self, *, target: str) -> dict[str, object]:
         """Open a terminal for an explicit target."""
@@ -913,6 +960,7 @@ def _make_turbogears_app(session: WorkdashSession):
                 lambda payload: self._session.code(
                     target=_required_text(payload, "target"),
                     agent=_optional_text(payload, "agent"),
+                    autostart=_optional_bool(payload, "autostart"),
                 ),
             )
 
@@ -1064,6 +1112,19 @@ def _optional_text(payload: dict[str, object], field: str) -> str | None:
         raise WorkdashControlError(
             "bad_request",
             f"Optional field {field!r} must be a non-empty string.",
+            status=HTTPStatus.BAD_REQUEST,
+        )
+    return value
+
+
+def _optional_bool(payload: dict[str, object], field: str) -> bool:
+    value = payload.get(field)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise WorkdashControlError(
+            "bad_request",
+            f"Optional field {field!r} must be a boolean.",
             status=HTTPStatus.BAD_REQUEST,
         )
     return value

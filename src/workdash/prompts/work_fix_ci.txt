@@ -1,0 +1,1 @@
+The existing pull request {url} at head {head_sha} has failing checks: {failing_checks}. Inspect the failure logs, fix the underlying problems, run the relevant tests, commit and push the changes to this pull request's existing head branch, then verify the checks on the new head SHA. Do not create another pull request or stop before reporting the result.

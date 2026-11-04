@@ -28,6 +28,7 @@ Feature: CLI orchestration commands
     - Missing optional agent commands mean that agent operation is not configured, not that the whole config is invalid.
     - `workdash analyze` accepts only configured analysis agents reported by `workdash show-config`.
     - `workdash code` launches only configured coding agents reported by `workdash show-config`.
+    - `workdash code` always asks the server to autostart the agent, so the new agent works autonomously from its briefing; there is no `--autostart` option and the TUI never asks for it.
     - A configured agent that lacks the command for the requested action is reported as unable to do that action, not as unconfigured.
     - Without `--agent`, `workdash analyze` and `workdash code` use the first configured agent for that action, in configuration order.
     - `workdash analyze`, `workdash code`, and `workdash terminal` accept any explicit target the JSON API accepts, including items `workdash list` does not show; the server resolves it.
@@ -317,3 +318,17 @@ Feature: CLI orchestration commands
     Then the command requests terminal launch from the local Workdash server
     And the system reports that the work item is unknown
     And the command exits with a non-zero status
+
+  @id:F-CLI-ORCHESTRATION-S040
+  Scenario: Code always asks the server to autostart the agent
+    Given a server-backed Workdash session is ready to answer
+    And GitHub repository `owner/repo` has open issue #1
+    When the user runs `workdash code owner/repo#ISSUE-1 --agent pi`
+    Then the command asks the server to code with autostart enabled
+    And the agent is briefed with the original prompt followed by the autonomous appendix once
+
+  @id:F-CLI-ORCHESTRATION-S041
+  Scenario: Code has no autostart option
+    When the user runs `workdash code owner/repo#ISSUE-1 --autostart`
+    Then the command exits with a non-zero status
+    And the command asks no server to code

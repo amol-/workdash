@@ -619,7 +619,7 @@ def test_select_workdash_session_treats_no_zellij_sessions_as_empty(
         (
             ["code", "owner/repo#ISSUE-1", "--agent", "pi"],
             "code",
-            {"target": "owner/repo#ISSUE-1", "agent": "pi"},
+            {"target": "owner/repo#ISSUE-1", "agent": "pi", "autostart": True},
         ),
         (["read", "terminal_23"], "pane/content", {"pane_id": "terminal_23", "full": False}),
         (
@@ -1018,7 +1018,7 @@ def test_main_code_human_output_formats_server_response(
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "code"
-            assert payload == {"target": "owner/repo#ISSUE-1", "agent": "pi"}
+            assert payload == {"target": "owner/repo#ISSUE-1", "agent": "pi", "autostart": True}
             return {
                 "status": "launched",
                 "item_id": "owner/repo#ISSUE-1",
@@ -1062,7 +1062,11 @@ def test_main_code_json_outputs_server_response(
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "code"
-            assert payload == {"target": "https://github.com/owner/repo/issues/1", "agent": "codex"}
+            assert payload == {
+                "target": "https://github.com/owner/repo/issues/1",
+                "agent": "codex",
+                "autostart": True,
+            }
             return response
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
@@ -1465,10 +1469,21 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
 
+    code_calls: list[dict[str, object]] = []
+    real_code = control_module.WorkdashSession.code
+
+    def spy_code(self, **kwargs):
+        code_calls.append(kwargs)
+        return real_code(self, **kwargs)
+
+    monkeypatch.setattr(control_module.WorkdashSession, "code", spy_code)
+
     assert workdash_module.main([]) == 0
 
     result = captured_callback["launch"](item, tool)
 
+    # The TUI stays plan-first: its launch never asks for autostart, so the briefing is unchanged.
+    assert [call["autostart"] for call in code_calls] == [False]
     assert agent_calls == [("/tmp/wt", "PROMPT", expected_tokens, "workdash-main")]
     assert (result["status"], result["pane_id"]) == ("launched", "terminal_4")
     assert vscode_calls == []
@@ -1674,6 +1689,21 @@ def test_workdash_control_skill_examples_are_valid_commands_and_explain_code_cla
     assert "no `workdash claim` command" in skill
     with pytest.raises(SystemExit):
         workdash_module._parse_args(["claim", "owner/repo#1"])
+    # Agents must learn what CLI code does, how the TUI differs, and that nothing is merged.
+    for text in (
+        "There is no `--autostart` option: the CLI always asks for",
+        "plan-first briefing",
+        "resumes that pull request in place",
+        "merge conflicts, or failing CI",
+        "`no_checks`",
+        "never as CI passed",
+        "Nothing is injected into it",
+        "never merges a pull request or closes an issue",
+    ):
+        assert text in " ".join(skill.split())
+    assert "--autoclose" not in skill
+    with pytest.raises(SystemExit):
+        workdash_module._parse_args(["code", "owner/repo#1", "--autostart"])
     # Agents must learn that ready is advice, ordered pull requests first, and needs the server.
     for text in (
         "read-only advice",

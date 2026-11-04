@@ -150,6 +150,7 @@ def _run_workdash(
                     return scenario_state["api_session"].code(
                         target=payload["target"],
                         agent=payload.get("agent"),
+                        autostart=payload.get("autostart", False),
                     )
                 if endpoint == "terminal":
                     return scenario_state["api_session"].terminal(
@@ -1111,6 +1112,31 @@ def _requests_pane_information_with_ordinary_panes(scenario_state: dict[str, Any
 def _requests_code_launch(scenario_state: dict[str, Any]) -> None:
     control_requests = scenario_state.get("control_requests", [])
     assert any(req["endpoint"] == "code" for req in control_requests)
+
+
+@when("the user runs `workdash code owner/repo#ISSUE-1 --autostart`")
+def _run_code_with_autostart_option(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as parse_error:
+        _run_workdash(
+            ["code", "owner/repo#ISSUE-1", "--autostart"], scenario_state, monkeypatch, capsys
+        )
+    scenario_state["exit_code"] = parse_error.value.code
+
+
+@then("the command asks the server to code with autostart enabled")
+def _asks_server_to_code_with_autostart(scenario_state: dict[str, Any]) -> None:
+    [request] = scenario_state["control_requests"]
+    assert request["endpoint"] == "code"
+    assert request["payload"]["autostart"] is True
+
+
+@then("the command asks no server to code")
+def _asks_no_server_to_code(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("control_requests", []) == []
 
 
 @then("the command requests terminal launch from the local Workdash server")

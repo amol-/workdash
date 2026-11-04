@@ -39,6 +39,16 @@ Feature: Launch a coding session
     - When a launched agent exits right away, the launch is reported as an error naming its pane, and a retry may launch again.
     - The TUI, the JSON API, and `workdash code` share one launch path, so they enforce the same claim.
     - VSCode Copilot is not an agent pane, so it holds no claim; it is still not opened while an agent pane is live in the worktree.
+    - Coding is plan-first by default: the TUI never asks for autonomous work, so its agent proposes a plan and waits before implementing, and nothing commits, pushes, or opens a pull request without the user's instruction.
+    - A coding request may ask for autostart. The briefing of a newly launched agent then ends with an autonomous appendix, once, saying to start without routine confirmation and overriding the plan-first pause. The pane stays an ordinary interactive agent session.
+    - The implementation appendix tells the agent to use the development practices, skills, and coordination workflows it is configured to follow, whatever the task needs (implementing an issue, or fixing CI, merge conflicts, or review feedback of a pull request), without naming a skill or mandating coordination; the review-only appendix and the plan-first briefing do not. It also tells the agent to inspect the checkout, branch, commits and uncommitted changes, continue valid partial work and replace it only for demonstrable defects, commit and push, and open a pull request that closes the issue. It tells the agent never to merge or close the issue, and to report the pull request URL, head SHA and actual CI status when done.
+    - The agent may report completion only when the pull request's current head is `passing` or `no_checks` and GitHub reports it as mergeable. `no_checks` is reported as no checks required or reported, never as CI passed; `pending` is waited for; `unknown` is reported as incomplete.
+    - After the appendix the agent is given what the GitHub work state says the work needs, from the same classification `workdash ready` uses: implement an issue, fix failing CI, resolve merge conflicts, or address review feedback. Several needs are all included, most urgent first: review feedback, then merge conflicts, then CI.
+    - An autostarted issue that an open pull request of the user's already closes works on that pull request's branch and updates it, never a second pull request. A pull request of somebody else closing the issue does not change the issue's implementation briefing, and a targeted todo is never redirected.
+    - A pull request that is waiting for CI, review, or merge, or is already finished, is described as it is, with its CI status told apart as passing, still running, no required or observed checks, or unknown; its briefing carries no order to start working, and the agent is told not to invent work or open another pull request.
+    - A pull request of somebody else stays a review: with autostart its agent starts reviewing without routine confirmation and still never edits, commits, or pushes.
+    - Requesting autostart on a worktree with a live agent pane starts nothing and sends nothing to that agent, whatever mode it runs in; it is answered without reading GitHub, so a GitHub outage does not hide it.
+    - When GitHub cannot report the work state, an autostart request fails with an error instead of guessing.
 
   @id:F-CODING-LAUNCH-S001
   Scenario: User picks a coding agent and a session opens on the worktree
@@ -239,3 +249,121 @@ Feature: Launch a coding session
     And a client requests code for `owner/repo#ISSUE-1` with agent `pi`
     Then exactly one coding agent is launched
     And both responses are errors saying the launch could not be confirmed
+
+  @id:F-CODING-LAUNCH-S028
+  Scenario: The TUI stays plan-first and never asks for autonomous work
+    Given the TUI has a work item selected
+    When the user presses "c"
+    And the user picks a supported coding agent from the dialog
+    Then the agent is briefed to implement the work item
+    And the agent is told to propose a plan and not to start implementing
+    And the agent is not told to work autonomously
+    And the agent is not told to follow configured practices and skills
+
+  @id:F-CODING-LAUNCH-S029
+  Scenario: Autostart appends the autonomous implementation appendix to the briefing once
+    Given a server-backed Workdash session is ready to answer
+    And GitHub repository `owner/repo` has open issue #42
+    When a client requests code with autostart `true` for `owner/repo#42` with agent `pi`
+    Then the agent is briefed with the original prompt followed by the autonomous appendix once
+    And the agent is told to start without routine confirmation, overriding the plan-first pause
+    And the agent is told to inspect existing commits and uncommitted work and continue it unless demonstrably defective
+    And the agent is told to commit, push, and open a pull request that closes issue `owner/repo#42`
+    And the agent is told to wait for the current head's CI or confirm that no checks are required or reported
+    And the agent is told never to merge the pull request or close the issue
+    And the agent is told to stay in its interactive session after reporting
+
+  @id:F-CODING-LAUNCH-S030
+  Scenario: Autostart on an issue without a pull request is told to implement it
+    Given a server-backed Workdash session is ready to answer
+    And GitHub repository `owner/repo` has open issue #42
+    When a client requests code with autostart `true` for `owner/repo#42` with agent `pi`
+    Then the agent is told to implement `https://github.com/owner/repo/issues/42`
+    And the agent is told to follow its configured practices and skills
+    And the agent is told not to open a duplicate pull request
+
+  @id:F-CODING-LAUNCH-S031
+  Scenario Outline: Autostart on an issue with an open pull request resumes that pull request
+    Given a server-backed Workdash session is ready to answer
+    And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51`
+    And pull request #51 has <ci> CI, <mergeability> mergeability, and no reviews
+    When a client requests code with autostart `true` for `owner/repo#42` with agent `pi`
+    Then the agent works in the checkout of pull request `owner/repo#51`
+    And the response is for `owner/repo#ISSUE-42`
+    And the agent is told <instruction>
+    And the agent is told to follow its configured practices and skills
+    And the agent is told not to create another pull request
+
+    Examples:
+      | ci      | mergeability | instruction                                        |
+      | failing | mergeable    | `has failing checks: tests`                        |
+      | passing | conflicting  | `cannot merge cleanly into main (base head base1)` |
+
+  @id:F-CODING-LAUNCH-S032
+  Scenario: A pull request with several needs gets all of them, most urgent first
+    Given a server-backed Workdash session is ready to answer
+    And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51`
+    And pull request #51 has merge conflicts, failed CI, and new review feedback
+    When a client requests code with autostart `true` for `owner/repo#42` with agent `pi`
+    Then the agent is told to address the review feedback first
+    And the agent is told to also resolve the merge conflicts
+    And the agent is told to also fix the failing checks
+
+  @id:F-CODING-LAUNCH-S033
+  Scenario: Autostart on a pull request of somebody else stays a review
+    Given a server-backed Workdash session is ready to answer
+    And open pull request `owner/repo#52` of another author closes no issue and its CI failed
+    When a client requests code with autostart `true` for `owner/repo#CHECK-52` with agent `pi`
+    Then the agent is briefed with the original prompt followed by the autonomous review appendix once
+    And the agent is told to start reviewing without routine confirmation
+    And the agent is told never to edit, commit, or push
+    And the agent is not told to open a pull request
+    And the agent is not told to follow configured practices and skills
+
+  @id:F-CODING-LAUNCH-S034
+  Scenario: Autostart on a worktree with a live agent sends nothing to that agent, even when GitHub is down
+    Given a server-backed Workdash session is ready to answer
+    And GitHub repository `owner/repo` has open issue #42
+    And GitHub answers issue work state queries with an outage
+    And the worktree of `owner/repo#ISSUE-42` already exists
+    And an agent pane is running in that worktree
+    When a client requests code with autostart `true` for `owner/repo#ISSUE-42` with agent `pi`
+    Then the response reports status `already_running`
+    And no coding agent is launched
+
+  @id:F-CODING-LAUNCH-S035
+  Scenario: Autostart fails when GitHub cannot report the work state
+    Given a server-backed Workdash session is ready to answer
+    And GitHub repository `owner/repo` has open issue #42
+    And GitHub answers issue work state queries with an outage
+    When a client requests code with autostart `true` for `owner/repo#42` with agent `pi`
+    Then the API returns error `github_error` with HTTP status 502
+    And no coding agent is launched
+
+  @id:F-CODING-LAUNCH-S036
+  Scenario Outline: Autostart on a pull request waiting for others describes it without ordering work
+    Given a server-backed Workdash session is ready to answer
+    And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51`
+    And pull request #51 has <ci> CI, mergeable mergeability, and no reviews
+    When a client requests code with autostart `true` for `owner/repo#42` with agent `pi`
+    Then the agent works in the checkout of pull request `owner/repo#51`
+    And the agent is told `<status>`
+    And the agent is told not to create another pull request
+    And the agent is not told to start working
+
+    Examples:
+      | ci        | status                                                                                                                                                       |
+      | pending   | without a final CI result (its current head's checks are still running)                                                                                      |
+      | passing   | waiting for human review (its current head's checks pass)                                                                                                    |
+      | no_checks | waiting for human review (GitHub reports no required or observed checks for its current head)                                                                |
+      | unknown   | without a final CI result (GitHub reports an unknown or unavailable CI status for its current head, which is neither passing nor proof that no checks exist) |
+
+  @id:F-CODING-LAUNCH-S037
+  Scenario: A pull request of somebody else closing the issue does not turn the issue into a review
+    Given a server-backed Workdash session is ready to answer
+    And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51` of another author
+    When a client requests code with autostart `true` for `owner/repo#42` with agent `pi`
+    Then the agent works in the checkout of issue `owner/repo#42`
+    And the agent is briefed with the original prompt followed by the autonomous appendix once
+    And the agent is told to implement `https://github.com/owner/repo/issues/42`
+    And the agent is told to follow its configured practices and skills

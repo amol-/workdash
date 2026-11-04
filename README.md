@@ -153,7 +153,7 @@ workdash list --json         # list items as machine-readable JSON
 workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
 workdash ready SCOPE [--json]   # list the GitHub work ready to be picked up next
 workdash analyze ITEM [--agent NAME] [--json]  # analyze an item
-workdash code ITEM [--agent NAME] [--json]  # launch a coding agent, or report the running one
+workdash code ITEM [--agent NAME] [--json]  # launch an autonomous coding agent, or report the running one
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
 workdash todo TEXT [--target REPOSITORY] [--body BODY] [--json]  # capture a todo
 workdash read PANE_ID [--full] [--json]  # read text from a live pane
@@ -392,6 +392,22 @@ a retry.
 Terminal panes do not count. VSCode Copilot, offered only by the TUI, holds no
 claim and is not opened while an agent pane is live. In the TUI, `c` on an item
 with a live agent pane focuses that pane instead of opening the dialog.
+
+`workdash code` always autostarts the agent: its briefing ends with an appendix
+telling it to work without routine confirmation, commit, push, and open a pull
+request that closes the issue (or update the existing one), and verify the
+pull request's current head: CI `passing`, or GitHub reporting no required or
+observed checks (`no_checks`), and a clean merge. It never merges or closes
+anything, and the agent stays in its interactive pane. The state-specific task
+comes from the same GitHub classification as `ready`: an issue is implemented, an
+issue an open pull request of yours closes resumes that pull request in place, and a pull
+request with review feedback, merge conflicts, or failing CI is repaired on its
+own branch with every reason included. A pull request waiting on CI, review, or
+merge is described, not reworked, and somebody else's pull request stays a
+review-only session. There is no `--autostart` option; the TUI's `c` keeps the
+plan-first briefing and never commits or pushes by itself, and the HTTP
+`POST /api/v0/code` takes an optional boolean `autostart`, false when omitted.
+`already_running` injects nothing into the running agent.
 
 Human output reports the status, item, agent, selected session, cwd, pane title,
 and pane id when available. `--json` emits the same result as machine-readable JSON.

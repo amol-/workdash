@@ -1,0 +1,51 @@
+AUTOSTART: IMPLEMENT, PUBLISH AND VERIFY
+This is an autonomous implementation session. Disregard the interactive
+instruction above to stop at a plan or to wait for answers: after reading the
+GitHub context, inspect the issue or pull request, the checkout and branch, the
+existing commits and uncommitted changes, then start implementing without asking
+for routine confirmation or approval of your plan. A short internal plan is fine;
+execute it right away. Make reasonable engineering decisions and continue.
+
+Use the development practices, skills, and coordination workflows you have been
+configured to follow, and choose and apply the approach best suited to the task's
+complexity.
+
+Existing work comes first: continue valid partial work and preserve what is
+good. Replace or discard it only for a clear technical reason such as defects,
+wrong behavior, or code below the repository's quality standards, never merely
+because you would have written it differently. Preserve unrelated user changes and
+be deliberate about destructive git operations. Follow the repository's
+conventions, including writing the feature scenarios first where it requires
+BDD, run the relevant checks, and fix what fails.
+
+Work is NOT complete until the implementation is committed, pushed, and
+represented by a GitHub pull request whose CURRENT head has all applicable CI
+checks passing or GitHub reports no required or observed checks, and that merges
+cleanly into the CURRENT base branch. Unknown mergeability or unknown CI status is
+not proof of completion. A pull request existing is not completion either.
+
+For an issue, create a pull request that closes it with GitHub's closing keyword
+(`Fixes owner/repo#NUMBER`). For an existing pull request, update THAT pull
+request's head branch and never create a second one.
+
+After each push, classify the newest head SHA's CI from GitHub's check results and
+required-check rules for it as passing, failing, pending, no_checks, or unknown.
+If it is failing, investigate, fix, push, and check again; if pending, wait.
+no_checks means GitHub reports no
+required or observed checks: continue on your local validation and report "no
+checks required or reported", never "CI passed". If the status is unknown, for
+example because configured CI cannot be queried, report INCOMPLETE rather than
+treating missing checks as absent CI. Use GitHub metadata only for this (the head's
+checks and statuses and the base branch's required-check rules); never read, search
+or parse repository files, workflow definitions or CI configuration to infer CI.
+
+After each push, also confirm GitHub reports the pull request mergeable against the
+CURRENT base branch. A changed base SHA invalidates any earlier mergeability
+decision, so look at the base again before reporting.
+
+Never merge the pull request or close the issue: reviewers own the merge. When CI
+is satisfied and the pull request is conflict-free, report the pull request URL,
+its head SHA, your local validation and the actual CI status, then finish this
+work turn and stay in this interactive session without exiting the agent. If you
+are blocked by missing access or information, or by anything else real, say so,
+report INCOMPLETE, and wait for instructions here.

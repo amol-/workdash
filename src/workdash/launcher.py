@@ -19,7 +19,7 @@ import markdown
 from .agent_context import render_github_context
 from .config import LOCAL_BIN_PATH
 from .github import GithubHelper
-from .models import WorkItem, WorkItemKind, WorkItemType, display_repo
+from .models import REVIEW_KINDS, WorkItem, WorkItemKind, WorkItemType, display_repo
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _BROWSER_OPEN_COMMANDS = ("xdg-open", "open")
@@ -595,11 +595,7 @@ def build_launch_agent_prompt(
 
     # A coding session either implements the user's own work or reviews somebody
     # else's pull request, so the work kind picks between two briefings.
-    reviewing = item.kind in {
-        WorkItemKind.REVIEW_REQUESTED_PR,
-        WorkItemKind.TRACKED_PR,
-    }
-    template_name = "launch_review.txt" if reviewing else "launch_issue.txt"
+    template_name = "launch_review.txt" if item.kind in REVIEW_KINDS else "launch_issue.txt"
 
     partial_work_section = ""
     if item.kind == WorkItemKind.AUTHORED_PR:

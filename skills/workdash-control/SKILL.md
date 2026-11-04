@@ -137,6 +137,51 @@ workdash terminal ITEM --json
 prints that path as `analysis_path`. `terminal` opens a plain terminal pane in the
 item's worktree and prints the pane title and pane ID.
 
+## Code starts autonomous work
+
+`workdash code ITEM` launches an autonomous but still interactive agent on an
+exact issue or pull request: it implements the work, commits, pushes, and opens
+a pull request linked to the issue (or updates the existing one), then checks
+the CI of the pull request's current head. It never merges a pull request or
+closes an issue, and its Zellij pane stays open at the agent's normal prompt
+when it reports back. There is no `--autostart` option: the CLI always asks for
+it. The TUI's `c` key does not; it keeps the human-directed, plan-first briefing
+and never commits, pushes, or opens a pull request on its own.
+
+Use `code ITEM` when you already know the exact task. Use `workdash ready` first
+to see what is actionable; `code` itself does not check readiness.
+
+```bash
+workdash code owner/repo#42 --agent pi --json
+workdash code owner/repo#PR-51 --agent pi --json            # your PR with merge conflicts, failing CI or review feedback
+workdash code owner/repo#42 --agent pi --host dashboard.lan --json
+```
+
+The agent is briefed from GitHub's current state of the work, the same
+classification `ready` reports:
+
+- An issue without an open pull request is implemented, and a pull request
+  closing it is created.
+- An issue that an open pull request of yours already closes resumes that pull
+  request in place, keeping the issue link; no second pull request is created. A
+  pull request of somebody else closing the issue does not change the task.
+- A pull request needing work is repaired in place on its existing branch,
+  whatever the reason: review feedback, merge conflicts, or failing CI. Every
+  applicable reason is given to the agent, review feedback first.
+- A pull request waiting for CI, review, or merge is described as such; the
+  agent invents no work and opens no new pull request.
+- A pull request of somebody else stays a review: the agent starts reviewing
+  without asking for confirmation and never edits, commits, or pushes.
+
+Successful work leaves the pull request open for a human to review and merge.
+The agent may report completion only when the current head's CI is `passing` or
+GitHub reports no required or observed checks (`no_checks`) and the pull request
+merges cleanly. `no_checks` is a legitimate outcome reported as "no checks
+required or reported", never as CI passed; it differs from configured CI whose
+status cannot be read (`unknown`), after which the agent reports the work as
+incomplete. If GitHub cannot report the work state, `code` fails with
+`github_error` instead of guessing.
+
 ## Code is an exclusive claim
 
 Use `workdash code ITEM` when you already know the issue or pull request to
@@ -157,9 +202,11 @@ Check `status` in the result:
 
 - `launched`: this call started the agent. Its `pane_id` is yours to drive.
 - `already_running`: an agent was already working in that worktree, so nothing
-  was started and `pane_id` is that existing pane. Reuse it to read or follow
-  the work instead of starting another; it may belong to another orchestrator,
-  so do not take it over. `agent` is null because the running agent is unknown.
+  was started and `pane_id` is that existing pane. Nothing is injected into it:
+  its prompt and mode stay as they were, whether it was started by the TUI or the
+  CLI. Reuse it to read or follow the work instead of starting another; it may
+  belong to another orchestrator, so do not take it over. `agent` is null because
+  the running agent is unknown.
 
 `launch_unconfirmed` means a launch may have started an agent whose pane is not
 visible yet: check `workdash info` instead of retrying in a loop. `agent_exited`
@@ -192,7 +239,8 @@ Human `read` output is just the pane text so it can be read directly.
    or use an item you already know.
 3. `workdash analyze ITEM --json` for context, then read `analysis_path` if needed.
 4. `workdash code ITEM --agent pi --json` to launch a worker.
-5. Copy `pane_id` from `code` or `workdash info --json`. On `already_running`,
+5. Copy `pane_id` from `code` or `workdash info --json`. The agent works on its
+   own; read its pane for the pull request URL and result. On `already_running`,
    another agent already owns that item: follow its pane or pick other work.
 6. Poll with `workdash read PANE_ID --full`.
 7. Send concise instructions with `workdash write PANE_ID "..."`.

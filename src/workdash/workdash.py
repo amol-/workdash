@@ -178,7 +178,9 @@ class WorkdashCommands:
         """Launch a coding agent through the local Workdash server."""
 
         try:
-            result = self._client.request("code", {"target": target, "agent": agent})
+            result = self._client.request(
+                "code", {"target": target, "agent": agent, "autostart": True}
+            )
         except WorkdashControlError as error:
             _print_control_error(error)
             return 1
@@ -364,7 +366,10 @@ class WorkdashCommands:
                 target=format_work_item_id(item), agent=tool, prefer_cache=(tool == "cached")
             )["path"],
             launch_callback=lambda item, tool: session.code(
-                target=format_work_item_id(item), agent=tool, allow_vscode=True
+                target=format_work_item_id(item),
+                agent=tool,
+                allow_vscode=True,
+                autostart=False,
             ),
             analyze_choices=config.tui_analyze_choices(),
             code_choices=config.tui_code_choices(),

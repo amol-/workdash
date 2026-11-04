@@ -12,6 +12,7 @@ import pytest
 from pytest_bdd import given, parsers, then, when
 from textual.widgets import Static
 
+from gh_work_state_fake import failure
 from workdash.analysis_cache import AnalysisCache
 from workdash.control import WorkdashSession, format_work_item_id
 from workdash.github import GithubHelper
@@ -554,3 +555,197 @@ def _no_coding_session(scenario_state: dict[str, Any]) -> None:
 @then("no worktree is prepared")
 def _no_worktree_prepared(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["worktree_calls"] == []
+
+
+# -- Autostart -----------------------------------------------------------------
+
+
+def _launched_prompt(scenario_state: dict[str, Any]) -> str:
+    """The single briefing of the launched agent, whitespace-normalized."""
+
+    prompts = scenario_state.get("launched_prompts") or [
+        launch[1] for launch in scenario_state["agent_launches"]
+    ]
+    [prompt] = prompts
+    return " ".join(prompt.split())
+
+
+@given("GitHub answers issue work state queries with an outage")
+def _github_work_state_outage(scenario_state: dict[str, Any]) -> None:
+    scenario_state["github"].failures["ReadyIssueTree"] = failure("HTTP 502: Bad Gateway")
+
+
+@then("the agent is told to propose a plan and not to start implementing")
+def _agent_told_to_plan_first(scenario_state: dict[str, Any]) -> None:
+    prompt = _launched_prompt(scenario_state)
+    assert "Propose a concrete implementation plan" in prompt
+    assert "Do not start implementing code yet." in prompt
+
+
+@then("the agent is not told to work autonomously")
+def _agent_not_told_to_work_autonomously(scenario_state: dict[str, Any]) -> None:
+    assert "AUTOSTART" not in _launched_prompt(scenario_state)
+
+
+@then("the agent is briefed with the original prompt followed by the autonomous appendix once")
+def _agent_briefed_with_implementation_appendix(scenario_state: dict[str, Any]) -> None:
+    prompt = _launched_prompt(scenario_state)
+    assert prompt.startswith("PROMPT AUTOSTART: IMPLEMENT, PUBLISH AND VERIFY")
+    assert prompt.count("AUTOSTART:") == 1
+
+
+@then(
+    "the agent is briefed with the original prompt followed by the autonomous review appendix once"
+)
+def _agent_briefed_with_review_appendix(scenario_state: dict[str, Any]) -> None:
+    prompt = _launched_prompt(scenario_state)
+    assert prompt.startswith("PROMPT AUTOSTART: REVIEW")
+    assert prompt.count("AUTOSTART:") == 1
+
+
+def _assert_told(scenario_state: dict[str, Any], *phrases: str) -> None:
+    prompt = _launched_prompt(scenario_state)
+    for phrase in phrases:
+        assert phrase in prompt, phrase
+
+
+@then("the agent is told to start without routine confirmation, overriding the plan-first pause")
+def _agent_told_to_start_now(scenario_state: dict[str, Any]) -> None:
+    _assert_told(
+        scenario_state,
+        "Disregard the interactive instruction above to stop at a plan",
+        "start implementing without asking for routine confirmation",
+    )
+
+
+@then(
+    "the agent is told to inspect existing commits and uncommitted work "
+    "and continue it unless demonstrably defective"
+)
+def _agent_told_to_continue_existing_work(scenario_state: dict[str, Any]) -> None:
+    _assert_told(
+        scenario_state,
+        "existing commits and uncommitted changes",
+        "continue valid partial work",
+        "Replace or discard it only for a clear technical reason",
+        "Preserve unrelated user changes",
+    )
+
+
+@then(
+    parsers.parse(
+        "the agent is told to commit, push, and open a pull request that closes issue `{issue}`"
+    )
+)
+def _agent_told_to_publish(issue: str, scenario_state: dict[str, Any]) -> None:
+    repo, _, number = issue.partition("#")
+    _assert_told(
+        scenario_state,
+        "committed, pushed, and represented by a GitHub pull request",
+        "create a pull request that closes it with GitHub's closing keyword",
+        f"https://github.com/{repo}/issues/{number}",
+    )
+
+
+@then(
+    "the agent is told to wait for the current head's CI "
+    "or confirm that no checks are required or reported"
+)
+def _agent_told_to_verify_ci(scenario_state: dict[str, Any]) -> None:
+    _assert_told(
+        scenario_state,
+        "CURRENT head has all applicable CI checks passing",
+        "if pending, wait",
+        'report "no checks required or reported", never "CI passed"',
+        "report INCOMPLETE",
+        "Use GitHub metadata only for this",
+        "never read, search or parse repository files, workflow definitions or CI configuration",
+        "mergeable against the CURRENT base branch",
+        "A changed base SHA invalidates any earlier mergeability decision",
+    )
+
+
+@then("the agent is told never to merge the pull request or close the issue")
+def _agent_told_never_to_merge(scenario_state: dict[str, Any]) -> None:
+    _assert_told(scenario_state, "Never merge the pull request or close the issue")
+
+
+@then("the agent is told to stay in its interactive session after reporting")
+def _agent_told_to_stay_interactive(scenario_state: dict[str, Any]) -> None:
+    _assert_told(scenario_state, "stay in this interactive session without exiting the agent")
+
+
+@then(parsers.parse("the agent is told to implement `{url}`"))
+def _agent_told_to_implement_issue(url: str, scenario_state: dict[str, Any]) -> None:
+    _assert_told(scenario_state, f"Continue the assigned issue {url}.")
+
+
+_PRACTICES = "development practices, skills, and coordination workflows you have been configured"
+
+
+@then("the agent is told to follow its configured practices and skills")
+def _agent_told_to_follow_configured_practices(scenario_state: dict[str, Any]) -> None:
+    _assert_told(scenario_state, _PRACTICES)
+
+
+@then("the agent is not told to follow configured practices and skills")
+def _agent_not_told_to_follow_configured_practices(scenario_state: dict[str, Any]) -> None:
+    assert _PRACTICES not in _launched_prompt(scenario_state)
+
+
+@then("the agent is told not to open a duplicate pull request")
+def _agent_told_no_duplicate_pull_request(scenario_state: dict[str, Any]) -> None:
+    _assert_told(scenario_state, "do not open a duplicate pull request")
+
+
+@then(parsers.parse("the agent is told `{text}`"))
+def _agent_told_text(text: str, scenario_state: dict[str, Any]) -> None:
+    _assert_told(scenario_state, text)
+
+
+@then("the agent is not told to start working")
+def _agent_not_told_to_start_working(scenario_state: dict[str, Any]) -> None:
+    assert "AUTOSTART" not in _launched_prompt(scenario_state)
+
+
+@then("the agent is told not to create another pull request")
+def _agent_told_not_to_create_another_pull_request(scenario_state: dict[str, Any]) -> None:
+    assert "create another pull request" in _launched_prompt(scenario_state).lower()
+
+
+@then("the agent is told to address the review feedback first")
+def _agent_told_to_address_review_first(scenario_state: dict[str, Any]) -> None:
+    prompt = _launched_prompt(scenario_state)
+    assert "AUTOSTART: IMPLEMENT" in prompt
+    assert prompt.index("has actionable review feedback") < prompt.index("Also resolve")
+
+
+@then("the agent is told to also resolve the merge conflicts")
+def _agent_told_to_also_resolve_conflicts(scenario_state: dict[str, Any]) -> None:
+    prompt = _launched_prompt(scenario_state)
+    assert "Also resolve the confirmed merge conflicts into main (base head base1)" in prompt
+    assert prompt.index("Also resolve") < prompt.index("Also investigate")
+
+
+@then("the agent is told to also fix the failing checks")
+def _agent_told_to_also_fix_checks(scenario_state: dict[str, Any]) -> None:
+    _assert_told(scenario_state, "Also investigate and fix these failing checks: tests.")
+
+
+@then("the agent is told to start reviewing without routine confirmation")
+def _agent_told_to_start_reviewing(scenario_state: dict[str, Any]) -> None:
+    _assert_told(
+        scenario_state, "start reviewing the pull request right away without asking for routine"
+    )
+
+
+@then("the agent is told never to edit, commit, or push")
+def _agent_told_never_to_edit(scenario_state: dict[str, Any]) -> None:
+    _assert_told(scenario_state, "Never edit files, commit, push, or change the pull request.")
+
+
+@then("the agent is not told to open a pull request")
+def _agent_not_told_to_open_pull_request(scenario_state: dict[str, Any]) -> None:
+    prompt = _launched_prompt(scenario_state)
+    assert "IMPLEMENT" not in prompt
+    assert "closing keyword" not in prompt
