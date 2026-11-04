@@ -31,8 +31,10 @@ from .launcher import (
     send_zellij_pane_input,
 )
 from .models import WorkItem, WorkItemType, display_repo, format_type_label
+from .repo_resolver import validate_repository_selectors
 from .repo_worktree import ensure_worktree, existing_worktree_path, get_merge_base
 from .todo import create_todo, is_repository_name, is_todo_target
+from .work_state import ReadyWork, find_ready_work
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8765
@@ -377,6 +379,68 @@ class WorkdashSession:
                 "pane_id": launch.pane_id,
             }
 
+    def ready(self, *, scope: str) -> dict[str, object]:
+        """Report the ready work of a scope, ready pull requests first.
+
+        The scope is ``owner/repo``, an issue, ``todo``, or ``any``. Work a live
+        agent pane already holds is left out. Nothing is claimed or launched, and
+        the dashboard is left alone.
+        """
+
+        issue = None
+        if scope == "todo":
+            repositories = [self.config.todo_repository]
+        elif scope == "any":
+            repositories = [
+                *validate_repository_selectors(list(self.config.repositories)),
+                self.config.todo_repository,
+            ]
+        elif is_repository_name(scope):
+            repositories = [scope]
+        else:
+            reference = _ITEM_REFERENCE_RE.match(scope)
+            parsed_url = parse_github_item_url(scope)
+            if (reference is not None and reference["label"] not in {None, "ISSUE"}) or (
+                parsed_url is not None and parsed_url.item_type == WorkItemType.PR
+            ):
+                raise WorkdashControlError(
+                    "unsupported_item_type",
+                    f"{scope!r} names a pull request; ready takes an issue as its scope.",
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+            item = self._require_item(scope)
+            repositories, issue = [], (item.repo, item.number)
+        try:
+            candidates = find_ready_work(
+                repositories=repositories,
+                issue=issue,
+                github_username=self.config.github_username,
+                todo_repository=self.config.todo_repository,
+            )
+        except RuntimeError as error:
+            raise WorkdashControlError(
+                "github_error",
+                f"GitHub lookup for {scope!r} failed: {error}",
+                status=HTTPStatus.BAD_GATEWAY,
+            ) from error
+        with self._lock:
+            panes = self._live_panes()
+            now = time.monotonic()
+            # An agent launch `code` has not confirmed yet holds its worktree too.
+            unclaimed = [
+                work
+                for work in candidates
+                if not any(
+                    (path := existing_worktree_path(self.config.workdir, claim)) is not None
+                    and (
+                        _agent_panes_in_worktree(panes, path)
+                        or self._unconfirmed_launches.get(_normalized_path(path), 0.0) > now
+                    )
+                    for claim in work.claims
+                )
+            ]
+        return {"scope": scope, "items": [_ready_work_payload(work) for work in unclaimed]}
+
     def pane_content(self, *, pane_id: str, full: bool = False) -> dict[str, object]:
         """Return visible or full scrollback content for a Zellij pane."""
 
@@ -696,6 +760,42 @@ def _work_items_payload(
     return {"items": items}
 
 
+def _ready_work_payload(work: ReadyWork) -> dict[str, object]:
+    item, issue, pull_request = work.item, work.issue, work.pull_request
+    payload: dict[str, object] = {
+        "id": format_work_item_id(item),
+        "type": item.item_type.value,
+        "repo": display_repo(item),
+        "number": item.number,
+        "title": item.title,
+        "url": item.url,
+        "created_at": item.created_at.isoformat(),
+        "action": work.action,
+        "reasons": list(work.reasons),
+        "issue_id": format_work_item_id(issue) if issue else None,
+        "issue_url": issue.url if issue else None,
+    }
+    if pull_request is not None:
+        payload |= {
+            "pr_head_sha": pull_request.head_sha,
+            "base_ref": pull_request.base_ref,
+            "base_head_sha": pull_request.base_head_sha,
+            "mergeability": pull_request.mergeability,
+            "ci_status": pull_request.ci_status,
+            "failing_checks": list(pull_request.failing_checks),
+            "feedback": [
+                {
+                    "kind": feedback.kind,
+                    "author": feedback.author,
+                    "url": feedback.url,
+                    "created_at": feedback.created_at.isoformat(),
+                }
+                for feedback in pull_request.feedback
+            ],
+        }
+    return payload
+
+
 def _pane_info_payload(
     session: str,
     workdir: str | None,
@@ -824,6 +924,14 @@ def _make_turbogears_app(session: WorkdashSession):
                 lambda payload: self._session.terminal(
                     target=_required_text(payload, "target"),
                 ),
+            )
+
+        @expose("json")
+        def ready(self):
+            return _handle_json_request(
+                request,
+                response,
+                lambda payload: self._session.ready(scope=_required_text(payload, "scope")),
             )
 
         @expose("json")

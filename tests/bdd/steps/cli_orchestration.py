@@ -14,6 +14,7 @@ from pytest_bdd import given, parsers, then, when
 
 from workdash.backend import compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
+from workdash.control import WorkdashControlError
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.repo_worktree import worktree_path
 
@@ -104,7 +105,7 @@ def _run_workdash(
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
-        if cmd[:3] == ["gh", "api", "graphql"] and scenario_state.get("github_lookup_installed"):
+        if cmd[:2] == ["gh", "api"] and scenario_state.get("github_lookup_installed"):
             return github_run(*args, **kwargs)
         if cmd == ["git", "rev-parse", "--show-toplevel"]:
             cwd = Path(kwargs["cwd"]).resolve()
@@ -154,6 +155,12 @@ def _run_workdash(
                     return scenario_state["api_session"].terminal(
                         target=payload["target"],
                     )
+                if endpoint == "ready":
+                    try:
+                        return scenario_state["api_session"].ready(scope=payload["scope"])
+                    except WorkdashControlError as error:
+                        scenario_state["control_error_code"] = error.code
+                        raise
                 if endpoint == "pane/content":
                     return scenario_state["api_session"].pane_content(
                         pane_id=payload["pane_id"],

@@ -588,6 +588,8 @@ def test_select_workdash_session_treats_no_zellij_sessions_as_empty(
         (["list"], "list", {"refresh": False}),
         (["list", "--refresh"], "list", {"refresh": True}),
         (["info"], "info", {"include_all_panes": False}),
+        (["ready", "any"], "ready", {"scope": "any"}),
+        (["ready", "owner/repo#42", "--json"], "ready", {"scope": "owner/repo#42"}),
         (["terminal", "owner/repo#ISSUE-1"], "terminal", {"target": "owner/repo#ISSUE-1"}),
         (
             ["todo", "Fix it", "--target", "owner/repo"],
@@ -649,6 +651,15 @@ def test_main_server_backed_commands_are_pure_http_clients(
 ) -> None:
     requests: list[tuple[str, dict[str, object]]] = []
     analysis_path = tmp_path / "missing-analysis.md"
+    ready_item = {
+        "id": "owner/repo#PR-51",
+        "type": "pr",
+        "title": "Fix the parser",
+        "url": "https://github.com/owner/repo/pull/51",
+        "action": "address_review",
+        "reasons": ["address_review", "fix_ci"],
+        "issue_id": "owner/repo#ISSUE-42",
+    }
 
     class FakeControlClient:
         def __init__(self, selected_host="127.0.0.1") -> None:
@@ -660,6 +671,8 @@ def test_main_server_backed_commands_are_pure_http_clients(
                 return {"items": []}
             if endpoint == "info":
                 return {"session": "workdash", "panes": []}
+            if endpoint == "ready":
+                return {"scope": payload["scope"], "items": [ready_item]}
             if endpoint == "analyze":
                 return {
                     "item_id": "owner/repo#ISSUE-1",
@@ -744,6 +757,14 @@ def test_main_server_backed_commands_are_pure_http_clients(
         )
         os.unlink(local_path)
     assert requests == [(expected_endpoint, expected_payload)]
+    if expected_endpoint == "ready" and "--json" in argv:
+        assert json.loads(output)["items"] == [ready_item]
+    elif expected_endpoint == "ready":
+        assert output == (
+            "PR    owner/repo#PR-51             address_review       Fix the parser "
+            "https://github.com/owner/repo/pull/51 [address_review,fix_ci] "
+            "(issue owner/repo#ISSUE-42)\n"
+        )
     if expected_endpoint == "todo" and "--json" in argv:
         assert json.loads(output) == {
             "item_id": "owner/repo#ISSUE-WT1",
@@ -758,6 +779,7 @@ def test_main_server_backed_commands_are_pure_http_clients(
     [
         ["list"],
         ["info"],
+        ["ready", "any"],
         ["analyze", "owner/repo#ISSUE-1"],
         ["code", "owner/repo#ISSUE-1"],
         ["read", "terminal_23"],
@@ -1636,7 +1658,15 @@ def test_workdash_control_skill_examples_are_valid_commands_and_explain_code_cla
         if line.startswith("workdash ")
     ]
 
-    assert {argv[0] for argv in examples} >= {"code", "list", "info", "read", "write", "close"}
+    assert {argv[0] for argv in examples} >= {
+        "code",
+        "list",
+        "info",
+        "ready",
+        "read",
+        "write",
+        "close",
+    }
     for argv in examples:
         workdash_module._parse_args(argv)
     # The live code pane is the claim, so agents must learn to reuse it.
@@ -1644,3 +1674,12 @@ def test_workdash_control_skill_examples_are_valid_commands_and_explain_code_cla
     assert "no `workdash claim` command" in skill
     with pytest.raises(SystemExit):
         workdash_module._parse_args(["claim", "owner/repo#1"])
+    # Agents must learn that ready is advice, ordered pull requests first, and needs the server.
+    for text in (
+        "read-only advice",
+        "sub-issue",
+        "Pull requests needing work come first",
+        "No ready work found.",
+        "never start a server just to run `ready`",
+    ):
+        assert text in skill

@@ -57,6 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.command in {
         "list",
         "info",
+        "ready",
         "analyze",
         "code",
         "read",
@@ -200,6 +201,20 @@ class WorkdashCommands:
             print(json.dumps(result, ensure_ascii=True, indent=2))
         else:
             _print_terminal_result(result)
+        return 0
+
+    def ready_cli(self, *, scope: str, json_output: bool) -> int:
+        """Report the ready work of a scope through the local Workdash server."""
+
+        try:
+            result = self._client.request("ready", {"scope": scope})
+        except WorkdashControlError as error:
+            _print_control_error(error)
+            return 1
+        if json_output:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        else:
+            _print_ready_result(result)
         return 0
 
     def todo_cli(
@@ -411,6 +426,8 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             json_output=options.json_output,
             include_all_panes=options.include_all_panes,
         )
+    if options.command == "ready":
+        return commands.ready_cli(scope=options.target or "", json_output=options.json_output)
     if options.command == "analyze":
         return commands.analyze_cli(
             target=options.target or "",
@@ -601,6 +618,22 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         default=argparse.SUPPRESS,
         help="Emit machine-readable JSON.",
     )
+    ready_parser = subparsers.add_parser(
+        "ready",
+        help="List the GitHub issues and pull requests ready to be worked on next.",
+    )
+    ready_parser.add_argument(
+        "target",
+        metavar="SCOPE",
+        help="owner/repo, an issue (owner/repo#NUMBER, item ID, or URL), todo, or any.",
+    )
+    ready_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Emit machine-readable JSON.",
+    )
     todo_parser = subparsers.add_parser(
         "todo",
         help="Capture a todo in the configured todo repository.",
@@ -676,6 +709,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     for client_parser in (
         list_parser,
         info_parser,
+        ready_parser,
         analyze_parser,
         code_parser,
         terminal_parser,
@@ -811,6 +845,19 @@ def _print_work_items_result(result: dict[str, object]) -> None:
         if display_type is None:
             display_type = str(item["id"]).split("#", maxsplit=1)[1].split("-", maxsplit=1)[0]
         print(f"{display_type:7} {item['id']:24} {str(item['updated_at'])[:10]} {title}")
+
+
+def _print_ready_result(result: dict[str, object]) -> None:
+    items = result["items"]
+    if not items:
+        print("No ready work found.")
+        return
+    for item in items:
+        issue = f" (issue {item['issue_id']})" if item["type"] == "pr" and item["issue_id"] else ""
+        print(
+            f"{item['type'].upper():5} {item['id']:28} {item['action']:20} "
+            f"{item['title']} {item['url']} [{','.join(item['reasons'])}]{issue}"
+        )
 
 
 def _with_local_analysis_path(result: dict[str, object]) -> dict[str, object]:

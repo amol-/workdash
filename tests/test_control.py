@@ -2,6 +2,7 @@ import base64
 import json
 import subprocess
 from datetime import UTC, datetime
+from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -11,9 +12,11 @@ from webob import Request
 
 import workdash.control as control_module
 from gh_todo_fake import fake_gh_todo_run
+from gh_work_state_fake import HEAD_SHA, check_run, failure, install_fake_github, todo_body
 from workdash.backend import IncludeResult
 from workdash.config import AgentConfig, WorkdashConfig
-from workdash.control import WorkdashSession, format_work_item_id
+from workdash.control import WorkdashControlError, WorkdashSession, format_work_item_id
+from workdash.github_client import GitHubClient
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 
 
@@ -266,6 +269,171 @@ def test_todo_api_validates_optional_body_without_reformatting(
                 "url": "https://github.com/testuser/todos/issues/110",
             },
         }
+
+
+def _ready_session(tmp_path, *, repositories: tuple[str, ...] = ()) -> WorkdashSession:
+    """A session resolving explicit targets through the real GitHub client."""
+
+    backend = MagicMock(github_client=GitHubClient())
+    backend.analysis_cache.load_analysis.return_value = None
+    backend.analysis_cache.load_analysis_date.return_value = None
+    return WorkdashSession(
+        config=WorkdashConfig(
+            github_username="testuser",
+            repositories=repositories,
+            todo_repository="testuser/todos",
+            workdir=str(tmp_path),
+        ),
+        backend=backend,
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+
+
+def _post_ready(session: WorkdashSession, payload: dict[str, object]):
+    request = Request.blank(
+        "/api/v0/ready",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps(payload).encode(),
+    )
+    response = request.get_response(control_module._make_turbogears_app(session))
+    return response.status_int, json.loads(response.text)
+
+
+def test_ready_api_reports_ready_work(monkeypatch, tmp_path) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("testuser/todos#3")
+    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: [])
+
+    status, body = _post_ready(_ready_session(tmp_path), {"scope": "todo"})
+
+    assert status == 200
+    assert body["result"]["scope"] == "todo"
+    assert [item["id"] for item in body["result"]["items"]] == ["testuser/todos#ISSUE-3"]
+
+
+@pytest.mark.parametrize(
+    ("payload", "status", "code"),
+    [
+        ({}, 400, "bad_request"),
+        ({"scope": "https://github.com/owner/repo/pull/5"}, 400, "unsupported_item_type"),
+        ({"scope": "owner/down"}, 502, "github_error"),
+    ],
+)
+def test_ready_api_reports_a_scope_error(payload, status, code, monkeypatch, tmp_path) -> None:
+    github = install_fake_github(monkeypatch)
+    github.failures["ReadyRepositoryIssues"] = failure("GraphQL: Something went wrong")
+    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: [])
+
+    status_code, body = _post_ready(_ready_session(tmp_path), payload)
+
+    assert (status_code, body["error"]["code"]) == (status, code)
+
+
+def test_ready_ids_resolve_to_the_same_items_code_acts_on(monkeypatch, tmp_path) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    github.add_issue("testuser/todos#7", body=todo_body("owner/other"))
+    github.add_pull_request(
+        "owner/repo#52",
+        author="someone-else",
+        closes=("owner/repo#42",),
+        checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+    )
+    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: [])
+    session = _ready_session(tmp_path, repositories=("owner/repo",))
+
+    ready = session.ready(scope="any")["items"]
+
+    assert [item["id"] for item in ready] == ["owner/repo#CHECK-52", "owner/other#ISSUE-WT7"]
+    for item in ready:
+        resolved = session._require_item(item["id"])
+        assert (format_work_item_id(resolved), resolved.url) == (item["id"], item["url"])
+
+
+def test_ready_leaves_out_the_pull_request_of_a_targeted_todo_an_agent_works_on(
+    monkeypatch, tmp_path
+) -> None:
+    worktree = tmp_path / "owner_other_todo_7"
+    worktree.mkdir()
+
+    def fake_git(cmd, *args, **kwargs):
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{kwargs['cwd']}\n", stderr="")
+        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="https://github.com/owner/other.git\n", stderr=""
+            )
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_git)
+    github = install_fake_github(monkeypatch)
+    github.add_issue("testuser/todos#7", body=todo_body("owner/other"))
+    github.add_pull_request(
+        "owner/other#51",
+        author="someone-else",
+        closes=("testuser/todos#7",),
+        checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+    )
+    panes: list[dict[str, object]] = []
+    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(panes))
+    session = _ready_session(tmp_path)
+
+    assert [item["id"] for item in session.ready(scope="owner/other")["items"]] == [
+        "owner/other#CHECK-51"
+    ]
+    panes.append(
+        {
+            "id": 1,
+            "title": "code_owner_other_todo_7",
+            "pane_cwd": str(worktree),
+            "pane_command": "pi",
+            "exited": False,
+        }
+    )
+    assert session.ready(scope="owner/other")["items"] == []
+
+
+def test_ready_reports_a_failed_issue_tree_lookup_without_widening_the_scope(
+    monkeypatch, tmp_path
+) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#99")
+    github.failures["ReadyIssueTree"] = failure("HTTP 502: Bad Gateway")
+
+    with pytest.raises(WorkdashControlError) as raised:
+        _ready_session(tmp_path).ready(scope="owner/repo#99")
+
+    assert (raised.value.code, raised.value.status) == ("github_error", HTTPStatus.BAD_GATEWAY)
+    assert "ReadyRepositoryIssues" not in github.operations
+
+
+def test_ready_reads_github_outside_the_session_lock_and_panes_inside_it(
+    monkeypatch, tmp_path
+) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    session = _ready_session(tmp_path)
+    lock_held: list[tuple[str, bool]] = []
+
+    def gh(*args, **kwargs):
+        lock_held.append(("gh", session._lock._is_owned()))
+        return github.run(*args, **kwargs)
+
+    def load_panes(_session):
+        lock_held.append(("panes", session._lock._is_owned()))
+        return []
+
+    monkeypatch.setattr(subprocess, "run", gh)
+    monkeypatch.setattr(control_module, "load_zellij_panes", load_panes)
+
+    assert [item["id"] for item in session.ready(scope="owner/repo")["items"]] == [
+        "owner/repo#ISSUE-1"
+    ]
+    assert {held for call, held in lock_held if call == "gh"} == {False}
+    assert {held for call, held in lock_held if call == "panes"} == {True}
 
 
 def test_session_analyze_returns_cached_analysis_without_configured_agents(tmp_path) -> None:
@@ -566,6 +734,21 @@ def test_an_expired_unconfirmed_launch_no_longer_blocks_the_worktree(monkeypatch
 
     assert (result["status"], result["pane_id"]) == ("launched", "terminal_30")
     assert launch_agent.call_count == 2
+
+
+@pytest.mark.parametrize(("ttl", "listed"), [(60, []), (0, ["owner/repo#ISSUE-1"])])
+def test_ready_leaves_out_work_whose_agent_launch_is_still_unconfirmed(
+    monkeypatch, tmp_path, ttl, listed
+) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    session, _worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
+    launch_agent.side_effect = None
+    monkeypatch.setattr(control_module, "_UNCONFIRMED_LAUNCH_TTL_SECONDS", ttl)
+    with pytest.raises(WorkdashControlError, match="did not appear"):
+        session.code(target="owner/repo#ISSUE-1", agent="pi")
+
+    assert [item["id"] for item in session.ready(scope="owner/repo")["items"]] == listed
 
 
 def test_analyze_uses_the_cached_analysis_of_an_item_fetched_from_github(tmp_path) -> None:

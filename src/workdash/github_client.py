@@ -111,6 +111,7 @@ _RATE_LIMIT_RETRY_DELAY_SECONDS = 70.0
 #   - "HTTP 429" / "API rate limit exceeded" / "abuse detection" (rate limiting)
 #   - "dial tcp ... no such host" / "connection reset" / "i/o timeout" ... (network)
 #   - "result of a timeout" (GraphQL execution timeout, sometimes with HTTP 200)
+#   - "unexpected end of JSON input" (GraphQL timeout cutting off an HTTP 200 body)
 # Each of these can succeed on a later retry, so the caller should retain the
 # URL in the included-items store and retry on the next refresh.
 _TRANSIENT_HTTP_STATUS_RE = re.compile(r"(?:HTTP |status code:?\s*)5\d{2}", re.IGNORECASE)
@@ -131,6 +132,7 @@ _TRANSIENT_SUBSTRINGS = (
     "i/o timeout",
     "result of a timeout",
     "context deadline exceeded",
+    "unexpected end of json input",
     "eof",
 )
 _REPOSITORY_AUTHORIZATION_SUBSTRINGS = (

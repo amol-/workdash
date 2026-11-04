@@ -151,6 +151,7 @@ workdash list                # list server-backed dashboard items as plain text
 workdash list --refresh      # ask the server to refresh items before listing
 workdash list --json         # list items as machine-readable JSON
 workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
+workdash ready SCOPE [--json]   # list the GitHub work ready to be picked up next
 workdash analyze ITEM [--agent NAME] [--json]  # analyze an item
 workdash code ITEM [--agent NAME] [--json]  # launch a coding agent, or report the running one
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
@@ -275,8 +276,8 @@ If any listener cannot bind, the entire server startup fails.
 Allowed clients can execute dashboard actions; do not expose it to untrusted
 networks or treat the IP allowlist as authentication or encryption.
 
-Client commands `list`, `info`, `analyze`, `code`, `terminal`, `todo`, `read`,
-`write`, and `close` accept `--host HOST` (default `127.0.0.1`). Listener and
+Client commands `list`, `info`, `ready`, `analyze`, `code`, `terminal`, `todo`,
+`read`, `write`, and `close` accept `--host HOST` (default `127.0.0.1`). Listener and
 client hosts may be IP addresses or DNS hostnames. Clients connect on port 8765
 without loading local GitHub, configuration, or Zellij state. Todo's `--target`
 still selects its repository, independently of the server host. `show-config`
@@ -302,6 +303,48 @@ Use `workdash list --refresh` to ask the server to refresh GitHub data before
 listing. Use `workdash list --json` to emit the same list as JSON records with
 item ID, type, kind, repository, number, title, URL, timestamps, and suggested
 status.
+
+## Ready command
+
+`workdash ready SCOPE [--json]` requires a running `workdash --server` session
+and lists the GitHub work that can be picked up next, read straight from GitHub
+rather than from the dashboard. It only reports: nothing is claimed or launched.
+
+`SCOPE` is one of:
+
+- `owner/repo`: every open issue and pull request of the repository, plus the
+  open pull requests closing its issues.
+- An issue (`owner/repo#42`, `owner/repo#ISSUE-42`, a targeted todo ID, or an
+  issue URL): its native sub-issues, recursively and across repositories, or the
+  issue itself when it never had sub-issues. Only pull requests closing one of
+  those issues count.
+- `todo`: the server's todo repository.
+- `any`: every repository selected by the server's `repositories`, plus the todo
+  repository.
+
+A pull request is ready when the server can push to its head branch and its
+current head needs work: `address_review` (a changes-requested review on the
+current head, or review bodies, unresolved threads, and comments that other
+humans posted after the last push), `fix_merge_conflicts` (GitHub reports a
+conflict with the current base branch), or `fix_ci` (a check or status on the
+current head failed). An issue is ready when it is open, never had sub-issues,
+has no open `blocked by` issue, and no open pull request closes it. Work a live
+Workdash code pane holds is left out, and so are pull requests that only wait
+for CI, review, or merge.
+
+Ready pull requests come first, then ready issues, each group oldest first:
+
+```
+TYPE  ID                           ACTION               title URL [REASONS] (issue ID)
+```
+
+Each ID is accepted as is by `code`, `analyze`, and `terminal`; a ready pull
+request names the issue it closes. `--json` adds the head SHA, base branch and
+its head SHA, mergeability, CI status (`passing`, `failing`, `pending`,
+`no_checks`, or `unknown`), failing checks, and feedback references. CI status
+comes from GitHub check metadata and the base branch's required checks only,
+never from repository files. If nothing is ready the output is
+`No ready work found.`.
 
 ## Info command
 

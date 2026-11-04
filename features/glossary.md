@@ -46,6 +46,13 @@ Canonical product vocabulary used by the feature files.
 - Workdash Zellij session: A Zellij session whose name starts with `workdash`, used by the system as the live terminal surface for orchestration commands and terminal-backed work actions.
 - Agent pane: A Zellij pane opened by the system for a terminal-hosted coding agent.
 - Claim: The exclusive right to run a coding agent in a worktree, held by the live agent pane working there. It is never stored: it ends when that pane exits or closes, which does not mean the work is finished.
+- Ready work: The GitHub work the server reports as actionable now for a scope: ready implementation pull requests first, then ready issues. Reporting it never claims or launches anything.
+- Leaf issue: An issue that never had native sub-issues, closed ones included. An issue with sub-issues is a container, never ready work itself.
+- Blocker: An issue another issue is natively `blocked by` on GitHub. Only an open blocker holds the blocked issue back.
+- Implementation pull request: An open pull request; the issues it closes through GitHub's native closing references are its linked issues.
+- Ready pull request: An implementation pull request whose current head needs new work (`address_review`, `fix_merge_conflicts`, or `fix_ci`), whose head branch the server can push to, and that no live agent pane works on.
+- CI status: The state of the checks on a pull request's current head, from GitHub metadata only: `passing`, `failing`, `pending`, `no_checks` (none reported and none required), or `unknown`.
+- Mergeability: Whether GitHub reports a pull request merges into its current base branch without conflicts: `mergeable`, `conflicting`, or `unknown` while GitHub has not computed it.
 - Terminal pane: A Zellij pane opened by the system for a plain terminal in a work item's worktree.
 - Configuration: The user settings stored at `~/.config/workdash/config.json`.
 - Configuration wizard: The interactive flow started by `--configure` that fills in any missing configuration fields, including the agents.

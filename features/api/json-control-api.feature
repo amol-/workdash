@@ -19,7 +19,7 @@ Feature: Local JSON control API
     - The API is intentionally unauthenticated plain HTTP for trusted LAN use only.
     - V0 exposes JSON APIs only, not an HTML browser UI.
     - API requests and responses use JSON objects.
-    - V0 capabilities are exposed as `POST /api/v0/list`, `POST /api/v0/info`, `POST /api/v0/analyze`, `POST /api/v0/code`, `POST /api/v0/terminal`, `POST /api/v0/todo`, `POST /api/v0/show-config`, `POST /api/v0/pane/content`, `POST /api/v0/pane/send`, and `POST /api/v0/pane/close`.
+    - V0 capabilities are exposed as `POST /api/v0/list`, `POST /api/v0/info`, `POST /api/v0/analyze`, `POST /api/v0/code`, `POST /api/v0/terminal`, `POST /api/v0/ready`, `POST /api/v0/todo`, `POST /api/v0/show-config`, `POST /api/v0/pane/content`, `POST /api/v0/pane/send`, and `POST /api/v0/pane/close`.
     - `POST /api/v0/todo` accepts an optional target as a GitHub `owner/repo` name or a git URL on any hosting service.
     - `POST /api/v0/todo` accepts optional body text as long details separate from the title, appended unchanged after the metadata block.
     - Successful API responses use `{ "ok": true, "result": ... }`.
@@ -29,6 +29,7 @@ Feature: Local JSON control API
     - A pull request outside the dashboard accepts any of its `PR`, `REVIEW`, or `CHECK` IDs and is reported with the ID its GitHub data implies.
     - Acting on a target outside the dashboard neither adds it to the dashboard list nor to the included items.
     - Target errors are distinct: a malformed target is `invalid_target` (400), an issue or pull request GitHub cannot find or the server cannot access is `unknown_item` (404), an issue reference naming a pull request or the reverse is `unsupported_item_type` (400), and a failing GitHub request is `github_error` (502).
+    - `POST /api/v0/ready` takes a required `scope` and returns the ready work as an ordered `items` list; a pull request ID or URL is not an issue scope and is `unsupported_item_type` (400).
     - Code responses include `status`: `launched` when the request started a coding agent, `already_running` when a live agent pane already works in the item's worktree.
     - Analyze and code requests without an agent use the first configured agent for that action, in configuration order.
     - A refresh request may arrive before the TUI event loop is running; it still succeeds and updates shared state, and the first TUI render uses that shared state.

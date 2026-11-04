@@ -37,6 +37,9 @@ from .steps import (
     common as _common,
 )
 from .steps import (
+    ready as _ready,
+)
+from .steps import (
     setup as _setup,
 )
 from .steps import (
@@ -74,6 +77,7 @@ for _step_module in (
     _show_config,
     _todo,
     _branchinfo,
+    _ready,
 ):
     for _name in dir(_step_module):
         if _name.startswith("pytestbdd_stepdef_") or _name in {
