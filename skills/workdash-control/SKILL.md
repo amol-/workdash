@@ -34,8 +34,15 @@ workdash info --json
 
 Copy IDs exactly:
 
-- Item IDs from `workdash list`: `owner/repo#ISSUE-123`, `owner/repo#PR-123`, `owner/repo#REVIEW-123`, `owner/repo#CHECK-123`.
+- Item IDs from `workdash list`: `owner/repo#ISSUE-123`, `owner/repo#PR-123`, `owner/repo#REVIEW-123`, `owner/repo#CHECK-123`, and `owner/repo#ISSUE-WT123` for a todo targeting `owner/repo`.
 - Pane IDs from `workdash info`: usually `terminal_N`.
+
+`workdash list` is only the dashboard view, capped and filtered. Item commands
+(`analyze`, `code`, `terminal`) also accept any issue or pull request the server
+can access on GitHub, even one `list` does not show: a Workdash item ID,
+`owner/repo#123` for an issue, or a GitHub issue or pull request URL. Using one
+does not add it to `list`. Use a PR ID or URL for a pull request: `owner/repo#123`
+naming a pull request fails with `unsupported_item_type`.
 
 ## Capture todos
 
@@ -89,9 +96,39 @@ workdash terminal ITEM --json
 
 `analyze` receives markdown content from the server as base64 (`content_type`,
 `file_name`, `file_content`), writes it to a secure temporary local file, and
-prints that path as `analysis_path`. `code` prints the new pane title and pane ID.
-`terminal` opens a plain terminal pane in the item's worktree and prints the
-pane title and pane ID.
+prints that path as `analysis_path`. `terminal` opens a plain terminal pane in the
+item's worktree and prints the pane title and pane ID.
+
+## Code is an exclusive claim
+
+Use `workdash code ITEM` when you already know the issue or pull request to
+work on, even if `workdash list` does not show it:
+
+```bash
+workdash code owner/repo#123 --agent pi --json
+workdash code owner/repo#ISSUE-WT123 --json
+workdash code https://github.com/owner/repo/pull/45 --agent pi --host dashboard.lan --json
+```
+
+At most one coding agent works in a worktree. The live Workdash `code_` pane
+launched for that worktree, by its title, is the claim: there is no `workdash claim` command and no claim
+file or database. Closing or exiting that pane releases the claim; it does not
+mean the work is finished. Plain `terminal_` panes never hold a claim.
+
+Check `status` in the result:
+
+- `launched`: this call started the agent. Its `pane_id` is yours to drive.
+- `already_running`: an agent was already working in that worktree, so nothing
+  was started and `pane_id` is that existing pane. Reuse it to read or follow
+  the work instead of starting another; it may belong to another orchestrator,
+  so do not take it over. `agent` is null because the running agent is unknown.
+
+`launch_unconfirmed` means a launch may have started an agent whose pane is not
+visible yet: check `workdash info` instead of retrying in a loop. `agent_exited`
+means the agent quit right after launch (e.g. a missing binary): read the pane it
+names, fix the cause, then retry. If Zellij cannot report its panes, `code`
+starts nothing and fails. VSCode Copilot is only offered by the TUI and holds no
+claim.
 
 ## Talk to panes
 
@@ -113,10 +150,11 @@ Human `read` output is just the pane text so it can be read directly.
 ## Typical orchestration loop
 
 1. `workdash show-config` to know usable agents.
-2. `workdash list` and choose one copy/paste item ID.
+2. `workdash list` and choose one copy/paste item ID, or use an item you already know.
 3. `workdash analyze ITEM --json` for context, then read `analysis_path` if needed.
 4. `workdash code ITEM --agent pi --json` to launch a worker.
-5. Copy `pane_id` from `code` or `workdash info --json`.
+5. Copy `pane_id` from `code` or `workdash info --json`. On `already_running`,
+   another agent already owns that item: follow its pane or pick other work.
 6. Poll with `workdash read PANE_ID --full`.
 7. Send concise instructions with `workdash write PANE_ID "..."`.
 8. Repeat `read`/`write` until the pane reports completion.

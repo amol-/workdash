@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,21 +13,17 @@ from pytest_bdd import given, parsers, then, when
 from textual.widgets import Static
 
 from workdash.analysis_cache import AnalysisCache
+from workdash.control import WorkdashSession, format_work_item_id
 from workdash.github import GithubHelper
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import CodeDialog
 
-from .common import make_valid_config, make_work_item, modal_screen_names
-
-
-async def _open_code_dialog(app, pilot) -> CodeDialog:
-    await pilot.press("c")
-    for _ in range(20):
-        await pilot.pause()
-        for screen in app.screen_stack:
-            if isinstance(screen, CodeDialog):
-                return screen
-    raise AssertionError("CodeDialog did not appear after pressing 'c'")
+from .common import (
+    install_zellij_agent_fakes,
+    make_valid_config,
+    make_work_item,
+    modal_screen_names,
+)
 
 
 @given("the next coding session launch will fail")
@@ -278,82 +275,19 @@ def _coding_dialog_open(scenario_state: dict[str, Any], work_items: list[WorkIte
 
 @given("the selected work item already has an open coding-agent pane")
 def _selected_item_has_open_pane(
-    scenario_state: dict[str, Any], work_items: list[WorkItem]
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
 ) -> None:
     if not work_items:
         work_items.append(make_work_item(number=42, title="Item with open pane"))
     scenario_state["selected_item"] = work_items[0]
-    scenario_state["active_agent_panes"] = [{"pane_id": "terminal_7"}]
-
-
-def run_active_pane_code_dialog_scenario(
-    scenario_state: dict[str, Any], work_items: list[WorkItem]
-) -> None:
-    """Drive the coding dialog for an item with an already open agent pane.
-
-    Captures the dialog's rendered lines right after it opens, proving the
-    focus option is offered, then presses "0" so a scenario that continues
-    with choosing to focus the pane can assert on the outcome from the same
-    drive (mirrors how ``run_code_dialog_scenario`` presses "1" once and lets
-    later Then steps inspect the result).
-    """
-
-    launch_calls: list[tuple[WorkItem, str]] = []
-    focus_calls: list[str] = []
-    captured: dict[str, Any] = {}
-
-    def launch_callback(item: WorkItem, tool: str = "codex") -> None:
-        launch_calls.append((item, tool))
-
-    def focus_callback(pane_id: str) -> None:
-        focus_calls.append(pane_id)
-
-    def list_agent_panes_callback(item: WorkItem) -> list[dict[str, object]]:
-        return scenario_state.get("active_agent_panes", [])
-
-    async def interactions(app, pilot) -> None:
-        dialog = await _open_code_dialog(app, pilot)
-        captured["dialog_lines"] = [static.render().plain for static in dialog.query(Static)]
-        await pilot.press("0")
-        status = ""
-        for _ in range(40):
-            await pilot.pause()
-            status = app.query_one("#status-footer", Static).render().plain
-            if focus_calls or "Failed to focus pane" in status:
-                break
-        captured["status"] = status
-
-    from .common import run_app
-
-    run_app(
-        work_items=list(work_items),
-        launch_callback=launch_callback,
-        focus_callback=focus_callback,
-        list_agent_panes_callback=list_agent_panes_callback,
-        interactions=interactions,
+    scenario_state.setdefault("panes", []).append(
+        {"id": 7, "title": "code_wt", "pane_cwd": str(tmp_path / "wt")}
     )
-    scenario_state["dialog_lines"] = captured["dialog_lines"]
-    scenario_state["launch_calls"] = launch_calls
-    scenario_state["focus_calls"] = focus_calls
-    scenario_state["coding_status"] = captured["status"]
 
 
-@when("the user chooses to focus the active agent pane")
-def _user_chooses_focus(scenario_state: dict[str, Any]) -> None:
-    # Already performed inside run_active_pane_code_dialog_scenario when the
-    # user pressed "c".
-    assert scenario_state["focus_calls"], "Expected the focus callback to have fired"
-
-
-@then("the dialog offers to focus the active agent pane")
-def _dialog_offers_focus(scenario_state: dict[str, Any]) -> None:
-    lines = scenario_state["dialog_lines"]
-    assert any("(0) Focus active agent" in line for line in lines), lines
-
-
-@then("the system focuses that pane")
-def _system_focuses_pane(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["focus_calls"] == ["terminal_7"]
+@given("another client starts a coding agent for that item while the coding dialog is open")
+def _another_client_starts_agent_while_dialog_open(scenario_state: dict[str, Any]) -> None:
+    scenario_state["agent_started_while_dialog_open"] = True
 
 
 def run_code_dialog_scenario(
@@ -362,25 +296,25 @@ def run_code_dialog_scenario(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Drive pressing 'c' in the TUI and then choosing the first configured agent.
+    """Drive pressing 'c' in the TUI and, when the dialog opens, choosing the first agent.
 
-    The ``launch_callback`` mirrors ``workdash.workdash._launch`` so the
-    production prompt builder runs end-to-end. External boundaries (``gh``
-    context collection, terminal/VSCode launchers) are patched so the test
-    stays in-process; the assembled prompt is recorded for the Then steps.
+    The TUI is wired to a real ``WorkdashSession`` exactly as ``workdash.workdash``
+    wires it, so the shared ``code()`` path decides, prepares, and launches. Only
+    the external boundaries (``gh`` context, worktree preparation, Zellij, VSCode)
+    are faked; the assembled prompt is recorded for the Then steps.
     """
 
+    import workdash.control as control_module
     import workdash.launcher as launcher_module
 
     worktree_calls: list[WorkItem] = []
     launch_calls: list[tuple[WorkItem, str]] = []
-    launched_prompts: list[str] = []
-    launched_tools: list[str] = []
+    focus_calls: list[str] = []
 
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir(parents=True, exist_ok=True)
 
-    def worktree_callback(item: WorkItem) -> str:
+    def ensure_worktree(_workdir: str, item: WorkItem) -> str:
         if scenario_state.get("worktree_fails"):
             raise RuntimeError("worktree failed")
         worktree_calls.append(item)
@@ -418,58 +352,52 @@ def run_code_dialog_scenario(
             return GithubHelper().fetch_launch_context(item)
 
     monkeypatch.setattr(launcher_module, "collect_launch_github_context", fake_collect)
+    monkeypatch.setattr(control_module, "ensure_worktree", ensure_worktree)
     monkeypatch.setattr(
-        launcher_module,
-        "launch_agent_context",
-        lambda repo_path, prompt, agent_command_tokens=None: (
-            launched_prompts.append(prompt),
-            launched_tools.append("codex-like"),
-        ),
+        control_module, "existing_worktree_path", lambda _workdir, _item: worktree_path
     )
+    monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
     monkeypatch.setattr(
-        launcher_module,
+        control_module,
         "launch_vscode_context",
-        lambda repo_path, prompt: (
-            launched_prompts.append(prompt),
-            launched_tools.append("vscode"),
+        lambda _repo_path, prompt: scenario_state.setdefault("agent_launches", []).append(
+            (str(worktree_path), prompt, ["vscode"], None)
         ),
     )
+    install_zellij_agent_fakes(scenario_state, monkeypatch)
+    config = make_valid_config(scenario_state.get("agents"))
+    session = WorkdashSession(
+        config=config,
+        backend=SimpleNamespace(analysis_cache=scenario_state.get("cache")),  # type: ignore[arg-type]
+        work_items=list(work_items),
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
 
-    cache: AnalysisCache | None = scenario_state.get("cache")
-
-    def launch_callback(item: WorkItem, tool: str = "codex") -> None:
+    def launch_callback(item: WorkItem, tool: str) -> dict[str, object]:
         launch_calls.append((item, tool))
-        if scenario_state.get("coding_launch_fails"):
-            raise RuntimeError("coding launch failed")
-        analysis_path = (
-            str(cache.build_analysis_path(item))
-            if cache is not None and item.analysis is not None
-            else None
-        )
-        prompt = launcher_module.prepare_launch_agent_prompt(
-            item,
-            str(worktree_path),
-            analysis_path=analysis_path,
-        )
-        if tool == "vscode":
-            launcher_module.launch_vscode_context(str(worktree_path), prompt)
-        else:
-            launcher_module.launch_agent_context(
-                str(worktree_path),
-                prompt,
-                agent_command_tokens=[tool],
-            )
+        return session.code(target=format_work_item_id(item), agent=tool, allow_vscode=True)
 
-    captured: dict[str, Any] = {}
+    captured: dict[str, Any] = {"dialog_lines": None}
 
     async def interactions(app, pilot) -> None:
-        dialog = await _open_code_dialog(app, pilot)
-        captured["dialog_lines"] = [static.render().plain for static in dialog.query(Static)]
-        await pilot.press("1")
+        await pilot.press("c")
+        for _ in range(20):
+            await pilot.pause()
+            dialog = next((s for s in app.screen_stack if isinstance(s, CodeDialog)), None)
+            if dialog is not None or focus_calls:
+                break
+        if dialog is not None:
+            captured["dialog_lines"] = [static.render().plain for static in dialog.query(Static)]
+            if scenario_state.get("agent_started_while_dialog_open"):
+                scenario_state["panes"].append(
+                    {"id": 9, "title": "code_wt", "pane_cwd": str(worktree_path)}
+                )
+            await pilot.press("1")
         for _ in range(40):
             await pilot.pause()
             status = app.query_one("#status-footer", Static).render().plain
-            if launch_calls or "Worktree setup failed" in status or "Launch failed" in status:
+            if any(word in status for word in ("Launched", "failed", "Focused")):
                 break
         captured["status"] = app.query_one("#status-footer", Static).render().plain
         captured["modal_screen_names"] = modal_screen_names(app)
@@ -478,16 +406,18 @@ def run_code_dialog_scenario(
 
     run_app(
         work_items=list(work_items),
-        worktree_callback=worktree_callback,
         launch_callback=launch_callback,
+        focus_callback=focus_calls.append,
+        list_agent_panes_callback=session.get_agent_panes_for_item,
         interactions=interactions,
-        config=make_valid_config(scenario_state.get("agents")),
+        config=config,
     )
+    launches = scenario_state.setdefault("agent_launches", [])
     scenario_state["dialog_lines"] = captured["dialog_lines"]
     scenario_state["worktree_calls"] = worktree_calls
     scenario_state["launch_calls"] = launch_calls
-    scenario_state["launched_prompts"] = launched_prompts
-    scenario_state["launched_tools"] = launched_tools
+    scenario_state["focus_calls"] = focus_calls
+    scenario_state["launched_prompts"] = [prompt for _path, prompt, *_ in launches]
     scenario_state["github_context"] = fake_github_context
     scenario_state["coding_status"] = captured["status"]
     scenario_state["modal_screen_names"] = captured["modal_screen_names"]
@@ -496,10 +426,45 @@ def run_code_dialog_scenario(
 @when("the user picks a supported coding agent from the dialog")
 def _picks_coding_agent(scenario_state: dict[str, Any]) -> None:
     # Already performed inside run_code_dialog_scenario when the user pressed 'c'.
-    if scenario_state.get("worktree_fails"):
-        assert "Worktree setup failed" in scenario_state["coding_status"]
-    else:
-        assert scenario_state["launch_calls"], "Expected the launch callback to have fired"
+    assert scenario_state["launch_calls"], "Expected the launch callback to have fired"
+
+
+@then("the system focuses that pane")
+def _system_focuses_pane(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["focus_calls"] == ["terminal_7"]
+
+
+@then("no dialog is shown")
+def _no_dialog_shown(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["dialog_lines"] is None
+
+
+@then("the dialog offers only coding agents and Cancel")
+def _dialog_offers_only_agents_and_cancel(scenario_state: dict[str, Any]) -> None:
+    options = [line for line in scenario_state["dialog_lines"] if line.startswith("(")]
+    assert options == [
+        "(1) claude",
+        "(2) codex",
+        "(3) pi",
+        "(4) VSCode Copilot",
+        "(Esc) Cancel",
+    ]
+
+
+@then("the system focuses the agent pane the other client started")
+def _system_focuses_other_clients_pane(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["focus_calls"] == ["terminal_9"]
+
+
+@then("no second coding session is launched")
+def _no_second_coding_session(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("agent_launches", []) == []
+
+
+@then("the TUI does not report that a session was launched")
+def _tui_does_not_report_launched(scenario_state: dict[str, Any]) -> None:
+    assert "Launched" not in scenario_state["coding_status"]
+    assert "Focused pane terminal_9" in scenario_state["coding_status"]
 
 
 @then(parsers.parse("the dialog offers `{first}`, `{second}`, and VSCode Copilot in that order"))
@@ -543,40 +508,8 @@ def _agent_preloaded_context(scenario_state: dict[str, Any]) -> None:
 
 
 @then("the TUI reports that the session was launched")
-def _tui_reports_session_launched(
-    scenario_state: dict[str, Any], work_items: list[WorkItem]
-) -> None:
-    # Rerun the flow just to observe the status footer directly — the
-    # previous helper discarded the app before we could inspect it.
-    worktree_calls: list[WorkItem] = []
-    launch_calls: list[tuple[WorkItem, str]] = []
-    captured: dict[str, Any] = {}
-
-    def worktree_callback(item: WorkItem) -> str:
-        worktree_calls.append(item)
-        return "/tmp/wt"
-
-    def launch_callback(item: WorkItem, tool: str = "codex") -> None:
-        launch_calls.append((item, tool))
-
-    async def interactions(app, pilot) -> None:
-        await _open_code_dialog(app, pilot)
-        await pilot.press("1")
-        for _ in range(40):
-            await pilot.pause()
-            if launch_calls:
-                break
-        captured["status"] = app.query_one("#status-footer", Static).render().plain
-
-    from .common import run_app
-
-    run_app(
-        work_items=list(work_items),
-        worktree_callback=worktree_callback,
-        launch_callback=launch_callback,
-        interactions=interactions,
-    )
-    assert "Launched" in captured["status"], captured
+def _tui_reports_session_launched(scenario_state: dict[str, Any]) -> None:
+    assert "Launched" in scenario_state["coding_status"], scenario_state["coding_status"]
 
 
 @when("the user launches a coding session with a supported coding agent")
@@ -613,7 +546,9 @@ def _reports_coding_launch_error_details(scenario_state: dict[str, Any]) -> None
 
 @then("no coding session is launched")
 def _no_coding_session(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["launch_calls"] == []
+    # Harnesses wired to the shared launch path record the agents it started;
+    # the others only record launch callbacks.
+    assert scenario_state.get("agent_launches", scenario_state["launch_calls"]) == []
 
 
 @then("no worktree is prepared")
