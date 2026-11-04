@@ -385,6 +385,68 @@ def test_pull_requests_beyond_one_query_are_evaluated_like_the_first(monkeypatch
             },
             [],
         ),
+        (
+            {
+                "threads": [
+                    thread(
+                        comment("reviewer", created=AFTER_PUSH),
+                        comment("testuser", created="2026-03-03T00:00:00Z"),
+                        comment("renovate[bot]", created="2026-03-04T00:00:00Z"),
+                    )
+                ]
+            },
+            [],
+        ),
+        (
+            {
+                "threads": [
+                    thread(
+                        comment("reviewer", created=AFTER_PUSH),
+                        comment("renovate[bot]", created="2026-03-03T00:00:00Z"),
+                    )
+                ]
+            },
+            ["review_thread"],
+        ),
+        # The server's GitHub identity answers feedback like the pull request author.
+        (
+            {"author": "contributor", "comments": [comment("testuser", created=AFTER_PUSH)]},
+            [],
+        ),
+        (
+            {
+                "author": "contributor",
+                "comments": [
+                    comment("reviewer", created=AFTER_PUSH),
+                    comment("testuser", created="2026-03-03T00:00:00Z"),
+                ],
+            },
+            [],
+        ),
+        (
+            {
+                "author": "contributor",
+                "threads": [
+                    thread(
+                        comment("reviewer", created=AFTER_PUSH),
+                        comment("testuser", created="2026-03-03T00:00:00Z"),
+                    )
+                ],
+            },
+            [],
+        ),
+        (
+            {
+                "author": "contributor",
+                "threads": [
+                    thread(
+                        comment("reviewer", created=AFTER_PUSH),
+                        comment("testuser", created="2026-03-03T00:00:00Z") | {"publishedAt": None},
+                    )
+                ],
+            },
+            ["review_thread"],
+        ),
     ],
 )
 def test_only_new_human_feedback_from_others_is_actionable(monkeypatch, fields, kinds) -> None:

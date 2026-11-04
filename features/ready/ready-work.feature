@@ -20,9 +20,9 @@ Feature: Ready work
     - A ready pull request lists every reason, ordered `address_review`, `fix_merge_conflicts`, `fix_ci`; the first one is its `action`. A ready issue has action `implement`.
     - Actionable review feedback is any of these on the current head:
         - a changes-requested verdict a reviewer gave on the current head commit and has not superseded;
-        - a review body, an unresolved and not outdated review thread, or a pull request comment that a human other than the pull request author posted after the current head was pushed.
-    - Settled feedback is not actionable: a review thread is settled by a later reply of the pull request author in it, a pull request comment by a later author comment in the conversation, and a review body or pull request comment by a later approval of the current head from the same person.
-    - Bot comments, the author's own comments, hidden comments, dismissed reviews, resolved or outdated threads, and feedback older than the current head are never actionable.
+        - a review body, an unresolved and not outdated review thread, or a pull request comment that a human other than the pull request author and the server's GitHub identity posted after the current head was pushed. A thread is judged by its latest comment that is not from a bot.
+    - Settled feedback is not actionable: a review thread is settled by a later reply in it from the pull request author or the server's GitHub identity, a pull request comment by a later comment of either of them in the conversation, and a review body or pull request comment by a later approval of the current head from the same person.
+    - Bot comments, comments of the pull request author or the server's GitHub identity, hidden comments, dismissed reviews, resolved or outdated threads, and feedback older than the current head are never actionable.
     - The CI status of the current head comes from GitHub metadata only: its checks and statuses, and the required checks of the base branch rulesets and branch protection. Repository files are never inspected.
         - `failing`: a check or status on the current head failed, was cancelled, timed out, or needs action.
         - `pending`: nothing failed and something is queued or running.

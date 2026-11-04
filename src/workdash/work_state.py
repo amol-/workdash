@@ -70,8 +70,9 @@ _PULL_REQUEST_FRAGMENT = (
     "latestOpinionatedReviews(first: 100) { nodes { state url submittedAt isMinimized "
     f"commit {{ oid }} {_ACTOR} }} }} "
     f"reviews(last: 100) {{ nodes {{ state body url submittedAt isMinimized {_ACTOR} }} }} "
+    # A thread is judged by its latest human comment, which bots may have replied to.
     "reviewThreads(last: 100) { nodes { isResolved isOutdated "
-    f"comments(last: 1) {{ nodes {{ url publishedAt isMinimized {_ACTOR} }} }} }} }} "
+    f"comments(last: 10) {{ nodes {{ url publishedAt isMinimized {_ACTOR} }} }} }} }} "
     f"comments(last: 100) {{ nodes {{ url createdAt isMinimized {_ACTOR} }} }} }}"
 )
 
@@ -487,6 +488,7 @@ def _pull_request_state(
                 node,
                 head_sha,
                 author,
+                github_username,
                 parse_github_datetime(pushes[-1] if pushes else commit["committedDate"]),
             ),
         )
@@ -588,29 +590,36 @@ def _required_checks(repo: str, branch: str) -> frozenset[str] | None:
 
 
 def _actionable_feedback(
-    node: dict, head_sha: str, author: str | None, pushed_at: datetime
+    node: dict, head_sha: str, author: str | None, github_username: str, pushed_at: datetime
 ) -> tuple[ReviewFeedback, ...]:
     """Collect the human feedback the current head has not addressed yet.
 
     That is a changes-requested verdict on the current head, and review bodies,
     unresolved current threads, and comments posted after the head was pushed,
-    from anyone but bots and the pull request author. Minimized entries, review
-    bodies and comments their author approved the current head after, and
-    comments the pull request author replied to are left out.
+    from anyone but bots, the pull request author, and the server's GitHub
+    identity. Minimized entries, review bodies and comments their author
+    approved the current head after, comments the author or the server identity
+    replied to later, and threads whose latest human comment is theirs are left out.
+
+    :param str github_username: The server's GitHub identity, answering feedback
+        like the pull request author.
     """
 
     feedback: dict[str, ReviewFeedback] = {}
+    own = {login.lower() for login in (author, github_username.strip()) if login}
+
+    def is_bot(entry: dict) -> bool:
+        actor = entry["author"] or {}
+        return actor.get("__typename") == "Bot" or (actor.get("login") or "").endswith("[bot]")
 
     def add(kind: str, entry: dict, posted_key: str, *, after: datetime | None = pushed_at) -> None:
-        actor = entry["author"] or {}
-        login = actor.get("login") or ""
+        login = (entry["author"] or {}).get("login") or ""
         if (
             not login
             or not entry[posted_key]  # A draft nobody else can see yet.
             or entry["isMinimized"]
-            or actor["__typename"] == "Bot"
-            or login.endswith("[bot]")
-            or login.lower() == (author or "").lower()
+            or is_bot(entry)
+            or login.lower() in own
         ):
             return
         created_at = parse_github_datetime(entry[posted_key])
@@ -637,15 +646,22 @@ def _actionable_feedback(
         if review["state"] in {"COMMENTED", "CHANGES_REQUESTED"} and review["body"].strip():
             add("review", review, "submittedAt", after=approval_after_push(review))
     for thread in node["reviewThreads"]["nodes"]:
-        comments = thread["comments"]["nodes"]
-        if not thread["isResolved"] and not thread["isOutdated"] and comments:
-            add("review_thread", comments[-1], "publishedAt")
-    # The author's latest reply answers the conversation comments before it.
+        latest = next(
+            (
+                comment
+                for comment in reversed(thread["comments"]["nodes"])
+                if comment["publishedAt"] and not is_bot(comment)
+            ),
+            None,
+        )
+        if not thread["isResolved"] and not thread["isOutdated"] and latest:
+            add("review_thread", latest, "publishedAt")
+    # The latest own reply answers the conversation comments before it.
     replied_at = max(
         (
             parse_github_datetime(comment["createdAt"])
             for comment in node["comments"]["nodes"]
-            if author and ((comment["author"] or {}).get("login") or "").lower() == author.lower()
+            if ((comment["author"] or {}).get("login") or "").lower() in own
         ),
         default=pushed_at,
     )
