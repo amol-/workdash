@@ -44,6 +44,44 @@ can access on GitHub, even one `list` does not show: a Workdash item ID,
 does not add it to `list`. Use a PR ID or URL for a pull request: `owner/repo#123`
 naming a pull request fails with `unsupported_item_type`.
 
+## Find ready work
+
+`workdash ready SCOPE` answers "what can be worked on next?" straight from
+GitHub, independent of what `workdash list` shows. It is read-only advice: it
+claims nothing and launches nothing. Use it to pick the next target for
+`workdash code`; use `workdash list` for dashboard triage instead.
+
+```bash
+workdash ready owner/repo              # open issues and pull requests of one repository
+workdash ready owner/repo#42           # an issue and its whole sub-issue tree
+workdash ready todo                    # the server's todo repository
+workdash ready any                     # every configured repository plus the todo repository
+workdash ready any --json
+workdash ready owner/repo#ISSUE-42 --host dashboard.lan --json
+```
+
+`ready ISSUE` (`owner/repo#42`, `owner/repo#ISSUE-42`, a targeted todo ID, or an
+issue URL) previews every actionable native sub-issue descendant, recursively and
+across repositories, or the issue itself when it has no sub-issues. An issue
+with sub-issues is never listed itself. A pull request ID or URL is not a scope.
+
+Results come in priority order, so the first one is the next to pick:
+
+- Pull requests needing work come first. `action` is `address_review`,
+  `fix_merge_conflicts`, or `fix_ci`, and `reasons` lists every one of them. The
+  pull request is the target: `workdash code` its `id` to resume its existing
+  branch; `issue_id` names the issue it implements. `--json` adds `ci_status`,
+  `failing_checks`, `mergeability`, `pr_head_sha`, `base_ref`, `base_head_sha`,
+  and `feedback` references.
+- New leaf issues follow, with action `implement`.
+- Left out: blocked issues, issues with sub-issues or an open pull request, work
+  a live code pane already holds, and pull requests merely awaiting CI, review,
+  or merge.
+- `No ready work found.` (an empty `items` list) means nothing is ready, not a failure.
+
+Only the server looks at GitHub and Zellij, so `ready` needs it running like
+every other command; never start a server just to run `ready`.
+
 ## Capture todos
 
 ```bash
@@ -150,7 +188,8 @@ Human `read` output is just the pane text so it can be read directly.
 ## Typical orchestration loop
 
 1. `workdash show-config` to know usable agents.
-2. `workdash list` and choose one copy/paste item ID, or use an item you already know.
+2. `workdash ready SCOPE` (or `workdash list`) and choose one copy/paste item ID,
+   or use an item you already know.
 3. `workdash analyze ITEM --json` for context, then read `analysis_path` if needed.
 4. `workdash code ITEM --agent pi --json` to launch a worker.
 5. Copy `pane_id` from `code` or `workdash info --json`. On `already_running`,
