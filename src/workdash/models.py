@@ -24,6 +24,10 @@ class WorkItemKind(StrEnum):
     TRACKED_ISSUE = "tracked_issue"
 
 
+# Items a coding session reviews instead of implementing.
+REVIEW_KINDS = {WorkItemKind.REVIEW_REQUESTED_PR, WorkItemKind.TRACKED_PR}
+
+
 @dataclass(slots=True)
 class WorkItem:
     """Normalized dashboard row model."""

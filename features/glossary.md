@@ -46,6 +46,7 @@ Canonical product vocabulary used by the feature files.
 - Workdash Zellij session: A Zellij session whose name starts with `workdash`, used by the system as the live terminal surface for orchestration commands and terminal-backed work actions.
 - Agent pane: A Zellij pane opened by the system for a terminal-hosted coding agent.
 - Claim: The exclusive right to run a coding agent in a worktree, held by the live agent pane working there. It is never stored: it ends when that pane exits or closes, which does not mean the work is finished.
+- Autostart: A coding request option that briefs a newly launched agent to work autonomously and publish a pull request instead of proposing a plan first. `workdash code` always autostarts; the TUI never does.
 - Ready work: The GitHub work the server reports as actionable now for a scope: ready implementation pull requests first, then ready issues. Reporting it never claims or launches anything.
 - Leaf issue: An issue that never had native sub-issues, closed ones included. An issue with sub-issues is a container, never ready work itself.
 - Blocker: An issue another issue is natively `blocked by` on GitHub. Only an open blocker holds the blocked issue back.

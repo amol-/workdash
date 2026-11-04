@@ -1,0 +1,1 @@
+The existing pull request {url} at head {head_sha} is {status}. It is not waiting for work from you: do not invent changes, make redundant commits, or create another pull request. Describe this state, and if the pull request is still open report its URL, head SHA and CI status ({ci_status}).

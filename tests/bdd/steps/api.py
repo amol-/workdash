@@ -338,6 +338,57 @@ def _client_requests_code(
     _call_api(scenario_state, work_items, tmp_path, "code", {"target": item_id, "agent": agent})
 
 
+@when(
+    parsers.parse(
+        "a client requests code with autostart `{value}` for `{item_id}` with agent `{agent}`"
+    )
+)
+def _client_requests_code_with_autostart(
+    value: str,
+    item_id: str,
+    agent: str,
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_code_fakes(scenario_state, monkeypatch)
+    _call_api(
+        scenario_state,
+        work_items,
+        tmp_path,
+        "code",
+        {"target": item_id, "agent": agent, "autostart": json.loads(value)},
+    )
+
+
+@then("the response reports status `already_running`")
+def _response_reports_already_running(scenario_state: dict[str, Any]) -> None:
+    assert _api_result(scenario_state)["status"] == "already_running"
+
+
+@then(parsers.parse("the response is for `{item_id}`"))
+def _response_is_for(item_id: str, scenario_state: dict[str, Any]) -> None:
+    assert _api_result(scenario_state)["item_id"] == item_id
+
+
+@then(parsers.parse("the agent works in the checkout of pull request `{ref}`"))
+def _agent_works_in_pull_request_checkout(ref: str, scenario_state: dict[str, Any]) -> None:
+    [(_workdir, item)] = scenario_state["ensure_calls"]
+    assert (f"{item.repo}#{item.number}", item.item_type) == (ref, WorkItemType.PR)
+
+
+@then(parsers.parse("the agent works in the checkout of issue `{ref}`"))
+def _agent_works_in_issue_checkout(ref: str, scenario_state: dict[str, Any]) -> None:
+    [(_workdir, item)] = scenario_state["ensure_calls"]
+    assert (f"{item.repo}#{item.number}", item.item_type) == (ref, WorkItemType.ISSUE)
+
+
+@then("the agent is briefed with exactly the original prompt")
+def _agent_briefed_with_original_prompt(scenario_state: dict[str, Any]) -> None:
+    assert [launch[1] for launch in scenario_state["agent_launches"]] == ["PROMPT"]
+
+
 @when(parsers.parse("two clients request code for `{item_id}` at the same time"))
 def _two_clients_request_code(
     item_id: str,

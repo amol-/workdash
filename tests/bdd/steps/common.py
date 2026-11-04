@@ -549,6 +549,28 @@ def install_github_item_lookup(
             r"\{ nameWithOwner issueOrPullRequest\(number: (\d+)\)",
             command[-1],
         )
+        tree = re.search(
+            r'query ReadyIssueTree \{ repository\(owner: "([^"]+)", name: "([^"]+)"\) '
+            r"\{ issue\(number: (\d+)\)",
+            command[-1],
+        )
+        if tree is not None:
+            # An autostarted code request reads the work state of the issue it codes on.
+            issue = {
+                "number": int(tree[3]),
+                "title": "Fix the issue",
+                "url": f"https://github.com/{tree[1]}/{tree[2]}/issues/{tree[3]}",
+                "createdAt": "2020-01-01T00:00:00Z",
+                "updatedAt": "2020-01-02T00:00:00Z",
+                "state": "OPEN",
+                "body": "",
+                "repository": {"nameWithOwner": f"{tree[1]}/{tree[2]}"},
+                "subIssuesSummary": {"total": 0},
+                "issueDependenciesSummary": {"blockedBy": 0},
+                "closedByPullRequestsReferences": {"nodes": []},
+            }
+            payload = {"data": {"repository": {"issue": issue}}}
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
         if match is None:
             raise AssertionError(f"Unexpected GitHub query: {command}")
         repo, number = f"{match[1]}/{match[2]}", int(match[3])

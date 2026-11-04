@@ -1,6 +1,7 @@
 import base64
 import json
 import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
@@ -12,12 +13,22 @@ from webob import Request
 
 import workdash.control as control_module
 from gh_todo_fake import fake_gh_todo_run
-from gh_work_state_fake import HEAD_SHA, check_run, failure, install_fake_github, todo_body
+from gh_work_state_fake import (
+    AFTER_PUSH,
+    HEAD_SHA,
+    check_run,
+    comment,
+    failure,
+    install_fake_github,
+    todo_body,
+)
 from workdash.backend import IncludeResult
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashControlError, WorkdashSession, format_work_item_id
 from workdash.github_client import GitHubClient
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
+from workdash.work_instruction import render_work_instruction
+from workdash.work_state import evaluate_pull_requests
 
 
 def _work_item(
@@ -749,6 +760,308 @@ def test_ready_leaves_out_work_whose_agent_launch_is_still_unconfirmed(
         session.code(target="owner/repo#ISSUE-1", agent="pi")
 
     assert [item["id"] for item in session.ready(scope="owner/repo")["items"]] == listed
+
+
+def _launched_prompt(launch_agent: MagicMock) -> str:
+    return launch_agent.call_args.args[1]
+
+
+def _authored_session(monkeypatch, tmp_path, panes=None):
+    """A coding session whose user authored the pull requests of the fake GitHub."""
+
+    session, worktree, ensure, launch_agent = _coding_session(
+        monkeypatch, tmp_path, [] if panes is None else panes
+    )
+    session.config = replace(session.config, github_username="testuser")
+    prepare = MagicMock(return_value="PROMPT")
+    monkeypatch.setattr(control_module, "prepare_launch_agent_prompt", prepare)
+    return session, worktree, ensure, launch_agent, prepare
+
+
+def test_code_without_autostart_launches_the_unchanged_briefing(monkeypatch, tmp_path) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    session, _worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
+
+    session.code(target="owner/repo#ISSUE-1", agent="pi")
+
+    assert _launched_prompt(launch_agent) == "PROMPT"
+    assert github.operations == []
+
+
+def test_code_with_autostart_adds_the_implementation_appendix_once(monkeypatch, tmp_path) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    session, _worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
+
+    result = session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+
+    prompt = _launched_prompt(launch_agent)
+    assert result["status"] == "launched"
+    assert prompt.startswith("PROMPT\n\nAUTOSTART: IMPLEMENT, PUBLISH AND VERIFY")
+    assert prompt.count("AUTOSTART:") == 1
+    assert prompt.endswith(render_work_instruction("implement", session.work_items[0]))
+    assert prompt.count("coordination workflows") == 1
+
+
+def test_code_on_a_live_agent_sends_nothing_and_reads_no_github_state_even_when_it_is_down(
+    monkeypatch, tmp_path
+) -> None:
+    github = install_fake_github(monkeypatch)
+    github.failures["ReadyIssueTree"] = failure("HTTP 502: Bad Gateway")
+    panes = [{"id": 5, "title": "code_owner_repo_1", "pane_cwd": str(tmp_path / "owner_repo_1")}]
+    session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
+
+    result = session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+
+    assert result == {
+        "status": "already_running",
+        "item_id": "owner/repo#ISSUE-1",
+        "session": "workdash-main",
+        "agent": None,
+        "cwd": str(worktree),
+        "pane_title": "code_owner_repo_1",
+        "pane_id": "terminal_5",
+    }
+    launch_agent.assert_not_called()
+    assert github.operations == []
+
+
+def test_autostart_appends_the_appendix_once_to_a_vscode_briefing(monkeypatch, tmp_path) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    session, worktree, _ensure, _launch_agent = _coding_session(monkeypatch, tmp_path, [])
+    launch_vscode = MagicMock()
+    monkeypatch.setattr(control_module, "launch_vscode_context", launch_vscode)
+
+    result = session.code(
+        target="owner/repo#ISSUE-1", agent="vscode", allow_vscode=True, autostart=True
+    )
+
+    [(path, prompt)] = [call.args for call in launch_vscode.call_args_list]
+    assert (result["status"], path) == ("launched", str(worktree))
+    assert prompt.startswith("PROMPT\n\nAUTOSTART: IMPLEMENT, PUBLISH AND VERIFY")
+    assert prompt.count("AUTOSTART:") == 1
+    assert prompt.endswith(render_work_instruction("implement", session.work_items[0]))
+
+
+def test_autostart_does_not_launch_where_the_redirected_pull_requests_agent_lives(
+    monkeypatch, tmp_path
+) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_pull_request("owner/repo#51", closes=("owner/repo#1",))
+    pull_request_worktree = tmp_path / "owner_repo_51"
+    pull_request_worktree.mkdir()
+    panes = [{"id": 6, "title": "code_owner_repo_51", "pane_cwd": str(pull_request_worktree)}]
+    session, _worktree, _ensure, launch_agent, _prepare = _authored_session(
+        monkeypatch, tmp_path, panes
+    )
+    monkeypatch.setattr(
+        control_module,
+        "existing_worktree_path",
+        lambda _wd, item: pull_request_worktree if item.number == 51 else None,
+    )
+
+    result = session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+
+    assert (result["status"], result["item_id"], result["pane_id"]) == (
+        "already_running",
+        "owner/repo#ISSUE-1",
+        "terminal_6",
+    )
+    launch_agent.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "pull_request",
+    [
+        {"checks": {HEAD_SHA: [check_run("tests", "FAILURE")]}},
+        {"mergeable": "CONFLICTING"},
+        {"comments": [comment("reviewer", created=AFTER_PUSH)]},
+    ],
+    ids=["failing_ci", "merge_conflicts", "review_feedback"],
+)
+def test_autostarting_an_issue_with_an_authored_pull_request_repairs_that_pull_request(
+    pull_request, monkeypatch, tmp_path
+) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_pull_request("owner/repo#51", closes=("owner/repo#1",), **pull_request)
+    session, _worktree, _ensure, launch_agent, prepare = _authored_session(monkeypatch, tmp_path)
+
+    result = session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+
+    [state] = evaluate_pull_requests(
+        [("owner/repo", 51)], github_username="testuser", todo_repository="testuser/todos"
+    )
+    prompt = _launched_prompt(launch_agent)
+    worked_on = prepare.call_args.args[0]
+    assert (worked_on.item_type, worked_on.number) == (WorkItemType.PR, 51)
+    # The result still names the target that was asked for.
+    assert result["item_id"] == "owner/repo#ISSUE-1"
+    assert prompt.startswith("PROMPT\n\nAUTOSTART: IMPLEMENT")
+    assert prompt.endswith(render_work_instruction(state.action, state))
+    # The configured-practices rule belongs to the appendix, so repairs get it too.
+    assert prompt.count("coordination workflows") == 1
+
+
+def test_autostarting_a_pull_request_waiting_for_others_orders_no_work(
+    monkeypatch, tmp_path
+) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#1",),
+        checks={HEAD_SHA: [check_run("tests", None, status="IN_PROGRESS")]},
+    )
+    session, _worktree, _ensure, launch_agent, _prepare = _authored_session(monkeypatch, tmp_path)
+
+    session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+
+    prompt = _launched_prompt(launch_agent)
+    assert "AUTOSTART" not in prompt
+    assert "still without a final CI result" in prompt
+
+
+def test_autostarting_an_issue_closed_by_somebody_elses_pull_request_still_implements_it(
+    monkeypatch, tmp_path
+) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_pull_request("owner/repo#51", closes=("owner/repo#1",), author="someone-else")
+    session, _worktree, _ensure, launch_agent, prepare = _authored_session(monkeypatch, tmp_path)
+
+    session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+
+    assert prepare.call_args.args[0] is session.work_items[0]
+    assert "AUTOSTART: IMPLEMENT" in _launched_prompt(launch_agent)
+    assert "Continue the assigned issue" in _launched_prompt(launch_agent)
+
+
+def test_autostart_prefers_the_users_own_pull_request_among_several(monkeypatch, tmp_path) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_pull_request("owner/repo#50", closes=("owner/repo#1",), author="someone-else")
+    github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#1",),
+        checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+    )
+    session, _worktree, _ensure, launch_agent, prepare = _authored_session(monkeypatch, tmp_path)
+
+    session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+
+    assert prepare.call_args.args[0].number == 51
+    assert "has failing checks: tests" in _launched_prompt(launch_agent)
+
+
+def test_autostart_never_redirects_a_targeted_todo(monkeypatch, tmp_path) -> None:
+    github = install_fake_github(monkeypatch)
+    session, _worktree, _ensure, launch_agent, prepare = _authored_session(monkeypatch, tmp_path)
+    todo = _work_item(number=7, title="Todo")
+    todo.repo = session.config.todo_repository
+    todo.todo_target = "owner/other"
+    session.work_items.append(todo)
+
+    session.code(target=format_work_item_id(todo), agent="pi", autostart=True)
+
+    assert prepare.call_args.args[0] is todo
+    assert "Continue the assigned issue" in _launched_prompt(launch_agent)
+    assert github.operations == []
+
+
+def test_autostarting_a_review_reads_no_github_state_and_stays_review_only(
+    monkeypatch, tmp_path
+) -> None:
+    github = install_fake_github(monkeypatch)
+    session, _worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
+    review = _work_item(number=2, title="Review", item_type=WorkItemType.PR)
+    session.work_items.append(review)
+
+    session.code(target="owner/repo#CHECK-2", agent="pi", autostart=True)
+
+    prompt = _launched_prompt(launch_agent)
+    assert prompt.startswith("PROMPT\n\nAUTOSTART: REVIEW")
+    assert "coordination workflows" not in prompt
+    assert github.operations == []
+
+
+def test_autostart_reports_a_failed_work_state_lookup_without_launching(
+    monkeypatch, tmp_path
+) -> None:
+    github = install_fake_github(monkeypatch)
+    github.failures["ReadyIssueTree"] = failure("HTTP 502: Bad Gateway")
+    session, _worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
+
+    with pytest.raises(WorkdashControlError) as raised:
+        session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+
+    assert (raised.value.code, raised.value.status) == ("github_error", HTTPStatus.BAD_GATEWAY)
+    launch_agent.assert_not_called()
+
+
+def test_autostart_reads_github_outside_the_session_lock(monkeypatch, tmp_path) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    session, _worktree, _ensure, _launch_agent = _coding_session(monkeypatch, tmp_path, [])
+    lock_held: list[bool] = []
+
+    def gh(*args, **kwargs):
+        lock_held.append(session._lock._is_owned())
+        return github.run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", gh)
+
+    session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+
+    assert lock_held
+    assert not any(lock_held)
+
+
+@pytest.mark.parametrize(
+    ("body", "autostart"),
+    [
+        ({}, False),
+        ({"autostart": None}, False),
+        ({"autostart": False}, False),
+        ({"autostart": True}, True),
+    ],
+)
+def test_code_api_forwards_a_boolean_autostart_and_defaults_it_to_false(body, autostart) -> None:
+    session = MagicMock()
+    session.code.return_value = {"status": "launched"}
+    request = Request.blank(
+        "/api/v0/code",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps({"target": "owner/repo#1", **body}).encode(),
+    )
+
+    response = request.get_response(control_module._make_turbogears_app(session))
+
+    assert response.status_int == 200
+    session.code.assert_called_once_with(target="owner/repo#1", agent=None, autostart=autostart)
+
+
+@pytest.mark.parametrize("value", ["false", "true", 1, 0, [], {}])
+def test_code_api_rejects_a_non_boolean_autostart(value) -> None:
+    session = MagicMock()
+    request = Request.blank(
+        "/api/v0/code",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps({"target": "owner/repo#1", "autostart": value}).encode(),
+    )
+
+    response = request.get_response(control_module._make_turbogears_app(session))
+
+    assert (response.status_int, json.loads(response.text)["error"]["code"]) == (
+        400,
+        "bad_request",
+    )
+    session.code.assert_not_called()
 
 
 def test_analyze_uses_the_cached_analysis_of_an_item_fetched_from_github(tmp_path) -> None:

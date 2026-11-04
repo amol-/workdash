@@ -28,6 +28,7 @@ Feature: Local JSON control API
     - An explicit target is any issue or pull request GitHub lets the server access, whether or not the dashboard lists it: older than the dashboard keeps, hidden because a pull request closes it, closed, or in an untracked repository.
     - A pull request outside the dashboard accepts any of its `PR`, `REVIEW`, or `CHECK` IDs and is reported with the ID its GitHub data implies.
     - Acting on a target outside the dashboard neither adds it to the dashboard list nor to the included items.
+    - `POST /api/v0/code` accepts an optional boolean `autostart`, false when omitted, that makes a newly launched coding agent work autonomously; any non-boolean value is rejected as a bad request without launching anything.
     - Target errors are distinct: a malformed target is `invalid_target` (400), an issue or pull request GitHub cannot find or the server cannot access is `unknown_item` (404), an issue reference naming a pull request or the reverse is `unsupported_item_type` (400), and a failing GitHub request is `github_error` (502).
     - `POST /api/v0/ready` takes a required `scope` and returns the ready work as an ordered `items` list; a pull request ID or URL is not an issue scope and is `unsupported_item_type` (400).
     - Code responses include `status`: `launched` when the request started a coding agent, `already_running` when a live agent pane already works in the item's worktree.
@@ -271,3 +272,18 @@ Feature: Local JSON control API
       | owner/repo#404      | no item        | unknown_item          | 404    |
       | owner/repo#5        | a pull request | unsupported_item_type | 400    |
       | owner/repo#ISSUE-77 | an outage      | github_error          | 502    |
+
+  @id:F-API-JSON-CONTROL-S029
+  Scenario: Code without autostart launches the unchanged interactive briefing
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current dashboard items include `owner/repo#ISSUE-1`
+    When a client requests code for `owner/repo#ISSUE-1` with agent `pi`
+    Then the agent is briefed with exactly the original prompt
+
+  @id:F-API-JSON-CONTROL-S030
+  Scenario: Autostart accepts only a boolean
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current dashboard items include `owner/repo#ISSUE-1`
+    When a client requests code with autostart `"false"` for `owner/repo#ISSUE-1` with agent `pi`
+    Then the API returns error `bad_request` with HTTP status 400
+    And no coding agent is launched
