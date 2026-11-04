@@ -1,10 +1,13 @@
 import base64
 import json
 import os
+import re
+import shlex
 import subprocess
 import tempfile
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -670,6 +673,7 @@ def test_main_server_backed_commands_are_pure_http_clients(
                 }
             if endpoint == "code":
                 return {
+                    "status": "launched",
                     "item_id": "owner/repo#ISSUE-1",
                     "session": "workdash",
                     "agent": "pi",
@@ -994,6 +998,7 @@ def test_main_code_human_output_formats_server_response(
             assert endpoint == "code"
             assert payload == {"target": "owner/repo#ISSUE-1", "agent": "pi"}
             return {
+                "status": "launched",
                 "item_id": "owner/repo#ISSUE-1",
                 "session": "workdash-main",
                 "agent": "pi",
@@ -1007,6 +1012,7 @@ def test_main_code_human_output_formats_server_response(
     assert workdash_module.main(["code", "owner/repo#ISSUE-1", "--agent", "pi"]) == 0
 
     output = capsys.readouterr().out
+    assert "Status: launched" in output
     assert "Item: owner/repo#ISSUE-1" in output
     assert "Agent: pi" in output
     assert "Session: workdash-main" in output
@@ -1414,8 +1420,11 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
         lambda *args, **kwargs: "PROMPT",
     )
 
+    panes: list[dict[str, object]] = []
+
     def fake_launch_agent_context(repo, prompt, agent_command_tokens=None, *, zellij_session=None):
         agent_calls.append((repo, prompt, agent_command_tokens, zellij_session))
+        panes.append({"id": 4, "title": "code_wt", "pane_cwd": repo})
         return SimpleNamespace(
             session=zellij_session,
             pane_id=None,
@@ -1424,19 +1433,22 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
         )
 
     monkeypatch.setattr(control_module, "launch_agent_context", fake_launch_agent_context)
+    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(panes))
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda _wd, _item: None)
     monkeypatch.setattr(
         control_module,
         "launch_vscode_context",
         lambda repo, prompt: vscode_calls.append((repo, prompt)),
     )
     monkeypatch.setenv("ZELLIJ", "0")
-    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
 
     assert workdash_module.main([]) == 0
 
-    captured_callback["launch"](item, tool)
+    result = captured_callback["launch"](item, tool)
 
-    assert agent_calls == [("/tmp/wt", "PROMPT", expected_tokens, None)]
+    assert agent_calls == [("/tmp/wt", "PROMPT", expected_tokens, "workdash-main")]
+    assert (result["status"], result["pane_id"]) == ("launched", "terminal_4")
     assert vscode_calls == []
 
 
@@ -1613,3 +1625,22 @@ def test_server_listener_flags_reach_the_zellij_dashboard(monkeypatch, tmp_path)
     assert error.value.code == 0
     assert captured["command"][-len(argv) :] == argv
     assert "--direct" in captured["command"]
+
+
+def test_workdash_control_skill_examples_are_valid_commands_and_explain_code_claims() -> None:
+    skill = (Path(__file__).parents[1] / "skills/workdash-control/SKILL.md").read_text()
+    examples = [
+        shlex.split(line, comments=True)[1:]
+        for block in re.findall(r"```bash\n(.*?)```", skill, re.DOTALL)
+        for line in block.splitlines()
+        if line.startswith("workdash ")
+    ]
+
+    assert {argv[0] for argv in examples} >= {"code", "list", "info", "read", "write", "close"}
+    for argv in examples:
+        workdash_module._parse_args(argv)
+    # The live code pane is the claim, so agents must learn to reuse it.
+    assert "already_running" in skill
+    assert "no `workdash claim` command" in skill
+    with pytest.raises(SystemExit):
+        workdash_module._parse_args(["claim", "owner/repo#1"])

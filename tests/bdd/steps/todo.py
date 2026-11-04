@@ -38,7 +38,16 @@ from workdash.todo import TODO_LABEL, todo_target_from_body
 from workdash.tui import TodoDialog
 
 from .api import _api_result, _call_api
-from .common import NOW_UTC, api_config, ensure_api_session, make_work_item, run_app
+from .common import (
+    NOW_UTC,
+    api_config,
+    ensure_api_session,
+    github_item_node,
+    install_github_item_lookup,
+    install_zellij_agent_fakes,
+    make_work_item,
+    run_app,
+)
 from .triage import type_column_label
 from .worktrees import _install_fake_git
 
@@ -550,22 +559,12 @@ def _user_launches_coding_session_for_item(
         },
     )
     monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
-
-    launches: list[tuple[str, str]] = []
-
-    def fake_launch(repo_path, prompt, agent_command_tokens=None, *, zellij_session=None):
-        launches.append((repo_path, prompt))
-        return SimpleNamespace(
-            session=zellij_session,
-            pane_id="terminal_23",
-            pane_title="code_todo",
-            cwd=repo_path,
-        )
-
-    monkeypatch.setattr(control_module, "launch_agent_context", fake_launch)
+    install_zellij_agent_fakes(scenario_state, monkeypatch)
 
     session.code(target=format_work_item_id(item), agent="codex")
-    scenario_state["todo_launches"] = launches
+    scenario_state["todo_launches"] = [
+        (repo_path, prompt) for repo_path, prompt, *_ in scenario_state["agent_launches"]
+    ]
 
 
 @then(parsers.parse("the item is shown for repository `{repo}`"))
@@ -1023,3 +1022,51 @@ def _agent_receives_todo_discussion(scenario_state):
     assert discussion["body"] in prompt
     assert discussion["comments"][0]["body"] in prompt
     assert "testuser/todos" in scenario_state["discussion_command"]
+
+
+@given(
+    parsers.parse(
+        "the dashboard does not list the todo issue number {number:d} with target `{target}`"
+    )
+)
+def _dashboard_does_not_list_targeted_todo(
+    number: int,
+    target: str,
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_api_session(scenario_state, work_items, tmp_path)
+    body = f'```json\n{{"workdash_todo_version": 1, "target": "{target}"}}\n```\n'
+    scenario_state.setdefault("github_items", {})[f"{TODO_REPOSITORY}#{number}"] = github_item_node(
+        WorkItemType.ISSUE, TODO_REPOSITORY, number, body=body
+    )
+    install_github_item_lookup(scenario_state, monkeypatch)
+
+
+@given(parsers.parse("the target repository `{repo}` has its own issue number {number:d}"))
+def _target_repository_has_own_issue(
+    repo: str, number: int, scenario_state: dict[str, Any]
+) -> None:
+    scenario_state["github_items"][f"{repo}#{number}"] = github_item_node(
+        WorkItemType.ISSUE, repo, number
+    )
+
+
+@then(
+    parsers.parse(
+        "that worktree is the `{target}` todo worktree of todo issue number {number:d} "
+        "in the todo repository"
+    )
+)
+def _worktree_is_target_todo_worktree(
+    target: str, number: int, scenario_state: dict[str, Any]
+) -> None:
+    [(workdir, item)] = scenario_state["ensure_calls"]
+    assert (item.repo, item.number, item.todo_target) == (TODO_REPOSITORY, number, target)
+    owner, _, name = target.partition("/")
+    assert scenario_state["terminal_launch_calls"] == [
+        (str(Path(workdir) / f"{owner}_{name}_todo_{number}"), "workdash-main")
+    ]
+    assert scenario_state["github_lookups"] == [f"{TODO_REPOSITORY}#{number}"]

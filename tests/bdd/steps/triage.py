@@ -1599,10 +1599,7 @@ def _user_presses_key(
     elif key == "c":
         from . import coding
 
-        if scenario_state.get("active_agent_panes") is not None:
-            coding.run_active_pane_code_dialog_scenario(scenario_state, work_items)
-        else:
-            coding.run_code_dialog_scenario(scenario_state, work_items, monkeypatch, tmp_path)
+        coding.run_code_dialog_scenario(scenario_state, work_items, monkeypatch, tmp_path)
     elif key == "t":
         from . import terminal as terminal_mod
 

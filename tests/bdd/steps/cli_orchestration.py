@@ -17,7 +17,7 @@ from workdash.config import AgentConfig, WorkdashConfig
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.repo_worktree import worktree_path
 
-from .common import NOW_UTC, make_work_item, set_session_items
+from .common import NOW_UTC, install_zellij_agent_fakes, make_work_item, set_session_items
 
 
 def _cli_config(
@@ -100,8 +100,12 @@ def _run_workdash(
             )
             return str(analysis_path)
 
+    github_run = subprocess.run
+
     def fake_run(*args, **kwargs):
         cmd = args[0]
+        if cmd[:3] == ["gh", "api", "graphql"] and scenario_state.get("github_lookup_installed"):
+            return github_run(*args, **kwargs)
         if cmd == ["git", "rev-parse", "--show-toplevel"]:
             cwd = Path(kwargs["cwd"]).resolve()
             if str(kwargs["cwd"]) in scenario_state.get("git_origins", {}):
@@ -120,7 +124,8 @@ def _run_workdash(
 
         class FakeControlClient:
             def __init__(self, host="127.0.0.1") -> None:
-                assert host == "127.0.0.1"
+                assert host == (argv[argv.index("--host") + 1] if "--host" in argv else "127.0.0.1")
+                scenario_state["client_host"] = host
 
             def request(
                 self, endpoint: str, payload: dict[str, object] | None = None
@@ -167,11 +172,7 @@ def _run_workdash(
                 raise AssertionError(f"Unexpected control endpoint: {endpoint}")
 
         monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
-        monkeypatch.setattr(
-            control_module,
-            "load_zellij_panes",
-            lambda _session: list(scenario_state.get("panes", [])),
-        )
+        install_zellij_agent_fakes(scenario_state, monkeypatch)
         monkeypatch.setattr(
             launcher_module,
             "load_zellij_panes",
@@ -188,21 +189,6 @@ def _run_workdash(
             control_module,
             "prepare_launch_agent_prompt",
             lambda *args, **kwargs: "PROMPT",
-        )
-        monkeypatch.setattr(
-            control_module,
-            "launch_agent_context",
-            lambda repo, prompt, agent_command_tokens=None, *, zellij_session=None: (
-                scenario_state.setdefault("launch_calls", []).append(
-                    (repo, prompt, agent_command_tokens, zellij_session)
-                )
-                or SimpleNamespace(
-                    session=zellij_session,
-                    pane_id="terminal_23",
-                    pane_title="code_owner_repo_1",
-                    cwd=repo,
-                )
-            ),
         )
         monkeypatch.setattr(
             control_module,
@@ -877,7 +863,7 @@ def _exits_non_zero(scenario_state: dict[str, Any]) -> None:
 
 @then("the system reports that the work item is unknown")
 def _reports_unknown_item(scenario_state: dict[str, Any]) -> None:
-    assert "No dashboard item matches" in scenario_state["stderr"]
+    assert "No accessible GitHub issue or pull request matches" in scenario_state["stderr"]
 
 
 @then("the system lists the candidate Workdash-owned sessions")
@@ -1014,7 +1000,7 @@ def _launches_code_with_selected_agent(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["exit_code"] == 0, scenario_state
     item = scenario_state["work_items"][0]
     assert scenario_state["ensure_calls"] == [(scenario_state["workdir"], item)]
-    assert scenario_state["launch_calls"] == [
+    assert scenario_state["agent_launches"] == [
         (
             str(Path(scenario_state["workdir"]) / "owner_repo_1"),
             "PROMPT",
@@ -1025,16 +1011,13 @@ def _launches_code_with_selected_agent(scenario_state: dict[str, Any]) -> None:
 
 
 @then(
-    "the system returns JSON with the item id, selected agent, selected session, cwd, pane title, "
-    "and pane id"
-)
-@then(
-    "the system returns JSON with the item ID, selected agent, selected session, cwd, pane title, "
-    "and pane ID"
+    "the system returns JSON with status `launched`, the item ID, selected agent, selected "
+    "session, cwd, pane title, and pane ID"
 )
 def _returns_code_json(scenario_state: dict[str, Any]) -> None:
     payload = json.loads(scenario_state["stdout"])
     assert payload == {
+        "status": "launched",
         "item_id": "owner/repo#ISSUE-1",
         "session": "workdash-main",
         "agent": "codex",
@@ -1249,10 +1232,47 @@ def _formats_server_response(scenario_state: dict[str, Any]) -> None:
 
 @then("the system reports that the work item is unknown")
 def _reports_unknown_work_item(scenario_state: dict[str, Any]) -> None:
-    assert "No dashboard item matches" in scenario_state["stderr"]
+    assert "No accessible GitHub issue or pull request matches" in scenario_state["stderr"]
     assert "owner/repo#ISSUE-99" in scenario_state["stderr"]
 
 
 @then(parsers.parse("the command connects to host `{host}`"))
 def _command_connects_to_host(host: str, scenario_state: dict[str, Any]) -> None:
     assert scenario_state["client_host"] == host
+
+
+@when("the user runs `workdash code owner/repo#99 --agent pi --host dashboard.lan --json`")
+def _run_remote_code_json(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(
+        ["code", "owner/repo#99", "--agent", "pi", "--host", "dashboard.lan", "--json"],
+        scenario_state,
+        monkeypatch,
+        capsys,
+    )
+
+
+@then(
+    parsers.parse(
+        "the system returns JSON with status `launched` for `{item_id}` and the new pane ID"
+    )
+)
+def _returns_launched_json(item_id: str, scenario_state: dict[str, Any]) -> None:
+    payload = json.loads(scenario_state["stdout"])
+    [launched_pane] = scenario_state["panes"]
+    assert (payload["status"], payload["item_id"], payload["pane_id"]) == (
+        "launched",
+        item_id,
+        f"terminal_{launched_pane['id']}",
+    )
+
+
+@then("the system prints status `already_running` and the running pane ID")
+def _prints_already_running(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state
+    assert "Status: already_running" in scenario_state["stdout"]
+    assert "Agent: -" in scenario_state["stdout"]
+    assert "Pane id: terminal_7" in scenario_state["stdout"]

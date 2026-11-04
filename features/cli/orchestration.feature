@@ -30,7 +30,9 @@ Feature: CLI orchestration commands
     - `workdash code` launches only configured coding agents reported by `workdash show-config`.
     - A configured agent that lacks the command for the requested action is reported as unable to do that action, not as unconfigured.
     - Without `--agent`, `workdash analyze` and `workdash code` use the first configured agent for that action, in configuration order.
-    - `workdash code` reports the created Zellij pane ID from live session state without persisting it.
+    - `workdash analyze`, `workdash code`, and `workdash terminal` accept any explicit target the JSON API accepts, including items `workdash list` does not show; the server resolves it.
+    - `workdash code` reports status `launched` with the created Zellij pane ID, or status `already_running` with the live agent pane already working in the item's worktree; pane IDs come from live session state and are never persisted.
+    - There is no claim command: the live agent pane started by `workdash code` is the claim.
     - `workdash terminal` opens a plain terminal in the item's worktree and reports the created Zellij pane ID.
     - `workdash terminal` does not accept an agent parameter.
     - `workdash code` does not expose non-terminal editors such as VSCode in V0.
@@ -127,7 +129,7 @@ Feature: CLI orchestration commands
     And the current Workdash items include an assigned issue without cached analysis
     When the user runs `workdash code owner/repo#ISSUE-1 --agent codex --json`
     Then the command requests code launch from the local Workdash server
-    And the system returns JSON with the item ID, selected agent, selected session, cwd, pane title, and pane ID
+    And the system returns JSON with status `launched`, the item ID, selected agent, selected session, cwd, pane title, and pane ID
 
   @id:F-CLI-ORCHESTRATION-S027
   Scenario: Terminal opens a plain terminal through the local Workdash server
@@ -142,15 +144,6 @@ Feature: CLI orchestration commands
     Given no server-backed Workdash session is running
     When the user runs `workdash terminal owner/repo#ISSUE-1`
     Then the command reports that `workdash --server` must be running
-    And the command exits with a non-zero status
-
-  @id:F-CLI-ORCHESTRATION-S029
-  Scenario: Terminal rejects an item outside the current dashboard state
-    Given a server-backed Workdash session has loaded dashboard items
-    And the current Workdash items do not include `owner/repo#ISSUE-99`
-    When the user runs `workdash terminal owner/repo#ISSUE-99 --json`
-    Then the command requests terminal launch from the local Workdash server
-    And the system reports that the work item is unknown
     And the command exits with a non-zero status
 
   @id:F-CLI-ORCHESTRATION-S014
@@ -179,15 +172,6 @@ Feature: CLI orchestration commands
     When the user runs `workdash info`
     Then the command still sends the request to the local Workdash server
     And the command formats the server response
-
-  @id:F-CLI-ORCHESTRATION-S018
-  Scenario: Analyze rejects an item outside the current dashboard state
-    Given a server-backed Workdash session has loaded dashboard items
-    And the current Workdash items do not include `owner/repo#ISSUE-99`
-    When the user runs `workdash analyze owner/repo#ISSUE-99 --agent codex --json`
-    Then the command requests analysis from the local Workdash server
-    And the system reports that the work item is unknown
-    And the command exits with a non-zero status
 
   @id:F-CLI-ORCHESTRATION-S019
   Scenario: Read shows pane text through the local Workdash server
@@ -304,3 +288,32 @@ Feature: CLI orchestration commands
       | action  | agent | error                                                 |
       | analyze | pi    | Agent 'pi' cannot analyze: it has no analyze command. |
       | code    | aider | Agent 'aider' cannot code: it has no launch command.  |
+
+  @id:F-CLI-ORCHESTRATION-S037
+  Scenario: A remote client codes on an issue outside the dashboard
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current Workdash items do not include `owner/repo#ISSUE-99`
+    And GitHub has the accessible issue `owner/repo#ISSUE-99`
+    And the client process cannot find GitHub CLI or Zellij on PATH
+    When the user runs `workdash code owner/repo#99 --agent pi --host dashboard.lan --json`
+    Then the command connects to host `dashboard.lan`
+    And the system returns JSON with status `launched` for `owner/repo#ISSUE-99` and the new pane ID
+
+  @id:F-CLI-ORCHESTRATION-S038
+  Scenario: Code reports an already running agent instead of starting another
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current dashboard items include `owner/repo#ISSUE-1`
+    And the worktree of `owner/repo#ISSUE-1` already exists
+    And an agent pane is running in that worktree
+    When the user runs `workdash code owner/repo#ISSUE-1 --agent pi`
+    Then the system prints status `already_running` and the running pane ID
+    And no coding agent is launched
+
+  @id:F-CLI-ORCHESTRATION-S039
+  Scenario: Item commands report a target GitHub cannot find
+    Given a server-backed Workdash session has loaded dashboard items
+    And GitHub answers item lookups with no item
+    When the user runs `workdash terminal owner/repo#ISSUE-99 --json`
+    Then the command requests terminal launch from the local Workdash server
+    And the system reports that the work item is unknown
+    And the command exits with a non-zero status

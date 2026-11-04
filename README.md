@@ -151,8 +151,8 @@ workdash list                # list server-backed dashboard items as plain text
 workdash list --refresh      # ask the server to refresh items before listing
 workdash list --json         # list items as machine-readable JSON
 workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
-workdash analyze ITEM [--agent NAME] [--json]  # analyze a current server item
-workdash code ITEM [--agent NAME] [--json]  # launch a coding agent
+workdash analyze ITEM [--agent NAME] [--json]  # analyze an item
+workdash code ITEM [--agent NAME] [--json]  # launch a coding agent, or report the running one
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
 workdash todo TEXT [--target REPOSITORY] [--body BODY] [--json]  # capture a todo
 workdash read PANE_ID [--full] [--json]  # read text from a live pane
@@ -199,7 +199,8 @@ The `repositories` list in `config.json` accepts:
 - `c` — launch a coding session on the selected item. Opens a dialog to pick
   one of your configured coding agents or VSCode Copilot. `workdash` prepares a
   dedicated git worktree for the item and starts the chosen tool in it, preloaded
-  with context about the issue or PR.
+  with context about the issue or PR. If an agent is already running in the
+  item's worktree, `c` focuses its pane instead of opening the dialog.
 - `t` — open a terminal in the selected item's worktree (no agent launched).
 - `w` — capture a todo. Opens a dialog asking for the todo text and an
   optional target repository.
@@ -315,9 +316,12 @@ Workdash session as `kind=unknown` with unknown item mapping.
 ## Analyze command
 
 `workdash analyze ITEM [--agent NAME] [--json]` requires a running
-`workdash --server` session and analyzes a current server-known Workdash item.
-`ITEM` can be a row ID from `workdash list` (such as `owner/repo#ISSUE-123`) or a
-GitHub issue/PR URL that is already in the current dashboard data. It reuses a
+`workdash --server` session and analyzes a work item. `ITEM` can be a row ID from
+`workdash list` (such as `owner/repo#ISSUE-123`), `owner/repo#123` for an issue,
+or a GitHub issue/PR URL. The item does not need to be on the dashboard: the
+server looks up any issue or pull request it can access on GitHub, without adding
+it to `workdash list` or to the included items. `workdash terminal` accepts the
+same items. It reuses a
 fresh cached analysis when available, otherwise the server prepares the item's
 worktree and runs the selected configured analysis agent.
 
@@ -330,12 +334,24 @@ base64 content.
 ## Code command
 
 `workdash code ITEM [--agent NAME] [--json]` requires a running
-`workdash --server` session and launches a configured coding agent for a
-current server-known Workdash item.
-`ITEM` accepts the same row IDs and GitHub URLs as `workdash analyze`.
+`workdash --server` session and launches a configured coding agent for a work
+item. `ITEM` accepts the same items as `workdash analyze`.
 
-Human output reports the item, agent, selected session, cwd, pane title, and pane
-id when available. `--json` emits the same result as machine-readable JSON.
+At most one coding agent works in a worktree: its live `code_` Zellij pane is the
+claim, with no claim command or stored claim state. When an agent pane launched
+for the item's worktree is still live, including one started for another item
+sharing that worktree, wherever its cwd has moved, `code` starts nothing and reports `status` `already_running` with that
+pane. Otherwise it reports `launched` once the new pane is visible. If Zellij
+cannot list its panes, or a launched pane does not show up, `code` starts nothing
+and reports an error; a retry within a minute of an unconfirmed launch fails too.
+An agent that exits right after launch is reported as an error and does not block
+a retry.
+Terminal panes do not count. VSCode Copilot, offered only by the TUI, holds no
+claim and is not opened while an agent pane is live. In the TUI, `c` on an item
+with a live agent pane focuses that pane instead of opening the dialog.
+
+Human output reports the status, item, agent, selected session, cwd, pane title,
+and pane id when available. `--json` emits the same result as machine-readable JSON.
 
 ## Read and write commands
 

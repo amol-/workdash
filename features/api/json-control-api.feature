@@ -24,7 +24,12 @@ Feature: Local JSON control API
     - `POST /api/v0/todo` accepts optional body text as long details separate from the title, appended unchanged after the metadata block.
     - Successful API responses use `{ "ok": true, "result": ... }`.
     - Failed API responses use an appropriate HTTP error status and `{ "ok": false, "error": { "code": ..., "message": ... } }`.
-    - Work item actions accept Workdash item IDs exactly as emitted by `workdash list`.
+    - Work item actions take an explicit target: a Workdash item ID as emitted by `workdash list`, `owner/repo#<number>` for an issue, or a GitHub issue or pull request URL.
+    - An explicit target is any issue or pull request GitHub lets the server access, whether or not the dashboard lists it: older than the dashboard keeps, hidden because a pull request closes it, closed, or in an untracked repository.
+    - A pull request outside the dashboard accepts any of its `PR`, `REVIEW`, or `CHECK` IDs and is reported with the ID its GitHub data implies.
+    - Acting on a target outside the dashboard neither adds it to the dashboard list nor to the included items.
+    - Target errors are distinct: a malformed target is `invalid_target` (400), an issue or pull request GitHub cannot find or the server cannot access is `unknown_item` (404), an issue reference naming a pull request or the reverse is `unsupported_item_type` (400), and a failing GitHub request is `github_error` (502).
+    - Code responses include `status`: `launched` when the request started a coding agent, `already_running` when a live agent pane already works in the item's worktree.
     - Analyze and code requests without an agent use the first configured agent for that action, in configuration order.
     - A refresh request may arrive before the TUI event loop is running; it still succeeds and updates shared state, and the first TUI render uses that shared state.
     - Pane actions accept pane IDs exactly as emitted by `workdash info`.
@@ -81,7 +86,7 @@ Feature: Local JSON control API
     And each pane record includes the session, tab, pane ID, title, cwd, command, pane kind, state, and mapped Workdash item when known
 
   @id:F-API-JSON-CONTROL-S007
-  Scenario: Analyze API runs only for a known dashboard item
+  Scenario: Analyze API runs for a known dashboard item
     Given a server-backed Workdash session has loaded dashboard items
     And the current dashboard items include `owner/repo#ISSUE-1`
     When a client requests analysis for `owner/repo#ISSUE-1` with agent `codex`
@@ -97,22 +102,13 @@ Feature: Local JSON control API
     Then the server analyzes the known item with `pi`
     And the API returns `pi` as the selected agent
 
-  @id:F-API-JSON-CONTROL-S008
-  Scenario: Analyze API rejects an unknown item
-    Given a server-backed Workdash session has loaded dashboard items
-    And the current dashboard items do not include `owner/repo#ISSUE-99`
-    When a client requests analysis for `owner/repo#ISSUE-99` with agent `codex`
-    Then the API returns an error saying the work item is unknown
-    And the server does not fetch the item outside the current dashboard state
-    And the server does not prepare a worktree
-
   @id:F-API-JSON-CONTROL-S009
-  Scenario: Code API launches only for a known dashboard item
+  Scenario: Code API launches for a known dashboard item
     Given a server-backed Workdash session has loaded dashboard items
     And the current dashboard items include `owner/repo#ISSUE-1`
     When a client requests code for `owner/repo#ISSUE-1` with agent `pi`
     Then the server launches the selected configured agent for the known item
-    And the API returns the item ID, selected agent, selected session, cwd, pane title, and pane ID
+    And the API returns status `launched` with the item ID, selected agent, selected session, cwd, pane title, and pane ID
 
   @id:F-API-JSON-CONTROL-S018
   Scenario: Terminal API opens a terminal for a known dashboard item
@@ -121,14 +117,6 @@ Feature: Local JSON control API
     When a client requests terminal for `owner/repo#ISSUE-1`
     Then the server opens a plain terminal in the item's worktree
     And the API returns the item ID, session, cwd, pane title, and pane ID
-
-  @id:F-API-JSON-CONTROL-S019
-  Scenario: Terminal API rejects an unknown item
-    Given a server-backed Workdash session has loaded dashboard items
-    And the current dashboard items do not include `owner/repo#ISSUE-99`
-    When a client requests terminal for `owner/repo#ISSUE-99`
-    Then the API returns an error saying the work item is unknown
-    And the server does not prepare a worktree
 
   @id:F-API-JSON-CONTROL-S015
   Scenario Outline: Todo API captures a todo in the configured todo repository
@@ -229,3 +217,56 @@ Feature: Local JSON control API
     And the created issue keeps the short title and the complete body after its metadata
     And the new todo becomes part of the shared dashboard state
     And the API returns the Workdash item ID, todo repository, target, issue number, and issue URL
+
+  @id:F-API-JSON-CONTROL-S025
+  Scenario Outline: Work item actions run on an accessible item outside the dashboard
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current dashboard items do not include `<item_id>`
+    And GitHub has the accessible <kind> `<item_id>`
+    When a client requests <request>
+    Then the server runs <action> for `<item_id>` in its worktree
+    And the dashboard list and the included items are unchanged
+
+    Examples:
+      | action   | kind         | request                                                         | item_id             |
+      | analysis | issue        | analysis for `other/tool#7` with agent `codex`                  | other/tool#ISSUE-7  |
+      | code     | issue        | code for `owner/repo#ISSUE-99` with agent `pi`                  | owner/repo#ISSUE-99 |
+      | terminal | issue        | terminal for `https://github.com/owner/repo/issues/42`          | owner/repo#ISSUE-42 |
+      | code     | pull request | code for `owner/repo#REVIEW-5` with agent `pi`                  | owner/repo#CHECK-5  |
+      | code     | pull request | code for `https://github.com/owner/repo/pull/5` with agent `pi` | owner/repo#CHECK-5  |
+
+  @id:F-API-JSON-CONTROL-S026
+  Scenario: An issue hidden behind the pull request that closes it can still be targeted
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current dashboard items include a pull request that closes `owner/repo#42`
+    And GitHub has the accessible issue `owner/repo#ISSUE-42`
+    When a client requests terminal for `owner/repo#42`
+    Then the server runs terminal for `owner/repo#ISSUE-42` in its worktree
+
+  @id:F-API-JSON-CONTROL-S027
+  Scenario Outline: Every issue reference form names the same issue
+    Given a server-backed Workdash session has loaded dashboard items
+    And GitHub has the accessible issue `owner/repo#ISSUE-42`
+    When a client requests terminal for `<target>`
+    Then the server runs terminal for `owner/repo#ISSUE-42` in its worktree
+
+    Examples:
+      | target                                  |
+      | owner/repo#42                           |
+      | owner/repo#ISSUE-42                     |
+      | https://github.com/owner/repo/issues/42 |
+
+  @id:F-API-JSON-CONTROL-S028
+  Scenario Outline: Unusable targets are reported with distinct errors
+    Given a server-backed Workdash session has loaded dashboard items
+    And GitHub answers item lookups with <answer>
+    When a client requests terminal for `<target>`
+    Then the API returns error `<code>` with HTTP status <status>
+    And the server does not prepare a worktree
+
+    Examples:
+      | target              | answer         | code                  | status |
+      | owner/repo#banana   | an issue       | invalid_target        | 400    |
+      | owner/repo#404      | no item        | unknown_item          | 404    |
+      | owner/repo#5        | a pull request | unsupported_item_type | 400    |
+      | owner/repo#ISSUE-77 | an outage      | github_error          | 502    |

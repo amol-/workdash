@@ -3,6 +3,7 @@ import json
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -363,6 +364,289 @@ def test_session_without_agents_reports_no_agent_for_each_action() -> None:
             409,
             message,
         )
+
+
+def _coding_session(
+    monkeypatch, tmp_path, panes, *, zellij_session="workdash-main"
+) -> tuple[WorkdashSession, Path, MagicMock, MagicMock]:
+    """A session whose item worktree exists, with Zellij reporting ``panes``."""
+
+    worktree = tmp_path / "owner_repo_1"
+    worktree.mkdir(exist_ok=True)
+    ensure_worktree = MagicMock(return_value=str(worktree))
+    launch_agent = MagicMock(
+        side_effect=lambda repo, *_args, **_kwargs: (
+            panes.append({"id": 30, "title": "code_owner_repo_1", "pane_cwd": repo})
+            or SimpleNamespace(session=None, pane_id=None, pane_title="code_owner_repo_1", cwd=repo)
+        )
+    )
+    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(panes))
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda _wd, _item: worktree)
+    monkeypatch.setattr(control_module, "ensure_worktree", ensure_worktree)
+    monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
+    monkeypatch.setattr(control_module, "prepare_launch_agent_prompt", lambda *a, **k: "PROMPT")
+    monkeypatch.setattr(control_module, "launch_agent_context", launch_agent)
+    monkeypatch.setattr(control_module, "_LAUNCH_VISIBILITY_INTERVAL_SECONDS", 0)
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi")}, workdir=str(tmp_path)),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="Issue")],
+        suggestion_markers={},
+        zellij_session=zellij_session,
+    )
+    return session, worktree, ensure_worktree, launch_agent
+
+
+def test_code_reports_the_lowest_live_agent_pane_tied_to_the_worktree(
+    monkeypatch, tmp_path
+) -> None:
+    worktree = tmp_path / "owner_repo_1"
+    panes = [
+        # The agent changed directory, but its title still names the worktree.
+        {"id": 9, "title": "code_owner_repo_1", "pane_cwd": "/elsewhere"},
+        {"id": 4, "title": "code_owner_repo_1", "pane_cwd": str(worktree / "src")},
+        # An agent of another worktree that changed directory into this one.
+        {"id": 3, "title": "code_owner_repo_2", "pane_cwd": str(worktree)},
+        {"id": 1, "title": "code_owner_repo_1", "pane_cwd": str(worktree), "exited": True},
+        {"id": 2, "title": "terminal_owner_repo_1", "pane_cwd": str(worktree)},
+        {"id": 0, "title": "code_owner_repo_10", "pane_cwd": str(tmp_path / "owner_repo_10")},
+    ]
+    session, worktree, ensure_worktree, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
+
+    result = session.code(target="owner/repo#ISSUE-1", agent="pi")
+
+    assert result == {
+        "status": "already_running",
+        "item_id": "owner/repo#ISSUE-1",
+        "session": "workdash-main",
+        "agent": None,
+        "cwd": str(worktree / "src"),
+        "pane_title": "code_owner_repo_1",
+        "pane_id": "terminal_4",
+    }
+    ensure_worktree.assert_not_called()
+    launch_agent.assert_not_called()
+    # The loaded dashboard row is used as is, without a GitHub lookup.
+    session.backend.github_client.fetch_item.assert_not_called()
+    assert [
+        pane["pane_id"] for pane in session.get_agent_panes_for_item(session.work_items[0])
+    ] == [
+        "terminal_4",
+        "terminal_9",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("zellij_session", "panes", "code"),
+    [
+        (None, [], "zellij_session_required"),
+        ("workdash-main", [{"title": "code_owner_repo_1", "pane_cwd": "/x"}], "zellij_unavailable"),
+    ],
+)
+def test_code_starts_nothing_when_live_agent_panes_cannot_be_checked(
+    monkeypatch, tmp_path, zellij_session, panes, code
+) -> None:
+    session, _worktree, ensure_worktree, launch_agent = _coding_session(
+        monkeypatch, tmp_path, panes, zellij_session=zellij_session
+    )
+
+    with pytest.raises(control_module.WorkdashControlError) as error:
+        session.code(target="owner/repo#ISSUE-1", agent="pi")
+
+    assert error.value.code == code
+    ensure_worktree.assert_not_called()
+    launch_agent.assert_not_called()
+
+
+def test_vscode_is_not_opened_while_an_agent_pane_is_live(monkeypatch, tmp_path) -> None:
+    panes = [{"id": 5, "title": "code_owner_repo_1", "pane_cwd": str(tmp_path / "owner_repo_1")}]
+    session, _worktree, _ensure, _launch = _coding_session(monkeypatch, tmp_path, panes)
+    launch_vscode = MagicMock()
+    monkeypatch.setattr(control_module, "launch_vscode_context", launch_vscode)
+
+    result = session.code(target="owner/repo#ISSUE-1", agent="vscode", allow_vscode=True)
+
+    assert (result["status"], result["pane_id"]) == ("already_running", "terminal_5")
+    launch_vscode.assert_not_called()
+
+
+def test_vscode_opens_without_a_zellij_session(monkeypatch, tmp_path) -> None:
+    session, worktree, _ensure, _launch = _coding_session(
+        monkeypatch, tmp_path, [], zellij_session=None
+    )
+    launch_vscode = MagicMock()
+    monkeypatch.setattr(control_module, "launch_vscode_context", launch_vscode)
+
+    assert session.get_agent_panes_for_item(session.work_items[0]) == []
+    result = session.code(target="owner/repo#ISSUE-1", agent="vscode", allow_vscode=True)
+
+    assert result["status"] == "launched"
+    launch_vscode.assert_called_once_with(str(worktree), "PROMPT")
+
+
+def test_an_unconfirmed_launch_whose_pane_shows_up_later_is_reported_as_running(
+    monkeypatch, tmp_path
+) -> None:
+    panes: list[dict[str, object]] = []
+    session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
+    side_effect = launch_agent.side_effect
+    launch_agent.side_effect = None
+
+    with pytest.raises(control_module.WorkdashControlError) as error:
+        session.code(target="owner/repo#ISSUE-1", agent="pi")
+    assert error.value.code == "launch_unconfirmed"
+
+    panes.append({"id": 8, "title": "code_owner_repo_1", "pane_cwd": str(worktree)})
+    result = session.code(target="owner/repo#ISSUE-1", agent="pi")
+
+    assert (result["status"], result["pane_id"]) == ("already_running", "terminal_8")
+    assert launch_agent.call_count == 1
+
+    # The pane settled the earlier launch, so once it exits a new agent may start.
+    panes.clear()
+    launch_agent.side_effect = side_effect
+    result = session.code(target="owner/repo#ISSUE-1", agent="pi")
+
+    assert (result["status"], result["pane_id"]) == ("launched", "terminal_30")
+    assert launch_agent.call_count == 2
+
+
+def test_an_agent_that_exits_right_after_launch_fails_without_blocking_a_retry(
+    monkeypatch, tmp_path
+) -> None:
+    # An earlier agent pane for this worktree that exited long ago.
+    panes = [{"id": 1, "title": "code_owner_repo_1", "exited": True}]
+    session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
+    side_effect = launch_agent.side_effect
+    launch_agent.side_effect = lambda repo, *_args, **_kwargs: (
+        panes.append({"id": 8, "title": "code_owner_repo_1", "pane_cwd": repo, "is_held": True})
+        or SimpleNamespace(
+            session=None, pane_id="terminal_8", pane_title="code_owner_repo_1", cwd=repo
+        )
+    )
+
+    with pytest.raises(control_module.WorkdashControlError) as error:
+        session.code(target="owner/repo#ISSUE-1", agent="pi")
+    assert error.value.code == "agent_exited"
+    assert "terminal_8" in str(error.value)
+
+    launch_agent.side_effect = side_effect
+    result = session.code(target="owner/repo#ISSUE-1", agent="pi")
+
+    assert (result["status"], result["pane_id"]) == ("launched", "terminal_30")
+    assert launch_agent.call_count == 2
+
+
+def test_code_waits_for_a_launched_agent_pane_that_zellij_lists_late(monkeypatch, tmp_path) -> None:
+    session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
+    launch_agent.side_effect = None
+    late_pane = {"id": 8, "title": "code_owner_repo_1", "pane_cwd": str(worktree)}
+    # Listings: before launch, first check after launch, second check after launch.
+    monkeypatch.setattr(
+        control_module, "load_zellij_panes", MagicMock(side_effect=[[], [], [late_pane]])
+    )
+
+    result = session.code(target="owner/repo#ISSUE-1", agent="pi")
+
+    assert (result["status"], result["pane_id"]) == ("launched", "terminal_8")
+    launch_agent.assert_called_once()
+
+
+def test_an_expired_unconfirmed_launch_no_longer_blocks_the_worktree(monkeypatch, tmp_path) -> None:
+    panes: list[dict[str, object]] = []
+    session, _worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
+    side_effect = launch_agent.side_effect
+    launch_agent.side_effect = None
+    monkeypatch.setattr(control_module, "_UNCONFIRMED_LAUNCH_TTL_SECONDS", 0)
+    with pytest.raises(control_module.WorkdashControlError):
+        session.code(target="owner/repo#ISSUE-1", agent="pi")
+
+    launch_agent.side_effect = side_effect
+    result = session.code(target="owner/repo#ISSUE-1", agent="pi")
+
+    assert (result["status"], result["pane_id"]) == ("launched", "terminal_30")
+    assert launch_agent.call_count == 2
+
+
+def test_analyze_uses_the_cached_analysis_of_an_item_fetched_from_github(tmp_path) -> None:
+    analysis_path = tmp_path / "analysis.md"
+    analysis_path.write_text("# Cached\n")
+    item = _github_issue("other/tool", 7)
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = item
+    backend.analysis_cache.load_analysis.return_value = "# Cached\n"
+    backend.analyze_item.return_value = str(analysis_path)
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(analyze="pi")}),
+        backend=backend,
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+
+    result = session.analyze(target="other/tool#7")
+
+    assert (result["item_id"], result["cache_used"]) == ("other/tool#ISSUE-7", True)
+    # Only the cache is read; no analysis agent runs.
+    backend.analyze_item.assert_called_once_with(item, tool="cached")
+
+
+def _github_issue(repo: str, number: int, *, todo_target: str | None = None) -> WorkItem:
+    item = _work_item(number=number, title="From GitHub")
+    item.repo = repo
+    item.todo_target = todo_target
+    return item
+
+
+@pytest.mark.parametrize(
+    ("target", "github_item", "code", "message"),
+    [
+        (
+            "owner/repo#PR-WT5",
+            None,
+            "invalid_target",
+            "'owner/repo#PR-WT5' is not a Workdash item ID, an owner/repo#NUMBER issue, "
+            "or a GitHub issue or pull request URL.",
+        ),
+        (
+            "owner/repo#5",
+            _work_item(number=5, title="A PR", item_type=WorkItemType.PR),
+            "unsupported_item_type",
+            "owner/repo#5 is a pull request; use owner/repo#PR-5.",
+        ),
+        (
+            "owner/repo#CHECK-5",
+            _work_item(number=5, title="An issue"),
+            "unsupported_item_type",
+            "owner/repo#5 is an issue; use owner/repo#ISSUE-5.",
+        ),
+        (
+            # The todo issue exists, but it targets another repository.
+            "owner/repo#ISSUE-WT5",
+            _github_issue("testuser/todos", 5, todo_target="other/repo"),
+            "unknown_item",
+            "No accessible GitHub issue or pull request matches 'owner/repo#ISSUE-WT5'.",
+        ),
+    ],
+)
+def test_explicit_targets_are_checked_against_what_github_reports(
+    target, github_item, code, message
+) -> None:
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = github_item
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="testuser/todos"),
+        backend=backend,
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+
+    with pytest.raises(control_module.WorkdashControlError) as error:
+        session.terminal(target=target)
+
+    assert (error.value.code, str(error.value)) == (code, message)
+    assert session.work_items == []
 
 
 def test_api_rejects_non_localhost_remote_addr() -> None:

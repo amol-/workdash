@@ -15,6 +15,7 @@ Feature: Targeted todo work actions
     - A targeted todo's analysis combines the target repository's code with the title, body, and comments of the GitHub todo issue.
     - Free-form body text or JSON naming other repositories never overrides the metadata target, including after refresh.
     - Code, terminal, and analysis actions for a targeted todo item run in a worktree of the target repository.
+    - A targeted todo item ID works for code, terminal, and analysis actions even when the dashboard does not list the todo: the todo issue and its target are read from GitHub, never confused with the target repository's own issue of the same number.
     - A targeted todo item's worktree is checked out on a branch named "wt-<number>", created from the target repository's current default branch.
     - A targeted todo item keeps a worktree of its own, separate from the target repository's issue and pull request worktrees.
     - URL targets need no manual clone or worktree preparation; their clone and worktree names follow the same `owner_name` and `owner_name_todo_<number>` conventions as GitHub targets.
@@ -113,3 +114,11 @@ Feature: Targeted todo work actions
     Then the system reports that the local directory belongs to a different repository
     And no terminal is opened
     And the existing clone and its worktrees remain untouched
+
+  @id:F-TODO-TARGET-S010
+  Scenario: A targeted todo outside the dashboard resolves to the todo issue and its target
+    Given the dashboard does not list the todo issue number 42 with target `owner/repo`
+    And the target repository `owner/repo` has its own issue number 42
+    When a client requests terminal for `owner/repo#ISSUE-WT42`
+    Then the server runs terminal for `owner/repo#ISSUE-WT42` in its worktree
+    And that worktree is the `owner/repo` todo worktree of todo issue number 42 in the todo repository
