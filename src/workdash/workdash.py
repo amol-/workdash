@@ -32,7 +32,6 @@ from .control import (
 from .launcher import (
     exec_zellij_wrapped_workdash,
     inject_workdash_local_bin_into_path,
-    launch_terminal_context,
     list_workdash_sessions,
     open_in_browser,
     open_markdown,
@@ -354,9 +353,7 @@ class WorkdashCommands:
             ),
             analyze_choices=config.tui_analyze_choices(),
             code_choices=config.tui_code_choices(),
-            terminal_callback=lambda item: launch_terminal_context(
-                ensure_worktree(config.workdir, item)
-            ),
+            terminal_callback=lambda item: session.terminal(target=format_work_item_id(item)),
             include_callback=lambda url, _identities: session.include_item_by_url(url),
             todo_callback=lambda text, target: session.todo(text=text, target=target),
             focus_callback=session.focus_pane,

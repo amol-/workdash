@@ -284,8 +284,13 @@ def _reports_worktree_error_details(scenario_state: dict[str, Any]) -> None:
         or scenario_state.get("branchdiff_status")
     )
     assert status is not None, scenario_state
-    # The coding action prepares its worktree inside the shared launch path.
-    prefix = "Launch failed" if "coding_status" in scenario_state else "Worktree setup failed"
+    # Coding and terminal actions prepare their worktree inside the shared session path.
+    if "coding_status" in scenario_state:
+        prefix = "Launch failed"
+    elif "terminal_status" in scenario_state:
+        prefix = "Terminal failed"
+    else:
+        prefix = "Worktree setup failed"
     assert f"{prefix}: worktree failed" in status
 
 
