@@ -7,6 +7,7 @@ Canonical product vocabulary used by the feature files.
 - User: The developer using `workdash` to triage their GitHub work.
 - System: `workdash`, the text-based GitHub work triage dashboard.
 - Work item: An issue or pull request surfaced by the system for triage.
+- Explicit target: The work item a command or API request names directly, by Workdash item ID, by `owner/repo#<number>` for an issue, or by GitHub URL. The server resolves it from GitHub whether or not the dashboard lists it, and resolving it never changes the dashboard.
 - Workdash item ID: A copy/paste identifier for a work item, formatted as `<repo>#ISSUE-<number>`, `<repo>#PR-<number>`, `<repo>#REVIEW-<number>`, `<repo>#CHECK-<number>`, or `<target>#ISSUE-WT<number>` for a targeted todo item.
 - Item type: The category of a work item shown in the Type column and used in its Workdash item ID. One of `ISSUE`, `PR`, `REVIEW`, or `CHECK`. An assigned or tracked issue is an `ISSUE`, a pull request the user authored is a `PR`, a pull request the user must review or has already reviewed is a `REVIEW`, and any other pull request is a `CHECK`.
 - REVIEW item: A pull request where the user is directly requested as a reviewer, or has already reviewed.
@@ -44,6 +45,7 @@ Canonical product vocabulary used by the feature files.
 - Zellij session: A terminal multiplexer session used by the system to host terminal-backed work actions.
 - Workdash Zellij session: A Zellij session whose name starts with `workdash`, used by the system as the live terminal surface for orchestration commands and terminal-backed work actions.
 - Agent pane: A Zellij pane opened by the system for a terminal-hosted coding agent.
+- Claim: The exclusive right to run a coding agent in a worktree, held by the live agent pane working there. It is never stored: it ends when that pane exits or closes, which does not mean the work is finished.
 - Terminal pane: A Zellij pane opened by the system for a plain terminal in a work item's worktree.
 - Configuration: The user settings stored at `~/.config/workdash/config.json`.
 - Configuration wizard: The interactive flow started by `--configure` that fills in any missing configuration fields, including the agents.
