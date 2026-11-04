@@ -1047,44 +1047,6 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
     asyncio.run(run_smoke())
 
 
-def test_workdash_app_terminal_worktree_failure_skips_the_terminal() -> None:
-    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
-    work_item = WorkItem(
-        kind=WorkItemKind.TRACKED_PR,
-        item_type=WorkItemType.PR,
-        repo="owner/repo",
-        number=22,
-        title="Implement renderer",
-        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
-        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
-        url="https://example.com/pull/22",
-    )
-    terminal_calls: list[WorkItem] = []
-
-    def failing_worktree_callback(item: WorkItem) -> str:
-        raise RuntimeError("worktree failed")
-
-    app = WorkdashApp(
-        work_items=[work_item],
-        worktree_callback=failing_worktree_callback,
-        terminal_callback=terminal_calls.append,
-        now_utc=now_utc,
-    )
-
-    async def run_smoke() -> None:
-        async with app.run_test() as pilot:
-            footer = app.query_one("#status-footer", Static)
-
-            await pilot.press("t")
-            await _wait_for_footer(footer, "Worktree setup failed: worktree failed", pilot)
-            _assert_no_modal_screens(app)
-            assert terminal_calls == []
-
-            await pilot.press("q")
-
-    asyncio.run(run_smoke())
-
-
 def test_workdash_app_code_launches_nothing_when_live_agent_panes_cannot_be_checked() -> None:
     work_item = WorkItem(
         kind=WorkItemKind.TRACKED_PR,

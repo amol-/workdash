@@ -372,7 +372,7 @@ class WorkdashApp(App[None]):
         worktree_callback: Callable[[WorkItem], str] | None = None,
         analyze_choices: Sequence[WorkdashAgentChoice] | None = None,
         code_choices: Sequence[WorkdashAgentChoice] | None = None,
-        terminal_callback: Callable[[WorkItem], None] | None = None,
+        terminal_callback: Callable[[WorkItem], dict[str, object]] | None = None,
         include_callback: (
             Callable[[str, set[tuple[WorkItemType, str, int]]], IncludeResult] | None
         ) = None,
@@ -776,16 +776,6 @@ class WorkdashApp(App[None]):
         if selected_item is None or self._terminal_callback is None:
             self._update_status("Terminal launch skipped.")
             return
-        if self._worktree_callback is not None:
-            try:
-                await self._run_with_busy_screen(
-                    message=f"Preparing worktree for {selected_item.repo}#{selected_item.number}...",
-                    callback=lambda: self._worktree_callback(selected_item),
-                )
-            except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
-                self._update_status(f"Worktree setup failed: {error}")
-                self.notify(f"Worktree setup failed: {error}", severity="error", timeout=10)
-                return
         try:
             await self._run_with_busy_screen(
                 message="Opening terminal...",
