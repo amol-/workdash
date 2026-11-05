@@ -12,6 +12,8 @@ monolithic conftest.
 
 from __future__ import annotations
 
+import pytest
+
 from .steps import (
     analysis as _analysis,
 )
@@ -97,3 +99,18 @@ def pytest_bdd_apply_tag(tag, function):
     marker is applied.
     """
     return True
+
+
+@pytest.fixture
+def loopback_aliases():
+    import errno
+    import socket
+
+    for host in ("127.0.0.2", "127.0.0.3"):
+        with socket.socket() as probe:
+            try:
+                probe.bind((host, 0))
+            except OSError as error:
+                if error.errno != errno.EADDRNOTAVAIL:
+                    raise
+                pytest.skip(f"loopback alias {host} is not available")

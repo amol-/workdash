@@ -7,6 +7,7 @@ Feature: Startup preflight checks
   partial results.
 
   Rules:
+    - `workdash --version` writes the version to standard output and exits successfully without preflight checks.
     - Before checking for GitHub CLI, the system appends ~/.config/workdash/bin to PATH so a global GitHub CLI is preferred when present and a locally downloaded GitHub CLI is used as the fallback.
     - When the GitHub CLI is not available on PATH after that extension, the system exits with a non-zero status and reports that the GitHub CLI is required.
     - When the GitHub CLI is available but `gh auth status` fails, the system exits with a non-zero status and tells the user to authenticate with `gh auth login`.

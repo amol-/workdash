@@ -416,14 +416,19 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
     )
     hosts = ("127.0.0.1", "127.0.0.2", "127.0.0.3")
     server = control_module.WorkdashControlServer(
-        session, listeners=((hosts[1], (hosts[2],)), (hosts[2], (hosts[1],)))
+        session,
+        listeners=(
+            (hosts[0], ("127.0.0.5",)),
+            (hosts[1], (hosts[2],)),
+            (hosts[2], (hosts[1],)),
+        ),
     )
     server.start()
     httpds, threads = list(server._httpds), list(server._threads)
     try:
         # Both explicit sources can use every listener, including the default.
         for host in hosts:
-            for source in hosts[1:]:
+            for source in (*hosts[1:], "127.0.0.5"):
                 connection = HTTPConnection(host, port, timeout=2, source_address=(source, 0))
                 try:
                     connection.request(
@@ -468,11 +473,11 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
             replacement.bind((host, port))
 
 
-@pytest.mark.parametrize("failing_host", ["127.0.0.3", "localhost"])
-def test_listener_bind_failure_releases_all_earlier_sockets(monkeypatch, failing_host) -> None:
+def test_listener_bind_failure_releases_all_earlier_sockets(monkeypatch) -> None:
     import errno
     import socket
 
+    failing_host = "127.0.0.3"
     bound = []
     make_server = control_module.make_server
 
@@ -488,7 +493,11 @@ def test_listener_bind_failure_releases_all_earlier_sockets(monkeypatch, failing
         port = occupied.getsockname()[1]
         monkeypatch.setattr(control_module, "SERVER_PORT", port)
         server = control_module.WorkdashControlServer(
-            MagicMock(), listeners=(("127.0.0.2", ("192.0.2.1",)), (failing_host, ("192.0.2.2",)))
+            MagicMock(),
+            listeners=(
+                ("127.0.0.2", ("192.0.2.1",)),
+                (failing_host, ("192.0.2.2",)),
+            ),
         )
         with pytest.raises(RuntimeError, match=f"{failing_host}:{port}") as error:
             server.start()
@@ -502,22 +511,42 @@ def test_listener_bind_failure_releases_all_earlier_sockets(monkeypatch, failing
         server.stop()
 
 
-def test_resolved_wildcard_listener_is_rejected_and_closed(monkeypatch) -> None:
-    monkeypatch.setattr(control_module, "SERVER_PORT", 0)
-    bound = []
-    make_server = control_module.make_server
+def test_duplicate_extra_listener_fails_and_releases_sockets(monkeypatch) -> None:
+    import socket
 
-    def record_server(host, port, app):
-        httpd = make_server(host, port, app)
-        bound.append(httpd)
-        return httpd
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setattr(control_module, "SERVER_PORT", port)
+    server = control_module.WorkdashControlServer(
+        MagicMock(),
+        listeners=(("127.0.0.2", ("192.0.2.1",)), ("127.0.0.2", ("192.0.2.2",))),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="127.0.0.2"):
+            server.start()
+        for host in ("127.0.0.1", "127.0.0.2"):
+            with socket.socket() as replacement:
+                replacement.bind((host, port))
+    finally:
+        server.stop()
 
-    monkeypatch.setattr(control_module, "make_server", record_server)
-    server = control_module.WorkdashControlServer(MagicMock(), listeners=(("0", ("192.0.2.1",)),))
-    with pytest.raises(RuntimeError, match="Wildcard listener binds"):
+
+def test_wildcard_listener_is_rejected_and_closed(monkeypatch) -> None:
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setattr(control_module, "SERVER_PORT", port)
+    server = control_module.WorkdashControlServer(
+        MagicMock(), listeners=(("0.0.0.0", ("192.0.2.1",)),)
+    )
+    with pytest.raises(RuntimeError, match="Cannot bind Workdash server"):
         server.start()
-    assert len(bound) == 2
-    assert all(httpd.socket.fileno() == -1 for httpd in bound)
+    with socket.socket() as replacement:
+        replacement.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        replacement.bind(("127.0.0.1", port))
 
 
 @pytest.mark.parametrize("body", [b"not json", b'{"ok":false}', b'{"ok":true,"result":[]}'])
@@ -563,3 +592,158 @@ def test_client_names_selected_host_when_unreachable(monkeypatch) -> None:
     assert error.value.status == 503
     assert error.value.code == "server_unreachable"
     assert error.value.__cause__ is failure
+
+
+def test_environment_selects_real_server_and_cli(monkeypatch, capsys):
+    import socket
+
+    import workdash.workdash as cli
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    host = "127.0.0.1"
+    monkeypatch.setenv("WORKDASH_HOST", f"{host}:{port}")
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="Isolated")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    server = control_module.WorkdashControlServer(session, listeners=((host, ("127.0.0.2",)),))
+    server.start()
+    try:
+        assert cli.main(["list", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["items"][0]["title"] == "Isolated"
+        assert control_module.show_config_payload(WorkdashConfig())["server"] == {
+            "host": host,
+            "port": port,
+        }
+    finally:
+        server.stop()
+
+
+def test_two_control_servers_route_cli_by_address(monkeypatch, capsys):
+    import socket
+
+    import workdash.workdash as cli
+
+    ports = []
+    servers = []
+    try:
+        for number in (1, 2):
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+            assert port not in ports
+            ports.append(port)
+            monkeypatch.setenv("WORKDASH_HOST", f"127.0.0.1:{port}")
+            session = WorkdashSession(
+                config=WorkdashConfig(),
+                backend=MagicMock(),
+                work_items=[_work_item(number=number, title=f"Server {number}")],
+                suggestion_markers={},
+                zellij_session=None,
+            )
+            server = control_module.WorkdashControlServer(session)
+            server.start()
+            servers.append(server)
+        assert cli.main(["list", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["items"][0]["title"] == "Server 2"
+        assert cli.main(["--host", f"127.0.0.1:{ports[0]}", "list", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["items"][0]["title"] == "Server 1"
+    finally:
+        for server in servers:
+            server.stop()
+
+
+def test_explicit_host_only_client_uses_default_port(monkeypatch, capsys):
+    import socket
+    import urllib.request
+
+    import workdash.workdash as cli
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    monkeypatch.setenv("WORKDASH_HOST", f"127.0.0.1:{port}")
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="Default port")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    server = control_module.WorkdashControlServer(session)
+    server.start()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    requested = []
+
+    def redirect(request):
+        requested.append(request.full_url)
+        return opener.open(
+            urllib.request.Request(
+                request.full_url.replace("127.0.0.1:8765", f"127.0.0.1:{port}"),
+                data=request.data,
+                headers=dict(request.header_items()),
+                method=request.method,
+            )
+        )
+
+    monkeypatch.setattr(control_module.urllib.request, "urlopen", redirect)
+    try:
+        assert cli.main(["--host", "127.0.0.1", "list", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["items"][0]["title"] == "Default port"
+        assert requested == ["http://127.0.0.1:8765/api/v0/list"]
+    finally:
+        server.stop()
+
+
+@pytest.mark.parametrize("host_only", [True, False])
+def test_local_non_loopback_primary_accepts_default_client(monkeypatch, host_only):
+    import socket
+    from ipaddress import ip_address
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+        try:
+            route.connect(("192.0.2.1", 80))
+            host = route.getsockname()[0]
+        except OSError:
+            pytest.skip("no local IPv4 network route")
+    if ip_address(host).is_loopback:
+        pytest.skip("no non-loopback IPv4 address")
+    with socket.socket() as probe:
+        probe.bind((host, 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setattr(control_module, "SERVER_PORT", port)
+    monkeypatch.setenv("WORKDASH_HOST", host if host_only else f"{host}:{port}")
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="Local network")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    server = control_module.WorkdashControlServer(session)
+    server.start()
+    try:
+        result = control_module.WorkdashControlClient().request("list")
+        assert result["items"][0]["title"] == "Local network"
+    finally:
+        server.stop()
+
+
+def test_wildcard_primary_is_rejected_without_opening_listeners(monkeypatch):
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("0.0.0.0", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setenv("WORKDASH_HOST", f"0.0.0.0:{port}")
+    server = control_module.WorkdashControlServer(
+        MagicMock(), listeners=(("127.0.0.2", ("192.0.2.1",)),)
+    )
+    with pytest.raises(RuntimeError, match="Wildcard listener binds"):
+        server.start()
+    assert not server._httpds

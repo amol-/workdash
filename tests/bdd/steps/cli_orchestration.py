@@ -1256,3 +1256,19 @@ def _reports_unknown_work_item(scenario_state: dict[str, Any]) -> None:
 @then(parsers.parse("the command connects to host `{host}`"))
 def _command_connects_to_host(host: str, scenario_state: dict[str, Any]) -> None:
     assert scenario_state["client_host"] == host
+
+
+@when(parsers.parse("the user runs `workdash --host 127.0.0.1:9001 {command}`"))
+def _run_host_with_nonclient(command, scenario_state, capsys):
+    import workdash.workdash as cli
+
+    with pytest.raises(SystemExit) as error:
+        cli.main(["--host", "127.0.0.1:9001", command])
+    scenario_state["exit_code"] = error.value.code
+    scenario_state["host_error"] = capsys.readouterr().err
+
+
+@then("the command rejects `--host` as a client-only option")
+def _host_option_rejected(scenario_state):
+    assert "--host" in scenario_state["host_error"]
+    assert "client" in scenario_state["host_error"]

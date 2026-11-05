@@ -42,12 +42,12 @@ Canonical product vocabulary used by the feature files.
 - API client: A command or trusted LAN automation agent that sends JSON requests to the Workdash server.
 - Pane ID: The copy/paste Zellij pane identifier reported by `workdash info`, used by pane content and send APIs.
 - Zellij session: A terminal multiplexer session used by the system to host terminal-backed work actions.
-- Workdash Zellij session: A Zellij session whose name starts with `workdash`, used by the system as the live terminal surface for orchestration commands and terminal-backed work actions.
+- Workdash Zellij session: A Zellij session used by a Workdash dashboard as the live terminal surface for orchestration commands and terminal-backed work actions. Automatically created sessions have names starting with `workdash`.
 - Agent pane: A Zellij pane opened by the system for a terminal-hosted coding agent.
 - Terminal pane: A Zellij pane opened by the system for a plain terminal in a work item's worktree.
 - Configuration: The user settings stored at `~/.config/workdash/config.json`.
 - Configuration wizard: The interactive flow started by `--configure` that fills in any missing configuration fields, including the agents.
 - TUI: The interactive terminal interface shown by default when the system starts.
 - List command: The non-interactive listing emitted by `workdash list`, intended for automation and for agents that need to read the active server-backed dashboard without driving the TUI.
-- Show-config command: The command and API capability that reports configured analysis and coding agents plus the fixed V0 server address.
+- Show-config command: The command and API capability that reports configured analysis and coding agents plus the selected default server address.
 - Recent activity: A work item whose last update is within the last 24 hours.

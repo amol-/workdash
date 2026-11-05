@@ -157,7 +157,7 @@ workdash terminal ITEM [--json]            # open a plain terminal in an item's 
 workdash todo TEXT [--target REPOSITORY] [--body BODY] [--json]  # capture a todo
 workdash read PANE_ID [--full] [--json]  # read text from a live pane
 workdash write PANE_ID TEXT [--raw] [--json]  # send text to a live pane
-workdash show-config [--json] # show configured agents and fixed server address
+workdash show-config [--json] # show configured agents and selected server address
 workdash --debug             # verbose logging
 workdash --configure         # run the interactive setup wizard
 workdash --direct            # start without the automatic Zellij wrapper
@@ -260,14 +260,15 @@ added by URL only shares the issue's worktree from the next refresh onwards.
 ## Local control server
 
 `workdash --server` starts the normal TUI and a JSON control API in the same
-process. It always listens on `127.0.0.1:8765`, accepts JSON only, and stops all
+process. It listens on `WORKDASH_HOST` (default `127.0.0.1:8765`), accepts JSON only, and stops all
 listeners when the TUI exits.
 
 For trusted LAN access, add repeatable `--listen HOST@IP1,IP2` options alongside
 `--server`. Each listener needs a nonempty list of exact accepted source IPs
 (no hostnames or subnets). All supplied source IPs are shared across every
-listener, with localhost always accepted. Access checks use the actual peer IP,
-never forwarding headers. Wildcard binds are rejected; the port stays 8765.
+listener, with localhost and the primary server IP always accepted.
+Access checks use the actual peer IP, never forwarding headers. Wildcard binds are
+rejected; extra listeners use the selected server port.
 If any listener cannot bind, the entire server startup fails.
 
 **Trusted LAN only:** the API is intentionally unauthenticated plain HTTP.
@@ -275,11 +276,17 @@ Allowed clients can execute dashboard actions; do not expose it to untrusted
 networks or treat the IP allowlist as authentication or encryption.
 
 Client commands `list`, `info`, `analyze`, `code`, `terminal`, `todo`, `read`,
-`write`, and `close` accept `--host HOST` (default `127.0.0.1`). Listener and
-client hosts may be IP addresses or DNS hostnames. Clients connect on port 8765
-without loading local GitHub, configuration, or Zellij state. Todo's `--target`
+`write`, and `close` accept `--host HOST[:PORT]` before or after the command.
+Set `WORKDASH_HOST` to an IPv4 address or IPv4 address:port to select the default
+for both server and clients; omitted ports use 8765. An explicit `--host` replaces
+that default, even if `WORKDASH_HOST` is invalid.
+A server dashboard already inside Zellij uses its current session, regardless
+of its name.
+Extra listener hosts and explicit client `--host` values may be IP addresses or DNS hostnames. Clients connect
+to the selected server without
+loading local GitHub, configuration, or Zellij state. Todo's `--target`
 still selects its repository, independently of the server host. `show-config`
-continues to report the default `127.0.0.1:8765` address.
+reports the selected default server address.
 
 ## List command
 
@@ -351,7 +358,7 @@ text exactly. Human output confirms that the pane accepted the input.
 ## Show-config command
 
 `workdash show-config [--json]` reports configured analysis agents, configured
-coding agents, and the fixed V0 server address. It does not require a running
+coding agents, and the selected server address. It does not require a running
 server. The same information is also available from the JSON API for HTTP
 clients.
 

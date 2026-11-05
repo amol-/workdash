@@ -9,13 +9,13 @@ Feature: Local JSON control API
     - `workdash --server` starts the normal TUI and a JSON API server in the same process.
     - The API server starts only after the initial dashboard items have loaded successfully.
     - The API server runs in the background and stops when the TUI process exits.
-    - At most one server-backed Workdash session can be active in V0.
-    - The server always listens on `127.0.0.1:8765`; repeatable `--listen HOST@IP1,IP2` adds listeners and requires `--server`.
+    - Multiple server-backed sessions can run on different addresses; a dashboard started inside Zellij uses its current session regardless of its name. If the current session is unknown, startup fails rather than selecting another session.
+    - The server listens on `WORKDASH_HOST` (IPv4 address or IPv4 address:port), defaulting to `127.0.0.1:8765`; repeatable `--listen HOST@IP1,IP2` adds listeners and requires `--server`.
     - Each listener requires a nonempty list of exact source IPs, not hostnames or subnets; missing, malformed, or empty entries are rejected.
-    - Listener hosts may be IPs or DNS hostnames; wildcard binds and custom ports are not supported. The port is always 8765.
-    - All listeners share the union of accepted source IPs, automatically including localhost.
+    - Listener hosts may be IPs or DNS hostnames; wildcard binds and ports in `--listen` are not supported. Extra listeners use the selected server port.
+    - All listeners share the union of accepted source IPs, automatically including localhost and the primary server IP. A `--listen` matching the primary IP adds its source IPs without binding a second listener.
     - Actual peer source IPs determine access, never forwarding headers; unlisted peers receive a forbidden JSON error without executing actions.
-    - If any listener cannot bind, startup fails without leaving other listeners active; exiting the TUI stops every listener.
+    - If any listener cannot bind, including a repeated non-primary listener address, startup fails without leaving other listeners active; exiting the TUI stops every listener.
     - The API is intentionally unauthenticated plain HTTP for trusted LAN use only.
     - V0 exposes JSON APIs only, not an HTML browser UI.
     - API requests and responses use JSON objects.
@@ -229,3 +229,23 @@ Feature: Local JSON control API
     And the created issue keeps the short title and the complete body after its metadata
     And the new todo becomes part of the shared dashboard state
     And the API returns the Workdash item ID, todo repository, target, issue number, and issue URL
+
+  @id:F-API-JSON-CONTROL-S025
+  Scenario: A custom server address is shared by clients and overlapping listeners
+    Given the user sets `WORKDASH_HOST` to `127.0.0.1` with an available custom port
+    When the user starts a server with a listener on `127.0.0.1` accepting `127.0.0.2`
+    Then a client using `WORKDASH_HOST` can list the server's work items
+    And the listener accepts `127.0.0.2` and denies `127.0.0.3`
+
+  @id:F-API-JSON-CONTROL-S026
+  Scenario: Server-backed dashboards use their own Zellij sessions
+    Given two Zellij sessions including a non-Workdash session are active
+    When a server-backed dashboard is started inside each session on a different address
+    Then both servers respond and each dashboard uses its own Zellij session
+
+  @id:F-API-JSON-CONTROL-S027
+  Scenario: The selected primary address can access its own server
+    Given the server uses a local primary IP address and an available port
+    When a client from that primary IP requests the list API
+    Then the API returns the current in-memory work items
+    And an unlisted source cannot access that server
