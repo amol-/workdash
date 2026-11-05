@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Collection, Sequence
@@ -18,6 +20,7 @@ from .backend import IncludeResult, SuggestionMarkers, WorkdashBackend, compute_
 from .config import WorkdashConfig
 from .github_client import parse_github_item_url
 from .launcher import (
+    _zellij_pane_name_for_work_action,
     close_zellij_pane,
     dump_zellij_pane,
     launch_agent_context,
@@ -27,13 +30,28 @@ from .launcher import (
     prepare_launch_agent_prompt,
     send_zellij_pane_input,
 )
-from .models import WorkItem, display_repo, format_type_label
+from .models import WorkItem, WorkItemType, display_repo, format_type_label
+from .repo_resolver import validate_repository_selectors
 from .repo_worktree import ensure_worktree, existing_worktree_path, get_merge_base
-from .todo import create_todo, is_todo_target
+from .todo import create_todo, is_repository_name, is_todo_target
+from .work_instruction import autostart_briefing
+from .work_state import ReadyWork, find_ready_work
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8765
 SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
+# `owner/repo#42`, a Workdash item ID such as `owner/repo#CHECK-42`, or a
+# targeted todo ID such as `owner/repo#ISSUE-WT42`.
+_ITEM_REFERENCE_RE = re.compile(
+    r"^(?P<repo>[^#\s]+)#(?:(?P<label>ISSUE|PR|REVIEW|CHECK)-(?P<todo>WT)?)?(?P<number>\d+)$"
+)
+# Zellij lists a new pane shortly after creating it; a launched agent whose pane
+# is still missing after these checks is reported as unconfirmed.
+_LAUNCH_VISIBILITY_CHECKS = 10
+_LAUNCH_VISIBILITY_INTERVAL_SECONDS = 0.5
+# An unconfirmed launch may still have started an agent, so the worktree refuses
+# new launches for this long unless its pane shows up first.
+_UNCONFIRMED_LAUNCH_TTL_SECONDS = 60.0
 
 
 def server_address(value: str | None = None) -> tuple[str, int]:
@@ -86,6 +104,8 @@ class WorkdashSession:
         self.zellij_session = zellij_session
         self.items_changed_callback = items_changed_callback
         self._lock = threading.RLock()
+        # Normalized worktree path -> monotonic deadline of an unconfirmed agent launch.
+        self._unconfirmed_launches: dict[str, float] = {}
 
     def list_items(self, *, refresh: bool = False) -> dict[str, object]:
         """Return the dashboard items currently known to the shared session."""
@@ -189,10 +209,10 @@ class WorkdashSession:
     def analyze(
         self, *, target: str, agent: str | None = None, prefer_cache: bool = True
     ) -> dict[str, object]:
-        """Analyze a current dashboard item through the shared action path."""
+        """Analyze an explicit target through the shared action path."""
 
+        item = self._require_item(target)
         with self._lock:
-            item = self._require_item(target)
             item_id = format_work_item_id(item)
             cache_used = item.analysis is not None and prefer_cache
             if agent == "cached":
@@ -242,28 +262,71 @@ class WorkdashSession:
             }
 
     def code(
-        self, *, target: str, agent: str | None = None, allow_vscode: bool = False
+        self,
+        *,
+        target: str,
+        agent: str | None = None,
+        allow_vscode: bool = False,
+        autostart: bool = False,
     ) -> dict[str, object]:
-        """Launch a coding agent for a current dashboard item."""
+        """Launch a coding agent for an explicit target unless one already works in its worktree.
 
-        with self._lock:
-            item = self._require_item(target)
-            item_id = format_work_item_id(item)
-            agents = self.config.configured_code_agents()
-            if (
-                agent is not None
-                and agent not in agents
-                and not (allow_vscode and agent == "vscode")
-            ):
-                raise self._unusable_agent_error(agent, "code", "launch")
-            selected_agent = agent or (agents[0] if agents else None)
-            if selected_agent is None:
-                raise WorkdashControlError(
-                    "no_agent",
-                    "No coding agents are configured.",
-                    status=HTTPStatus.CONFLICT,
+        The live agent pane in a worktree is the claim on it, so instead of starting
+        a second agent there this reports that pane with status ``already_running``.
+
+        :param bool autostart: Brief a newly launched agent to work autonomously from the
+            current GitHub state of the work, instead of proposing a plan first.
+        """
+
+        item = self._require_item(target)
+        item_id = format_work_item_id(item)
+        agents = self.config.configured_code_agents()
+        if agent is not None and agent not in agents and not (allow_vscode and agent == "vscode"):
+            raise self._unusable_agent_error(agent, "code", "launch")
+        selected_agent = agent or (agents[0] if agents else None)
+        if selected_agent is None:
+            raise WorkdashControlError(
+                "no_agent",
+                "No coding agents are configured.",
+                status=HTTPStatus.CONFLICT,
+            )
+        # Without Zellij no agent pane can exist, and VSCode needs none to launch.
+        no_zellij_vscode = self.zellij_session is None and selected_agent == "vscode"
+        if autostart:
+            # A live agent answers without reading GitHub, so an outage cannot hide it. Only
+            # a worktree known locally is checked here; the briefing may redirect the work to
+            # another item, whose claim is checked below.
+            with self._lock:
+                repo_path = existing_worktree_path(self.config.workdir, item)
+                if repo_path is not None:
+                    panes = [] if no_zellij_vscode else self._live_panes()
+                    claimed = self._claimed_launch(item_id, repo_path, panes)
+                    if claimed is not None:
+                        return claimed
+            try:
+                item, autostart_text = autostart_briefing(
+                    item,
+                    github_username=self.config.github_username,
+                    todo_repository=self.config.todo_repository,
                 )
-            repo_path = ensure_worktree(self.config.workdir, item)
+            except RuntimeError as error:
+                raise WorkdashControlError(
+                    "github_error",
+                    f"GitHub lookup for {target!r} failed: {error}",
+                    status=HTTPStatus.BAD_GATEWAY,
+                ) from error
+        with self._lock:
+            panes = [] if no_zellij_vscode else self._live_panes()
+            # Checked before ensure_worktree so an agent in a locally proven worktree is
+            # reused without pulling its checkout. A worktree that only ensure_worktree
+            # finds (e.g. by branch) may be pulled before the second check.
+            repo_path = existing_worktree_path(self.config.workdir, item)
+            if repo_path is None or not _agent_panes_in_worktree(panes, repo_path):
+                repo_path = ensure_worktree(self.config.workdir, item)
+            claimed = self._claimed_launch(item_id, repo_path, panes)
+            if claimed is not None:
+                return claimed
+            launch_key = _normalized_path(repo_path)
             prompt = prepare_launch_agent_prompt(
                 item,
                 repo_path,
@@ -272,9 +335,13 @@ class WorkdashSession:
                 else None,
                 merge_base=get_merge_base(repo_path),
             )
+            if autostart:
+                prompt = f"{prompt.rstrip()}\n\n{autostart_text}"
             if selected_agent == "vscode":
+                # VSCode leaves no pane behind, so it never holds the claim.
                 launch_vscode_context(repo_path, prompt)
                 return {
+                    "status": "launched",
                     "item_id": item_id,
                     "session": self.zellij_session,
                     "agent": selected_agent,
@@ -283,26 +350,89 @@ class WorkdashSession:
                     "pane_id": None,
                 }
             command_tokens = self.config.code_agent_launch_command_tokens(selected_agent)
+            self._unconfirmed_launches[launch_key] = (
+                time.monotonic() + _UNCONFIRMED_LAUNCH_TTL_SECONDS
+            )
             launch = launch_agent_context(
                 repo_path,
                 prompt,
                 agent_command_tokens=command_tokens,
                 zellij_session=self.zellij_session,
             )
+            for check in range(_LAUNCH_VISIBILITY_CHECKS):
+                if check:
+                    time.sleep(_LAUNCH_VISIBILITY_INTERVAL_SECONDS)
+                listed = self._live_panes()
+                # No agent held the worktree before launching, so a live one now is ours.
+                running = _agent_panes_in_worktree(listed, repo_path)
+                if running:
+                    break
+                # Zellij holds the pane of an agent that exits at once, e.g. a missing binary.
+                if any(
+                    _format_pane_id(pane.get("id")) == launch.pane_id
+                    and pane.get("title") == launch.pane_title
+                    for pane in listed
+                ):
+                    del self._unconfirmed_launches[launch_key]
+                    raise WorkdashControlError(
+                        "agent_exited",
+                        f"The coding agent for {item_id} exited right after launch; see pane "
+                        f"{launch.pane_id} and check the agent command.",
+                    )
+            else:
+                raise WorkdashControlError(
+                    "launch_unconfirmed",
+                    f"Launched a coding agent for {item_id}, but its pane did not appear in "
+                    "Zellij; check `workdash info` before retrying.",
+                    status=HTTPStatus.CONFLICT,
+                )
+            del self._unconfirmed_launches[launch_key]
             return {
+                "status": "launched",
                 "item_id": item_id,
                 "session": launch.session or self.zellij_session,
                 "agent": selected_agent,
                 "cwd": launch.cwd,
                 "pane_title": launch.pane_title,
-                "pane_id": launch.pane_id,
+                "pane_id": _format_pane_id(running[0]["id"]),
             }
 
-    def terminal(self, *, target: str) -> dict[str, object]:
-        """Open a terminal for a current dashboard item."""
+    def _claimed_launch(
+        self, item_id: str, repo_path: os.PathLike[str] | str, panes: list[dict[str, object]]
+    ) -> dict[str, object] | None:
+        """Report the live agent holding a worktree, or fail while its launch is unconfirmed.
 
+        Called with the session lock held. ``None`` means nothing holds the worktree.
+        """
+
+        running = _agent_panes_in_worktree(panes, repo_path)
+        launch_key = _normalized_path(repo_path)
+        if running:
+            # The live pane now holds the claim, settling any unconfirmed launch.
+            self._unconfirmed_launches.pop(launch_key, None)
+            return {
+                "status": "already_running",
+                "item_id": item_id,
+                "session": self.zellij_session,
+                "agent": None,
+                "cwd": running[0].get("pane_cwd"),
+                "pane_title": running[0].get("title"),
+                "pane_id": _format_pane_id(running[0]["id"]),
+            }
+        if self._unconfirmed_launches.get(launch_key, 0.0) > time.monotonic():
+            raise WorkdashControlError(
+                "launch_unconfirmed",
+                f"An earlier coding agent launch for {item_id} is still unconfirmed; "
+                "check `workdash info` or retry in a minute.",
+                status=HTTPStatus.CONFLICT,
+            )
+        return None
+
+    def terminal(self, *, target: str) -> dict[str, object]:
+        """Open a terminal for an explicit target."""
+
+        item = self._require_item(target)
         with self._lock:
-            item = self._require_item(target)
             item_id = format_work_item_id(item)
             repo_path = ensure_worktree(self.config.workdir, item)
             launch = launch_terminal_context(
@@ -316,6 +446,68 @@ class WorkdashSession:
                 "pane_title": launch.pane_title,
                 "pane_id": launch.pane_id,
             }
+
+    def ready(self, *, scope: str) -> dict[str, object]:
+        """Report the ready work of a scope, ready pull requests first.
+
+        The scope is ``owner/repo``, an issue, ``todo``, or ``any``. Work a live
+        agent pane already holds is left out. Nothing is claimed or launched, and
+        the dashboard is left alone.
+        """
+
+        issue = None
+        if scope == "todo":
+            repositories = [self.config.todo_repository]
+        elif scope == "any":
+            repositories = [
+                *validate_repository_selectors(list(self.config.repositories)),
+                self.config.todo_repository,
+            ]
+        elif is_repository_name(scope):
+            repositories = [scope]
+        else:
+            reference = _ITEM_REFERENCE_RE.match(scope)
+            parsed_url = parse_github_item_url(scope)
+            if (reference is not None and reference["label"] not in {None, "ISSUE"}) or (
+                parsed_url is not None and parsed_url.item_type == WorkItemType.PR
+            ):
+                raise WorkdashControlError(
+                    "unsupported_item_type",
+                    f"{scope!r} names a pull request; ready takes an issue as its scope.",
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+            item = self._require_item(scope)
+            repositories, issue = [], (item.repo, item.number)
+        try:
+            candidates = find_ready_work(
+                repositories=repositories,
+                issue=issue,
+                github_username=self.config.github_username,
+                todo_repository=self.config.todo_repository,
+            )
+        except RuntimeError as error:
+            raise WorkdashControlError(
+                "github_error",
+                f"GitHub lookup for {scope!r} failed: {error}",
+                status=HTTPStatus.BAD_GATEWAY,
+            ) from error
+        with self._lock:
+            panes = self._live_panes()
+            now = time.monotonic()
+            # An agent launch `code` has not confirmed yet holds its worktree too.
+            unclaimed = [
+                work
+                for work in candidates
+                if not any(
+                    (path := existing_worktree_path(self.config.workdir, claim)) is not None
+                    and (
+                        _agent_panes_in_worktree(panes, path)
+                        or self._unconfirmed_launches.get(_normalized_path(path), 0.0) > now
+                    )
+                    for claim in work.claims
+                )
+            ]
+        return {"scope": scope, "items": [_ready_work_payload(work) for work in unclaimed]}
 
     def pane_content(self, *, pane_id: str, full: bool = False) -> dict[str, object]:
         """Return visible or full scrollback content for a Zellij pane."""
@@ -366,14 +558,92 @@ class WorkdashSession:
         return self.backend.analyze_item(item, tool=tool, cwd=cwd)
 
     def _require_item(self, target: str) -> WorkItem:
-        item = resolve_work_item_target(target, self.work_items)
+        """Resolve an explicit target, fetching it from GitHub when the dashboard lacks it.
+
+        The fetched item never joins the dashboard: what the dashboard shows is a
+        presentation choice, not a limit on which items can be acted on.
+        """
+
+        parsed_url = parse_github_item_url(target)
+        reference = _ITEM_REFERENCE_RE.match(target)
+        if parsed_url is not None:
+            repo, number, item_type = parsed_url.repo, parsed_url.number, parsed_url.item_type
+            targeted_todo = False
+        elif (
+            reference is not None
+            and is_repository_name(reference["repo"])
+            and (reference["todo"] is None or reference["label"] == "ISSUE")
+        ):
+            # A targeted todo is an issue of the todo repository, listed under its target.
+            targeted_todo = reference["todo"] is not None
+            repo = self.config.todo_repository if targeted_todo else reference["repo"]
+            number = int(reference["number"])
+            item_type = (
+                WorkItemType.ISSUE if reference["label"] in {None, "ISSUE"} else WorkItemType.PR
+            )
+        else:
+            raise WorkdashControlError(
+                "invalid_target",
+                f"{target!r} is not a Workdash item ID, an owner/repo#NUMBER issue, "
+                "or a GitHub issue or pull request URL.",
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        item = next(
+            (item for item in self.work_items if (item.repo, item.number) == (repo, number)), None
+        )
         if item is None:
+            try:
+                item = self.backend.github_client.fetch_item(
+                    repo,
+                    number,
+                    github_username=self.config.github_username,
+                    todo_repository=self.config.todo_repository,
+                )
+            except RuntimeError as error:
+                raise WorkdashControlError(
+                    "github_error",
+                    f"GitHub lookup for {target!r} failed: {error}",
+                    status=HTTPStatus.BAD_GATEWAY,
+                ) from error
+            if item is not None:
+                item.analysis = self.backend.analysis_cache.load_analysis(item)
+                item.analyzed_at = self.backend.analysis_cache.load_analysis_date(item)
+        if item is None or (targeted_todo and format_work_item_id(item) != target):
             raise WorkdashControlError(
                 "unknown_item",
-                f"No dashboard item matches {target!r}.",
+                f"No accessible GitHub issue or pull request matches {target!r}.",
                 status=HTTPStatus.NOT_FOUND,
             )
+        if item.item_type != item_type:
+            kind, label = (
+                ("a pull request", "PR")
+                if item.item_type == WorkItemType.PR
+                else ("an issue", "ISSUE")
+            )
+            raise WorkdashControlError(
+                "unsupported_item_type",
+                f"{item.repo}#{number} is {kind}; use {item.repo}#{label}-{number}.",
+                status=HTTPStatus.BAD_REQUEST,
+            )
         return item
+
+    def _live_panes(self) -> list[dict[str, object]]:
+        """Return the Zellij panes, failing closed when they cannot be read."""
+
+        if not self.zellij_session:
+            raise WorkdashControlError(
+                "zellij_session_required",
+                "Coding agents need a known Workdash Zellij session to check for running agents.",
+                status=HTTPStatus.CONFLICT,
+            )
+        try:
+            return load_zellij_panes(self.zellij_session)
+        except RuntimeError as error:
+            raise WorkdashControlError(
+                "zellij_unavailable",
+                f"Cannot check for running coding agents: {error}",
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            ) from error
 
     def _unusable_agent_error(self, agent: str, action: str, command: str) -> WorkdashControlError:
         """Explain why an agent cannot perform an action: unknown name or missing command."""
@@ -390,21 +660,16 @@ class WorkdashSession:
         )
 
     def get_agent_panes_for_item(self, item: WorkItem) -> list[dict[str, object]]:
-        """Return live agent panes for the given work item.
+        """Return the live agent panes working in the item's worktree, lowest pane ID first."""
 
-        Reuses the same live-pane data and item mapping used by info().
-        Returns a list of pane dicts, each containing pane_id, title, cwd, etc.
-        """
-        if not self.zellij_session:
+        worktree = existing_worktree_path(self.config.workdir, item)
+        if worktree is None or not self.zellij_session:
             return []
-        item_id = format_work_item_id(item)
-        with self._lock:
-            return _agent_panes_for_item(
-                self.zellij_session,
-                self.config.workdir,
-                self.work_items,
-                item_id,
-            )
+        item_by_cwd = {_normalized_path(worktree): format_work_item_id(item)}
+        return [
+            _pane_payload(self.zellij_session, pane, item_by_cwd, kind="agent")
+            for pane in _agent_panes_in_worktree(self._live_panes(), worktree)
+        ]
 
     def focus_pane(self, pane_id: str) -> None:
         """Focus a Zellij pane by its ID.
@@ -538,23 +803,6 @@ def format_work_item_id(item: WorkItem) -> str:
     return f"{item.repo}#{item_type}-{item.number}"
 
 
-def resolve_work_item_target(target: str, work_items: Sequence[WorkItem]) -> WorkItem | None:
-    for item in work_items:
-        if target == format_work_item_id(item):
-            return item
-    parsed = parse_github_item_url(target)
-    if parsed is None:
-        return None
-    for item in work_items:
-        if (
-            item.repo == parsed.repo
-            and item.item_type == parsed.item_type
-            and item.number == parsed.number
-        ):
-            return item
-    return None
-
-
 def show_config_payload(config: WorkdashConfig) -> dict[str, object]:
     host, port = server_address()
     return {
@@ -589,6 +837,42 @@ def _work_items_payload(
             }
         )
     return {"items": items}
+
+
+def _ready_work_payload(work: ReadyWork) -> dict[str, object]:
+    item, issue, pull_request = work.item, work.issue, work.pull_request
+    payload: dict[str, object] = {
+        "id": format_work_item_id(item),
+        "type": item.item_type.value,
+        "repo": display_repo(item),
+        "number": item.number,
+        "title": item.title,
+        "url": item.url,
+        "created_at": item.created_at.isoformat(),
+        "action": work.action,
+        "reasons": list(work.reasons),
+        "issue_id": format_work_item_id(issue) if issue else None,
+        "issue_url": issue.url if issue else None,
+    }
+    if pull_request is not None:
+        payload |= {
+            "pr_head_sha": pull_request.head_sha,
+            "base_ref": pull_request.base_ref,
+            "base_head_sha": pull_request.base_head_sha,
+            "mergeability": pull_request.mergeability,
+            "ci_status": pull_request.ci_status,
+            "failing_checks": list(pull_request.failing_checks),
+            "feedback": [
+                {
+                    "kind": feedback.kind,
+                    "author": feedback.author,
+                    "url": feedback.url,
+                    "created_at": feedback.created_at.isoformat(),
+                }
+                for feedback in pull_request.feedback
+            ],
+        }
+    return payload
 
 
 def _pane_info_payload(
@@ -708,6 +992,7 @@ def _make_turbogears_app(session: WorkdashSession):
                 lambda payload: self._session.code(
                     target=_required_text(payload, "target"),
                     agent=_optional_text(payload, "agent"),
+                    autostart=_optional_bool(payload, "autostart"),
                 ),
             )
 
@@ -719,6 +1004,14 @@ def _make_turbogears_app(session: WorkdashSession):
                 lambda payload: self._session.terminal(
                     target=_required_text(payload, "target"),
                 ),
+            )
+
+        @expose("json")
+        def ready(self):
+            return _handle_json_request(
+                request,
+                response,
+                lambda payload: self._session.ready(scope=_required_text(payload, "scope")),
             )
 
         @expose("json")
@@ -856,6 +1149,19 @@ def _optional_text(payload: dict[str, object], field: str) -> str | None:
     return value
 
 
+def _optional_bool(payload: dict[str, object], field: str) -> bool:
+    value = payload.get(field)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise WorkdashControlError(
+            "bad_request",
+            f"Optional field {field!r} must be a boolean.",
+            status=HTTPStatus.BAD_REQUEST,
+        )
+    return value
+
+
 def _is_live_non_plugin_pane(pane: dict[str, object]) -> bool:
     return (
         pane.get("is_plugin") is not True
@@ -923,44 +1229,26 @@ def _normalized_path(path: os.PathLike[str] | str) -> str:
     return os.path.realpath(os.path.expanduser(os.fspath(path)))
 
 
-def _agent_panes_for_item(
-    session: str,
-    workdir: str | None,
-    work_items: Sequence[WorkItem],
-    item_id: str,
+def _agent_panes_in_worktree(
+    panes: Sequence[dict[str, object]], worktree: os.PathLike[str] | str
 ) -> list[dict[str, object]]:
-    """Return live agent panes mapped to a specific work item."""
-    # Build the cwd -> item_id mapping for all work items
-    item_by_cwd = {}
-    if workdir is not None:
-        for item in work_items:
-            item_path = existing_worktree_path(workdir, item)
-            if item_path is not None:
-                item_by_cwd[_normalized_path(item_path)] = format_work_item_id(item)
+    """Return the live agent panes holding the claim on ``worktree``, lowest pane ID first.
 
-    # Collect agent panes that match our target item
-    agent_panes = []
-    for pane in load_zellij_panes(session):
-        if not _is_workdash_work_pane(pane):
+    Only the launch title ties a pane to its worktree: an agent may change directory
+    into another worktree, and Zellij keeps the launch title even when it sets its own.
+    """
+
+    title = _zellij_pane_name_for_work_action("code", os.fspath(worktree))
+    claiming = []
+    for pane in panes:
+        if not _is_workdash_work_pane(pane) or pane.get("title") != title:
             continue
-        title = pane.get("title")
-        if not isinstance(title, str) or not title.startswith("code_"):
-            continue
-
-        # Map pane to item via cwd
-        cwd = pane.get("pane_cwd")
-        mapped_item = None
-        if isinstance(cwd, str) and cwd:
-            normalized_cwd = _normalized_path(cwd)
-            matches = [
-                (root, iid)
-                for root, iid in item_by_cwd.items()
-                if normalized_cwd == root or normalized_cwd.startswith(root + os.sep)
-            ]
-            if matches:
-                mapped_item = max(matches, key=lambda match: len(match[0]))[1]
-
-        if mapped_item == item_id:
-            agent_panes.append(_pane_payload(session, pane, item_by_cwd, kind="agent"))
-
-    return agent_panes
+        if not isinstance(pane.get("id"), int):
+            # A pane that cannot be named can neither be reused nor ruled out.
+            raise WorkdashControlError(
+                "zellij_unavailable",
+                f"Zellij reported a live agent pane in {worktree} without a pane ID.",
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        claiming.append(pane)
+    return sorted(claiming, key=lambda pane: pane["id"])

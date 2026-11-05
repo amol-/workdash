@@ -151,8 +151,9 @@ workdash list                # list server-backed dashboard items as plain text
 workdash list --refresh      # ask the server to refresh items before listing
 workdash list --json         # list items as machine-readable JSON
 workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
-workdash analyze ITEM [--agent NAME] [--json]  # analyze a current server item
-workdash code ITEM [--agent NAME] [--json]  # launch a coding agent
+workdash ready SCOPE [--json]   # list the GitHub work ready to be picked up next
+workdash analyze ITEM [--agent NAME] [--json]  # analyze an item
+workdash code ITEM [--agent NAME] [--json]  # launch an autonomous coding agent, or report the running one
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
 workdash todo TEXT [--target REPOSITORY] [--body BODY] [--json]  # capture a todo
 workdash read PANE_ID [--full] [--json]  # read text from a live pane
@@ -199,7 +200,8 @@ The `repositories` list in `config.json` accepts:
 - `c` — launch a coding session on the selected item. Opens a dialog to pick
   one of your configured coding agents or VSCode Copilot. `workdash` prepares a
   dedicated git worktree for the item and starts the chosen tool in it, preloaded
-  with context about the issue or PR.
+  with context about the issue or PR. If an agent is already running in the
+  item's worktree, `c` focuses its pane instead of opening the dialog.
 - `t` — open a terminal in the selected item's worktree (no agent launched).
 - `w` — capture a todo. Opens a dialog asking for the todo text and an
   optional target repository.
@@ -275,7 +277,7 @@ If any listener cannot bind, the entire server startup fails.
 Allowed clients can execute dashboard actions; do not expose it to untrusted
 networks or treat the IP allowlist as authentication or encryption.
 
-Client commands `list`, `info`, `analyze`, `code`, `terminal`, `todo`, `read`,
+Client commands `list`, `info`, `ready`, `analyze`, `code`, `terminal`, `todo`, `read`,
 `write`, and `close` accept `--host HOST[:PORT]` before or after the command.
 Set `WORKDASH_HOST` to an IPv4 address or IPv4 address:port to select the default
 for both server and clients; omitted ports use 8765. An explicit `--host` replaces
@@ -283,8 +285,7 @@ that default, even if `WORKDASH_HOST` is invalid.
 A server dashboard already inside Zellij uses its current session, regardless
 of its name.
 Extra listener hosts and explicit client `--host` values may be IP addresses or DNS hostnames. Clients connect
-to the selected server without
-loading local GitHub, configuration, or Zellij state. Todo's `--target`
+to the selected server without loading local GitHub, configuration, or Zellij state. Todo's `--target`
 still selects its repository, independently of the server host. `show-config`
 reports the selected default server address.
 
@@ -309,6 +310,48 @@ listing. Use `workdash list --json` to emit the same list as JSON records with
 item ID, type, kind, repository, number, title, URL, timestamps, and suggested
 status.
 
+## Ready command
+
+`workdash ready SCOPE [--json]` requires a running `workdash --server` session
+and lists the GitHub work that can be picked up next, read straight from GitHub
+rather than from the dashboard. It only reports: nothing is claimed or launched.
+
+`SCOPE` is one of:
+
+- `owner/repo`: every open issue and pull request of the repository, plus the
+  open pull requests closing its issues.
+- An issue (`owner/repo#42`, `owner/repo#ISSUE-42`, a targeted todo ID, or an
+  issue URL): its native sub-issues, recursively and across repositories, or the
+  issue itself when it never had sub-issues. Only pull requests closing one of
+  those issues count.
+- `todo`: the server's todo repository.
+- `any`: every repository selected by the server's `repositories`, plus the todo
+  repository.
+
+A pull request is ready when the server can push to its head branch and its
+current head needs work: `address_review` (a changes-requested review on the
+current head, or review bodies, unresolved threads, and comments that other
+humans posted after the last push), `fix_merge_conflicts` (GitHub reports a
+conflict with the current base branch), or `fix_ci` (a check or status on the
+current head failed). An issue is ready when it is open, never had sub-issues,
+has no open `blocked by` issue, and no open pull request closes it. Work a live
+Workdash code pane holds is left out, and so are pull requests that only wait
+for CI, review, or merge.
+
+Ready pull requests come first, then ready issues, each group oldest first:
+
+```
+TYPE  ID                           ACTION               title URL [REASONS] (issue ID)
+```
+
+Each ID is accepted as is by `code`, `analyze`, and `terminal`; a ready pull
+request names the issue it closes. `--json` adds the head SHA, base branch and
+its head SHA, mergeability, CI status (`passing`, `failing`, `pending`,
+`no_checks`, or `unknown`), failing checks, and feedback references. CI status
+comes from GitHub check metadata and the base branch's required checks only,
+never from repository files. If nothing is ready the output is
+`No ready work found.`.
+
 ## Info command
 
 `workdash info [--json]` requires a running `workdash --server` session and
@@ -322,9 +365,12 @@ Workdash session as `kind=unknown` with unknown item mapping.
 ## Analyze command
 
 `workdash analyze ITEM [--agent NAME] [--json]` requires a running
-`workdash --server` session and analyzes a current server-known Workdash item.
-`ITEM` can be a row ID from `workdash list` (such as `owner/repo#ISSUE-123`) or a
-GitHub issue/PR URL that is already in the current dashboard data. It reuses a
+`workdash --server` session and analyzes a work item. `ITEM` can be a row ID from
+`workdash list` (such as `owner/repo#ISSUE-123`), `owner/repo#123` for an issue,
+or a GitHub issue/PR URL. The item does not need to be on the dashboard: the
+server looks up any issue or pull request it can access on GitHub, without adding
+it to `workdash list` or to the included items. `workdash terminal` accepts the
+same items. It reuses a
 fresh cached analysis when available, otherwise the server prepares the item's
 worktree and runs the selected configured analysis agent.
 
@@ -337,12 +383,40 @@ base64 content.
 ## Code command
 
 `workdash code ITEM [--agent NAME] [--json]` requires a running
-`workdash --server` session and launches a configured coding agent for a
-current server-known Workdash item.
-`ITEM` accepts the same row IDs and GitHub URLs as `workdash analyze`.
+`workdash --server` session and launches a configured coding agent for a work
+item. `ITEM` accepts the same items as `workdash analyze`.
 
-Human output reports the item, agent, selected session, cwd, pane title, and pane
-id when available. `--json` emits the same result as machine-readable JSON.
+At most one coding agent works in a worktree: its live `code_` Zellij pane is the
+claim, with no claim command or stored claim state. When an agent pane launched
+for the item's worktree is still live, including one started for another item
+sharing that worktree, wherever its cwd has moved, `code` starts nothing and reports `status` `already_running` with that
+pane. Otherwise it reports `launched` once the new pane is visible. If Zellij
+cannot list its panes, or a launched pane does not show up, `code` starts nothing
+and reports an error; a retry within a minute of an unconfirmed launch fails too.
+An agent that exits right after launch is reported as an error and does not block
+a retry.
+Terminal panes do not count. VSCode Copilot, offered only by the TUI, holds no
+claim and is not opened while an agent pane is live. In the TUI, `c` on an item
+with a live agent pane focuses that pane instead of opening the dialog.
+
+`workdash code` always autostarts the agent: its briefing ends with an appendix
+telling it to work without routine confirmation, commit, push, and open a pull
+request that closes the issue (or update the existing one), and verify the
+pull request's current head: CI `passing`, or GitHub reporting no required or
+observed checks (`no_checks`), and a clean merge. It never merges or closes
+anything, and the agent stays in its interactive pane. The state-specific task
+comes from the same GitHub classification as `ready`: an issue is implemented, an
+issue an open pull request of yours closes resumes that pull request in place, and a pull
+request with review feedback, merge conflicts, or failing CI is repaired on its
+own branch with every reason included. A pull request waiting on CI, review, or
+merge is described, not reworked, and somebody else's pull request stays a
+review-only session. There is no `--autostart` option; the TUI's `c` keeps the
+plan-first briefing and never commits or pushes by itself, and the HTTP
+`POST /api/v0/code` takes an optional boolean `autostart`, false when omitted.
+`already_running` injects nothing into the running agent.
+
+Human output reports the status, item, agent, selected session, cwd, pane title,
+and pane id when available. `--json` emits the same result as machine-readable JSON.
 
 ## Read and write commands
 

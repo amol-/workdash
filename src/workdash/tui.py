@@ -170,7 +170,7 @@ class AnalyzeDialog(ModalScreen[str | None]):
 
 
 class CodeDialog(ModalScreen[str | None]):
-    """Modal dialog for choosing a coding tool to launch or focusing an active agent."""
+    """Modal dialog for choosing a coding tool to launch."""
 
     DEFAULT_CSS = """
         #code-shell {
@@ -188,24 +188,15 @@ class CodeDialog(ModalScreen[str | None]):
         """
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(
-        self,
-        *,
-        choices: Sequence[WorkdashAgentChoice],
-        active_agent_panes: Sequence[dict[str, object]] | None = None,
-    ) -> None:
+    def __init__(self, *, choices: Sequence[WorkdashAgentChoice]) -> None:
         super().__init__()
         self._choices = tuple(choices)
         self._choices_by_key = {choice.key: choice for choice in self._choices}
-        self._active_agent_panes = list(active_agent_panes or [])
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="code-shell"):
             yield Static("Launch coding session:", classes="code-line")
             yield Static("")
-            # Show focus option if there are active agent panes
-            if self._active_agent_panes:
-                yield Static("(0) Focus active agent", classes="code-line")
             for choice in self._choices:
                 yield Static(f"({choice.key}) {choice.label}", classes="code-line", markup=False)
             if not self._choices:
@@ -214,10 +205,6 @@ class CodeDialog(ModalScreen[str | None]):
             yield Static("(Esc) Cancel", classes="code-line")
 
     def on_key(self, event) -> None:
-        # Handle focus active agent (key "0")
-        if event.key == "0" and self._active_agent_panes:
-            event.stop()
-            self.dismiss("__focus_active_agent__")
         choice = self._choices_by_key.get(event.key)
         if choice is not None:
             event.stop()
@@ -381,11 +368,11 @@ class WorkdashApp(App[None]):
         open_markdown_callback: Callable[[str], None] | None = None,
         refresh_callback: Callable[[], RefreshCallbackResult] | None = None,
         analyze_callback: Callable[[WorkItem, str], AnalyzeCallbackResult] | None = None,
-        launch_callback: Callable[[WorkItem, str], None] | None = None,
+        launch_callback: Callable[[WorkItem, str], dict[str, object]] | None = None,
         worktree_callback: Callable[[WorkItem], str] | None = None,
         analyze_choices: Sequence[WorkdashAgentChoice] | None = None,
         code_choices: Sequence[WorkdashAgentChoice] | None = None,
-        terminal_callback: Callable[[WorkItem], None] | None = None,
+        terminal_callback: Callable[[WorkItem], dict[str, object]] | None = None,
         include_callback: (
             Callable[[str, set[tuple[WorkItemType, str, int]]], IncludeResult] | None
         ) = None,
@@ -730,8 +717,6 @@ class WorkdashApp(App[None]):
         if selected_item is None or self._launch_callback is None:
             self._update_status("Code launch skipped.")
             return
-        # Get active agent panes for this item
-        active_panes = []
         if self._list_agent_panes_callback is not None:
             try:
                 active_panes = self._list_agent_panes_callback(selected_item)
@@ -739,39 +724,23 @@ class WorkdashApp(App[None]):
                 self._update_status(f"Failed to check active panes: {error}")
                 self.notify(f"Failed to check active panes: {error}", severity="error", timeout=10)
                 return
-        dialog = CodeDialog(
-            choices=self._code_choices,
-            active_agent_panes=active_panes,
-        )
+            if active_panes:
+                await self._focus_pane(str(active_panes[0]["pane_id"]))
+                return
 
         def _on_dialog_result(choice: str | None) -> None:
             if choice is None:
                 return
-            if choice == "__focus_active_agent__":
-                self._run_after_dialog(
-                    lambda: self._handle_focus_active_agent(selected_item, active_panes)
-                )
-                return
             self._run_after_dialog(lambda: self._perform_launch(selected_item, choice))
 
-        await self.push_screen(dialog, callback=_on_dialog_result)
+        await self.push_screen(CodeDialog(choices=self._code_choices), callback=_on_dialog_result)
 
     async def _perform_launch(self, item: WorkItem, choice: str) -> None:
         """Execute coding tool launch after the user picks from the dialog."""
 
-        if self._worktree_callback is not None:
-            try:
-                await self._run_with_busy_screen(
-                    message=f"Preparing worktree for {item.repo}#{item.number}...",
-                    callback=lambda: self._worktree_callback(item),
-                )
-            except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
-                self._update_status(f"Worktree setup failed: {error}")
-                self.notify(f"Worktree setup failed: {error}", severity="error", timeout=10)
-                return
         tool_label = self._choice_tool_label(self._code_choices, choice)
         try:
-            await self._run_with_busy_screen(
+            result = await self._run_with_busy_screen(
                 message=f"Launching {tool_label}...",
                 callback=lambda c=choice: self._launch_callback(item, c),
             )
@@ -779,18 +748,13 @@ class WorkdashApp(App[None]):
             self._update_status(f"Launch failed: {error}")
             self.notify(f"Launch failed: {error}", severity="error", timeout=10, markup=False)
             return
+        if result["status"] == "already_running":
+            # Another client started an agent while the dialog was open.
+            await self._focus_pane(str(result["pane_id"]))
+            return
         self._update_status(
             f"Launched {tool_label} for {item.item_type.value} {item.repo}#{item.number}."
         )
-
-    async def _handle_focus_active_agent(
-        self, item: WorkItem, active_panes: list[dict[str, object]]
-    ) -> None:
-        """Handle focusing an active agent pane - picks first if multiple exist."""
-        if not active_panes:
-            self._update_status("No active agent panes found.")
-            return
-        await self._focus_pane(active_panes[0].get("pane_id", ""))
 
     async def _focus_pane(self, pane_id: str) -> None:
         """Focus a Zellij pane by its ID."""
@@ -812,16 +776,6 @@ class WorkdashApp(App[None]):
         if selected_item is None or self._terminal_callback is None:
             self._update_status("Terminal launch skipped.")
             return
-        if self._worktree_callback is not None:
-            try:
-                await self._run_with_busy_screen(
-                    message=f"Preparing worktree for {selected_item.repo}#{selected_item.number}...",
-                    callback=lambda: self._worktree_callback(selected_item),
-                )
-            except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
-                self._update_status(f"Worktree setup failed: {error}")
-                self.notify(f"Worktree setup failed: {error}", severity="error", timeout=10)
-                return
         try:
             await self._run_with_busy_screen(
                 message="Opening terminal...",

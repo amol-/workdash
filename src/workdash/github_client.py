@@ -111,6 +111,7 @@ _RATE_LIMIT_RETRY_DELAY_SECONDS = 70.0
 #   - "HTTP 429" / "API rate limit exceeded" / "abuse detection" (rate limiting)
 #   - "dial tcp ... no such host" / "connection reset" / "i/o timeout" ... (network)
 #   - "result of a timeout" (GraphQL execution timeout, sometimes with HTTP 200)
+#   - "unexpected end of JSON input" (GraphQL timeout cutting off an HTTP 200 body)
 # Each of these can succeed on a later retry, so the caller should retain the
 # URL in the included-items store and retry on the next refresh.
 _TRANSIENT_HTTP_STATUS_RE = re.compile(r"(?:HTTP |status code:?\s*)5\d{2}", re.IGNORECASE)
@@ -131,6 +132,7 @@ _TRANSIENT_SUBSTRINGS = (
     "i/o timeout",
     "result of a timeout",
     "context deadline exceeded",
+    "unexpected end of json input",
     "eof",
 )
 _REPOSITORY_AUTHORIZATION_SUBSTRINGS = (
@@ -1323,6 +1325,111 @@ class GitHubClient:
                 raise RuntimeError(f"{context}: missing or invalid closing issue reference.")
             issues.append((repo, number))
         return issues
+
+    def fetch_item(
+        self, repo: str, number: int, *, github_username: str, todo_repository: str
+    ) -> WorkItem | None:
+        """Look up one issue or pull request by number, whatever its state.
+
+        Returns ``None`` when GitHub cannot resolve the repository or the item, or
+        denies access to it. Every other failure raises, so a GitHub outage is never
+        mistaken for a missing item.
+
+        :param str todo_repository: Repository whose issues are todos, so their
+            target is read from the issue body.
+        """
+
+        subject = f"{repo}#{number}"
+        owner, _, name = repo.partition("/")
+        fields = "title url createdAt updatedAt author { login }"
+        command = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+            f"{{ nameWithOwner issueOrPullRequest(number: {number}) {{ __typename "
+            f"... on Issue {{ {fields} body }} "
+            f"... on PullRequest {{ {fields} {_CLOSING_ISSUES_SELECTION} }} }} }} }}",
+        ]
+        failure_message_prefix = f"Failed to look up {subject} via gh"
+        completed = _run_gh_command_with_retry(
+            command,
+            not_found_message="Failed to run gh item lookup: gh CLI is not installed or not on PATH.",
+            failure_message_prefix=failure_message_prefix,
+            # gh reports "could not resolve" and access denials as a failed command
+            # that still prints the GraphQL errors.
+            tolerate_partial_response=True,
+        )
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                f"Failed to parse gh item JSON for {subject}: {error.msg}"
+            ) from error
+        errors = payload.get("errors") if isinstance(payload, dict) else None
+        for entry in errors if isinstance(errors, list) else []:
+            message = entry.get("message") if isinstance(entry, dict) else None
+            if isinstance(message, str) and (
+                _is_unresolvable_item_error(message) or _is_repository_authorization_error(message)
+            ):
+                return None
+            raise RuntimeError(f"{failure_message_prefix}: {message or 'unknown error'}")
+        data = payload.get("data") if isinstance(payload, dict) else None
+        repository = data.get("repository") if isinstance(data, dict) else None
+        node = repository.get("issueOrPullRequest") if isinstance(repository, dict) else None
+        if node is None and isinstance(repository, dict):
+            return None
+        context = f"Invalid gh item payload for {subject}"
+        if not isinstance(node, dict):
+            raise RuntimeError(f"{context}: missing repository.issueOrPullRequest.")
+        repo = repository.get("nameWithOwner")
+        typename = node.get("__typename")
+        title, url, created_at, updated_at = (
+            node.get(key) for key in ("title", "url", "createdAt", "updatedAt")
+        )
+        if typename not in {"Issue", "PullRequest"} or not all(
+            isinstance(value, str) for value in (repo, title, url, created_at, updated_at)
+        ):
+            raise RuntimeError(f"{context}: missing or invalid fields.")
+        if typename == "Issue":
+            return WorkItem(
+                kind=WorkItemKind.TRACKED_ISSUE,
+                item_type=WorkItemType.ISSUE,
+                repo=repo,
+                number=number,
+                title=title,
+                created_at=parse_github_datetime(created_at),
+                updated_at=parse_github_datetime(updated_at),
+                url=url,
+                todo_target=todo_target_from_body(node.get("body"))
+                if repo.lower() == todo_repository.lower()
+                else None,
+            )
+        author = node.get("author")
+        author_login = author.get("login") if isinstance(author, dict) else None
+        authored_by_user = isinstance(author_login, str) and (
+            author_login.strip().lower() == github_username.strip().lower()
+        )
+        # Only an issue in the pull request's own repository can name its worktree.
+        closing_issues = self._closing_issues({"pullRequest": node}, subject=subject)
+        return WorkItem(
+            kind=WorkItemKind.AUTHORED_PR if authored_by_user else WorkItemKind.TRACKED_PR,
+            item_type=WorkItemType.PR,
+            repo=repo,
+            number=number,
+            title=title,
+            created_at=parse_github_datetime(created_at),
+            updated_at=parse_github_datetime(updated_at),
+            url=url,
+            closing_issue_numbers=tuple(
+                sorted(
+                    issue_number
+                    for issue_repo, issue_number in closing_issues
+                    if issue_repo == repo
+                )
+            ),
+        )
 
     def fetch_item_by_url(
         self, parsed_url: ParsedGitHubItemURL, github_username: str

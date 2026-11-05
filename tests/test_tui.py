@@ -563,7 +563,7 @@ def test_workdash_app_footer_shows_success_status_for_actions(
         open_callback=lambda _: None,
         refresh_callback=lambda: [work_item],
         analyze_callback=analyze_callback,
-        launch_callback=lambda _, __tool="codex": None,
+        launch_callback=lambda _, __tool="codex": {"status": "launched"},
         analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
         code_choices=_DEFAULT_TUI_CONFIG.tui_code_choices(),
         terminal_callback=lambda _: None,
@@ -782,7 +782,7 @@ def test_analyze_dialog_shows_nine_agents_and_cached_analysis_without_scrolling(
     asyncio.run(run_smoke())
 
 
-def test_code_dialog_shows_eight_agents_vscode_and_focus_option_without_scrolling() -> None:
+def test_code_dialog_shows_eight_agents_and_vscode_without_scrolling() -> None:
     work_item = WorkItem(
         kind=WorkItemKind.TRACKED_PR,
         item_type=WorkItemType.PR,
@@ -799,8 +799,8 @@ def test_code_dialog_shows_eight_agents_vscode_and_focus_option_without_scrollin
     app = WorkdashApp(
         work_items=[work_item],
         code_choices=config.tui_code_choices(),
-        launch_callback=lambda item, tool: None,
-        list_agent_panes_callback=lambda item: [{"pane_id": "terminal_1"}],
+        launch_callback=lambda item, tool: {"status": "launched"},
+        list_agent_panes_callback=lambda item: [],
         now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
     )
 
@@ -810,7 +810,7 @@ def test_code_dialog_shows_eight_agents_vscode_and_focus_option_without_scrollin
             await pilot.pause()
             assert isinstance(app.screen, CodeDialog)
             lines = [str(line.render()) for line in app.screen.query(".code-line")]
-            assert lines[1] == "(0) Focus active agent"
+            assert lines[1] == "(1) agent1"
             assert lines[-2:] == ["(9) VSCode Copilot", "(Esc) Cancel"]
             assert app.screen.query_one("#code-shell").max_scroll_y == 0
 
@@ -833,7 +833,7 @@ def test_agent_names_with_markup_characters_are_shown_literally() -> None:
         work_items=[work_item],
         code_choices=config.tui_code_choices(),
         worktree_callback=lambda item: "/tmp/worktree",
-        launch_callback=lambda item, tool: None,
+        launch_callback=lambda item, tool: {"status": "launched"},
         now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
     )
 
@@ -879,7 +879,9 @@ def test_workdash_app_uses_only_configured_tui_agent_choices(
             analyze_calls.append((item, tool)) or "/tmp/analysis.md"
         ),
         worktree_callback=lambda item: worktree_attempts.append(item) or "/tmp/worktree",
-        launch_callback=lambda item, tool="codex": launch_calls.append((item, tool)),
+        launch_callback=lambda item, tool="codex": (
+            launch_calls.append((item, tool)) or {"status": "launched"}
+        ),
         analyze_choices=WorkdashConfig(
             agents={"codex": AgentConfig(analyze="codex exec")}
         ).tui_analyze_choices(),
@@ -910,7 +912,7 @@ def test_workdash_app_uses_only_configured_tui_agent_choices(
             assert isinstance(app.screen, CodeDialog)
             await pilot.press("1")
             await pilot.pause()
-            assert worktree_attempts == [work_item]
+            assert worktree_attempts == []
             assert launch_calls == [(work_item, "vscode")]
 
             await pilot.press("q")
@@ -1045,8 +1047,7 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
     asyncio.run(run_smoke())
 
 
-def test_workdash_app_worktree_failure_closes_dialogs_and_skips_actions() -> None:
-    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
+def test_workdash_app_code_launches_nothing_when_live_agent_panes_cannot_be_checked() -> None:
     work_item = WorkItem(
         kind=WorkItemKind.TRACKED_PR,
         item_type=WorkItemType.PR,
@@ -1057,27 +1058,17 @@ def test_workdash_app_worktree_failure_closes_dialogs_and_skips_actions() -> Non
         updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
         url="https://example.com/pull/22",
     )
-    launch_calls: list[tuple[WorkItem, str]] = []
-    terminal_calls: list[WorkItem] = []
-    worktree_attempts: list[WorkItem] = []
+    launch_callback = MagicMock()
 
-    def failing_worktree_callback(item: WorkItem) -> str:
-        worktree_attempts.append(item)
-        raise RuntimeError(f"worktree failed {len(worktree_attempts)}")
-
-    def launch_callback(item: WorkItem, tool: str = "codex") -> None:
-        launch_calls.append((item, tool))
-
-    def terminal_callback(item: WorkItem) -> None:
-        terminal_calls.append(item)
+    def failing_list_agent_panes(_item: WorkItem) -> list[dict[str, object]]:
+        raise RuntimeError("zellij unavailable")
 
     app = WorkdashApp(
         work_items=[work_item],
-        worktree_callback=failing_worktree_callback,
         launch_callback=launch_callback,
         code_choices=_DEFAULT_TUI_CONFIG.tui_code_choices(),
-        terminal_callback=terminal_callback,
-        now_utc=now_utc,
+        list_agent_panes_callback=failing_list_agent_panes,
+        now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
     )
 
     async def run_smoke() -> None:
@@ -1085,17 +1076,47 @@ def test_workdash_app_worktree_failure_closes_dialogs_and_skips_actions() -> Non
             footer = app.query_one("#status-footer", Static)
 
             await pilot.press("c")
-            await pilot.pause()
-            await pilot.press("2")
-            await _wait_for_footer(footer, "Worktree setup failed: worktree failed 1", pilot)
+            await _wait_for_footer(
+                footer, "Failed to check active panes: zellij unavailable", pilot
+            )
             _assert_no_modal_screens(app)
-            assert launch_calls == []
+            launch_callback.assert_not_called()
 
-            await pilot.press("t")
-            await _wait_for_footer(footer, "Worktree setup failed: worktree failed 2", pilot)
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_workdash_app_code_reports_a_failed_focus_of_the_running_agent_pane() -> None:
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+    )
+    launch_callback = MagicMock()
+
+    app = WorkdashApp(
+        work_items=[work_item],
+        launch_callback=launch_callback,
+        code_choices=_DEFAULT_TUI_CONFIG.tui_code_choices(),
+        list_agent_panes_callback=lambda _item: [{"pane_id": "terminal_7"}],
+        focus_callback=MagicMock(side_effect=RuntimeError("pane is gone")),
+        now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+
+            await pilot.press("c")
+            await _wait_for_footer(footer, "Failed to focus pane: pane is gone", pilot)
             _assert_no_modal_screens(app)
-            assert terminal_calls == []
-            assert len(worktree_attempts) == 2
+            launch_callback.assert_not_called()
 
             await pilot.press("q")
 
@@ -1294,106 +1315,6 @@ def test_workdash_app_capture_todo_reports_the_failure_and_keeps_the_app_alive()
             )
             assert app.is_running
             _assert_no_modal_screens(app)
-            await pilot.press("q")
-
-    asyncio.run(run_smoke())
-
-
-def test_workdash_app_code_dialog_shows_focus_option_with_active_agent() -> None:
-    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
-    work_item = WorkItem(
-        kind=WorkItemKind.TRACKED_PR,
-        item_type=WorkItemType.PR,
-        repo="owner/repo",
-        number=22,
-        title="Implement renderer",
-        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
-        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
-        url="https://example.com/pull/22",
-    )
-    focus_calls: list[str] = []
-    active_panes = [
-        {"pane_id": "terminal_1", "title": "code_repo", "cwd": "/tmp/wt", "kind": "agent"}
-    ]
-
-    app = WorkdashApp(
-        work_items=[work_item],
-        code_choices=WorkdashConfig().tui_code_choices(),
-        launch_callback=lambda item, tool: None,  # Required to pass the check
-        focus_callback=lambda pane_id: focus_calls.append(pane_id),
-        list_agent_panes_callback=lambda item: active_panes,
-        now_utc=now_utc,
-    )
-
-    async def run_smoke() -> None:
-        async with app.run_test() as pilot:
-            # Ensure cursor is on row 0
-            await pilot.pause()
-            # Check that we have a selected item
-            selected = app._selected_item()
-            assert selected is not None, "Should have a selected item"
-            await pilot.press("c")
-            await pilot.pause()
-            # Verify CodeDialog is open
-            from workdash.tui import CodeDialog
-
-            dialog = None
-            for screen in app.screen_stack:
-                if isinstance(screen, CodeDialog):
-                    dialog = screen
-                    break
-            assert dialog is not None, (
-                f"CodeDialog should be open. Screens: {[type(s).__name__ for s in app.screen_stack]}"
-            )
-            # Check that the dialog has the focus option
-            assert dialog._active_agent_panes == active_panes
-            # Press 0 to focus
-            await pilot.press("0")
-            await pilot.pause()
-            # Verify focus callback was called
-            assert len(focus_calls) == 1
-            assert focus_calls[0] == "terminal_1"
-            # Verify no launch happened
-            await pilot.press("q")
-
-    asyncio.run(run_smoke())
-
-
-def test_workdash_app_code_dialog_no_focus_option_without_active_agent() -> None:
-    now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
-    work_item = WorkItem(
-        kind=WorkItemKind.TRACKED_PR,
-        item_type=WorkItemType.PR,
-        repo="owner/repo",
-        number=22,
-        title="Implement renderer",
-        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
-        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
-        url="https://example.com/pull/22",
-    )
-
-    app = WorkdashApp(
-        work_items=[work_item],
-        code_choices=WorkdashConfig().tui_code_choices(),
-        launch_callback=lambda item, tool: None,
-        list_agent_panes_callback=lambda item: [],
-        now_utc=now_utc,
-    )
-
-    async def run_smoke() -> None:
-        async with app.run_test() as pilot:
-            await pilot.press("c")
-            await pilot.pause()
-            from workdash.tui import CodeDialog
-
-            dialog = None
-            for screen in app.screen_stack:
-                if isinstance(screen, CodeDialog):
-                    dialog = screen
-                    break
-            assert dialog is not None
-            # Verify no active panes
-            assert dialog._active_agent_panes == []
             await pilot.press("q")
 
     asyncio.run(run_smoke())

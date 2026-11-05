@@ -7,6 +7,7 @@ Canonical product vocabulary used by the feature files.
 - User: The developer using `workdash` to triage their GitHub work.
 - System: `workdash`, the text-based GitHub work triage dashboard.
 - Work item: An issue or pull request surfaced by the system for triage.
+- Explicit target: The work item a command or API request names directly, by Workdash item ID, by `owner/repo#<number>` for an issue, or by GitHub URL. The server resolves it from GitHub whether or not the dashboard lists it, and resolving it never changes the dashboard.
 - Workdash item ID: A copy/paste identifier for a work item, formatted as `<repo>#ISSUE-<number>`, `<repo>#PR-<number>`, `<repo>#REVIEW-<number>`, `<repo>#CHECK-<number>`, or `<target>#ISSUE-WT<number>` for a targeted todo item.
 - Item type: The category of a work item shown in the Type column and used in its Workdash item ID. One of `ISSUE`, `PR`, `REVIEW`, or `CHECK`. An assigned or tracked issue is an `ISSUE`, a pull request the user authored is a `PR`, a pull request the user must review or has already reviewed is a `REVIEW`, and any other pull request is a `CHECK`.
 - REVIEW item: A pull request where the user is directly requested as a reviewer, or has already reviewed.
@@ -44,6 +45,15 @@ Canonical product vocabulary used by the feature files.
 - Zellij session: A terminal multiplexer session used by the system to host terminal-backed work actions.
 - Workdash Zellij session: A Zellij session used by a Workdash dashboard as the live terminal surface for orchestration commands and terminal-backed work actions. Automatically created sessions have names starting with `workdash`.
 - Agent pane: A Zellij pane opened by the system for a terminal-hosted coding agent.
+- Claim: The exclusive right to run a coding agent in a worktree, held by the live agent pane working there. It is never stored: it ends when that pane exits or closes, which does not mean the work is finished.
+- Autostart: A coding request option that briefs a newly launched agent to work autonomously and publish a pull request instead of proposing a plan first. `workdash code` always autostarts; the TUI never does.
+- Ready work: The GitHub work the server reports as actionable now for a scope: ready implementation pull requests first, then ready issues. Reporting it never claims or launches anything.
+- Leaf issue: An issue that never had native sub-issues, closed ones included. An issue with sub-issues is a container, never ready work itself.
+- Blocker: An issue another issue is natively `blocked by` on GitHub. Only an open blocker holds the blocked issue back.
+- Implementation pull request: An open pull request; the issues it closes through GitHub's native closing references are its linked issues.
+- Ready pull request: An implementation pull request whose current head needs new work (`address_review`, `fix_merge_conflicts`, or `fix_ci`), whose head branch the server can push to, and that no live agent pane works on.
+- CI status: The state of the checks on a pull request's current head, from GitHub metadata only: `passing`, `failing`, `pending`, `no_checks` (none reported and none required), or `unknown`.
+- Mergeability: Whether GitHub reports a pull request merges into its current base branch without conflicts: `mergeable`, `conflicting`, or `unknown` while GitHub has not computed it.
 - Terminal pane: A Zellij pane opened by the system for a plain terminal in a work item's worktree.
 - Configuration: The user settings stored at `~/.config/workdash/config.json`.
 - Configuration wizard: The interactive flow started by `--configure` that fills in any missing configuration fields, including the agents.

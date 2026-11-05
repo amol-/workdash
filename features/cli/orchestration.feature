@@ -6,9 +6,9 @@ Feature: CLI orchestration commands
   humans or pass structured JSON through for agents.
 
   Rules:
-    - `workdash list`, `workdash info`, `workdash analyze`, `workdash code`, `workdash terminal`, `workdash todo`, `workdash read`, `workdash write`, and `workdash close` require a running `workdash --server` session.
-    - All nine server-backed CLI commands accept `--host HOST[:PORT]` before or after the command, overriding `WORKDASH_HOST`; otherwise they use `WORKDASH_HOST` or `127.0.0.1:8765`. A host without a port uses 8765.
-    - `--host` is rejected for server startup and commands other than the nine server-backed clients; `--version` exits immediately.
+    - `workdash list`, `workdash info`, `workdash ready`, `workdash analyze`, `workdash code`, `workdash terminal`, `workdash todo`, `workdash read`, `workdash write`, and `workdash close` require a running `workdash --server` session.
+    - All ten server-backed CLI commands accept `--host HOST[:PORT]` before or after the command, overriding `WORKDASH_HOST`; otherwise they use `WORKDASH_HOST` or `127.0.0.1:8765`. A host without a port uses 8765.
+    - `--host` is rejected for server startup and commands other than the ten server-backed clients; `--version` exits immediately.
     - `WORKDASH_HOST` must be an IPv4 address with an optional port; an explicit `--host` may be a DNS hostname and overrides even an invalid `WORKDASH_HOST`. Host selection preserves positional item targets and todo targets, whether GitHub `owner/repo` names or git URLs.
     - Server-backed CLI commands do not load configuration, run GitHub preflight, inspect Zellij, or fetch GitHub directly.
     - Server-backed CLI commands report a clear error naming the selected host when the Workdash server is not reachable.
@@ -29,9 +29,12 @@ Feature: CLI orchestration commands
     - Missing optional agent commands mean that agent operation is not configured, not that the whole config is invalid.
     - `workdash analyze` accepts only configured analysis agents reported by `workdash show-config`.
     - `workdash code` launches only configured coding agents reported by `workdash show-config`.
+    - `workdash code` always asks the server to autostart the agent, so the new agent works autonomously from its briefing; there is no `--autostart` option and the TUI never asks for it.
     - A configured agent that lacks the command for the requested action is reported as unable to do that action, not as unconfigured.
     - Without `--agent`, `workdash analyze` and `workdash code` use the first configured agent for that action, in configuration order.
-    - `workdash code` reports the created Zellij pane ID from live session state without persisting it.
+    - `workdash analyze`, `workdash code`, and `workdash terminal` accept any explicit target the JSON API accepts, including items `workdash list` does not show; the server resolves it.
+    - `workdash code` reports status `launched` with the created Zellij pane ID, or status `already_running` with the live agent pane already working in the item's worktree; pane IDs come from live session state and are never persisted.
+    - There is no claim command: the live agent pane started by `workdash code` is the claim.
     - `workdash terminal` opens a plain terminal in the item's worktree and reports the created Zellij pane ID.
     - `workdash terminal` does not accept an agent parameter.
     - `workdash code` does not expose non-terminal editors such as VSCode in V0.
@@ -128,7 +131,7 @@ Feature: CLI orchestration commands
     And the current Workdash items include an assigned issue without cached analysis
     When the user runs `workdash code owner/repo#ISSUE-1 --agent codex --json`
     Then the command requests code launch from the local Workdash server
-    And the system returns JSON with the item ID, selected agent, selected session, cwd, pane title, and pane ID
+    And the system returns JSON with status `launched`, the item ID, selected agent, selected session, cwd, pane title, and pane ID
 
   @id:F-CLI-ORCHESTRATION-S027
   Scenario: Terminal opens a plain terminal through the local Workdash server
@@ -143,15 +146,6 @@ Feature: CLI orchestration commands
     Given no server-backed Workdash session is running
     When the user runs `workdash terminal owner/repo#ISSUE-1`
     Then the command reports that `workdash --server` must be running
-    And the command exits with a non-zero status
-
-  @id:F-CLI-ORCHESTRATION-S029
-  Scenario: Terminal rejects an item outside the current dashboard state
-    Given a server-backed Workdash session has loaded dashboard items
-    And the current Workdash items do not include `owner/repo#ISSUE-99`
-    When the user runs `workdash terminal owner/repo#ISSUE-99 --json`
-    Then the command requests terminal launch from the local Workdash server
-    And the system reports that the work item is unknown
     And the command exits with a non-zero status
 
   @id:F-CLI-ORCHESTRATION-S014
@@ -180,15 +174,6 @@ Feature: CLI orchestration commands
     When the user runs `workdash info`
     Then the command still sends the request to the local Workdash server
     And the command formats the server response
-
-  @id:F-CLI-ORCHESTRATION-S018
-  Scenario: Analyze rejects an item outside the current dashboard state
-    Given a server-backed Workdash session has loaded dashboard items
-    And the current Workdash items do not include `owner/repo#ISSUE-99`
-    When the user runs `workdash analyze owner/repo#ISSUE-99 --agent codex --json`
-    Then the command requests analysis from the local Workdash server
-    And the system reports that the work item is unknown
-    And the command exits with a non-zero status
 
   @id:F-CLI-ORCHESTRATION-S019
   Scenario: Read shows pane text through the local Workdash server
@@ -307,6 +292,49 @@ Feature: CLI orchestration commands
       | code    | aider | Agent 'aider' cannot code: it has no launch command.  |
 
   @id:F-CLI-ORCHESTRATION-S037
+  Scenario: A remote client codes on an issue outside the dashboard
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current Workdash items do not include `owner/repo#ISSUE-99`
+    And GitHub has the accessible issue `owner/repo#ISSUE-99`
+    And the client process cannot find GitHub CLI or Zellij on PATH
+    When the user runs `workdash code owner/repo#99 --agent pi --host dashboard.lan --json`
+    Then the command connects to host `dashboard.lan`
+    And the system returns JSON with status `launched` for `owner/repo#ISSUE-99` and the new pane ID
+
+  @id:F-CLI-ORCHESTRATION-S038
+  Scenario: Code reports an already running agent instead of starting another
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current dashboard items include `owner/repo#ISSUE-1`
+    And the worktree of `owner/repo#ISSUE-1` already exists
+    And an agent pane is running in that worktree
+    When the user runs `workdash code owner/repo#ISSUE-1 --agent pi`
+    Then the system prints status `already_running` and the running pane ID
+    And no coding agent is launched
+
+  @id:F-CLI-ORCHESTRATION-S039
+  Scenario: Item commands report a target GitHub cannot find
+    Given a server-backed Workdash session has loaded dashboard items
+    And GitHub answers item lookups with no item
+    When the user runs `workdash terminal owner/repo#ISSUE-99 --json`
+    Then the command requests terminal launch from the local Workdash server
+    And the system reports that the work item is unknown
+    And the command exits with a non-zero status
+
+  @id:F-CLI-ORCHESTRATION-S040
+  Scenario: Code always asks the server to autostart the agent
+    Given a server-backed Workdash session is ready to answer
+    And GitHub repository `owner/repo` has open issue #1
+    When the user runs `workdash code owner/repo#ISSUE-1 --agent pi`
+    Then the command asks the server to code with autostart enabled
+    And the agent is briefed with the original prompt followed by the autonomous appendix once
+
+  @id:F-CLI-ORCHESTRATION-S041
+  Scenario: Code has no autostart option
+    When the user runs `workdash code owner/repo#ISSUE-1 --autostart`
+    Then the command exits with a non-zero status
+    And the command asks no server to code
+
+  @id:F-CLI-ORCHESTRATION-S042
   Scenario Outline: Host selection is rejected for non-client commands
     When the user runs `workdash --host 127.0.0.1:9001 <command>`
     Then the command rejects `--host` as a client-only option

@@ -1627,3 +1627,104 @@ def test_list_open_todo_issues_keeps_a_transient_failure_retryable(
 
     with pytest.raises(TransientFetchError, match="Failed to list open todo issues"):
         GitHubClient().list_open_todo_issues("testuser/todos")
+
+
+def _item_lookup_run(payload: dict[str, object], *, failed: bool = False):
+    def fake_run(command, **kwargs):
+        assert command[:3] == ["gh", "api", "graphql"], command
+        if failed:
+            raise subprocess.CalledProcessError(
+                1, command, output=json.dumps(payload), stderr="GraphQL: error"
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    return fake_run
+
+
+def _item_lookup_payload(repo: str, node: dict[str, object]) -> dict[str, object]:
+    fields = {
+        "title": "Work",
+        "url": f"https://github.com/{repo}/issues/5",
+        "createdAt": "2026-02-01T00:00:00Z",
+        "updatedAt": "2026-02-02T00:00:00Z",
+        "author": {"login": "TestUser"},
+    }
+    return {"data": {"repository": {"nameWithOwner": repo, "issueOrPullRequest": fields | node}}}
+
+
+def test_fetch_item_reads_an_authored_pull_request_and_its_own_repository_closing_issues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closing = [
+        {"number": 9, "repository": {"nameWithOwner": "owner/repo"}},
+        {"number": 3, "repository": {"nameWithOwner": "owner/repo"}},
+        {"number": 1, "repository": {"nameWithOwner": "other/repo"}},
+    ]
+    payload = _item_lookup_payload(
+        "owner/repo",
+        {"__typename": "PullRequest", "closingIssuesReferences": {"nodes": closing}},
+    )
+    monkeypatch.setattr(subprocess, "run", _item_lookup_run(payload))
+
+    item = GitHubClient().fetch_item(
+        "Owner/Repo", 5, github_username="testuser", todo_repository="testuser/todos"
+    )
+
+    assert item is not None
+    assert (item.kind, item.item_type, item.repo, item.number) == (
+        WorkItemKind.AUTHORED_PR,
+        WorkItemType.PR,
+        "owner/repo",
+        5,
+    )
+    assert item.closing_issue_numbers == (3, 9)
+
+
+@pytest.mark.parametrize(
+    ("repo", "expected_target"), [("testuser/todos", "owner/repo"), ("owner/repo", None)]
+)
+def test_fetch_item_reads_the_todo_target_only_for_todo_repository_issues(
+    monkeypatch: pytest.MonkeyPatch, repo: str, expected_target: str | None
+) -> None:
+    body = '```json\n{"workdash_todo_version": 1, "target": "owner/repo"}\n```\n'
+    payload = _item_lookup_payload(repo, {"__typename": "Issue", "body": body})
+    monkeypatch.setattr(subprocess, "run", _item_lookup_run(payload))
+
+    item = GitHubClient().fetch_item(
+        repo, 5, github_username="testuser", todo_repository="testuser/todos"
+    )
+
+    assert item is not None
+    assert (item.item_type, item.todo_target) == (WorkItemType.ISSUE, expected_target)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Could not resolve to an issue or pull request with the number of 5.",
+        "Could not resolve to a Repository with the name 'owner/gone'.",
+        "Resource protected by organization SAML enforcement.",
+    ],
+)
+def test_fetch_item_reports_missing_or_inaccessible_items_as_none(
+    monkeypatch: pytest.MonkeyPatch, message: str
+) -> None:
+    payload = {"data": {"repository": None}, "errors": [{"message": message}]}
+    monkeypatch.setattr(subprocess, "run", _item_lookup_run(payload, failed=True))
+
+    assert (
+        GitHubClient().fetch_item(
+            "owner/repo", 5, github_username="testuser", todo_repository="testuser/todos"
+        )
+        is None
+    )
+
+
+def test_fetch_item_raises_on_other_github_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {"data": None, "errors": [{"message": "Something went wrong while executing"}]}
+    monkeypatch.setattr(subprocess, "run", _item_lookup_run(payload, failed=True))
+
+    with pytest.raises(RuntimeError, match="Something went wrong while executing"):
+        GitHubClient().fetch_item(
+            "owner/repo", 5, github_username="testuser", todo_repository="testuser/todos"
+        )

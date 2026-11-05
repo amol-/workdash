@@ -14,10 +14,11 @@ from pytest_bdd import given, parsers, then, when
 
 from workdash.backend import compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
+from workdash.control import WorkdashControlError
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.repo_worktree import worktree_path
 
-from .common import NOW_UTC, make_work_item, set_session_items
+from .common import NOW_UTC, install_zellij_agent_fakes, make_work_item, set_session_items
 
 
 def _cli_config(
@@ -100,8 +101,12 @@ def _run_workdash(
             )
             return str(analysis_path)
 
+    github_run = subprocess.run
+
     def fake_run(*args, **kwargs):
         cmd = args[0]
+        if cmd[:2] == ["gh", "api"] and scenario_state.get("github_lookup_installed"):
+            return github_run(*args, **kwargs)
         if cmd == ["git", "rev-parse", "--show-toplevel"]:
             cwd = Path(kwargs["cwd"]).resolve()
             if str(kwargs["cwd"]) in scenario_state.get("git_origins", {}):
@@ -120,7 +125,8 @@ def _run_workdash(
 
         class FakeControlClient:
             def __init__(self, host="127.0.0.1") -> None:
-                assert host == "127.0.0.1"
+                assert host == (argv[argv.index("--host") + 1] if "--host" in argv else "127.0.0.1")
+                scenario_state["client_host"] = host
 
             def request(
                 self, endpoint: str, payload: dict[str, object] | None = None
@@ -144,11 +150,18 @@ def _run_workdash(
                     return scenario_state["api_session"].code(
                         target=payload["target"],
                         agent=payload.get("agent"),
+                        autostart=payload.get("autostart", False),
                     )
                 if endpoint == "terminal":
                     return scenario_state["api_session"].terminal(
                         target=payload["target"],
                     )
+                if endpoint == "ready":
+                    try:
+                        return scenario_state["api_session"].ready(scope=payload["scope"])
+                    except WorkdashControlError as error:
+                        scenario_state["control_error_code"] = error.code
+                        raise
                 if endpoint == "pane/content":
                     return scenario_state["api_session"].pane_content(
                         pane_id=payload["pane_id"],
@@ -167,11 +180,7 @@ def _run_workdash(
                 raise AssertionError(f"Unexpected control endpoint: {endpoint}")
 
         monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
-        monkeypatch.setattr(
-            control_module,
-            "load_zellij_panes",
-            lambda _session: list(scenario_state.get("panes", [])),
-        )
+        install_zellij_agent_fakes(scenario_state, monkeypatch)
         monkeypatch.setattr(
             launcher_module,
             "load_zellij_panes",
@@ -188,21 +197,6 @@ def _run_workdash(
             control_module,
             "prepare_launch_agent_prompt",
             lambda *args, **kwargs: "PROMPT",
-        )
-        monkeypatch.setattr(
-            control_module,
-            "launch_agent_context",
-            lambda repo, prompt, agent_command_tokens=None, *, zellij_session=None: (
-                scenario_state.setdefault("launch_calls", []).append(
-                    (repo, prompt, agent_command_tokens, zellij_session)
-                )
-                or SimpleNamespace(
-                    session=zellij_session,
-                    pane_id="terminal_23",
-                    pane_title="code_owner_repo_1",
-                    cwd=repo,
-                )
-            ),
         )
         monkeypatch.setattr(
             control_module,
@@ -877,7 +871,7 @@ def _exits_non_zero(scenario_state: dict[str, Any]) -> None:
 
 @then("the system reports that the work item is unknown")
 def _reports_unknown_item(scenario_state: dict[str, Any]) -> None:
-    assert "No dashboard item matches" in scenario_state["stderr"]
+    assert "No accessible GitHub issue or pull request matches" in scenario_state["stderr"]
 
 
 @then("the system lists the candidate Workdash-owned sessions")
@@ -1014,7 +1008,7 @@ def _launches_code_with_selected_agent(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["exit_code"] == 0, scenario_state
     item = scenario_state["work_items"][0]
     assert scenario_state["ensure_calls"] == [(scenario_state["workdir"], item)]
-    assert scenario_state["launch_calls"] == [
+    assert scenario_state["agent_launches"] == [
         (
             str(Path(scenario_state["workdir"]) / "owner_repo_1"),
             "PROMPT",
@@ -1025,16 +1019,13 @@ def _launches_code_with_selected_agent(scenario_state: dict[str, Any]) -> None:
 
 
 @then(
-    "the system returns JSON with the item id, selected agent, selected session, cwd, pane title, "
-    "and pane id"
-)
-@then(
-    "the system returns JSON with the item ID, selected agent, selected session, cwd, pane title, "
-    "and pane ID"
+    "the system returns JSON with status `launched`, the item ID, selected agent, selected "
+    "session, cwd, pane title, and pane ID"
 )
 def _returns_code_json(scenario_state: dict[str, Any]) -> None:
     payload = json.loads(scenario_state["stdout"])
     assert payload == {
+        "status": "launched",
         "item_id": "owner/repo#ISSUE-1",
         "session": "workdash-main",
         "agent": "codex",
@@ -1121,6 +1112,31 @@ def _requests_pane_information_with_ordinary_panes(scenario_state: dict[str, Any
 def _requests_code_launch(scenario_state: dict[str, Any]) -> None:
     control_requests = scenario_state.get("control_requests", [])
     assert any(req["endpoint"] == "code" for req in control_requests)
+
+
+@when("the user runs `workdash code owner/repo#ISSUE-1 --autostart`")
+def _run_code_with_autostart_option(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as parse_error:
+        _run_workdash(
+            ["code", "owner/repo#ISSUE-1", "--autostart"], scenario_state, monkeypatch, capsys
+        )
+    scenario_state["exit_code"] = parse_error.value.code
+
+
+@then("the command asks the server to code with autostart enabled")
+def _asks_server_to_code_with_autostart(scenario_state: dict[str, Any]) -> None:
+    [request] = scenario_state["control_requests"]
+    assert request["endpoint"] == "code"
+    assert request["payload"]["autostart"] is True
+
+
+@then("the command asks no server to code")
+def _asks_no_server_to_code(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state.get("control_requests", []) == []
 
 
 @then("the command requests terminal launch from the local Workdash server")
@@ -1249,7 +1265,7 @@ def _formats_server_response(scenario_state: dict[str, Any]) -> None:
 
 @then("the system reports that the work item is unknown")
 def _reports_unknown_work_item(scenario_state: dict[str, Any]) -> None:
-    assert "No dashboard item matches" in scenario_state["stderr"]
+    assert "No accessible GitHub issue or pull request matches" in scenario_state["stderr"]
     assert "owner/repo#ISSUE-99" in scenario_state["stderr"]
 
 
@@ -1272,3 +1288,40 @@ def _run_host_with_nonclient(command, scenario_state, capsys):
 def _host_option_rejected(scenario_state):
     assert "--host" in scenario_state["host_error"]
     assert "client" in scenario_state["host_error"]
+
+
+@when("the user runs `workdash code owner/repo#99 --agent pi --host dashboard.lan --json`")
+def _run_remote_code_json(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(
+        ["code", "owner/repo#99", "--agent", "pi", "--host", "dashboard.lan", "--json"],
+        scenario_state,
+        monkeypatch,
+        capsys,
+    )
+
+
+@then(
+    parsers.parse(
+        "the system returns JSON with status `launched` for `{item_id}` and the new pane ID"
+    )
+)
+def _returns_launched_json(item_id: str, scenario_state: dict[str, Any]) -> None:
+    payload = json.loads(scenario_state["stdout"])
+    [launched_pane] = scenario_state["panes"]
+    assert (payload["status"], payload["item_id"], payload["pane_id"]) == (
+        "launched",
+        item_id,
+        f"terminal_{launched_pane['id']}",
+    )
+
+
+@then("the system prints status `already_running` and the running pane ID")
+def _prints_already_running(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state
+    assert "Status: already_running" in scenario_state["stdout"]
+    assert "Agent: -" in scenario_state["stdout"]
+    assert "Pane id: terminal_7" in scenario_state["stdout"]

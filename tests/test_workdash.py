@@ -1,10 +1,13 @@
 import base64
 import json
 import os
+import re
+import shlex
 import subprocess
 import tempfile
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -587,6 +590,8 @@ def test_select_workdash_session_treats_no_zellij_sessions_as_empty(
         (["list"], "list", {"refresh": False}),
         (["list", "--refresh"], "list", {"refresh": True}),
         (["info"], "info", {"include_all_panes": False}),
+        (["ready", "any"], "ready", {"scope": "any"}),
+        (["ready", "owner/repo#42", "--json"], "ready", {"scope": "owner/repo#42"}),
         (["terminal", "owner/repo#ISSUE-1"], "terminal", {"target": "owner/repo#ISSUE-1"}),
         (
             ["todo", "Fix it", "--target", "owner/repo"],
@@ -616,7 +621,7 @@ def test_select_workdash_session_treats_no_zellij_sessions_as_empty(
         (
             ["code", "owner/repo#ISSUE-1", "--agent", "pi"],
             "code",
-            {"target": "owner/repo#ISSUE-1", "agent": "pi"},
+            {"target": "owner/repo#ISSUE-1", "agent": "pi", "autostart": True},
         ),
         (["read", "terminal_23"], "pane/content", {"pane_id": "terminal_23", "full": False}),
         (
@@ -636,18 +641,39 @@ def test_select_workdash_session_treats_no_zellij_sessions_as_empty(
         ),
     ],
 )
-@pytest.mark.parametrize("host", ["127.0.0.1", "192.0.2.10", "dashboard.lan"])
+@pytest.mark.parametrize(
+    ("host", "environment_host", "host_position"),
+    [
+        ("127.0.0.1", None, None),
+        ("192.0.2.10", None, "after"),
+        ("dashboard.lan", None, "after"),
+        ("127.0.0.1:19876", "127.0.0.1:19876", None),
+        ("dashboard.lan:1234", "127.0.0.1:19876", "before"),
+        ("dashboard.lan:1234", "127.0.0.1:19876", "after"),
+    ],
+)
 def test_main_server_backed_commands_are_pure_http_clients(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path,
     host: str,
+    environment_host: str | None,
+    host_position: str | None,
     argv: list[str],
     expected_endpoint: str,
     expected_payload: dict[str, object],
 ) -> None:
     requests: list[tuple[str, dict[str, object]]] = []
     analysis_path = tmp_path / "missing-analysis.md"
+    ready_item = {
+        "id": "owner/repo#PR-51",
+        "type": "pr",
+        "title": "Fix the parser",
+        "url": "https://github.com/owner/repo/pull/51",
+        "action": "address_review",
+        "reasons": ["address_review", "fix_ci"],
+        "issue_id": "owner/repo#ISSUE-42",
+    }
 
     class FakeControlClient:
         def __init__(self, selected_host="127.0.0.1") -> None:
@@ -659,6 +685,8 @@ def test_main_server_backed_commands_are_pure_http_clients(
                 return {"items": []}
             if endpoint == "info":
                 return {"session": "workdash", "panes": []}
+            if endpoint == "ready":
+                return {"scope": payload["scope"], "items": [ready_item]}
             if endpoint == "analyze":
                 return {
                     "item_id": "owner/repo#ISSUE-1",
@@ -672,6 +700,7 @@ def test_main_server_backed_commands_are_pure_http_clients(
                 }
             if endpoint == "code":
                 return {
+                    "status": "launched",
                     "item_id": "owner/repo#ISSUE-1",
                     "session": "workdash",
                     "agent": "pi",
@@ -731,7 +760,13 @@ def test_main_server_backed_commands_are_pure_http_clients(
         lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
     )
 
-    assert workdash_module.main(argv + (["--host", host] if host != "127.0.0.1" else [])) == 0
+    if environment_host is None:
+        monkeypatch.delenv("WORKDASH_HOST", raising=False)
+    else:
+        monkeypatch.setenv("WORKDASH_HOST", environment_host)
+    host_args = ["--host", host] if host_position else []
+    command = host_args + argv if host_position == "before" else argv + host_args
+    assert workdash_module.main(command) == 0
 
     output = capsys.readouterr().out
     if expected_endpoint == "analyze":
@@ -742,6 +777,14 @@ def test_main_server_backed_commands_are_pure_http_clients(
         )
         os.unlink(local_path)
     assert requests == [(expected_endpoint, expected_payload)]
+    if expected_endpoint == "ready" and "--json" in argv:
+        assert json.loads(output)["items"] == [ready_item]
+    elif expected_endpoint == "ready":
+        assert output == (
+            "PR    owner/repo#PR-51             address_review       Fix the parser "
+            "https://github.com/owner/repo/pull/51 [address_review,fix_ci] "
+            "(issue owner/repo#ISSUE-42)\n"
+        )
     if expected_endpoint == "todo" and "--json" in argv:
         assert json.loads(output) == {
             "item_id": "owner/repo#ISSUE-WT1",
@@ -756,6 +799,7 @@ def test_main_server_backed_commands_are_pure_http_clients(
     [
         ["list"],
         ["info"],
+        ["ready", "any"],
         ["analyze", "owner/repo#ISSUE-1"],
         ["code", "owner/repo#ISSUE-1"],
         ["read", "terminal_23"],
@@ -994,8 +1038,9 @@ def test_main_code_human_output_formats_server_response(
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "code"
-            assert payload == {"target": "owner/repo#ISSUE-1", "agent": "pi"}
+            assert payload == {"target": "owner/repo#ISSUE-1", "agent": "pi", "autostart": True}
             return {
+                "status": "launched",
                 "item_id": "owner/repo#ISSUE-1",
                 "session": "workdash-main",
                 "agent": "pi",
@@ -1009,6 +1054,7 @@ def test_main_code_human_output_formats_server_response(
     assert workdash_module.main(["code", "owner/repo#ISSUE-1", "--agent", "pi"]) == 0
 
     output = capsys.readouterr().out
+    assert "Status: launched" in output
     assert "Item: owner/repo#ISSUE-1" in output
     assert "Agent: pi" in output
     assert "Session: workdash-main" in output
@@ -1036,7 +1082,11 @@ def test_main_code_json_outputs_server_response(
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "code"
-            assert payload == {"target": "https://github.com/owner/repo/issues/1", "agent": "codex"}
+            assert payload == {
+                "target": "https://github.com/owner/repo/issues/1",
+                "agent": "codex",
+                "autostart": True,
+            }
             return response
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
@@ -1416,8 +1466,11 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
         lambda *args, **kwargs: "PROMPT",
     )
 
+    panes: list[dict[str, object]] = []
+
     def fake_launch_agent_context(repo, prompt, agent_command_tokens=None, *, zellij_session=None):
         agent_calls.append((repo, prompt, agent_command_tokens, zellij_session))
+        panes.append({"id": 4, "title": "code_wt", "pane_cwd": repo})
         return SimpleNamespace(
             session=zellij_session,
             pane_id=None,
@@ -1426,19 +1479,33 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
         )
 
     monkeypatch.setattr(control_module, "launch_agent_context", fake_launch_agent_context)
+    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(panes))
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda _wd, _item: None)
     monkeypatch.setattr(
         control_module,
         "launch_vscode_context",
         lambda repo, prompt: vscode_calls.append((repo, prompt)),
     )
     monkeypatch.setenv("ZELLIJ", "0")
-    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
+
+    code_calls: list[dict[str, object]] = []
+    real_code = control_module.WorkdashSession.code
+
+    def spy_code(self, **kwargs):
+        code_calls.append(kwargs)
+        return real_code(self, **kwargs)
+
+    monkeypatch.setattr(control_module.WorkdashSession, "code", spy_code)
 
     assert workdash_module.main([]) == 0
 
-    captured_callback["launch"](item, tool)
+    result = captured_callback["launch"](item, tool)
 
-    assert agent_calls == [("/tmp/wt", "PROMPT", expected_tokens, None)]
+    # The TUI stays plan-first: its launch never asks for autostart, so the briefing is unchanged.
+    assert [call["autostart"] for call in code_calls] == [False]
+    assert agent_calls == [("/tmp/wt", "PROMPT", expected_tokens, "workdash-main")]
+    assert (result["status"], result["pane_id"]) == ("launched", "terminal_4")
     assert vscode_calls == []
 
 
@@ -1637,6 +1704,7 @@ def test_environment_address_and_explicit_host_precedence(monkeypatch, capsys):
     [
         ["list"],
         ["info"],
+        ["ready", "owner/repo"],
         ["analyze", "item"],
         ["code", "item"],
         ["terminal", "item"],
@@ -1647,6 +1715,8 @@ def test_environment_address_and_explicit_host_precedence(monkeypatch, capsys):
     ],
 )
 def test_all_clients_accept_host_on_either_side(monkeypatch, args):
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:19876")
+    assert workdash_module._parse_args(args).host == "127.0.0.1:19876"
     monkeypatch.setenv("WORKDASH_HOST", "bad:port")
     assert workdash_module._parse_args(["--host", "example.org", *args]).host == "example.org"
     assert (
@@ -1758,3 +1828,54 @@ def test_version_writes_to_stdout_without_preflight(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.out == f"workdash {workdash_module.__version__}\n"
     assert captured.err == ""
+
+
+def test_workdash_control_skill_examples_are_valid_commands_and_explain_code_claims() -> None:
+    skill = (Path(__file__).parents[1] / "skills/workdash-control/SKILL.md").read_text()
+    examples = [
+        shlex.split(line, comments=True)[1:]
+        for block in re.findall(r"```bash\n(.*?)```", skill, re.DOTALL)
+        for line in block.splitlines()
+        if line.startswith("workdash ")
+    ]
+
+    assert {argv[0] for argv in examples} >= {
+        "code",
+        "list",
+        "info",
+        "ready",
+        "read",
+        "write",
+        "close",
+    }
+    for argv in examples:
+        workdash_module._parse_args(argv)
+    # The live code pane is the claim, so agents must learn to reuse it.
+    assert "already_running" in skill
+    assert "no `workdash claim` command" in skill
+    with pytest.raises(SystemExit):
+        workdash_module._parse_args(["claim", "owner/repo#1"])
+    # Agents must learn what CLI code does, how the TUI differs, and that nothing is merged.
+    for text in (
+        "There is no `--autostart` option: the CLI always asks for",
+        "plan-first briefing",
+        "resumes that pull request in place",
+        "merge conflicts, or failing CI",
+        "`no_checks`",
+        "never as CI passed",
+        "Nothing is injected into it",
+        "never merges a pull request or closes an issue",
+    ):
+        assert text in " ".join(skill.split())
+    assert "--autoclose" not in skill
+    with pytest.raises(SystemExit):
+        workdash_module._parse_args(["code", "owner/repo#1", "--autostart"])
+    # Agents must learn that ready is advice, ordered pull requests first, and needs the server.
+    for text in (
+        "read-only advice",
+        "sub-issue",
+        "Pull requests needing work come first",
+        "No ready work found.",
+        "never start a server just to run `ready`",
+    ):
+        assert text in skill

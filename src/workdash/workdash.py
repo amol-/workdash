@@ -33,7 +33,6 @@ from .control import (
 from .launcher import (
     exec_zellij_wrapped_workdash,
     inject_workdash_local_bin_into_path,
-    launch_terminal_context,
     list_workdash_sessions,
     open_in_browser,
     open_markdown,
@@ -58,6 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.command in {
         "list",
         "info",
+        "ready",
         "analyze",
         "code",
         "read",
@@ -179,7 +179,9 @@ class WorkdashCommands:
         """Launch a coding agent through the local Workdash server."""
 
         try:
-            result = self._client.request("code", {"target": target, "agent": agent})
+            result = self._client.request(
+                "code", {"target": target, "agent": agent, "autostart": True}
+            )
         except WorkdashControlError as error:
             _print_control_error(error)
             return 1
@@ -201,6 +203,20 @@ class WorkdashCommands:
             print(json.dumps(result, ensure_ascii=True, indent=2))
         else:
             _print_terminal_result(result)
+        return 0
+
+    def ready_cli(self, *, scope: str, json_output: bool) -> int:
+        """Report the ready work of a scope through the local Workdash server."""
+
+        try:
+            result = self._client.request("ready", {"scope": scope})
+        except WorkdashControlError as error:
+            _print_control_error(error)
+            return 1
+        if json_output:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        else:
+            _print_ready_result(result)
         return 0
 
     def todo_cli(
@@ -352,13 +368,14 @@ class WorkdashCommands:
                 target=format_work_item_id(item), agent=tool, prefer_cache=(tool == "cached")
             )["path"],
             launch_callback=lambda item, tool: session.code(
-                target=format_work_item_id(item), agent=tool, allow_vscode=True
+                target=format_work_item_id(item),
+                agent=tool,
+                allow_vscode=True,
+                autostart=False,
             ),
             analyze_choices=config.tui_analyze_choices(),
             code_choices=config.tui_code_choices(),
-            terminal_callback=lambda item: launch_terminal_context(
-                ensure_worktree(config.workdir, item)
-            ),
+            terminal_callback=lambda item: session.terminal(target=format_work_item_id(item)),
             include_callback=lambda url, _identities: session.include_item_by_url(url),
             todo_callback=lambda text, target: session.todo(text=text, target=target),
             focus_callback=session.focus_pane,
@@ -413,6 +430,8 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             json_output=options.json_output,
             include_all_panes=options.include_all_panes,
         )
+    if options.command == "ready":
+        return commands.ready_cli(scope=options.target or "", json_output=options.json_output)
     if options.command == "analyze":
         return commands.analyze_cli(
             target=options.target or "",
@@ -556,9 +575,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     )
     analyze_parser = subparsers.add_parser(
         "analyze",
-        help="Analyze a current Workdash item.",
+        help="Analyze a Workdash item.",
     )
-    analyze_parser.add_argument("target", metavar="ITEM", help="Workdash item ID or GitHub URL.")
+    analyze_parser.add_argument(
+        "target", metavar="ITEM", help="Workdash item ID, owner/repo#NUMBER issue, or GitHub URL."
+    )
     analyze_parser.add_argument(
         "--agent",
         help="Configured analysis agent to run when no fresh cache exists.",
@@ -572,9 +593,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     )
     code_parser = subparsers.add_parser(
         "code",
-        help="Launch a coding agent for a current Workdash item.",
+        help="Launch a coding agent for a Workdash item, or report the one already running.",
     )
-    code_parser.add_argument("target", metavar="ITEM", help="Workdash item ID or GitHub URL.")
+    code_parser.add_argument(
+        "target", metavar="ITEM", help="Workdash item ID, owner/repo#NUMBER issue, or GitHub URL."
+    )
     code_parser.add_argument(
         "--agent",
         help="Configured coding agent to launch.",
@@ -588,10 +611,28 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     )
     terminal_parser = subparsers.add_parser(
         "terminal",
-        help="Open a plain terminal in a current Workdash item's worktree.",
+        help="Open a plain terminal in a Workdash item's worktree.",
     )
-    terminal_parser.add_argument("target", metavar="ITEM", help="Workdash item ID or GitHub URL.")
     terminal_parser.add_argument(
+        "target", metavar="ITEM", help="Workdash item ID, owner/repo#NUMBER issue, or GitHub URL."
+    )
+    terminal_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Emit machine-readable JSON.",
+    )
+    ready_parser = subparsers.add_parser(
+        "ready",
+        help="List the GitHub issues and pull requests ready to be worked on next.",
+    )
+    ready_parser.add_argument(
+        "target",
+        metavar="SCOPE",
+        help="owner/repo, an issue (owner/repo#NUMBER, item ID, or URL), todo, or any.",
+    )
+    ready_parser.add_argument(
         "--json",
         dest="json_output",
         action="store_true",
@@ -673,6 +714,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     for client_parser in (
         list_parser,
         info_parser,
+        ready_parser,
         analyze_parser,
         code_parser,
         terminal_parser,
@@ -686,7 +728,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         )
     show_config_parser = subparsers.add_parser(
         "show-config",
-        help="Show configured agents and the fixed server address.",
+        help="Show configured agents and the selected server address.",
     )
     show_config_parser.add_argument(
         "--json",
@@ -714,6 +756,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     client_commands = {
         "list",
         "info",
+        "ready",
         "analyze",
         "code",
         "terminal",
@@ -833,6 +876,19 @@ def _print_work_items_result(result: dict[str, object]) -> None:
         print(f"{display_type:7} {item['id']:24} {str(item['updated_at'])[:10]} {title}")
 
 
+def _print_ready_result(result: dict[str, object]) -> None:
+    items = result["items"]
+    if not items:
+        print("No ready work found.")
+        return
+    for item in items:
+        issue = f" (issue {item['issue_id']})" if item["type"] == "pr" and item["issue_id"] else ""
+        print(
+            f"{item['type'].upper():5} {item['id']:28} {item['action']:20} "
+            f"{item['title']} {item['url']} [{','.join(item['reasons'])}]{issue}"
+        )
+
+
 def _with_local_analysis_path(result: dict[str, object]) -> dict[str, object]:
     cli_result = dict(result)
     file_content = cli_result.pop("file_content", None)
@@ -887,8 +943,9 @@ def _print_todo_result(result: dict[str, object]) -> None:
 
 
 def _print_code_result(result: dict[str, object]) -> None:
+    print(f"Status: {result['status']}")
     print(f"Item: {result['item_id']}")
-    print(f"Agent: {result['agent']}")
+    print(f"Agent: {result['agent'] or '-'}")
     print(f"Session: {result['session']}")
     print(f"Cwd: {result['cwd']}")
     print(f"Pane title: {result['pane_title'] or '-'}")
