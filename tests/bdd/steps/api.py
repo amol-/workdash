@@ -232,6 +232,7 @@ def _user_starts_workdash_with_server(
     monkeypatch.setattr(workdash_module, "WorkdashControlServer", FakeControlServer)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
     monkeypatch.setattr(workdash_module, "list_workdash_sessions", lambda: ["workdash-main"])
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
 
     scenario_state["exit_code"] = workdash_module.main(["--server"])
     captured = capsys.readouterr()
@@ -939,6 +940,189 @@ def _unlisted_source_requests_todo(
 def _api_returns_forbidden(scenario_state) -> None:
     assert scenario_state["api_status"] == 403
     assert scenario_state["api_payload"]["error"]["code"] == "forbidden"
+
+
+@given("the user sets `WORKDASH_HOST` to `127.0.0.1` with an available custom port")
+def _custom_server_address(monkeypatch, scenario_state, loopback_aliases):
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setenv("WORKDASH_HOST", f"127.0.0.1:{port}")
+    scenario_state["custom_port"] = port
+
+
+@when("the user starts a server with a listener on `127.0.0.1` accepting `127.0.0.2`")
+def _start_custom_server(scenario_state, work_items, tmp_path, request):
+    from workdash.control import WorkdashControlServer
+
+    seed_dashboard_item(work_items, scenario_state)
+    session = ensure_api_session(scenario_state, work_items, tmp_path)
+    server = WorkdashControlServer(session, listeners=(("127.0.0.1", ("127.0.0.2",)),))
+    server.start()
+    request.addfinalizer(server.stop)
+
+
+@then("a client using `WORKDASH_HOST` can list the server's work items")
+def _default_client_lists_custom_server(scenario_state):
+    from workdash.control import WorkdashControlClient
+
+    result = WorkdashControlClient().request("list")
+    assert result["items"][0]["id"] == "owner/repo#ISSUE-1"
+
+
+@then("the listener accepts `127.0.0.2` and denies `127.0.0.3`")
+def _source_can_access_custom_server(scenario_state):
+    from http.client import HTTPConnection
+
+    for source, status in (("127.0.0.2", 200), ("127.0.0.3", 403)):
+        connection = HTTPConnection(
+            "127.0.0.1", scenario_state["custom_port"], source_address=(source, 0)
+        )
+        try:
+            connection.request("POST", "/api/v0/list", "{}", {"Content-Type": "application/json"})
+            response = connection.getresponse()
+            assert response.status == status
+            if status == 200:
+                assert (
+                    json.loads(response.read())["result"]["items"][0]["id"] == "owner/repo#ISSUE-1"
+                )
+        finally:
+            connection.close()
+
+
+@given("two Zellij sessions including a non-Workdash session are active")
+def _two_workdash_sessions(scenario_state, monkeypatch):
+    import workdash.workdash as cli
+
+    scenario_state["dashboard_sessions"] = ["workdash-one", "demo"]
+    monkeypatch.setattr(cli, "list_workdash_sessions", lambda: ["workdash-one"])
+    monkeypatch.setenv("ZELLIJ", "0")
+
+
+@when("a server-backed dashboard is started inside each session on a different address")
+def _start_two_server_dashboards(scenario_state, monkeypatch, tmp_path, request):
+    import socket
+    import threading
+    import time
+
+    import workdash.control as control
+    import workdash.workdash as cli
+
+    stopped = threading.Event()
+    threads = []
+    ports = []
+
+    class Backend:
+        def __init__(self, config):
+            pass
+
+        def load_items(self, progress_callback=None):
+            return [], {}
+
+    class App:
+        def __init__(self, **kwargs):
+            self.is_running = False
+
+        def run(self, *, mouse):
+            stopped.wait()
+
+    monkeypatch.setattr(cli, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(cli, "load_config", lambda: api_config(tmp_path))
+    monkeypatch.setattr(cli, "WorkdashBackend", Backend)
+    monkeypatch.setattr(cli, "WorkdashApp", App)
+    monkeypatch.setattr(control, "load_zellij_panes", lambda session: [])
+
+    def cleanup():
+        stopped.set()
+        for thread in threads:
+            thread.join(5)
+        assert all(not thread.is_alive() for thread in threads)
+
+    request.addfinalizer(cleanup)
+    for session in scenario_state["dashboard_sessions"]:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        ports.append(port)
+        monkeypatch.setenv("ZELLIJ_SESSION_NAME", session)
+        monkeypatch.setenv("WORKDASH_HOST", f"127.0.0.1:{port}")
+        thread = threading.Thread(target=lambda: cli.main(["--direct", "--server"]), daemon=True)
+        threads.append(thread)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            pytest.fail(f"dashboard {session} did not start its server")
+    scenario_state["dashboard_ports"] = ports
+
+
+@then("both servers respond and each dashboard uses its own Zellij session")
+def _dashboards_use_own_sessions(scenario_state):
+    from workdash.control import WorkdashControlClient
+
+    for port, session in zip(
+        scenario_state["dashboard_ports"], scenario_state["dashboard_sessions"]
+    ):
+        result = WorkdashControlClient(f"127.0.0.1:{port}").request("info")
+        assert result["session"] == session
+
+
+@given("the server uses a local primary IP address and an available port")
+def _server_uses_local_primary(
+    monkeypatch, scenario_state, work_items, tmp_path, request, loopback_aliases
+):
+    import socket
+
+    from workdash.control import WorkdashControlServer
+
+    host = "127.0.0.2"
+    with socket.socket() as probe:
+        probe.bind((host, 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setenv("WORKDASH_HOST", f"{host}:{port}")
+    seed_dashboard_item(work_items, scenario_state)
+    session = ensure_api_session(scenario_state, work_items, tmp_path)
+    server = WorkdashControlServer(session)
+    server.start()
+    request.addfinalizer(server.stop)
+    scenario_state["primary_address"] = (host, port)
+
+
+@when("a client from that primary IP requests the list API")
+def _primary_requests_list(scenario_state):
+    from http.client import HTTPConnection
+
+    host, port = scenario_state["primary_address"]
+    connection = HTTPConnection(host, port, source_address=(host, 0), timeout=3)
+    try:
+        connection.request("POST", "/api/v0/list", "{}", {"Content-Type": "application/json"})
+        response = connection.getresponse()
+        scenario_state["api_status"] = response.status
+        scenario_state["api_payload"] = json.loads(response.read())
+    finally:
+        connection.close()
+
+
+@then("an unlisted source cannot access that server")
+def _unlisted_source_cannot_access_primary(scenario_state):
+    from http.client import HTTPConnection
+
+    host, port = scenario_state["primary_address"]
+    connection = HTTPConnection(host, port, source_address=("127.0.0.3", 0), timeout=3)
+    try:
+        connection.request("POST", "/api/v0/list", "{}", {"Content-Type": "application/json"})
+        response = connection.getresponse()
+        assert response.status == 403
+        assert json.loads(response.read())["error"]["code"] == "forbidden"
+    finally:
+        connection.close()
 
 
 # -- Explicit targets outside the dashboard ----------------------------------

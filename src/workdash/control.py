@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Collection, Sequence
 from http import HTTPStatus
-from ipaddress import ip_address
+from ipaddress import IPv4Address, ip_address
 from socketserver import BaseServer
 from wsgiref.simple_server import make_server
 
@@ -52,6 +52,27 @@ _LAUNCH_VISIBILITY_INTERVAL_SECONDS = 0.5
 # An unconfirmed launch may still have started an agent, so the worktree refuses
 # new launches for this long unless its pane shows up first.
 _UNCONFIRMED_LAUNCH_TTL_SECONDS = 60.0
+
+
+def server_address(value: str | None = None) -> tuple[str, int]:
+    """Resolve a control address, applying the environment default when omitted."""
+    label = "WORKDASH_HOST" if value is None else "--host"
+    value = os.environ.get("WORKDASH_HOST", SERVER_HOST) if value is None else value
+    host, separator, port = value.partition(":")
+    if (
+        not host
+        or any(c.isspace() or c in "/@?#[]" for c in host)
+        or (separator and (not port.isascii() or not port.isdigit() or not 1 <= int(port) <= 65535))
+    ):
+        raise ValueError(f"Invalid {label} {value!r}: expected HOST or HOST:PORT")
+    if label == "WORKDASH_HOST":
+        try:
+            IPv4Address(host)
+        except ValueError as error:
+            raise ValueError(
+                f"Invalid {label} {value!r}: expected IPv4 address or IPv4:PORT"
+            ) from error
+    return host, int(port) if separator else SERVER_PORT
 
 
 class WorkdashControlError(RuntimeError):
@@ -676,18 +697,27 @@ class WorkdashControlServer:
     def start(self) -> None:
         """Bind every listener before serving the shared JSON API."""
 
-        accepted_ips = {ip for _host, ips in self._listeners for ip in ips}
-        app = _source_filtered_wsgi_app(_make_turbogears_app(self._session), accepted_ips)
+        primary_host, port = server_address()
+        accepted_ips = {
+            "127.0.0.1",
+            primary_host,
+            *(ip for _host, ips in self._listeners for ip in ips),
+        }
+        host = primary_host
         try:
-            for host in [SERVER_HOST, *(host for host, _ips in self._listeners)]:
-                httpd = make_server(host, SERVER_PORT, app)
+            app = _source_filtered_wsgi_app(_make_turbogears_app(self._session), accepted_ips)
+            for host in [
+                primary_host,
+                *(host for host, _ips in self._listeners if host != primary_host),
+            ]:
+                httpd = make_server(host, port, app)
                 self._httpds.append(httpd)
                 if ip_address(httpd.server_address[0]).is_unspecified:
                     raise OSError("Wildcard listener binds are not allowed")
         except OSError as error:
             self.stop()
             raise RuntimeError(
-                f"Cannot bind Workdash server at {host}:{SERVER_PORT}: {error}. "
+                f"Cannot bind Workdash server at {host}:{port}: {error}. "
                 "Is another `workdash --server` running?"
             ) from error
         for httpd in self._httpds:
@@ -713,8 +743,9 @@ class WorkdashControlServer:
 class WorkdashControlClient:
     """HTTP client used by thin CLI commands."""
 
-    def __init__(self, host: str = SERVER_HOST) -> None:
-        self._address = f"{host}:{SERVER_PORT}"
+    def __init__(self, host: str | None = None) -> None:
+        selected_host, port = server_address(host)
+        self._address = f"{selected_host}:{port}"
 
     def request(self, endpoint: str, payload: dict[str, object] | None = None) -> dict[str, object]:
         body = json.dumps(payload or {}).encode("utf-8")
@@ -773,12 +804,13 @@ def format_work_item_id(item: WorkItem) -> str:
 
 
 def show_config_payload(config: WorkdashConfig) -> dict[str, object]:
+    host, port = server_address()
     return {
         "agents": {
             "analyze": config.configured_analyze_agents(),
             "code": config.configured_code_agents(),
         },
-        "server": {"host": SERVER_HOST, "port": SERVER_PORT},
+        "server": {"host": host, "port": port},
     }
 
 

@@ -27,6 +27,7 @@ from .control import (
     WorkdashControlServer,
     WorkdashSession,
     format_work_item_id,
+    server_address,
     show_config_payload,
 )
 from .launcher import (
@@ -325,12 +326,13 @@ class WorkdashCommands:
             progress_callback=lambda message: print(message, flush=True)
         )
         try:
-            # Outside --server, the dashboard is already running inside its own
-            # Zellij session (Zellij sets this env var), so it doesn't need to
-            # enumerate sessions to find itself; that lookup is only for a
-            # separate process (the JSON API) locating the session later.
+            current_session = os.getenv("ZELLIJ_SESSION_NAME")
+            if server and os.getenv("ZELLIJ") and not current_session:
+                raise RuntimeError("Cannot determine the current Zellij session.")
             zellij_session = (
-                _select_workdash_session(None) if server else os.getenv("ZELLIJ_SESSION_NAME")
+                _select_workdash_session(None)
+                if server and not os.getenv("ZELLIJ")
+                else current_session
             )
         except RuntimeError as error:
             print(f"Error: {error}", file=sys.stderr, flush=True)
@@ -521,6 +523,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         action="store_true",
         help="Start the TUI with the localhost JSON control API.",
     )
+    parser.add_argument("--host", default=argparse.SUPPRESS, help="Workdash server HOST[:PORT].")
     parser.add_argument(
         "--listen",
         action="append",
@@ -721,11 +724,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         close_parser,
     ):
         client_parser.add_argument(
-            "--host", default="127.0.0.1", help="Workdash server host (port 8765)."
+            "--host", default=argparse.SUPPRESS, help="Workdash server HOST[:PORT]."
         )
     show_config_parser = subparsers.add_parser(
         "show-config",
-        help="Show configured agents and the fixed server address.",
+        help="Show configured agents and the selected server address.",
     )
     show_config_parser.add_argument(
         "--json",
@@ -749,6 +752,30 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         help="Show the open pull request and issue for the current branch.",
     )
     namespace = parser.parse_args(argv) if argv is not None else parser.parse_args()
+    host = getattr(namespace, "host", None)
+    client_commands = {
+        "list",
+        "info",
+        "ready",
+        "analyze",
+        "code",
+        "terminal",
+        "todo",
+        "read",
+        "write",
+        "close",
+    }
+    if host is not None and (
+        namespace.command not in client_commands or namespace.server or namespace.configure
+    ):
+        parser.error("--host is only supported by server-backed client commands")
+    if namespace.command in client_commands | {"show-config"} or namespace.server:
+        try:
+            server_address(None if namespace.server or namespace.command == "show-config" else host)
+        except ValueError as error:
+            parser.error(str(error))
+        if host is None:
+            host = os.environ.get("WORKDASH_HOST", "127.0.0.1")
     if namespace.listen and not namespace.server:
         parser.error("--listen requires --server")
     listeners = []
@@ -780,7 +807,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         body=getattr(namespace, "body", None),
         full=getattr(namespace, "full", False),
         raw=getattr(namespace, "raw", False),
-        host=getattr(namespace, "host", "127.0.0.1"),
+        host=host or "127.0.0.1",
         listeners=tuple(listeners),
     )
 

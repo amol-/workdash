@@ -7,8 +7,9 @@ Feature: CLI orchestration commands
 
   Rules:
     - `workdash list`, `workdash info`, `workdash ready`, `workdash analyze`, `workdash code`, `workdash terminal`, `workdash todo`, `workdash read`, `workdash write`, and `workdash close` require a running `workdash --server` session.
-    - All ten server-backed CLI commands accept `--host HOST`, defaulting to `127.0.0.1`, using plain HTTP on fixed port 8765.
-    - Client hosts may be IPs or DNS hostnames; host selection preserves positional item targets and todo targets, whether GitHub `owner/repo` names or git URLs.
+    - All ten server-backed CLI commands accept `--host HOST[:PORT]` before or after the command, overriding `WORKDASH_HOST`; otherwise they use `WORKDASH_HOST` or `127.0.0.1:8765`. A host without a port uses 8765.
+    - `--host` is rejected for server startup and commands other than the ten server-backed clients; `--version` exits immediately.
+    - `WORKDASH_HOST` must be an IPv4 address with an optional port; an explicit `--host` may be a DNS hostname and overrides even an invalid `WORKDASH_HOST`. Host selection preserves positional item targets and todo targets, whether GitHub `owner/repo` names or git URLs.
     - Server-backed CLI commands do not load configuration, run GitHub preflight, inspect Zellij, or fetch GitHub directly.
     - Server-backed CLI commands report a clear error naming the selected host when the Workdash server is not reachable.
     - CLI commands that return information support `--json`.
@@ -332,3 +333,14 @@ Feature: CLI orchestration commands
     When the user runs `workdash code owner/repo#ISSUE-1 --autostart`
     Then the command exits with a non-zero status
     And the command asks no server to code
+
+  @id:F-CLI-ORCHESTRATION-S042
+  Scenario Outline: Host selection is rejected for non-client commands
+    When the user runs `workdash --host 127.0.0.1:9001 <command>`
+    Then the command rejects `--host` as a client-only option
+    And the command exits with a non-zero status
+
+    Examples:
+      | command     |
+      | --server    |
+      | show-config |

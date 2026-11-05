@@ -218,6 +218,7 @@ def test_main_server_refresh_before_tui_run_updates_session_and_repaints_when_ru
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
     monkeypatch.setattr(workdash_module, "list_workdash_sessions", lambda: ["workdash-main"])
     monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
 
     argv = ["--server"]
     for host, ips in listeners:
@@ -285,6 +286,7 @@ def test_main_server_refresh_callback_reraises_unrelated_runtime_errors(
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
     monkeypatch.setattr(workdash_module, "list_workdash_sessions", lambda: ["workdash-main"])
     monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
 
     with pytest.raises(RuntimeError, match="refresh exploded"):
         workdash_module.main(["--server"])
@@ -639,12 +641,24 @@ def test_select_workdash_session_treats_no_zellij_sessions_as_empty(
         ),
     ],
 )
-@pytest.mark.parametrize("host", ["127.0.0.1", "192.0.2.10", "dashboard.lan"])
+@pytest.mark.parametrize(
+    ("host", "environment_host", "host_position"),
+    [
+        ("127.0.0.1", None, None),
+        ("192.0.2.10", None, "after"),
+        ("dashboard.lan", None, "after"),
+        ("127.0.0.1:19876", "127.0.0.1:19876", None),
+        ("dashboard.lan:1234", "127.0.0.1:19876", "before"),
+        ("dashboard.lan:1234", "127.0.0.1:19876", "after"),
+    ],
+)
 def test_main_server_backed_commands_are_pure_http_clients(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path,
     host: str,
+    environment_host: str | None,
+    host_position: str | None,
     argv: list[str],
     expected_endpoint: str,
     expected_payload: dict[str, object],
@@ -746,7 +760,13 @@ def test_main_server_backed_commands_are_pure_http_clients(
         lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
     )
 
-    assert workdash_module.main(argv + (["--host", host] if host != "127.0.0.1" else [])) == 0
+    if environment_host is None:
+        monkeypatch.delenv("WORKDASH_HOST", raising=False)
+    else:
+        monkeypatch.setenv("WORKDASH_HOST", environment_host)
+    host_args = ["--host", host] if host_position else []
+    command = host_args + argv if host_position == "before" else argv + host_args
+    assert workdash_module.main(command) == 0
 
     output = capsys.readouterr().out
     if expected_endpoint == "analyze":
@@ -1662,6 +1682,152 @@ def test_server_listener_flags_reach_the_zellij_dashboard(monkeypatch, tmp_path)
     assert error.value.code == 0
     assert captured["command"][-len(argv) :] == argv
     assert "--direct" in captured["command"]
+
+
+def test_environment_address_and_explicit_host_precedence(monkeypatch, capsys):
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:19876")
+    assert workdash_module._parse_args(["list"]).host == "127.0.0.1:19876"
+    assert workdash_module._parse_args(["--host", "example.org", "list"]).host == "example.org"
+    assert (
+        workdash_module._parse_args(["list", "--host", "example.org:1234"]).host
+        == "example.org:1234"
+    )
+    monkeypatch.setenv("WORKDASH_HOST", "bad:port")
+    assert workdash_module._parse_args(["list", "--host", "example.org"]).host == "example.org"
+    with pytest.raises(SystemExit):
+        workdash_module._parse_args(["list"])
+    assert "WORKDASH_HOST" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["list"],
+        ["info"],
+        ["ready", "owner/repo"],
+        ["analyze", "item"],
+        ["code", "item"],
+        ["terminal", "item"],
+        ["todo", "text"],
+        ["read", "pane"],
+        ["write", "pane", "text"],
+        ["close", "pane"],
+    ],
+)
+def test_all_clients_accept_host_on_either_side(monkeypatch, args):
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:19876")
+    assert workdash_module._parse_args(args).host == "127.0.0.1:19876"
+    monkeypatch.setenv("WORKDASH_HOST", "bad:port")
+    assert workdash_module._parse_args(["--host", "example.org", *args]).host == "example.org"
+    assert (
+        workdash_module._parse_args([*args, "--host", "example.org:1234"]).host
+        == "example.org:1234"
+    )
+
+
+def test_address_validation_and_host_only_default(monkeypatch, capsys):
+    monkeypatch.setenv("WORKDASH_HOST", "dashboard.lan")
+    with pytest.raises(ValueError, match="WORKDASH_HOST"):
+        control_module.server_address()
+    assert workdash_module._parse_args(["list", "--host", "example.org"]).host == "example.org"
+    monkeypatch.setenv("WORKDASH_HOST", "localhost:invalid")
+    with pytest.raises(SystemExit):
+        workdash_module.main(["list"])
+    error = capsys.readouterr().err
+    assert "WORKDASH_HOST" in error and "localhost:invalid" in error
+    assert control_module.server_address("dashboard.lan") == ("dashboard.lan", 8765)
+
+
+@pytest.mark.parametrize("value", ["", ":1234", "localhost:", "localhost:0", "localhost:65536"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_cli_rejects_invalid_control_addresses(monkeypatch, capsys, value, explicit):
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:9876" if explicit else value)
+    args = ["list", "--host", value] if explicit else ["list"]
+    with pytest.raises(SystemExit):
+        workdash_module.main(args)
+    error = capsys.readouterr().err
+    assert ("--host" if explicit else "WORKDASH_HOST") in error
+    assert repr(value) in error
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],
+        ["--server"],
+        ["show-config"],
+        ["--configure"],
+        ["branchdiff"],
+        ["branchinfo"],
+        ["--server", "list"],
+        ["--configure", "list"],
+    ],
+)
+def test_host_is_rejected_for_nonclient_commands(monkeypatch, capsys, args):
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:9999")
+    monkeypatch.setattr(
+        workdash_module, "WorkdashCommands", lambda **kwargs: pytest.fail("command was executed")
+    )
+    monkeypatch.setattr(workdash_module, "configure", lambda: pytest.fail("setup was executed"))
+    with pytest.raises(SystemExit) as error:
+        workdash_module.main(["--host", "127.0.0.1:9001", *args])
+    assert error.value.code == 2
+    message = capsys.readouterr().err
+    assert "--host" in message and "client" in message
+
+
+def test_server_inside_zellij_requires_current_session_name(monkeypatch, capsys):
+    from unittest.mock import MagicMock
+
+    backend = MagicMock()
+    backend.load_items.return_value = ([], {})
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", lambda **kwargs: backend)
+    monkeypatch.setattr(
+        workdash_module,
+        "list_workdash_sessions",
+        lambda: pytest.fail("must not select another session"),
+    )
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+    assert workdash_module.main(["--direct", "--server"]) == 1
+    assert "Cannot determine the current Zellij session" in capsys.readouterr().err
+
+
+def test_server_outside_zellij_selects_single_existing_workdash_session(monkeypatch):
+    from unittest.mock import MagicMock
+
+    backend = MagicMock()
+    backend.load_items.return_value = ([], {})
+    sessions = []
+    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", lambda **kwargs: backend)
+    monkeypatch.setattr(workdash_module, "list_workdash_sessions", lambda: ["workdash-existing"])
+    monkeypatch.setattr(
+        workdash_module,
+        "WorkdashApp",
+        lambda **kwargs: sessions.append(kwargs["session"].zellij_session) or MagicMock(),
+    )
+    monkeypatch.setattr(workdash_module, "WorkdashControlServer", MagicMock())
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+    assert workdash_module.main(["--direct", "--server"]) == 0
+    assert sessions == ["workdash-existing"]
+
+
+def test_version_writes_to_stdout_without_preflight(monkeypatch, capsys):
+    monkeypatch.setenv("WORKDASH_HOST", "invalid:port")
+    monkeypatch.setattr(
+        workdash_module, "_check_gh_preflight", lambda: pytest.fail("unexpected preflight")
+    )
+    with pytest.raises(SystemExit) as error:
+        workdash_module.main(["--version"])
+    assert error.value.code == 0
+    captured = capsys.readouterr()
+    assert captured.out == f"workdash {workdash_module.__version__}\n"
+    assert captured.err == ""
 
 
 def test_workdash_control_skill_examples_are_valid_commands_and_explain_code_claims() -> None:

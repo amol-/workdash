@@ -12,7 +12,7 @@ Feature: Show configured automation options
     - Configured coding agents are agents with a launch command configured.
     - Agents are reported by their configured names, in the order of the configuration file.
     - V0 coding agents do not include non-terminal editors such as VSCode.
-    - The server address is reported as `127.0.0.1:8765`.
+    - The server address reflects `WORKDASH_HOST`, or `127.0.0.1:8765` when unset.
     - JSON output is available for automation clients.
 
   @id:F-CONFIG-SHOW-CONFIG-S001
