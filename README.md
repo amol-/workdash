@@ -153,7 +153,7 @@ workdash list --json         # list items as machine-readable JSON
 workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
 workdash ready SCOPE [--json]   # list the GitHub work ready to be picked up next
 workdash analyze ITEM [--agent NAME] [--json]  # analyze an item
-workdash code ITEM [--agent NAME] [--json]  # launch an autonomous coding agent, or report the running one
+workdash code ITEM [--agent NAME] [--group NAME] [--json]  # launch an autonomous coding agent, or report the running one
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
 workdash todo TEXT [--target REPOSITORY] [--body BODY] [--json]  # capture a todo
 workdash read PANE_ID [--full] [--json]  # read text from a live pane
@@ -382,9 +382,13 @@ base64 content.
 
 ## Code command
 
-`workdash code ITEM [--agent NAME] [--json]` requires a running
+`workdash code ITEM [--agent NAME] [--group NAME] [--json]` requires a running
 `workdash --server` session and launches a configured coding agent for a work
-item. `ITEM` accepts the same items as `workdash analyze`.
+item. `ITEM` accepts the same items as `workdash analyze`. With `--group NAME`,
+the server opens a new agent pane in the named Zellij tab, creating it if needed;
+without it the pane opens in the current tab. This also works with `--host`.
+An existing agent remains in its current tab regardless of the requested group.
+The API accepts the same option as a `group` string.
 
 At most one coding agent works in a worktree: its live `code_` Zellij pane is the
 claim, with no claim command or stored claim state. When an agent pane launched
@@ -415,8 +419,8 @@ plan-first briefing and never commits or pushes by itself, and the HTTP
 `POST /api/v0/code` takes an optional boolean `autostart`, false when omitted.
 `already_running` injects nothing into the running agent.
 
-Human output reports the status, item, agent, selected session, cwd, pane title,
-and pane id when available. `--json` emits the same result as machine-readable JSON.
+Human output reports the status, item, agent, selected session, actual tab, cwd,
+pane title, and pane id when available. `--json` emits the same result as machine-readable JSON.
 
 ## Read and write commands
 

@@ -110,6 +110,7 @@ class CLIOptions:
     session: str | None = None
     target: str | None = None
     agent: str | None = None
+    group: str | None = None
     include_all_panes: bool = False
     pane_id: str | None = None
     text: str | None = None
@@ -175,12 +176,20 @@ class WorkdashCommands:
             _print_analysis_result(result)
         return 0
 
-    def code_cli(self, *, target: str, agent: str | None, json_output: bool) -> int:
+    def code_cli(
+        self, *, target: str, agent: str | None, group: str | None, json_output: bool
+    ) -> int:
         """Launch a coding agent through the local Workdash server."""
 
         try:
             result = self._client.request(
-                "code", {"target": target, "agent": agent, "autostart": True}
+                "code",
+                {
+                    "target": target,
+                    "agent": agent,
+                    "autostart": True,
+                    **({"group": group} if group is not None else {}),
+                },
             )
         except WorkdashControlError as error:
             _print_control_error(error)
@@ -442,6 +451,7 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
         return commands.code_cli(
             target=options.target or "",
             agent=options.agent,
+            group=options.group,
             json_output=options.json_output,
         )
     if options.command == "terminal":
@@ -602,6 +612,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         "--agent",
         help="Configured coding agent to launch.",
     )
+    code_parser.add_argument("--group", help="Zellij tab for the agent pane.")
     code_parser.add_argument(
         "--json",
         dest="json_output",
@@ -801,6 +812,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         session=getattr(namespace, "session", None),
         target=getattr(namespace, "target", None),
         agent=getattr(namespace, "agent", None),
+        group=getattr(namespace, "group", None),
         include_all_panes=getattr(namespace, "include_all_panes", False),
         pane_id=getattr(namespace, "pane_id", None),
         text=getattr(namespace, "text", None),
@@ -947,6 +959,7 @@ def _print_code_result(result: dict[str, object]) -> None:
     print(f"Item: {result['item_id']}")
     print(f"Agent: {result['agent'] or '-'}")
     print(f"Session: {result['session']}")
+    print(f"Tab: {result.get('tab_name') or '-'}")
     print(f"Cwd: {result['cwd']}")
     print(f"Pane title: {result['pane_title'] or '-'}")
     print(f"Pane id: {result['pane_id'] or '-'}")

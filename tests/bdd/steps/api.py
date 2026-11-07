@@ -807,6 +807,7 @@ def _api_returns_code_result(scenario_state: dict[str, Any]) -> None:
         "cwd": str(Path(scenario_state["api_session"].config.workdir) / "owner_repo_1"),
         "pane_title": "code_owner_repo_1",
         "pane_id": "terminal_23",
+        "tab_name": None,
     }
 
 

@@ -486,7 +486,9 @@ def install_zellij_agent_fakes(
             raise RuntimeError("Failed to list Zellij panes for workdash-main: session not found")
         return [dict(pane) for pane in panes]
 
-    def launch_agent(repo_path, prompt, agent_command_tokens=None, *, zellij_session=None):
+    def launch_agent(
+        repo_path, prompt, agent_command_tokens=None, *, zellij_session=None, group=None
+    ):
         launches = scenario_state.setdefault("agent_launches", [])
         launches.append((repo_path, prompt, agent_command_tokens, zellij_session))
         if scenario_state.get("coding_launch_fails"):
@@ -495,7 +497,9 @@ def install_zellij_agent_fakes(
         pane_id = 22 + len(launches)
         pane_title = f"code_{Path(repo_path).name}"
         if not scenario_state.get("launched_panes_invisible"):
-            panes.append({"id": pane_id, "title": pane_title, "pane_cwd": repo_path})
+            panes.append(
+                {"id": pane_id, "title": pane_title, "pane_cwd": repo_path, "tab_name": group}
+            )
         return SimpleNamespace(
             session=zellij_session, pane_id=None, pane_title=pane_title, cwd=repo_path
         )

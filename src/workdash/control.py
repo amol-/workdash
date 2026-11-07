@@ -268,6 +268,7 @@ class WorkdashSession:
         agent: str | None = None,
         allow_vscode: bool = False,
         autostart: bool = False,
+        group: str | None = None,
     ) -> dict[str, object]:
         """Launch a coding agent for an explicit target unless one already works in its worktree.
 
@@ -278,6 +279,10 @@ class WorkdashSession:
             current GitHub state of the work, instead of proposing a plan first.
         """
 
+        if group is not None and (not isinstance(group, str) or not group.strip()):
+            raise WorkdashControlError(
+                "bad_request", "Group must be a non-empty string.", status=HTTPStatus.BAD_REQUEST
+            )
         item = self._require_item(target)
         item_id = format_work_item_id(item)
         agents = self.config.configured_code_agents()
@@ -358,6 +363,7 @@ class WorkdashSession:
                 prompt,
                 agent_command_tokens=command_tokens,
                 zellij_session=self.zellij_session,
+                **({"group": group} if group is not None else {}),
             )
             for check in range(_LAUNCH_VISIBILITY_CHECKS):
                 if check:
@@ -395,6 +401,7 @@ class WorkdashSession:
                 "cwd": launch.cwd,
                 "pane_title": launch.pane_title,
                 "pane_id": _format_pane_id(running[0]["id"]),
+                "tab_name": running[0].get("tab_name"),
             }
 
     def _claimed_launch(
@@ -418,6 +425,7 @@ class WorkdashSession:
                 "cwd": running[0].get("pane_cwd"),
                 "pane_title": running[0].get("title"),
                 "pane_id": _format_pane_id(running[0]["id"]),
+                "tab_name": running[0].get("tab_name"),
             }
         if self._unconfirmed_launches.get(launch_key, 0.0) > time.monotonic():
             raise WorkdashControlError(
@@ -993,6 +1001,7 @@ def _make_turbogears_app(session: WorkdashSession):
                     target=_required_text(payload, "target"),
                     agent=_optional_text(payload, "agent"),
                     autostart=_optional_bool(payload, "autostart"),
+                    **({"group": _required_text(payload, "group")} if "group" in payload else {}),
                 ),
             )
 

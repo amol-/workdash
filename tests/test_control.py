@@ -602,6 +602,7 @@ def test_code_reports_the_lowest_live_agent_pane_tied_to_the_worktree(
         "cwd": str(worktree / "src"),
         "pane_title": "code_owner_repo_1",
         "pane_id": "terminal_4",
+        "tab_name": None,
     }
     ensure_worktree.assert_not_called()
     launch_agent.assert_not_called()
@@ -822,6 +823,7 @@ def test_code_on_a_live_agent_sends_nothing_and_reads_no_github_state_even_when_
         "cwd": str(worktree),
         "pane_title": "code_owner_repo_1",
         "pane_id": "terminal_5",
+        "tab_name": None,
     }
     launch_agent.assert_not_called()
     assert github.operations == []
@@ -1527,3 +1529,58 @@ def test_wildcard_primary_is_rejected_without_opening_listeners(monkeypatch):
     with pytest.raises(RuntimeError, match="Wildcard listener binds"):
         server.start()
     assert not server._httpds
+
+
+def test_grouped_code_preserves_existing_claim_and_reports_actual_tab(monkeypatch, tmp_path):
+    panes = [
+        {"id": 4, "title": "code_owner_repo_1", "pane_cwd": "/elsewhere", "tab_name": "actual"}
+    ]
+    session, _, _, launch = _coding_session(monkeypatch, tmp_path, panes)
+    result = session.code(target="owner/repo#ISSUE-1", group="requested")
+    assert result["status"] == "already_running"
+    assert result["tab_name"] == "actual"
+    launch.assert_not_called()
+
+
+def test_code_api_forwards_group_and_rejects_invalid_group():
+    session = MagicMock()
+    session.code.return_value = {"status": "launched"}
+    app = control_module._make_turbogears_app(session)
+    for group, status in [("epic", 200), ("", 400), ([], 400)]:
+        request = Request.blank(
+            "/api/v0/code",
+            method="POST",
+            content_type="application/json",
+            body=json.dumps({"target": "owner/repo#1", "group": group}).encode(),
+        )
+        assert request.get_response(app).status_int == status
+    session.code.assert_called_once_with(
+        target="owner/repo#1", agent=None, autostart=False, group="epic"
+    )
+
+
+def test_grouped_code_forwards_group_and_reports_live_tab(monkeypatch, tmp_path):
+    panes = []
+    session, _, _, launch = _coding_session(monkeypatch, tmp_path, panes)
+    launch.side_effect = lambda repo, prompt, **kwargs: (
+        panes.append({"id": 30, "title": "code_owner_repo_1", "pane_cwd": repo, "tab_name": "epic"})
+        or SimpleNamespace(session=None, pane_id=None, pane_title="code_owner_repo_1", cwd=repo)
+    )
+    result = session.code(target="owner/repo#ISSUE-1", group="epic")
+    assert launch.call_args.kwargs["group"] == "epic"
+    assert result["status"] == "launched"
+    assert result["tab_name"] == "epic"
+
+
+def test_code_rejects_blank_group_before_looking_up_item():
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    with pytest.raises(control_module.WorkdashControlError) as error:
+        session.code(target="owner/repo#1", group="  ")
+    assert error.value.code == "bad_request"
+    session.backend.github_client.fetch_item.assert_not_called()
