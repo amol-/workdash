@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import subprocess
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -1347,3 +1348,55 @@ def _both_responses_unconfirmed(scenario_state: dict[str, Any]) -> None:
         (409, "launch_unconfirmed"),
         (409, "launch_unconfirmed"),
     ]
+
+
+@given(
+    "a server-backed Workdash session has an item with a worktree artifact and an alias inside .workdash"
+)
+def _artifact_item(scenario_state, work_items, tmp_path, monkeypatch):
+    item = make_work_item(number=1)
+    work_items[:] = [item]
+    set_session_items(scenario_state, work_items)
+    worktree = tmp_path / "wrk" / "owner_repo_1"
+    worktree.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(worktree)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git",
+        ],
+        check=True,
+    )
+    artifacts = worktree / ".workdash"
+    artifacts.mkdir(parents=True)
+    (artifacts / "PR_REVIEW.md").write_text("Review contents")
+    (artifacts / "alias.md").symlink_to("PR_REVIEW.md")
+
+
+@when("a client lists and reads the item's worktree artifacts")
+def _get_artifacts(scenario_state, work_items, tmp_path):
+    app = _source_filtered_wsgi_app(
+        _make_turbogears_app(ensure_api_session(scenario_state, work_items, tmp_path))
+    )
+    responses = []
+    for suffix in ("", ".workdash/PR_REVIEW.md", ".workdash/alias.md"):
+        req = Request.blank(f"/api/items/owner/repo%23ISSUE-1/files/{suffix}")
+        req.environ["REMOTE_ADDR"] = "127.0.0.1"
+        response = req.get_response(app)
+        _ = response.body
+        responses.append(response)
+    scenario_state["artifact_responses"] = responses
+
+
+@then("the listing names the artifact and its alias and the API returns their contents")
+def _check_artifacts(scenario_state):
+    listing, artifact, alias = scenario_state["artifact_responses"]
+    assert listing.status_int == 200
+    assert listing.json["result"]["entries"] == ["PR_REVIEW.md", "alias.md"]
+    assert artifact.status_int == alias.status_int == 200
+    assert artifact.text == alias.text == "Review contents"

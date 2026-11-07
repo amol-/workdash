@@ -1,6 +1,7 @@
 """Git worktree management for work items."""
 
 import contextlib
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -38,24 +39,36 @@ def worktree_path(workdir: str, repo: str, number: int, *, todo: bool = False) -
     return main.parent / GitHelper().worktree_name(repo, number, todo=todo)
 
 
-def existing_worktree_path(workdir: str, item: WorkItem) -> Path | None:
+def existing_worktree_path(
+    workdir: str, item: WorkItem, *, pinned: contextlib.ExitStack | None = None
+) -> Path | tuple[Path, int] | None:
     """Find a locally proven worktree without creating, fetching, or querying GitHub."""
     base = Path(workdir).expanduser()
     if not base.is_dir():
         return None
     git = GitHelper()
-    matches = [
-        candidate
-        for candidate in _worktree_candidates(base, item)
-        if git.worktree_proves_item(candidate, item)
-    ]
+    matches = []
+    for candidate in _worktree_candidates(base, item):
+        if pinned is None:
+            if git.worktree_proves_item(candidate, item):
+                matches.append((candidate, None))
+            continue
+        try:
+            fd = os.open(candidate, os.O_RDONLY | os.O_DIRECTORY)
+        except OSError:
+            continue
+        pinned.callback(os.close, fd)
+        directory = Path(f"/dev/fd/{fd}")
+        if git.worktree_proves_item(candidate, item, directory=directory):
+            matches.append((candidate, fd))
     # A checkout named after the item's own number is beyond doubt this item's,
     # so it wins over any closing issue's directory when several exist. Anything
     # still ambiguous after every accepted number is somebody's guess, not an answer.
     for number in (item.number, *accepted_worktree_numbers(item)):
-        preferred = [candidate for candidate in matches if candidate.name.endswith(f"_{number}")]
+        preferred = [match for match in matches if match[0].name.endswith(f"_{number}")]
         if len(preferred) == 1:
-            return preferred[0]
+            candidate, fd = preferred[0]
+            return (candidate, fd) if pinned is not None else candidate
     return None
 
 
