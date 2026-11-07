@@ -18,7 +18,8 @@ Feature: Local JSON control API
     - If any listener cannot bind, including a repeated non-primary listener address, startup fails without leaving other listeners active; exiting the TUI stops every listener.
     - The API is intentionally unauthenticated plain HTTP for trusted LAN use only.
     - V0 exposes JSON APIs only, not an HTML browser UI.
-    - API requests and responses use JSON objects.
+    - V0 API requests and responses use JSON objects; item file GET responses contain file bytes or a JSON directory listing.
+    - `GET /api/items/{item_id}/files/` lists the item's `.workdash` directory as a JSON success envelope containing a sorted `entries` array of names; `GET /api/items/{item_id}/files/.workdash/{path}` serves a file within it. Symlinked worktree paths and symlinks resolving inside `.workdash` are available; paths and symlinks escaping `.workdash` and missing worktrees are not served or listed. The same source IP access rules apply, and no writes are supported.
     - V0 capabilities are exposed as `POST /api/v0/list`, `POST /api/v0/info`, `POST /api/v0/analyze`, `POST /api/v0/code`, `POST /api/v0/terminal`, `POST /api/v0/ready`, `POST /api/v0/todo`, `POST /api/v0/show-config`, `POST /api/v0/pane/content`, `POST /api/v0/pane/send`, and `POST /api/v0/pane/close`.
     - `POST /api/v0/todo` accepts an optional target as a GitHub `owner/repo` name or a git URL on any hosting service.
     - `POST /api/v0/todo` accepts optional body text as long details separate from the title, appended unchanged after the metadata block.
@@ -37,6 +38,12 @@ Feature: Local JSON control API
     - Pane actions accept pane IDs exactly as emitted by `workdash info`.
     - Analyze responses include `content_type`, `file_name`, and base64 `file_content`; there is no `content_encoding` field because content is always base64.
     - CLI analyze treats a missing or invalid base64 `file_content` as an invalid server response instead of falling back to the server cache path.
+
+  @id:F-API-JSON-CONTROL-S034
+  Scenario: A client reads and lists worktree artifacts
+    Given a server-backed Workdash session has an item with a worktree artifact and an alias inside .workdash
+    When a client lists and reads the item's worktree artifacts
+    Then the listing names the artifact and its alias and the API returns their contents
 
   @id:F-API-JSON-CONTROL-S001
   Scenario: Server-backed startup exposes a local JSON API with the TUI

@@ -1527,3 +1527,483 @@ def test_wildcard_primary_is_rejected_without_opening_listeners(monkeypatch):
     with pytest.raises(RuntimeError, match="Wildcard listener binds"):
         server.start()
     assert not server._httpds
+
+
+def _pin_test_worktree(stack, path):
+    if path is None:
+        return None
+    fd = control_module.os.open(path, control_module.os.O_RDONLY | control_module.os.O_DIRECTORY)
+    stack.callback(control_module.os.close, fd)
+    return path, fd
+
+
+@pytest.mark.parametrize("symlinked_worktree", [False, True])
+def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
+    worktree = tmp_path / "checkout"
+    artifacts = worktree / ".workdash"
+    artifacts.mkdir(parents=True)
+    (artifacts / "review.md").write_text("real review")
+    (artifacts / "nested").mkdir()
+    (artifacts / "nested" / "review.md").write_text("nested review")
+    (worktree / "secret").write_text("secret")
+    (artifacts / "escape").symlink_to(worktree / "secret")
+    (artifacts / "escape-dir").symlink_to(worktree)
+    (artifacts / "root-alias").symlink_to(".")
+    (artifacts / "alias").symlink_to(artifacts / "review.md")
+    (artifacts / "nested-alias").symlink_to("nested")
+    (artifacts / "nested" / "relative-alias").symlink_to("../review.md")
+    (artifacts / "chain").symlink_to("nested/relative-alias")
+    (artifacts / "nested" / "escape").symlink_to("../../secret")
+    (artifacts / "chain-escape").symlink_to("nested/escape")
+    (artifacts / "loop").symlink_to("loop")
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="one")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    worktree_path = worktree
+    if symlinked_worktree:
+        worktree_path = tmp_path / "checkout-link"
+        worktree_path.symlink_to(worktree, target_is_directory=True)
+    monkeypatch.setattr(
+        control_module,
+        "existing_worktree_path",
+        lambda *args, pinned: _pin_test_worktree(pinned, worktree_path),
+    )
+    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
+
+    def get(path, method="GET", peer="127.0.0.1"):
+        request = Request.blank(path, method=method)
+        request.environ["REMOTE_ADDR"] = peer
+        return request.get_response(app)
+
+    base = "/api/items/owner/repo%23ISSUE-1/files/"
+    response = get(base + ".workdash/review.md")
+    assert response.status_int == 200 and response.text == "real review", response.text
+    assert response.content_type == "text/plain"
+    assert get(base + ".workdash/nested/review.md").text == "nested review"
+    assert get(base + ".workdash/alias").text == "real review"
+    assert get(base + ".workdash/nested-alias/relative-alias").text == "real review"
+    assert get(base).json["result"]["entries"] == [
+        "alias",
+        "chain",
+        "nested",
+        "nested-alias",
+        "review.md",
+        "root-alias",
+    ]
+    for path in (
+        ".workdash/../secret",
+        ".workdash/%2e%2e/secret",
+        "secret",
+        ".workdash/escape",
+        ".workdash/escape-dir/secret",
+        ".workdash/root-alias",
+        "/etc/passwd",
+    ):
+        response = get(base + path)
+        assert response.status_int in (403, 404), path
+        assert response.json["ok"] is False
+    assert get(base, method="POST").status_int == 405
+    assert get(base, peer="192.0.2.7").status_int == 403
+    session.backend.github_client.fetch_item.return_value = None
+    assert get("/api/items/owner/repo%23ISSUE-2/files/").status_int == 404
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args, pinned: None)
+    assert get(base).status_int == 404
+    monkeypatch.setattr(
+        control_module,
+        "existing_worktree_path",
+        lambda *args, pinned: _pin_test_worktree(pinned, worktree),
+    )
+    (artifacts / "review.md").unlink()
+    (artifacts / "escape").unlink()
+    (artifacts / "escape-dir").unlink()
+    (artifacts / "root-alias").unlink()
+    (artifacts / "alias").unlink()
+    (artifacts / "nested-alias").unlink()
+    (artifacts / "chain").unlink()
+    (artifacts / "chain-escape").unlink()
+    (artifacts / "loop").unlink()
+    (artifacts / "nested" / "escape").unlink()
+    (artifacts / "nested" / "relative-alias").unlink()
+    (artifacts / "nested" / "review.md").unlink()
+    (artifacts / "nested").rmdir()
+    artifacts.rmdir()
+    assert get(base).status_int == 404
+    artifacts.symlink_to(tmp_path)
+    assert get(base).status_int in (403, 404)
+
+
+@pytest.mark.parametrize("component", ["file", "alias-target", "directory", "root", "listing"])
+def test_item_files_reject_symlink_substitution(tmp_path, monkeypatch, component):
+    worktree = tmp_path / "checkout"
+    artifacts = worktree / ".workdash"
+    directory = artifacts / "nested"
+    directory.mkdir(parents=True)
+    (directory / "review.md").write_text("safe")
+    (artifacts / "alias").symlink_to("nested/review.md")
+    outside = tmp_path / "outside"
+    (outside / "nested").mkdir(parents=True)
+    (outside / "nested" / "review.md").write_text("secret")
+    (outside / "review.md").write_text("secret")
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="one")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    monkeypatch.setattr(
+        control_module,
+        "existing_worktree_path",
+        lambda *args, pinned: _pin_test_worktree(pinned, worktree),
+    )
+    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
+
+    original_open = control_module.os.open
+    original_read = Path.read_bytes
+    original_iterdir = Path.iterdir
+    replaced = False
+
+    def replace():
+        nonlocal replaced
+        if replaced:
+            return
+        replaced = True
+        target = {
+            "file": directory / "review.md",
+            "alias-target": directory / "review.md",
+            "directory": directory,
+            "root": artifacts,
+            "listing": artifacts,
+        }[component]
+        destination = {
+            "file": outside / "review.md",
+            "alias-target": outside / "review.md",
+            "directory": outside,
+            "root": outside,
+            "listing": outside,
+        }[component]
+        target.rename(target.with_name(target.name + ".old"))
+        target.symlink_to(destination)
+
+    def open_with_replacement(path, flags, *args, **kwargs):
+        name = {
+            "file": "review.md",
+            "alias-target": "review.md",
+            "directory": "nested",
+            "root": ".workdash",
+            "listing": ".workdash",
+        }[component]
+        if path == name and kwargs.get("dir_fd") is not None:
+            replace()
+        return original_open(path, flags, *args, **kwargs)
+
+    def read_with_replacement(path):
+        replace()
+        return original_read(path)
+
+    def list_with_replacement(path):
+        replace()
+        return original_iterdir(path)
+
+    monkeypatch.setattr(control_module.os, "open", open_with_replacement)
+    monkeypatch.setattr(Path, "read_bytes", read_with_replacement)
+    monkeypatch.setattr(Path, "iterdir", list_with_replacement)
+    suffix = {
+        "listing": "",
+        "alias-target": ".workdash/alias",
+    }.get(component, ".workdash/nested/review.md")
+    request = Request.blank(f"/api/items/owner/repo%23ISSUE-1/files/{suffix}")
+    request.environ["REMOTE_ADDR"] = "127.0.0.1"
+    response = request.get_response(app)
+    assert replaced
+    assert response.status_int == 404
+    assert "secret" not in response.text
+
+
+@pytest.mark.parametrize("suffix", ["", ".workdash/review.md"])
+def test_item_files_reject_worktree_symlink_substitution(tmp_path, monkeypatch, suffix):
+    worktree = tmp_path / "checkout"
+    (worktree / ".workdash").mkdir(parents=True)
+    (worktree / ".workdash" / "review.md").write_text("safe")
+    outside = tmp_path / "outside"
+    (outside / ".workdash").mkdir(parents=True)
+    (outside / ".workdash" / "review.md").write_text("secret")
+    (outside / ".workdash" / "outside-only.txt").write_text("secret")
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="one")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    original_open = control_module.os.open
+
+    def open_with_replacement(path, flags, *args, **kwargs):
+        fd = original_open(path, flags, *args, **kwargs)
+        if path == worktree:
+            worktree.rename(tmp_path / "original")
+            worktree.symlink_to(outside)
+        return fd
+
+    monkeypatch.setattr(
+        control_module,
+        "existing_worktree_path",
+        lambda *args, pinned: _pin_test_worktree(pinned, worktree),
+    )
+    monkeypatch.setattr(control_module.os, "open", open_with_replacement)
+    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
+    request = Request.blank(f"/api/items/owner/repo%23ISSUE-1/files/{suffix}")
+    request.environ["REMOTE_ADDR"] = "127.0.0.1"
+    response = request.get_response(app)
+    assert response.status_int in (200, 404)
+    assert "secret" not in response.text
+    if not suffix and response.status_int == 200:
+        assert "outside-only.txt" not in response.json["result"]["entries"]
+        assert response.json["result"]["entries"] == ["review.md"]
+
+
+def test_item_files_listing_validates_pinned_entries_after_replacement(tmp_path, monkeypatch):
+    worktree = tmp_path / "checkout"
+    artifacts = worktree / ".workdash"
+    artifacts.mkdir(parents=True)
+    (worktree / "secret").write_text("secret")
+    (artifacts / "escape").symlink_to(worktree / "secret")
+    (artifacts / "safe").write_text("safe")
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="one")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    monkeypatch.setattr(
+        control_module,
+        "existing_worktree_path",
+        lambda *args, pinned: _pin_test_worktree(pinned, worktree),
+    )
+    original_listdir = control_module.os.listdir
+
+    def list_with_replacement(fd):
+        artifacts.rename(worktree / ".workdash-old")
+        artifacts.mkdir()
+        (artifacts / "escape").write_text("harmless")
+        (artifacts / "safe").write_text("safe")
+        return original_listdir(fd)
+
+    monkeypatch.setattr(control_module.os, "listdir", list_with_replacement)
+    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
+    request = Request.blank("/api/items/owner/repo%23ISSUE-1/files/")
+    request.environ["REMOTE_ADDR"] = "127.0.0.1"
+    response = request.get_response(app)
+    assert response.status_int == 404 or response.json["result"]["entries"] == ["safe"]
+
+
+def test_item_files_listing_rejects_directory_substitution(tmp_path, monkeypatch):
+    worktree = tmp_path / "checkout"
+    artifacts = worktree / ".workdash"
+    nested = artifacts / "nested"
+    nested.mkdir(parents=True)
+    (nested / "review.md").write_text("safe")
+    (artifacts / "alias").symlink_to("nested/review.md")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "review.md").write_text("secret")
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="one")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    monkeypatch.setattr(
+        control_module,
+        "existing_worktree_path",
+        lambda *args, pinned: _pin_test_worktree(pinned, worktree),
+    )
+    original_open = control_module.os.open
+    replaced = False
+
+    def open_with_replacement(path, flags, *args, **kwargs):
+        nonlocal replaced
+        if path == "nested" and kwargs.get("dir_fd") is not None and not replaced:
+            replaced = True
+            nested.rename(artifacts / "old")
+            nested.symlink_to(outside)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(control_module.os, "open", open_with_replacement)
+    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
+    request = Request.blank("/api/items/owner/repo%23ISSUE-1/files/")
+    request.environ["REMOTE_ADDR"] = "127.0.0.1"
+    response = request.get_response(app)
+    assert replaced
+    assert "alias" not in response.json["result"]["entries"]
+
+
+@pytest.mark.parametrize("symlinked_worktree", [False, True])
+def test_item_files_resolve_shared_pr_and_targeted_todo_worktrees(
+    tmp_path, monkeypatch, symlinked_worktree
+):
+    resolve = Path.resolve
+
+    def resolve_without_fd_path(self, *args, **kwargs):
+        if self.parent == Path("/dev/fd"):
+            return self
+        return resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_without_fd_path)
+    pr = replace(
+        _work_item(number=2, title="PR", item_type=WorkItemType.PR),
+        kind=WorkItemKind.AUTHORED_PR,
+        closing_issue_numbers=(1,),
+    )
+    todo = replace(_work_item(number=3, title="Todo"), repo="owner/todos", todo_target="owner/repo")
+    for name, content in (("owner_repo_1", "shared"), ("owner_repo_todo_3", "todo")):
+        path = tmp_path / name
+        path.mkdir()
+        subprocess.run(["git", "init", "-q", str(path)], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(path),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ],
+            check=True,
+        )
+        (path / ".workdash").mkdir()
+        (path / ".workdash" / "artifact.txt").write_text(content)
+        if symlinked_worktree:
+            target = tmp_path / (name + "-target")
+            path.rename(target)
+            path.symlink_to(target, target_is_directory=True)
+    session = WorkdashSession(
+        config=WorkdashConfig(workdir=str(tmp_path), todo_repository="owner/todos"),
+        backend=MagicMock(),
+        work_items=[pr, todo],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
+    for item_id, expected in (("owner/repo%23PR-2", "shared"), ("owner/repo%23ISSUE-WT3", "todo")):
+        request = Request.blank(f"/api/items/{item_id}/files/.workdash/artifact.txt")
+        request.environ["REMOTE_ADDR"] = "127.0.0.1"
+        response = request.get_response(app)
+        assert response.status_int == 200
+        assert response.text == expected
+
+
+@pytest.mark.parametrize("suffix", ["", ".workdash/artifact.txt"])
+def test_item_files_reject_worktree_replacement_after_resolution(tmp_path, monkeypatch, suffix):
+    checkout = tmp_path / "owner_repo_1"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git",
+        ],
+        check=True,
+    )
+    (checkout / ".workdash").mkdir()
+    (checkout / ".workdash" / "artifact.txt").write_text("safe")
+    outside = tmp_path / "outside"
+    (outside / ".workdash").mkdir(parents=True)
+    (outside / ".workdash" / "artifact.txt").write_text("secret")
+    (outside / ".workdash" / "outside-only.txt").write_text("secret")
+    subprocess.run(["git", "init", "-q", str(outside)], check=True)
+    subprocess.run(
+        ["git", "-C", str(outside), "remote", "add", "origin", "https://github.com/owner/repo.git"],
+        check=True,
+    )
+    session = WorkdashSession(
+        config=WorkdashConfig(workdir=str(tmp_path)),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="one")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    original = control_module.existing_worktree_path
+
+    def replace_after_resolution(*args, **kwargs):
+        result = original(*args, **kwargs)
+        assert result is not None and result[0] == checkout
+        checkout.rename(tmp_path / "old")
+        checkout.symlink_to(outside)
+        return result
+
+    monkeypatch.setattr(control_module, "existing_worktree_path", replace_after_resolution)
+    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
+    request = Request.blank(f"/api/items/owner/repo%23ISSUE-1/files/{suffix}")
+    request.environ["REMOTE_ADDR"] = "127.0.0.1"
+    response = request.get_response(app)
+    assert response.status_int in (200, 404)
+    assert "secret" not in response.text
+    if not suffix and response.status_int == 200:
+        assert "outside-only.txt" not in response.json["result"]["entries"]
+        assert response.json["result"]["entries"] == ["artifact.txt"]
+
+
+def test_item_files_pins_worktree_before_git_validation(tmp_path, monkeypatch):
+    from workdash.git import GitHelper
+
+    checkout = tmp_path / "owner_repo_1"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git",
+        ],
+        check=True,
+    )
+    (checkout / ".workdash").mkdir()
+    (checkout / ".workdash" / "artifact.txt").write_text("safe")
+    outside = tmp_path / "outside"
+    (outside / ".workdash").mkdir(parents=True)
+    (outside / ".workdash" / "artifact.txt").write_text("secret")
+    original = GitHelper.worktree_proves_item
+    descriptors = []
+
+    def replace_during_validation(self, candidate, item, *, directory):
+        descriptors.append(int(directory.name))
+        checkout.rename(tmp_path / "old")
+        checkout.symlink_to(outside)
+        return original(self, candidate, item, directory=directory)
+
+    monkeypatch.setattr(GitHelper, "worktree_proves_item", replace_during_validation)
+    session = WorkdashSession(
+        config=WorkdashConfig(workdir=str(tmp_path)),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="one")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
+    request = Request.blank("/api/items/owner/repo%23ISSUE-1/files/.workdash/artifact.txt")
+    request.environ["REMOTE_ADDR"] = "127.0.0.1"
+    response = request.get_response(app)
+    assert response.status_int in (200, 404)
+    assert "secret" not in response.text
+    assert descriptors
+    for fd in descriptors:
+        with pytest.raises(OSError):
+            control_module.os.fstat(fd)
