@@ -474,6 +474,7 @@ def test_session_analyze_returns_cached_analysis_without_configured_agents(tmp_p
     assert result == {
         "item_id": "owner/repo#ISSUE-1",
         "path": str(cached_path),
+        "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
         "agent": "cached",
         "cache_used": True,
         "status": "cached",

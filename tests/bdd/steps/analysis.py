@@ -25,7 +25,7 @@ from workdash.analyzer import Analyzer
 from workdash.backend import WorkdashBackend
 from workdash.config import WorkdashConfig
 from workdash.control import WorkdashSession, format_work_item_id
-from workdash.launcher import open_markdown
+from workdash.launcher import open_in_browser
 from workdash.models import WorkItem
 from workdash.tui import AnalyzeDialog, WorkdashApp
 
@@ -419,9 +419,6 @@ def _run_generate_fresh(
         result = session.analyze(target=format_work_item_id(item), agent=tool, prefer_cache=False)
         return result["path"]
 
-    monkeypatch.setattr(
-        "workdash.tui.open_markdown", partial(open_markdown, command="term-view --quiet")
-    )
     viewer_run = MagicMock(side_effect=lambda argv, **kwargs: opened_paths.append(argv[-1]))
     agent_run = subprocess.run
     monkeypatch.setattr(
@@ -453,6 +450,8 @@ def _run_generate_fresh(
         work_items=list(work_items),
         worktree_callback=worktree_callback,
         analyze_callback=analyze_callback,
+        open_url_callback=partial(open_in_browser, command="term-view --quiet"),
+        session=session,
         interactions=interactions,
         busy_messages=busy_messages,
     )
@@ -476,9 +475,6 @@ def _choose_open_cached(
     analysis_md_path = cache.build_analysis_path(item)
 
     opened_paths: list[str] = []
-    monkeypatch.setattr(
-        "workdash.tui.open_markdown", partial(open_markdown, command="term-view --quiet")
-    )
     viewer_run = MagicMock(side_effect=lambda argv, **kwargs: opened_paths.append(argv[-1]))
     monkeypatch.setattr(subprocess, "run", viewer_run)
     scenario_state["viewer_run"] = viewer_run
@@ -486,6 +482,17 @@ def _choose_open_cached(
     def analyze_callback(item_: WorkItem, tool: str = "codex") -> str | None:
         assert tool == "cached", tool
         return str(analysis_md_path)
+
+    session = WorkdashSession(
+        config=make_valid_config(),
+        backend=WorkdashBackend(
+            analysis_cache=cache,
+            config=make_valid_config(),
+        ),
+        work_items=list(work_items),
+        suggestion_markers={},
+        zellij_session=None,
+    )
 
     async def interactions(app, pilot) -> None:
         dialog = await _open_analyze_dialog(app, pilot)
@@ -500,6 +507,8 @@ def _choose_open_cached(
     run_app(
         work_items=list(work_items),
         analyze_callback=analyze_callback,
+        open_url_callback=partial(open_in_browser, command="term-view --quiet"),
+        session=session,
         interactions=interactions,
     )
     scenario_state["opened_paths"] = opened_paths
@@ -532,27 +541,23 @@ def _generated_cached(scenario_state: dict[str, Any]) -> None:
     assert cache.load_analysis(item) == scenario_state["fresh_body"]
 
 
-@then("the rendered analysis is opened with the configured viewer")
-def _rendered_opened(scenario_state: dict[str, Any]) -> None:
-    html_path = Path(scenario_state["opened_paths"][0])
+@then("the analysis HTTP URL is opened with the configured viewer")
+def _analysis_url_opened(scenario_state: dict[str, Any]) -> None:
+    item: WorkItem = scenario_state["selected_item"]
+    expected_url = "http://127.0.0.1:8765" + AnalysisCache.build_analysis_url_path(item)
     scenario_state["viewer_run"].assert_called_once_with(
-        ["term-view", "--quiet", str(html_path)],
+        ["term-view", "--quiet", expected_url],
         check=True,
         capture_output=True,
         text=True,
         timeout=4,
     )
-    expected_body = scenario_state.get("fresh_body", "# cached analysis\nbody")
-    assert (
-        "<h1>" + expected_body.splitlines()[0].removeprefix("# ") + "</h1>" in html_path.read_text()
-    )
+    assert scenario_state["opened_paths"] == [expected_url]
 
 
-@then("the cached analysis is rendered")
-def _cached_rendered(scenario_state: dict[str, Any]) -> None:
-    html_path = Path(scenario_state["analysis_md_path"]).with_suffix(".html")
-    assert scenario_state["opened_paths"] == [str(html_path)]
-    assert "<h1>cached analysis</h1>" in html_path.read_text()
+@then("the cached analysis URL is opened with the configured viewer")
+def _cached_analysis_url_opened(scenario_state: dict[str, Any]) -> None:
+    _analysis_url_opened(scenario_state)
 
 
 @then("the previously cached analysis is preserved")

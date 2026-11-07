@@ -42,7 +42,7 @@ Feature: CLI orchestration commands
     - `workdash write` sends pane input through the server-backed pane send API, appending Enter unless raw input is requested.
     - `workdash close` closes a pane through the server-backed pane close API.
     - `workdash analyze` returns markdown analysis content as base64 in the server response with `content_type`, `file_name`, and `file_content`.
-    - `workdash analyze` writes the server-returned analysis content to a secure temporary local file and reports that client-side path as `analysis_path`.
+    - `workdash analyze` reports the server-provided analysis `url` and writes no local file; the server path stays internal.
     - `workdash todo` captures a todo through the server, taking the title as its text argument, an optional `--target` GitHub `owner/repo` name or git URL, and optional long details via `--body BODY`.
     - `workdash todo` reports the created Workdash item ID and the created issue URL.
 
@@ -105,7 +105,7 @@ Feature: CLI orchestration commands
     When the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`
     Then the command requests analysis from the local Workdash server
     And the server analysis response includes markdown content as base64 with a file name
-    And the system returns JSON with the item ID, selected agent, local analysis path, and cache status
+    And the system returns JSON with the item ID, selected agent, analysis URL, and cache status
 
   @id:F-CLI-ORCHESTRATION-S010
   Scenario: Orchestration commands require the local Workdash server
@@ -165,7 +165,7 @@ Feature: CLI orchestration commands
     When the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`
     Then the command requests analysis from the local Workdash server
     And the server analysis response includes markdown content as base64 with a file name
-    And the system returns JSON with the item ID, selected agent, local analysis path, and cache status
+    And the system returns JSON with the item ID, selected agent, analysis URL, and cache status
 
   @id:F-CLI-ORCHESTRATION-S017
   Scenario: Server-backed commands skip local GitHub and Zellij preflight
@@ -251,14 +251,14 @@ Feature: CLI orchestration commands
     Then the pane is mapped to that authored pull request
 
   @id:F-CLI-ORCHESTRATION-S033
-  Scenario: Analyze CLI writes server-returned analysis content to a secure local file
+  Scenario: Analyze CLI reports the server analysis URL without local files
     Given a server-backed Workdash session has loaded dashboard items
     And the current Workdash items include an assigned issue without cached analysis
     And the generated analysis content is returned by the server
     When the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`
     Then the command requests analysis from the local Workdash server
     And the server analysis response includes markdown content as base64 with a file name
-    And the system returns JSON with the item ID, selected agent, local analysis path, cache status, and no server file content fields
+    And the system returns JSON with the item ID, selected agent, analysis URL, cache status, and no server file or content fields
 
   @id:F-CLI-ORCHESTRATION-S034
   Scenario: Todo selects a remote server without changing its target
