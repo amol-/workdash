@@ -19,6 +19,7 @@ from pathlib import Path
 from socketserver import BaseServer
 from wsgiref.simple_server import make_server
 
+from .analysis_cache import AnalysisCache
 from .backend import IncludeResult, SuggestionMarkers, WorkdashBackend, compute_suggestion_markers
 from .config import WorkdashConfig
 from .github_client import parse_github_item_url
@@ -256,6 +257,7 @@ class WorkdashSession:
             return {
                 "item_id": item_id,
                 "path": path,
+                "url": self.analysis_url(item),
                 "agent": selected_agent,
                 "cache_used": cache_used,
                 "status": "cached" if cache_used else "generated",
@@ -333,9 +335,7 @@ class WorkdashSession:
             prompt = prepare_launch_agent_prompt(
                 item,
                 repo_path,
-                analysis_path=str(self.backend.analysis_cache.build_analysis_path(item))
-                if item.analysis is not None
-                else None,
+                analysis_path=self.analysis_url(item) if item.analysis is not None else None,
                 merge_base=get_merge_base(repo_path),
             )
             if autostart:
@@ -559,6 +559,11 @@ class WorkdashSession:
                 return cached_path
         cwd = ensure_worktree(self.config.workdir, item) if tool != "cached" else None
         return self.backend.analyze_item(item, tool=tool, cwd=cwd)
+
+    def analysis_url(self, item: WorkItem) -> str:
+        """Return the HTTP URL under which this item's analysis markdown is served."""
+
+        return _analysis_http_url(item)
 
     def _require_item(self, target: str) -> WorkItem:
         """Resolve an explicit target, fetching it from GitHub when the dashboard lacks it.
@@ -817,6 +822,13 @@ def show_config_payload(config: WorkdashConfig) -> dict[str, object]:
     }
 
 
+def _analysis_http_url(item: WorkItem) -> str:
+    """Return the absolute HTTP URL serving ``item``'s cached analysis markdown."""
+
+    host, port = server_address()
+    return f"http://{host}:{port}{AnalysisCache.build_analysis_url_path(item)}"
+
+
 def _work_items_payload(
     work_items: Sequence[WorkItem], suggestion_markers: SuggestionMarkers
 ) -> dict[str, object]:
@@ -837,6 +849,8 @@ def _work_items_payload(
                 "suggested": bool(
                     suggestion_markers.get((item.item_type, item.repo, item.number), "")
                 ),
+                "analysis_available": item.analysis is not None,
+                "analysis_url": _analysis_http_url(item) if item.analysis is not None else None,
             }
         )
     return {"items": items}
@@ -1055,6 +1069,8 @@ def _make_turbogears_app(session: WorkdashSession):
                     raise WorkdashControlError(
                         "method_not_allowed", "Only GET is supported.", status=405
                     )
+                if len(path) == 3 and path[2] == "analysis":
+                    return self._serve_analysis(path)
                 if len(path) < 3 or path[2] != "files":
                     raise WorkdashControlError("not_found", "Unknown endpoint.", status=404)
                 item = self._session._require_item(f"{path[0]}/{path[1]}")
@@ -1143,6 +1159,18 @@ def _make_turbogears_app(session: WorkdashSession):
                 response.status_int = HTTPStatus.NOT_FOUND
                 response.content_type = "application/json"
                 return json.dumps(_error_envelope("not_found", "Artifact not found.")).encode()
+
+        def _serve_analysis(self, path) -> bytes:
+            """Serve the cached analysis markdown of an item as text/markdown."""
+
+            item = self._session._require_item(f"{path[0]}/{path[1]}")
+            analysis = self._session.backend.analysis_cache.load_analysis(item)
+            if analysis is None:
+                raise WorkdashControlError(
+                    "not_found", "No cached analysis for this item.", status=404
+                )
+            response.content_type = "text/markdown; charset=utf-8"
+            return analysis.encode("utf-8")
 
     class ApiController(TGController):
         def __init__(self, workdash_session: WorkdashSession) -> None:

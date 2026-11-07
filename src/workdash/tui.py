@@ -16,7 +16,7 @@ from textual.widgets import DataTable, Input, Static
 
 from .backend import IncludeResult, compute_suggestion_markers
 from .config import WorkdashAgentChoice
-from .launcher import launch_branchdiff_context, open_markdown
+from .launcher import launch_branchdiff_context, open_in_browser, open_markdown
 from .models import WorkItem, WorkItemType, ci_status_symbol, display_repo, format_type_label
 
 SuggestionMarkers = dict[tuple[WorkItemType, str, int], str]
@@ -366,6 +366,7 @@ class WorkdashApp(App[None]):
         suggestion_markers: SuggestionMarkers | None = None,
         open_callback: Callable[[WorkItem], None] | None = None,
         open_markdown_callback: Callable[[str], None] | None = None,
+        open_url_callback: Callable[[str], None] | None = None,
         refresh_callback: Callable[[], RefreshCallbackResult] | None = None,
         analyze_callback: Callable[[WorkItem, str], AnalyzeCallbackResult] | None = None,
         launch_callback: Callable[[WorkItem, str], dict[str, object]] | None = None,
@@ -391,6 +392,7 @@ class WorkdashApp(App[None]):
         self._suggestion_markers = dict(suggestion_markers or {})
         self._open_callback = open_callback
         self._open_markdown_callback = open_markdown_callback or open_markdown
+        self._open_url_callback = open_url_callback or open_in_browser
         self._refresh_callback = refresh_callback
         self._analyze_callback = analyze_callback
         self._launch_callback = launch_callback
@@ -635,6 +637,14 @@ class WorkdashApp(App[None]):
 
         await self.push_screen(dialog, callback=_on_dialog_result)
 
+    def _session_analysis_url(self, item: WorkItem) -> str | None:
+        """Return the server analysis URL for ``item`` when the shared session is known."""
+
+        session = self._session
+        if session is None:
+            return None
+        return session.analysis_url(item)
+
     async def _perform_analysis(self, item: WorkItem, choice: str) -> None:
         """Execute analysis after the user picks a tool from the dialog."""
 
@@ -659,7 +669,11 @@ class WorkdashApp(App[None]):
             return
         if analysis_path is not None:
             try:
-                self._open_markdown_callback(analysis_path)
+                analysis_url = self._session_analysis_url(item)
+                if analysis_url is not None:
+                    self._open_url_callback(analysis_url)
+                else:
+                    self._open_markdown_callback(analysis_path)
             except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
                 self._update_status(f"Failed to open analysis: {error}")
                 self.notify(f"Failed to open analysis: {error}", severity="error", timeout=10)

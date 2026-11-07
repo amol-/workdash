@@ -75,6 +75,14 @@ class AnalysisCache:
 
         return self.build_cache_path(item).with_suffix(".md")
 
+    @staticmethod
+    def build_analysis_url_path(item: WorkItem) -> str:
+        """Return the API URL path segment serving this item's analysis markdown."""
+
+        owner, repository = _split_repository(item.repo)
+        prefix = "ISSUE" if item.item_type == WorkItemType.ISSUE else "PR"
+        return f"/api/items/{owner}/{repository}%23{prefix}-{item.number}/analysis"
+
     def build_cache_document(self, item: WorkItem) -> AnalysisCacheDocument:
         """Build the JSON payload shape for storing a cache entry."""
 

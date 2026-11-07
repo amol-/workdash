@@ -18,6 +18,7 @@ Feature: List command
     - The item type reported on a row is `ISSUE`, `PR`, `REVIEW`, or `CHECK`.
     - Workdash item IDs are formatted as `repo#ISSUE-N`, `repo#PR-N`, `repo#REVIEW-N`, or `repo#CHECK-N`.
     - The list command supports `--json` for machine-readable work item records.
+    - Each JSON work item record reports `analysis_available` and, when an analysis is cached, `analysis_url` with the HTTP URL serving it.
     - The suggested item's title is prefixed with "* ".
     - When no work items match, the list command emits an explicit empty-result line.
 
