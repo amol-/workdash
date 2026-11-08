@@ -151,6 +151,10 @@ class FakeGitHub:
             "state": "OPEN",
             "author": "testuser",
             "created": "2026-02-01T00:00:00Z",
+            # When the pull request last changed, when it is not its creation.
+            "updated": None,
+            # When it merged, which defaults to its creation so it reads as long merged.
+            "merged": None,
             "closes": closes,
             "head": HEAD_SHA,
             # The latest commit GitHub lists, when it lags behind the head ref.
@@ -234,14 +238,9 @@ class FakeGitHub:
         return {"repository": {"issue": node}}
 
     def _ReadyPullRequests(self, query: str) -> dict:
-        aliases = re.findall(
-            r'(p\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) '
-            r"\{ pullRequest\(number: (\d+)\)",
-            query,
-        )
         return {
             alias: {"pullRequest": self._pull_request_node(f"{owner}/{name}#{number}")}
-            for alias, owner, name, number in aliases
+            for alias, owner, name, number in _queried_pull_requests(query)
         }
 
     def _ReadyCommitChecks(self, query: str) -> dict:
@@ -254,6 +253,14 @@ class FakeGitHub:
         )
         contexts = self._page(query, checks)
         return {"repository": {"object": {"statusCheckRollup": {"contexts": contexts}}}}
+
+    def _PullRequestStates(self, query: str) -> dict:
+        return {
+            alias: {
+                "pullRequest": {"state": self.pull_requests[f"{owner}/{name}#{number}"]["state"]}
+            }
+            for alias, owner, name, number in _queried_pull_requests(query)
+        }
 
     def _item_lookup(self, command: list[str], query: str):
         """Answer the single issue or pull request lookup explicit targets resolve with."""
@@ -378,6 +385,9 @@ class FakeGitHub:
         repo, number = _split(ref)
         pr["lookups"] += 1
         answers = pr["mergeable"] if isinstance(pr["mergeable"], list) else [pr["mergeable"]]
+        merged_at = pr["merged"]
+        if merged_at is None and pr["state"] == "MERGED":
+            merged_at = pr["created"]
         latest_commit = pr["latest_commit"] or pr["head"]
         checks = pr["checks"].get(latest_commit)
         latest_opinions = {
@@ -390,7 +400,8 @@ class FakeGitHub:
             "title": f"Pull request {ref}",
             "url": f"https://github.com/{repo}/pull/{number}",
             "createdAt": pr["created"],
-            "updatedAt": pr["created"],
+            "updatedAt": pr["updated"] or pr["created"],
+            "mergedAt": merged_at,
             "state": pr["state"],
             "author": actor(pr["author"]),
             "repository": {"nameWithOwner": repo},
@@ -449,6 +460,16 @@ def install_fake_github(monkeypatch: pytest.MonkeyPatch) -> FakeGitHub:
 def _split(ref: str) -> tuple[str, int]:
     repo, _, number = ref.partition("#")
     return repo, int(number)
+
+
+def _queried_pull_requests(query: str) -> list[tuple[str, str, str, str]]:
+    """Each aliased pull request a query names, as ``(alias, owner, name, number)``."""
+
+    return re.findall(
+        r'(p\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) '
+        r"\{ pullRequest\(number: (\d+)\)",
+        query,
+    )
 
 
 def _queried_repository(query: str) -> str:

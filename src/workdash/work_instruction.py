@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .models import REVIEW_KINDS, WorkItem, WorkItemKind, WorkItemType
-from .work_state import PullRequestWorkState, evaluate_pull_requests, resolve_issue_scope
+from .models import REVIEW_KINDS, WorkItem, WorkItemType
+from .work_state import PullRequestWorkState, work_pull_request
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _ALSO = {
@@ -50,33 +50,18 @@ def autostart_briefing(
     if item.kind in REVIEW_KINDS:
         return item, _load("autostart_review.txt")
 
-    # The pull requests this work is about: the target itself, or those closing the issue.
-    # A targeted todo is never redirected: its checkout is the target repository's.
-    candidates: list[tuple[str, int]] = []
-    if item.item_type == WorkItemType.PR:
-        candidates = [(item.repo, item.number)]
-    elif item.todo_target is None:
-        for entry in resolve_issue_scope(item.repo, item.number, todo_repository=todo_repository):
-            # GitHub names the repository canonically, which may differ in case from the target's.
-            if (entry.item.repo.lower(), entry.item.number) == (item.repo.lower(), item.number):
-                candidates = list(entry.open_pull_requests)
-    states = (
-        evaluate_pull_requests(
-            candidates, github_username=github_username, todo_repository=todo_repository
-        )
-        if candidates
-        else []
+    state = work_pull_request(
+        item, github_username=github_username, todo_repository=todo_repository
     )
     if item.item_type == WorkItemType.ISSUE:
-        # Only the user's own pull request carries on the issue; somebody else's is not this work.
-        states = [state for state in states if state.item.kind == WorkItemKind.AUTHORED_PR][:1]
-        if states:
-            item = states[0].item
+        # Only an open pull request carries the issue's work on; a merged one has finished it.
+        state = state if state is not None and state.state == "OPEN" else None
+        if state is not None:
+            item = state.item
 
     appendix = _load("autostart_implement.txt")
-    if not states:
+    if state is None:
         return item, f"{appendix}\n{render_work_instruction('implement', item)}"
-    [state, *_] = states
     instruction = render_work_instruction(state.action, state)
     # Nothing to implement or repair, so the briefing carries no order to start working.
     return item, instruction if state.action in _AWAITING else f"{appendix}\n{instruction}"

@@ -20,6 +20,7 @@ from socketserver import BaseServer
 from wsgiref.simple_server import make_server
 
 from .analysis_cache import AnalysisCache
+from .autoclose import AutocloseSupervisor
 from .backend import IncludeResult, SuggestionMarkers, WorkdashBackend, compute_suggestion_markers
 from .config import WorkdashConfig
 from .github_client import parse_github_item_url
@@ -27,6 +28,7 @@ from .launcher import (
     _zellij_pane_name_for_work_action,
     close_zellij_pane,
     dump_zellij_pane,
+    is_live_zellij_pane,
     launch_agent_context,
     launch_terminal_context,
     launch_vscode_context,
@@ -110,6 +112,7 @@ class WorkdashSession:
         self._lock = threading.RLock()
         # Normalized worktree path -> monotonic deadline of an unconfirmed agent launch.
         self._unconfirmed_launches: dict[str, float] = {}
+        self.autoclose = AutocloseSupervisor(config=config, lock=self._lock)
 
     def list_items(self, *, refresh: bool = False) -> dict[str, object]:
         """Return the dashboard items currently known to the shared session."""
@@ -274,6 +277,7 @@ class WorkdashSession:
         allow_vscode: bool = False,
         autostart: bool = False,
         group: str | None = None,
+        autoclose: bool = False,
     ) -> dict[str, object]:
         """Launch a coding agent for an explicit target unless one already works in its worktree.
 
@@ -282,11 +286,19 @@ class WorkdashSession:
 
         :param bool autostart: Brief a newly launched agent to work autonomously from the
             current GitHub state of the work, instead of proposing a plan first.
+        :param bool autoclose: Let the server supervise the newly launched pane, nudging it
+            from GitHub state and closing it when the work is done. Needs ``autostart``.
         """
 
         if group is not None and (not isinstance(group, str) or not group.strip()):
             raise WorkdashControlError(
                 "bad_request", "Group must be a non-empty string.", status=HTTPStatus.BAD_REQUEST
+            )
+        if autoclose and not autostart:
+            raise WorkdashControlError(
+                "bad_request",
+                "An autoclosed pane must be autostarted: pass autostart with autoclose.",
+                status=HTTPStatus.BAD_REQUEST,
             )
         item = self._require_item(target)
         item_id = format_work_item_id(item)
@@ -310,7 +322,7 @@ class WorkdashSession:
                 repo_path = existing_worktree_path(self.config.workdir, item)
                 if repo_path is not None:
                     panes = [] if no_zellij_vscode else self._live_panes()
-                    claimed = self._claimed_launch(item_id, repo_path, panes)
+                    claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
                     if claimed is not None:
                         return claimed
             try:
@@ -333,7 +345,7 @@ class WorkdashSession:
             repo_path = existing_worktree_path(self.config.workdir, item)
             if repo_path is None or not _agent_panes_in_worktree(panes, repo_path):
                 repo_path = ensure_worktree(self.config.workdir, item)
-            claimed = self._claimed_launch(item_id, repo_path, panes)
+            claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
             if claimed is not None:
                 return claimed
             launch_key = _normalized_path(repo_path)
@@ -396,19 +408,36 @@ class WorkdashSession:
                     status=HTTPStatus.CONFLICT,
                 )
             del self._unconfirmed_launches[launch_key]
-            return {
+            pane_id = _format_pane_id(running[0]["id"])
+            launched = {
                 "status": "launched",
                 "item_id": item_id,
                 "session": launch.session or self.zellij_session,
                 "agent": selected_agent,
                 "cwd": launch.cwd,
                 "pane_title": launch.pane_title,
-                "pane_id": _format_pane_id(running[0]["id"]),
+                "pane_id": pane_id,
                 "tab_name": running[0].get("tab_name"),
             }
+            if autoclose:
+                # Only this confirmed pane is supervised; an existing one never is.
+                self.autoclose.supervise(
+                    session=launch.session or self.zellij_session,
+                    pane_id=pane_id,
+                    pane_title=str(running[0].get("title") or ""),
+                    item=item,
+                    repo_path=repo_path,
+                )
+                launched["autoclose_enabled"] = True
+            return launched
 
     def _claimed_launch(
-        self, item_id: str, repo_path: os.PathLike[str] | str, panes: list[dict[str, object]]
+        self,
+        item_id: str,
+        repo_path: os.PathLike[str] | str,
+        panes: list[dict[str, object]],
+        *,
+        autoclose: bool,
     ) -> dict[str, object] | None:
         """Report the live agent holding a worktree, or fail while its launch is unconfirmed.
 
@@ -420,7 +449,7 @@ class WorkdashSession:
         if running:
             # The live pane now holds the claim, settling any unconfirmed launch.
             self._unconfirmed_launches.pop(launch_key, None)
-            return {
+            claimed = {
                 "status": "already_running",
                 "item_id": item_id,
                 "session": self.zellij_session,
@@ -430,6 +459,10 @@ class WorkdashSession:
                 "pane_id": _format_pane_id(running[0]["id"]),
                 "tab_name": running[0].get("tab_name"),
             }
+            if autoclose:
+                # The running agent is nobody's supervised session.
+                claimed["autoclose_enabled"] = False
+            return claimed
         if self._unconfirmed_launches.get(launch_key, 0.0) > time.monotonic():
             raise WorkdashControlError(
                 "launch_unconfirmed",
@@ -744,8 +777,10 @@ class WorkdashControlServer:
             )
             thread.start()
             self._threads.append(thread)
+        self._session.autoclose.start()
 
     def stop(self) -> None:
+        self._session.autoclose.stop()
         for httpd in self._httpds[: len(self._threads)]:
             httpd.shutdown()
         for httpd in self._httpds:
@@ -919,7 +954,7 @@ def _pane_info_payload(
             panes.append(
                 _pane_payload(selected_session=session, pane=pane, item_by_cwd=item_by_cwd)
             )
-        elif include_all_panes and _is_live_non_plugin_pane(pane):
+        elif include_all_panes and is_live_zellij_pane(pane):
             panes.append(
                 _pane_payload(
                     selected_session=session,
@@ -1019,6 +1054,7 @@ def _make_turbogears_app(session: WorkdashSession):
                     agent=_optional_text(payload, "agent"),
                     autostart=_optional_bool(payload, "autostart"),
                     **({"group": _required_text(payload, "group")} if "group" in payload else {}),
+                    autoclose=_optional_bool(payload, "autoclose"),
                 ),
             )
 
@@ -1303,16 +1339,8 @@ def _optional_bool(payload: dict[str, object], field: str) -> bool:
     return value
 
 
-def _is_live_non_plugin_pane(pane: dict[str, object]) -> bool:
-    return (
-        pane.get("is_plugin") is not True
-        and pane.get("exited") is not True
-        and pane.get("is_held") is not True
-    )
-
-
 def _is_workdash_work_pane(pane: dict[str, object]) -> bool:
-    if not _is_live_non_plugin_pane(pane):
+    if not is_live_zellij_pane(pane):
         return False
     title = pane.get("title")
     return isinstance(title, str) and (title.startswith("code_") or title.startswith("terminal_"))

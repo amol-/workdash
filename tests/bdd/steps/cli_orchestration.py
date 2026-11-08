@@ -152,6 +152,7 @@ def _run_workdash(
                         agent=payload.get("agent"),
                         autostart=payload.get("autostart", False),
                         group=payload.get("group"),
+                        autoclose=payload.get("autoclose", False),
                     )
                 if endpoint == "terminal":
                     return scenario_state["api_session"].terminal(
@@ -1106,6 +1107,20 @@ def _requests_code_launch(scenario_state: dict[str, Any]) -> None:
     assert any(req["endpoint"] == "code" for req in control_requests)
 
 
+@when("the user runs `workdash code owner/repo#ISSUE-42 --agent pi --autoclose`")
+def _run_code_with_autoclose(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(
+        ["code", "owner/repo#ISSUE-42", "--agent", "pi", "--autoclose"],
+        scenario_state,
+        monkeypatch,
+        capsys,
+    )
+
+
 @when("the user runs `workdash code owner/repo#ISSUE-1 --autostart`")
 def _run_code_with_autostart_option(
     scenario_state: dict[str, Any],
@@ -1124,6 +1139,13 @@ def _asks_server_to_code_with_autostart(scenario_state: dict[str, Any]) -> None:
     [request] = scenario_state["control_requests"]
     assert request["endpoint"] == "code"
     assert request["payload"]["autostart"] is True
+
+
+@then("the command asks the server to code with autostart and autoclose enabled")
+def _asks_server_to_code_with_autostart_and_autoclose(scenario_state: dict[str, Any]) -> None:
+    [request] = scenario_state["control_requests"]
+    assert request["endpoint"] == "code"
+    assert (request["payload"]["autostart"], request["payload"]["autoclose"]) == (True, True)
 
 
 @then("the command asks no server to code")

@@ -1007,18 +1007,13 @@ def test_main_analyze_reports_server_error(
     assert "Agent 'vscode' is not configured" in captured.err
 
 
-def test_main_code_human_output_formats_server_response(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    class FakeControlClient:
-        def __init__(self, host="127.0.0.1") -> None:
-            assert host == "127.0.0.1"
-
-        def request(self, endpoint: str, payload: dict[str, object] | None = None):
-            assert endpoint == "code"
-            assert payload == {"target": "owner/repo#ISSUE-1", "agent": "pi", "autostart": True}
-            return {
+@pytest.mark.parametrize(
+    ("arguments", "expected_payload", "result", "expected_lines"),
+    [
+        (
+            ["code", "owner/repo#ISSUE-1", "--agent", "pi"],
+            {"target": "owner/repo#ISSUE-1", "agent": "pi", "autostart": True},
+            {
                 "status": "launched",
                 "item_id": "owner/repo#ISSUE-1",
                 "session": "workdash-main",
@@ -1026,20 +1021,102 @@ def test_main_code_human_output_formats_server_response(
                 "cwd": "/tmp/wt",
                 "pane_title": "code_wt",
                 "pane_id": "terminal_7",
-            }
+            },
+            [
+                "Status: launched",
+                "Item: owner/repo#ISSUE-1",
+                "Agent: pi",
+                "Session: workdash-main",
+                "Tab: -",
+                "Cwd: /tmp/wt",
+                "Pane title: code_wt",
+                "Pane id: terminal_7",
+            ],
+        ),
+        (
+            ["code", "owner/repo#ISSUE-1", "--agent", "pi", "--autoclose"],
+            {
+                "target": "owner/repo#ISSUE-1",
+                "agent": "pi",
+                "autostart": True,
+                "autoclose": True,
+            },
+            {
+                "status": "launched",
+                "item_id": "owner/repo#ISSUE-1",
+                "session": "workdash-main",
+                "agent": "pi",
+                "cwd": "/tmp/wt",
+                "pane_title": "code_wt",
+                "pane_id": "terminal_7",
+                "autoclose_enabled": True,
+            },
+            [
+                "Status: launched",
+                "Item: owner/repo#ISSUE-1",
+                "Agent: pi",
+                "Session: workdash-main",
+                "Tab: -",
+                "Cwd: /tmp/wt",
+                "Pane title: code_wt",
+                "Pane id: terminal_7",
+                "Autoclose: enabled",
+            ],
+        ),
+        (
+            ["code", "owner/repo#ISSUE-1", "--agent", "pi", "--autoclose"],
+            {
+                "target": "owner/repo#ISSUE-1",
+                "agent": "pi",
+                "autostart": True,
+                "autoclose": True,
+            },
+            {
+                "status": "already_running",
+                "item_id": "owner/repo#ISSUE-1",
+                "session": "workdash-main",
+                "agent": None,
+                "cwd": "/tmp/wt",
+                "pane_title": "code_wt",
+                "pane_id": "terminal_7",
+                "autoclose_enabled": False,
+            },
+            [
+                "Status: already_running",
+                "Item: owner/repo#ISSUE-1",
+                "Agent: -",
+                "Session: workdash-main",
+                "Tab: -",
+                "Cwd: /tmp/wt",
+                "Pane title: code_wt",
+                "Pane id: terminal_7",
+                "Autoclose: not enabled",
+            ],
+        ),
+    ],
+)
+def test_main_code_human_output_formats_the_server_response(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
+    expected_payload: dict[str, object],
+    result: dict[str, object],
+    expected_lines: list[str],
+) -> None:
+    class FakeControlClient:
+        def __init__(self, host="127.0.0.1") -> None:
+            assert host == "127.0.0.1"
+
+        def request(self, endpoint: str, payload: dict[str, object] | None = None):
+            assert endpoint == "code"
+            assert payload == expected_payload
+            return result
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
 
-    assert workdash_module.main(["code", "owner/repo#ISSUE-1", "--agent", "pi"]) == 0
+    assert workdash_module.main(arguments) == 0
 
-    output = capsys.readouterr().out
-    assert "Status: launched" in output
-    assert "Item: owner/repo#ISSUE-1" in output
-    assert "Agent: pi" in output
-    assert "Session: workdash-main" in output
-    assert "Cwd: /tmp/wt" in output
-    assert "Pane title: code_wt" in output
-    assert "Pane id: terminal_7" in output
+    assert capsys.readouterr().out.splitlines() == expected_lines
 
 
 def test_main_code_json_outputs_server_response(
@@ -1481,8 +1558,8 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
 
     result = captured_callback["launch"](item, tool)
 
-    # The TUI stays plan-first: its launch never asks for autostart, so the briefing is unchanged.
-    assert [call["autostart"] for call in code_calls] == [False]
+    # The TUI stays plan-first and unsupervised: its launch asks for neither option.
+    assert [(call["autostart"], call["autoclose"]) for call in code_calls] == [(False, False)]
     assert agent_calls == [("/tmp/wt", "PROMPT", expected_tokens, "workdash-main")]
     assert (result["status"], result["pane_id"]) == ("launched", "terminal_4")
     assert vscode_calls == []

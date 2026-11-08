@@ -47,6 +47,8 @@ Canonical product vocabulary used by the feature files.
 - Agent pane: A Zellij pane opened by the system for a terminal-hosted coding agent.
 - Claim: The exclusive right to run a coding agent in a worktree, held by the live agent pane working there. It is never stored: it ends when that pane exits or closes, which does not mean the work is finished.
 - Autostart: A coding request option that briefs a newly launched agent to work autonomously and publish a pull request instead of proposing a plan first. `workdash code` always autostarts; the TUI never does.
+- Autoclose: A coding request option that lets the server supervise the pane the request just launched, nudging the agent when its work needs more and closing the pane when the work is done or merged. The TUI never uses it, and it requires autostart.
+- Supervised pane: An agent pane the server watches after an autoclosed launch. It is judged only from pane output, the messages Workdash sends into it, and GitHub state, and it is never another client's pane.
 - Ready work: The GitHub work the server reports as actionable now for a scope: ready implementation pull requests first, then ready issues. Reporting it never claims or launches anything.
 - Leaf issue: An issue that never had native sub-issues, closed ones included. An issue with sub-issues is a container, never ready work itself.
 - Blocker: An issue another issue is natively `blocked by` on GitHub. Only an open blocker holds the blocked issue back.

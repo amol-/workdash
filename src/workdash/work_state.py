@@ -57,7 +57,7 @@ _CHECK_CONTEXTS = (
 # newest entries: only feedback after the latest push can be actionable.
 _PULL_REQUEST_FRAGMENT = (
     f"fragment ReadyPullRequest on PullRequest {{ number title url createdAt updatedAt state "
-    f"{_ACTOR} repository {{ nameWithOwner }} headRefOid maintainerCanModify "
+    f"{_ACTOR} repository {{ nameWithOwner }} headRefOid mergedAt maintainerCanModify "
     "headRef { refUpdateRule { viewerCanPush } } "
     "headRepository { viewerPermission } baseRepository { viewerPermission } "
     "baseRefName baseRef { target { oid } } mergeable reviewDecision "
@@ -104,6 +104,7 @@ class PullRequestWorkState:
     ci_status: str
     failing_checks: tuple[str, ...]
     feedback: tuple[ReviewFeedback, ...]
+    merged_at: datetime | None = None
 
     @property
     def reasons(self) -> tuple[str, ...]:
@@ -145,6 +146,7 @@ class IssueWorkState:
     has_sub_issues: bool
     blocked: bool
     open_pull_requests: tuple[tuple[str, int], ...]
+    merged_pull_requests: tuple[tuple[str, int], ...]
 
     @property
     def ready(self) -> bool:
@@ -302,7 +304,13 @@ def evaluate_pull_requests(
     """
 
     nodes = _fetch_pull_requests(pull_requests)
-    recomputing = [index for index, node in enumerate(nodes) if node.get("mergeable") == "UNKNOWN"]
+    # GitHub computes mergeability lazily, but reports UNKNOWN for a head it no longer
+    # recomputes, so asking a merged or closed one again only costs a call.
+    recomputing = [
+        index
+        for index, node in enumerate(nodes)
+        if node["state"] == "OPEN" and node.get("mergeable") == "UNKNOWN"
+    ]
     if recomputing:
         time.sleep(_MERGEABILITY_RETRY_DELAY_SECONDS)
         refreshed = _fetch_pull_requests([pull_requests[index] for index in recomputing])
@@ -315,6 +323,57 @@ def evaluate_pull_requests(
         )
         for (repo, number), node in zip(pull_requests, nodes, strict=True)
     ]
+
+
+def work_pull_request(
+    item: WorkItem, *, github_username: str, todo_repository: str
+) -> PullRequestWorkState | None:
+    """Return the pull request whose state carries an item's work, ``None`` when it has none.
+
+    That is the item's own pull request, or the user's closing pull request of the
+    issue: the open one when there is one, otherwise one that merged before it was
+    looked for. A targeted todo has none: its checkout is the target repository's.
+    """
+
+    candidates: list[tuple[str, int]] = []
+    if item.item_type == WorkItemType.PR:
+        candidates = [(item.repo, item.number)]
+    elif item.todo_target is None:
+        for entry in resolve_issue_scope(item.repo, item.number, todo_repository=todo_repository):
+            # GitHub names the repository canonically, which may differ in case from the target's.
+            if (entry.item.repo.lower(), entry.item.number) == (item.repo.lower(), item.number):
+                candidates = [*entry.open_pull_requests, *entry.merged_pull_requests]
+    if not candidates:
+        return None
+    states = evaluate_pull_requests(
+        candidates, github_username=github_username, todo_repository=todo_repository
+    )
+    if item.item_type == WorkItemType.PR:
+        return states[0]
+    # Only the user's own pull request carries on the issue; somebody else's is not this work.
+    # The issue's open pull requests are listed before its merged ones, so the open one is first.
+    authored = [state for state in states if state.item.kind is WorkItemKind.AUTHORED_PR]
+    return authored[0] if authored else None
+
+
+def pull_request_states(pull_requests: Sequence[tuple[str, int]]) -> dict[tuple[str, int], str]:
+    """Return each pull request's state: ``OPEN``, ``MERGED``, or ``CLOSED``.
+
+    Repeated checks of pull requests that are already tracked only need their state,
+    so this reads one metadata query instead of a whole work state evaluation.
+    """
+
+    states: dict[tuple[str, int], str] = {}
+    for start in range(0, len(pull_requests), _PULL_REQUESTS_PER_QUERY):
+        batch = pull_requests[start : start + _PULL_REQUESTS_PER_QUERY]
+        subject = ", ".join(f"{repo}#{number}" for repo, number in batch)
+        data = _graphql(
+            f"query PullRequestStates {{ {_pull_request_aliases(batch, 'state')} }}", subject
+        )
+        with _github_payload(subject):
+            for index, pull_request in enumerate(batch):
+                states[pull_request] = data[f"p{index}"]["pullRequest"]["state"]
+    return states
 
 
 def _owner_repositories(owner: str) -> list[str]:
@@ -371,19 +430,26 @@ def _fetch_pull_requests(pull_requests: Sequence[tuple[str, int]]) -> list[dict]
     nodes = []
     for start in range(0, len(pull_requests), _PULL_REQUESTS_PER_QUERY):
         batch = pull_requests[start : start + _PULL_REQUESTS_PER_QUERY]
-        aliases = " ".join(
-            f"p{index}: repository(owner: {json.dumps(repo.partition('/')[0])}, "
-            f"name: {json.dumps(repo.partition('/')[2])}) "
-            f"{{ pullRequest(number: {number}) {{ ...ReadyPullRequest }} }}"
-            for index, (repo, number) in enumerate(batch)
-        )
         subject = ", ".join(f"{repo}#{number}" for repo, number in batch)
         data = _graphql(
-            f"query ReadyPullRequests {{ {aliases} }} {_PULL_REQUEST_FRAGMENT}", subject
+            f"query ReadyPullRequests {{ {_pull_request_aliases(batch, '...ReadyPullRequest')} }} "
+            f"{_PULL_REQUEST_FRAGMENT}",
+            subject,
         )
         with _github_payload(subject):
             nodes += [data[f"p{index}"]["pullRequest"] for index in range(len(batch))]
     return nodes
+
+
+def _pull_request_aliases(batch: Sequence[tuple[str, int]], fields: str) -> str:
+    """Name each pull request of a batch by one alias, selecting ``fields`` of it."""
+
+    return " ".join(
+        f"p{index}: repository(owner: {json.dumps(repo.partition('/')[0])}, "
+        f"name: {json.dumps(repo.partition('/')[2])}) "
+        f"{{ pullRequest(number: {number}) {{ {fields} }} }}"
+        for index, (repo, number) in enumerate(batch)
+    )
 
 
 def _issue_state(node: dict, todo_repository: str) -> IssueWorkState:
@@ -396,6 +462,11 @@ def _issue_state(node: dict, todo_repository: str) -> IssueWorkState:
             (pr["repository"]["nameWithOwner"], pr["number"])
             for pr in node["closedByPullRequestsReferences"]["nodes"]
             if pr["state"] == "OPEN"
+        ),
+        merged_pull_requests=tuple(
+            (pr["repository"]["nameWithOwner"], pr["number"])
+            for pr in node["closedByPullRequestsReferences"]["nodes"]
+            if pr["state"] == "MERGED"
         ),
     )
 
@@ -491,6 +562,7 @@ def _pull_request_state(
                 github_username,
                 parse_github_datetime(pushes[-1] if pushes else commit["committedDate"]),
             ),
+            merged_at=parse_github_datetime(node["mergedAt"]) if node["mergedAt"] else None,
         )
 
 

@@ -113,6 +113,7 @@ class CLIOptions:
     body: str | None = None
     full: bool = False
     raw: bool = False
+    autoclose: bool = False
     host: str = "127.0.0.1"
     listeners: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
@@ -173,20 +174,23 @@ class WorkdashCommands:
         return 0
 
     def code_cli(
-        self, *, target: str, agent: str | None, group: str | None, json_output: bool
+        self,
+        *,
+        target: str,
+        agent: str | None,
+        group: str | None,
+        json_output: bool,
+        autoclose: bool = False,
     ) -> int:
         """Launch a coding agent through the local Workdash server."""
 
+        payload: dict[str, object] = {"target": target, "agent": agent, "autostart": True}
+        if group is not None:
+            payload["group"] = group
+        if autoclose:
+            payload["autoclose"] = True
         try:
-            result = self._client.request(
-                "code",
-                {
-                    "target": target,
-                    "agent": agent,
-                    "autostart": True,
-                    **({"group": group} if group is not None else {}),
-                },
-            )
+            result = self._client.request("code", payload)
         except WorkdashControlError as error:
             _print_control_error(error)
             return 1
@@ -383,6 +387,7 @@ class WorkdashCommands:
                 agent=tool,
                 allow_vscode=True,
                 autostart=False,
+                autoclose=False,
             ),
             analyze_choices=config.tui_analyze_choices(),
             code_choices=config.tui_code_choices(),
@@ -455,6 +460,7 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             agent=options.agent,
             group=options.group,
             json_output=options.json_output,
+            autoclose=options.autoclose,
         )
     if options.command == "terminal":
         return commands.terminal_cli(
@@ -615,6 +621,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         help="Configured coding agent to launch.",
     )
     code_parser.add_argument("--group", help="Zellij tab for the agent pane.")
+    code_parser.add_argument(
+        "--autoclose",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Let the server nudge the new agent and close its pane when the work is done.",
+    )
     code_parser.add_argument(
         "--json",
         dest="json_output",
@@ -821,6 +833,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         body=getattr(namespace, "body", None),
         full=getattr(namespace, "full", False),
         raw=getattr(namespace, "raw", False),
+        autoclose=getattr(namespace, "autoclose", False),
         host=host or "127.0.0.1",
         listeners=tuple(listeners),
     )
@@ -943,6 +956,8 @@ def _print_code_result(result: dict[str, object]) -> None:
     print(f"Cwd: {result['cwd']}")
     print(f"Pane title: {result['pane_title'] or '-'}")
     print(f"Pane id: {result['pane_id'] or '-'}")
+    if "autoclose_enabled" in result:
+        print(f"Autoclose: {'enabled' if result['autoclose_enabled'] else 'not enabled'}")
 
 
 def _print_terminal_result(result: dict[str, object]) -> None:

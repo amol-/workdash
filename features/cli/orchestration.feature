@@ -32,6 +32,7 @@ Feature: CLI orchestration commands
     - `workdash code --group NAME` asks the server to open a new agent in the named Zellij tab, creating it if needed; without the option it opens in the current tab.
     - Code results report the actual tab of the agent pane, including an already-running pane, in human and JSON output.
     - `workdash code` always asks the server to autostart the agent, so the new agent works autonomously from its briefing; there is no `--autostart` option and the TUI never asks for it.
+    - `workdash code --autoclose` asks the server to supervise the new pane as well; the CLI polls nothing itself and `--autoclose` never asks for autoclose without autostart.
     - A configured agent that lacks the command for the requested action is reported as unable to do that action, not as unconfigured.
     - Without `--agent`, `workdash analyze` and `workdash code` use the first configured agent for that action, in configuration order.
     - `workdash analyze`, `workdash code`, and `workdash terminal` accept any explicit target the JSON API accepts, including items `workdash list` does not show; the server resolves it.
@@ -354,3 +355,10 @@ Feature: CLI orchestration commands
     When the user runs `workdash code owner/repo#ISSUE-1 --group epic --host dashboard.lan --json`
     Then the command connects to host `dashboard.lan`
     And the result reports the agent in tab `epic`
+
+  @id:F-CLI-ORCHESTRATION-S044
+  Scenario: Code with autoclose asks the server to supervise the new pane
+    Given a server-backed Workdash session is ready to answer
+    And GitHub repository `owner/repo` has open issue #42
+    When the user runs `workdash code owner/repo#ISSUE-42 --agent pi --autoclose`
+    Then the command asks the server to code with autostart and autoclose enabled

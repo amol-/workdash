@@ -3,7 +3,60 @@ from pathlib import Path
 
 import pytest
 
-from workdash.git import GitHelper, get_current_branch, get_repo_root
+from workdash.git import GitHelper, get_current_branch, get_repo_root, has_unpublished_work
+
+
+def commit_everything(tmp_path: Path, message: str = "initial") -> str:
+    """Initialize the repository at ``tmp_path`` when needed, commit everything, and
+    return the new head SHA."""
+
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "dev@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Dev"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "--all"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "--allow-empty", "-m", message], cwd=tmp_path, check=True
+    )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    )
+    return head.stdout.strip()
+
+
+def test_unpublished_work_is_absent_when_the_worktree_is_what_github_has(tmp_path: Path) -> None:
+    head_sha = commit_everything(tmp_path)
+
+    assert has_unpublished_work(str(tmp_path), head_sha) is False
+
+
+def test_unpublished_work_includes_an_uncommitted_change(tmp_path: Path) -> None:
+    (tmp_path / "notes.md").write_text("committed\n")
+    head_sha = commit_everything(tmp_path)
+    (tmp_path / "notes.md").write_text("work in progress\n")
+
+    assert has_unpublished_work(str(tmp_path), head_sha) is True
+
+
+def test_unpublished_work_includes_a_commit_github_does_not_have(tmp_path: Path) -> None:
+    pushed_sha = commit_everything(tmp_path)
+    commit_everything(tmp_path, "local only")
+
+    assert has_unpublished_work(str(tmp_path), pushed_sha) is True
+
+
+def test_unpublished_work_includes_an_unadded_file(tmp_path: Path) -> None:
+    head_sha = commit_everything(tmp_path)
+    (tmp_path / "parser.py").write_text("def parse(tokens):\n    return tokens\n")
+
+    assert has_unpublished_work(str(tmp_path), head_sha) is True
+
+
+def test_unpublished_work_ignores_workdash_artifacts(tmp_path: Path) -> None:
+    head_sha = commit_everything(tmp_path)
+    (tmp_path / ".workdash").mkdir()
+    (tmp_path / ".workdash" / "PR_REVIEW.md").write_text("review\n")
+
+    assert has_unpublished_work(str(tmp_path), head_sha) is False
 
 
 def test_worktree_name_preserves_owner_repo_number_shape() -> None:
