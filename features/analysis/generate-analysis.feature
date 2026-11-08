@@ -12,27 +12,26 @@ Feature: Generate an analysis
     - Source citations link to the code repository's own hosting service, including GitHub, GitLab, and Codeberg.
     - When the source-link format is not immediately obvious, the agent cites the file path and line number without inventing a URL.
     - While the analysis runs, the system shows the user that work is in progress.
-    - After a successful fresh analysis, the system caches the result and opens the rendered HTML with the same configured viewer used for work item URLs.
-    - Opening a cached analysis also renders it and uses that viewer, including its fullscreen terminal choice and current session.
-    - The HTML file path is passed literally after configured viewer arguments; opening an analysis does not prepare a worktree.
+    - After a successful fresh analysis, the system caches the result and opens its HTTP analysis URL with the same configured viewer used for work item URLs.
+    - Opening a cached analysis also opens that URL, including its fullscreen terminal choice and current session.
+    - The analysis URL is passed literally after configured viewer arguments; opening an analysis does not prepare a worktree and does not read the server's filesystem.
     - When an analysis fails or produces no content, the system closes any progress overlay, reports the failure details to the user, and leaves any previous cached analysis untouched.
 
   @id:F-ANALYSIS-GENERATE-S001
-  Scenario: Fresh analysis is cached and opened in the browser
+  Scenario: Fresh analysis is cached and opened by URL in the viewer
     Given the user has the analyze dialog open on a work item
     When the user chooses to generate a fresh analysis with a configured analysis agent
     Then the system prepares the work item's worktree
     And the analysis agent starts inside that worktree with access to the code and the work item's discussion
     And the system shows that the analysis is in progress
     And the generated analysis is cached
-    And the rendered analysis is opened with the configured viewer
+    And the analysis HTTP URL is opened with the configured viewer
 
   @id:F-ANALYSIS-GENERATE-S002
-  Scenario: Opening a cached analysis renders and opens it
+  Scenario: Opening a cached analysis opens its URL
     Given the selected work item has a cached analysis
     When the user chooses to open the cached analysis
-    Then the cached analysis is rendered
-    And the rendered analysis is opened with the configured viewer
+    Then the cached analysis URL is opened with the configured viewer
 
   @id:F-ANALYSIS-GENERATE-S003
   Scenario: Failing analysis reports to the user and preserves the cache

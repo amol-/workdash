@@ -262,8 +262,8 @@ added by URL only shares the issue's worktree from the next refresh onwards.
 ## Local control server
 
 `workdash --server` starts the normal TUI and a JSON control API in the same
-process. It listens on `WORKDASH_HOST` (default `127.0.0.1:8765`), accepts JSON only, and stops all
-listeners when the TUI exits.
+process. It listens on `WORKDASH_HOST` (default `127.0.0.1:8765`) and stops all
+listeners when the TUI exits. Control requests use JSON; item artifact GETs return file contents or a JSON listing.
 
 For trusted LAN access, add repeatable `--listen HOST@IP1,IP2` options alongside
 `--server`. Each listener needs a nonempty list of exact accepted source IPs
@@ -272,6 +272,19 @@ listener, with localhost and the primary server IP always accepted.
 Access checks use the actual peer IP, never forwarding headers. Wildcard binds are
 rejected; extra listeners use the selected server port.
 If any listener cannot bind, the entire server startup fails.
+
+To list an item's `.workdash/` artifacts or retrieve one, URL-encode the `#` in
+its Workdash ID (otherwise it is interpreted as a URL fragment):
+
+```bash
+curl 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/'
+curl 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/.workdash/PR_REVIEW.md'
+```
+
+The listing is a JSON success envelope with `result.entries`, a sorted array of
+names. Files are returned as `text/plain`; only files inside the existing
+worktree's `.workdash/` directory are available. These endpoints are read-only
+and use the same peer access checks as the control API.
 
 **Trusted LAN only:** the API is intentionally unauthenticated plain HTTP.
 Allowed clients can execute dashboard actions; do not expose it to untrusted

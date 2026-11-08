@@ -42,16 +42,18 @@ def get_current_branch(repo_path: Path) -> str:
 class GitHelper:
     """Local git command helpers used to prepare and prove Workdash worktrees."""
 
-    def worktree_proves_item(self, candidate: Path, item: WorkItem) -> bool:
+    def worktree_proves_item(
+        self, candidate: Path, item: WorkItem, *, directory: Path | None = None
+    ) -> bool:
         if item.todo_target is not None:
             # A targeted todo works on the target's code, so its worktree is a
             # clone of the target under a name of its own.
             return self.repository_matches(
-                candidate, item.todo_target
+                candidate, item.todo_target, directory=directory
             ) and candidate.name == self.worktree_name(item.todo_target, item.number, todo=True)
-        if not self.is_worktree_root(candidate):
+        if not self.is_worktree_root(directory or candidate):
             return False
-        origin_repo = self.remote_repo(candidate, "origin")
+        origin_repo = self.remote_repo(directory or candidate, "origin")
         if origin_repo is None:
             return False
         accepted_names = {
@@ -60,7 +62,7 @@ class GitHelper:
         if origin_repo == item.repo:
             return candidate.name in accepted_names
         if item.item_type == WorkItemType.PR:
-            if self.remote_repo(candidate, "upstream") != item.repo:
+            if self.remote_repo(directory or candidate, "upstream") != item.repo:
                 return False
             return candidate.name in accepted_names
         return False
@@ -78,7 +80,10 @@ class GitHelper:
         if result.returncode != 0:
             return False
         root = result.stdout.strip()
-        return bool(root) and Path(root).resolve() == candidate.resolve()
+        try:
+            return bool(root) and Path(root).samefile(candidate)
+        except OSError:
+            return False
 
     def remote_repo(self, candidate: Path, remote_name: str) -> str | None:
         remote_url = self.remote_url(candidate, remote_name)
@@ -114,11 +119,13 @@ class GitHelper:
             return None
         return result.stdout.strip() or None
 
-    def repository_matches(self, candidate: Path, target: str) -> bool:
+    def repository_matches(
+        self, candidate: Path, target: str, *, directory: Path | None = None
+    ) -> bool:
         """Prove repository identity using the origin host and full repository path."""
-        if not self.is_worktree_root(candidate):
+        if not self.is_worktree_root(directory or candidate):
             return False
-        origin = self.remote_url(candidate, "origin")
+        origin = self.remote_url(directory or candidate, "origin")
         identity = self.repository_identity(target)
         return identity is not None and self.repository_identity(origin or "") == identity
 

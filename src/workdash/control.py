@@ -6,16 +6,20 @@ import base64
 import json
 import os
 import re
+import stat
 import threading
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Collection, Sequence
+from contextlib import ExitStack
 from http import HTTPStatus
 from ipaddress import IPv4Address, ip_address
+from pathlib import Path
 from socketserver import BaseServer
 from wsgiref.simple_server import make_server
 
+from .analysis_cache import AnalysisCache
 from .backend import IncludeResult, SuggestionMarkers, WorkdashBackend, compute_suggestion_markers
 from .config import WorkdashConfig
 from .github_client import parse_github_item_url
@@ -253,6 +257,7 @@ class WorkdashSession:
             return {
                 "item_id": item_id,
                 "path": path,
+                "url": self.analysis_url(item),
                 "agent": selected_agent,
                 "cache_used": cache_used,
                 "status": "cached" if cache_used else "generated",
@@ -335,9 +340,7 @@ class WorkdashSession:
             prompt = prepare_launch_agent_prompt(
                 item,
                 repo_path,
-                analysis_path=str(self.backend.analysis_cache.build_analysis_path(item))
-                if item.analysis is not None
-                else None,
+                analysis_path=self.analysis_url(item) if item.analysis is not None else None,
                 merge_base=get_merge_base(repo_path),
             )
             if autostart:
@@ -564,6 +567,11 @@ class WorkdashSession:
                 return cached_path
         cwd = ensure_worktree(self.config.workdir, item) if tool != "cached" else None
         return self.backend.analyze_item(item, tool=tool, cwd=cwd)
+
+    def analysis_url(self, item: WorkItem) -> str:
+        """Return the HTTP URL under which this item's analysis markdown is served."""
+
+        return _analysis_http_url(item)
 
     def _require_item(self, target: str) -> WorkItem:
         """Resolve an explicit target, fetching it from GitHub when the dashboard lacks it.
@@ -822,6 +830,13 @@ def show_config_payload(config: WorkdashConfig) -> dict[str, object]:
     }
 
 
+def _analysis_http_url(item: WorkItem) -> str:
+    """Return the absolute HTTP URL serving ``item``'s cached analysis markdown."""
+
+    host, port = server_address()
+    return f"http://{host}:{port}{AnalysisCache.build_analysis_url_path(item)}"
+
+
 def _work_items_payload(
     work_items: Sequence[WorkItem], suggestion_markers: SuggestionMarkers
 ) -> dict[str, object]:
@@ -842,6 +857,8 @@ def _work_items_payload(
                 "suggested": bool(
                     suggestion_markers.get((item.item_type, item.repo, item.number), "")
                 ),
+                "analysis_available": item.analysis is not None,
+                "analysis_url": _analysis_http_url(item) if item.analysis is not None else None,
             }
         )
     return {"items": items}
@@ -1050,9 +1067,124 @@ def _make_turbogears_app(session: WorkdashSession):
             response.status_int = HTTPStatus.NOT_FOUND
             return _error_envelope("not_found", "Unknown Workdash API endpoint.")
 
+    class ItemsController(TGController):
+        def __init__(self, workdash_session: WorkdashSession) -> None:
+            self._session = workdash_session
+
+        @expose()
+        def _default(self, *path):
+            try:
+                if request.method != "GET":
+                    raise WorkdashControlError(
+                        "method_not_allowed", "Only GET is supported.", status=405
+                    )
+                if len(path) == 3 and path[2] == "analysis":
+                    return self._serve_analysis(path)
+                if len(path) < 3 or path[2] != "files":
+                    raise WorkdashControlError("not_found", "Unknown endpoint.", status=404)
+                item = self._session._require_item(f"{path[0]}/{path[1]}")
+                parts = tuple(request.path_info.split("/")[6:])
+                listing = not parts or parts == ("",)
+                if not listing and (
+                    parts[0] != ".workdash" or any(p in (".", "..", "") for p in parts)
+                ):
+                    raise WorkdashControlError("not_found", "Artifact not found.", status=404)
+                with ExitStack() as stack:
+                    selected = existing_worktree_path(
+                        self._session.config.workdir, item, pinned=stack
+                    )
+                    if selected is None:
+                        raise WorkdashControlError("not_found", "Worktree not found.", status=404)
+                    worktree, fd = selected
+                    worktree = worktree.resolve(strict=True)
+                    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                    fd = os.open(".workdash", flags, dir_fd=fd)
+                    stack.callback(os.close, fd)
+                    root = worktree / ".workdash"
+                    if listing:
+                        entries = []
+                        for name in os.listdir(fd):
+                            try:
+                                with ExitStack() as entry_stack:
+                                    directories = [fd]
+                                    pending = [name]
+                                    links = 0
+                                    while pending:
+                                        part = pending.pop(0)
+                                        if part in ("", "."):
+                                            continue
+                                        if part == "..":
+                                            if len(directories) == 1:
+                                                raise ValueError("Symlink escapes artifact root")
+                                            directories.pop()
+                                            continue
+                                        info = os.stat(
+                                            part, dir_fd=directories[-1], follow_symlinks=False
+                                        )
+                                        if stat.S_ISLNK(info.st_mode):
+                                            links += 1
+                                            if links > 40:
+                                                raise ValueError("Too many symlinks")
+                                            target = os.readlink(part, dir_fd=directories[-1])
+                                            if os.path.isabs(target):
+                                                target = str(Path(target).relative_to(root))
+                                                directories = directories[:1]
+                                            pending = target.split("/") + pending
+                                        elif pending:
+                                            child = os.open(part, flags, dir_fd=directories[-1])
+                                            entry_stack.callback(os.close, child)
+                                            directories.append(child)
+                            except (OSError, ValueError):
+                                continue
+                            entries.append(name)
+                        entries.sort()
+                        response.content_type = "application/json"
+                        return json.dumps({"ok": True, "result": {"entries": entries}}).encode()
+                    if len(parts) < 2:
+                        raise WorkdashControlError("not_found", "Artifact not found.", status=404)
+                    # Resolve aliases first, then reopen only beneath the pinned root without links.
+                    resolved = (root.joinpath(*parts[1:])).resolve(strict=True).relative_to(root)
+                    if not resolved.parts:
+                        raise WorkdashControlError("not_found", "Artifact not found.", status=404)
+                    for part in resolved.parts[:-1]:
+                        fd = os.open(part, flags, dir_fd=fd)
+                        stack.callback(os.close, fd)
+                    fd = os.open(
+                        resolved.parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd
+                    )
+                    with os.fdopen(fd, "rb") as artifact:
+                        if not stat.S_ISREG(os.fstat(fd).st_mode):
+                            raise WorkdashControlError(
+                                "not_found", "Artifact not found.", status=404
+                            )
+                        content = artifact.read()
+                    response.content_type = "text/plain"
+                    return content
+            except WorkdashControlError as error:
+                response.status_int = error.status
+                response.content_type = "application/json"
+                return json.dumps(_error_envelope(error.code, str(error))).encode()
+            except (OSError, ValueError, RuntimeError):
+                response.status_int = HTTPStatus.NOT_FOUND
+                response.content_type = "application/json"
+                return json.dumps(_error_envelope("not_found", "Artifact not found.")).encode()
+
+        def _serve_analysis(self, path) -> bytes:
+            """Serve the cached analysis markdown of an item as text/markdown."""
+
+            item = self._session._require_item(f"{path[0]}/{path[1]}")
+            analysis = self._session.backend.analysis_cache.load_analysis(item)
+            if analysis is None:
+                raise WorkdashControlError(
+                    "not_found", "No cached analysis for this item.", status=404
+                )
+            response.content_type = "text/markdown; charset=utf-8"
+            return analysis.encode("utf-8")
+
     class ApiController(TGController):
         def __init__(self, workdash_session: WorkdashSession) -> None:
             self.v0 = V0Controller(workdash_session)
+            self.items = ItemsController(workdash_session)
 
     class RootController(TGController):
         def __init__(self, workdash_session: WorkdashSession) -> None:

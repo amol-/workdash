@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import subprocess
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ import pytest
 from pytest_bdd import given, parsers, then, when
 from webob import Request
 
+from workdash.analysis_cache import AnalysisCache
 from workdash.backend import compute_suggestion_markers
 from workdash.control import _make_turbogears_app, _source_filtered_wsgi_app, format_work_item_id
 from workdash.models import WorkItem, WorkItemKind, WorkItemType, worktree_item_number
@@ -759,13 +761,14 @@ def _api_returns_selected_agent(agent: str, scenario_state: dict[str, Any]) -> N
 
 
 @then(
-    "the API returns the item ID, selected agent, analysis path, cache status, and base64 markdown content"
+    "the API returns the item ID, selected agent, analysis URL and path, cache status, and base64 markdown content"
 )
 def _api_returns_analysis_result(scenario_state: dict[str, Any]) -> None:
     result = _api_result(scenario_state)
     assert result == {
         "item_id": "owner/repo#ISSUE-1",
         "path": scenario_state["analysis_path"],
+        "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
         "agent": "codex",
         "cache_used": False,
         "status": "generated",
@@ -1348,3 +1351,96 @@ def _both_responses_unconfirmed(scenario_state: dict[str, Any]) -> None:
         (409, "launch_unconfirmed"),
         (409, "launch_unconfirmed"),
     ]
+
+
+@given(
+    "a server-backed Workdash session has an item with a worktree artifact and an alias inside .workdash"
+)
+def _artifact_item(scenario_state, work_items, tmp_path, monkeypatch):
+    item = make_work_item(number=1)
+    work_items[:] = [item]
+    set_session_items(scenario_state, work_items)
+    worktree = tmp_path / "wrk" / "owner_repo_1"
+    worktree.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(worktree)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git",
+        ],
+        check=True,
+    )
+    artifacts = worktree / ".workdash"
+    artifacts.mkdir(parents=True)
+    (artifacts / "PR_REVIEW.md").write_text("Review contents")
+    (artifacts / "alias.md").symlink_to("PR_REVIEW.md")
+
+
+@when("a client lists and reads the item's worktree artifacts")
+def _get_artifacts(scenario_state, work_items, tmp_path):
+    app = _source_filtered_wsgi_app(
+        _make_turbogears_app(ensure_api_session(scenario_state, work_items, tmp_path))
+    )
+    responses = []
+    for suffix in ("", ".workdash/PR_REVIEW.md", ".workdash/alias.md"):
+        req = Request.blank(f"/api/items/owner/repo%23ISSUE-1/files/{suffix}")
+        req.environ["REMOTE_ADDR"] = "127.0.0.1"
+        response = req.get_response(app)
+        _ = response.body
+        responses.append(response)
+    scenario_state["artifact_responses"] = responses
+
+
+@then("the listing names the artifact and its alias and the API returns their contents")
+def _check_artifacts(scenario_state):
+    listing, artifact, alias = scenario_state["artifact_responses"]
+    assert listing.status_int == 200
+    assert listing.json["result"]["entries"] == ["PR_REVIEW.md", "alias.md"]
+    assert artifact.status_int == alias.status_int == 200
+    assert artifact.text == alias.text == "Review contents"
+
+
+@given("a server-backed Workdash session has an item with a cached analysis")
+def _item_with_cached_analysis(scenario_state, work_items, tmp_path):
+    item = make_work_item(number=1)
+    work_items[:] = [item]
+    set_session_items(scenario_state, work_items)
+    cache = AnalysisCache(tmp_path / "analysis-cache")
+    cache.save(item, "# cached analysis\nbody\n")
+    item.analysis = cache.load_analysis(item)
+    item.analyzed_at = cache.load_analysis_date(item)
+    scenario_state["analysis_cache"] = cache
+    session = ensure_api_session(scenario_state, work_items, tmp_path)
+    session.backend.analysis_cache = cache
+
+
+@when("a client requests the item's analysis URL")
+def _request_analysis_url(scenario_state, work_items, tmp_path):
+    app = _source_filtered_wsgi_app(
+        _make_turbogears_app(ensure_api_session(scenario_state, work_items, tmp_path))
+    )
+    req = Request.blank("/api/items/owner/repo%23ISSUE-1/analysis")
+    req.environ["REMOTE_ADDR"] = "127.0.0.1"
+    response = req.get_response(app)
+    scenario_state["analysis_response"] = response
+
+
+@then("the API returns the cached markdown as text/markdown")
+def _analysis_served(scenario_state):
+    response = scenario_state["analysis_response"]
+    assert response.status_int == 200
+    assert response.content_type == "text/markdown"
+    assert response.text == "# cached analysis\nbody\n"
+
+
+@then("the API returns a not found error")
+def _analysis_not_found(scenario_state):
+    response = scenario_state["analysis_response"]
+    assert response.status_int == 404
+    assert response.json["ok"] is False
+    assert response.json["error"]["code"] == "not_found"

@@ -1,10 +1,8 @@
 import base64
 import json
-import os
 import re
 import shlex
 import subprocess
-import tempfile
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -691,6 +689,7 @@ def test_main_server_backed_commands_are_pure_http_clients(
                 return {
                     "item_id": "owner/repo#ISSUE-1",
                     "path": str(analysis_path),
+                    "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
                     "agent": "codex",
                     "cache_used": False,
                     "status": "generated",
@@ -770,12 +769,12 @@ def test_main_server_backed_commands_are_pure_http_clients(
 
     output = capsys.readouterr().out
     if expected_endpoint == "analyze":
-        local_path = next(
-            line.removeprefix("Analysis path: ")
+        analysis_url = next(
+            line.removeprefix("Analysis URL: ")
             for line in output.splitlines()
-            if line.startswith("Analysis path: ")
+            if line.startswith("Analysis URL: ")
         )
-        os.unlink(local_path)
+        assert analysis_url == "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis"
     assert requests == [(expected_endpoint, expected_payload)]
     if expected_endpoint == "ready" and "--json" in argv:
         assert json.loads(output)["items"] == [ready_item]
@@ -843,6 +842,7 @@ def test_main_analyze_human_output_formats_server_response(
             return {
                 "item_id": "owner/repo#ISSUE-1",
                 "path": "/server/cache/analysis.md",
+                "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
                 "agent": "codex",
                 "cache_used": False,
                 "status": "generated",
@@ -856,21 +856,18 @@ def test_main_analyze_human_output_formats_server_response(
     assert workdash_module.main(["analyze", "owner/repo#ISSUE-1"]) == 0
 
     output = capsys.readouterr().out
-    analysis_path = next(
-        line.removeprefix("Analysis path: ")
+    analysis_url = next(
+        line.removeprefix("Analysis URL: ")
         for line in output.splitlines()
-        if line.startswith("Analysis path: ")
+        if line.startswith("Analysis URL: ")
     )
-    try:
-        assert "Item: owner/repo#ISSUE-1" in output
-        assert "Agent: codex" in output
-        assert "Status: generated" in output
-        assert open(analysis_path, encoding="utf-8").read() == "analysis body\n"
-    finally:
-        os.unlink(analysis_path)
+    assert analysis_url == "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis"
+    assert "Item: owner/repo#ISSUE-1" in output
+    assert "Agent: codex" in output
+    assert "Status: generated" in output
 
 
-def test_main_analyze_json_outputs_local_analysis_path_without_server_content_fields(
+def test_main_analyze_json_outputs_analysis_url_without_server_content_fields(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -884,6 +881,7 @@ def test_main_analyze_json_outputs_local_analysis_path_without_server_content_fi
             return {
                 "item_id": "owner/repo#ISSUE-1",
                 "path": "/server/cache/cached.md",
+                "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
                 "agent": "codex",
                 "cache_used": True,
                 "status": "cached",
@@ -899,20 +897,16 @@ def test_main_analyze_json_outputs_local_analysis_path_without_server_content_fi
     )
 
     payload = json.loads(capsys.readouterr().out)
-    analysis_path = payload.pop("analysis_path")
-    try:
-        assert payload == {
-            "item_id": "owner/repo#ISSUE-1",
-            "agent": "codex",
-            "cache_used": True,
-            "status": "cached",
-        }
-        assert open(analysis_path, encoding="utf-8").read() == "cached body\n"
-    finally:
-        os.unlink(analysis_path)
+    assert payload == {
+        "item_id": "owner/repo#ISSUE-1",
+        "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
+        "agent": "codex",
+        "cache_used": True,
+        "status": "cached",
+    }
 
 
-def test_main_analyze_json_writes_unique_secure_temp_file_from_server_content(
+def test_main_analyze_json_reports_the_same_server_analysis_url_twice(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -925,6 +919,7 @@ def test_main_analyze_json_writes_unique_secure_temp_file_from_server_content(
             return {
                 "item_id": "owner/repo#ISSUE-1",
                 "path": "/server/cache/analysis.md",
+                "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
                 "agent": "codex",
                 "cache_used": False,
                 "status": "generated",
@@ -935,42 +930,25 @@ def test_main_analyze_json_writes_unique_secure_temp_file_from_server_content(
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
 
-    analysis_paths = []
-    try:
-        assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--json"]) == 0
-        first_payload = json.loads(capsys.readouterr().out)
-        analysis_paths.append(first_payload["analysis_path"])
-        assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--json"]) == 0
-        second_payload = json.loads(capsys.readouterr().out)
-        analysis_paths.append(second_payload["analysis_path"])
+    assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--json"]) == 0
+    first_payload = json.loads(capsys.readouterr().out)
+    assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--json"]) == 0
+    second_payload = json.loads(capsys.readouterr().out)
 
-        assert "copy_path" not in first_payload
-        assert "file_content" not in first_payload
-        assert "file_name" not in first_payload
-        assert "content_type" not in first_payload
-        assert analysis_paths[0] != analysis_paths[1]
-        for analysis_path in analysis_paths:
-            assert analysis_path.startswith(
-                os.path.join(tempfile.gettempdir(), "workdash-owner-repo-ISSUE1-")
-            )
-            assert analysis_path.endswith(".md")
-            assert os.stat(analysis_path).st_mode & 0o077 == 0
-            assert open(analysis_path, encoding="utf-8").read() == "analysis body\n"
-    finally:
-        for analysis_path in analysis_paths:
-            try:
-                os.unlink(analysis_path)
-            except FileNotFoundError:
-                pass
+    assert "path" not in first_payload
+    assert "file_content" not in first_payload
+    assert "file_name" not in first_payload
+    assert "content_type" not in first_payload
+    assert first_payload == second_payload
+    assert first_payload["url"] == "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis"
 
 
 @pytest.mark.parametrize(
     ("response_fields", "expected_error"),
     [
-        ({}, "missing base64 file_content"),
-        ({"file_content": 123}, "missing base64 file_content"),
-        ({"file_content": "not base64"}, "invalid analysis content"),
-        ({"file_content": "☃"}, "invalid analysis content"),
+        ({"url": None}, "missing the analysis url"),
+        ({"url": 123}, "missing the analysis url"),
+        ({"url": ""}, "missing the analysis url"),
     ],
 )
 def test_main_analyze_reports_invalid_content_response(
@@ -988,6 +966,7 @@ def test_main_analyze_reports_invalid_content_response(
             return {
                 "item_id": "owner/repo#ISSUE-1",
                 "path": "/server/cache/analysis.md",
+                "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
                 "agent": "codex",
                 "cache_used": False,
                 "status": "generated",

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import binascii
 import json
 import logging
 import os
@@ -12,9 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 from collections.abc import Sequence
-from contextlib import suppress
 from dataclasses import dataclass
 from ipaddress import ip_address
 
@@ -166,7 +162,7 @@ class WorkdashCommands:
             _print_control_error(error)
             return 1
         try:
-            result = _with_local_analysis_path(result)
+            result = _with_analysis_url(result)
         except WorkdashControlError as error:
             _print_control_error(error)
             return 1
@@ -376,6 +372,12 @@ class WorkdashCommands:
             analyze_callback=lambda item, tool: session.analyze(
                 target=format_work_item_id(item), agent=tool, prefer_cache=(tool == "cached")
             )["path"],
+            open_url_callback=lambda url: open_in_browser(
+                url,
+                config.open_command,
+                needs_pane=config.open_needs_pane,
+                zellij_session=zellij_session,
+            ),
             launch_callback=lambda item, tool: session.code(
                 target=format_work_item_id(item),
                 agent=tool,
@@ -901,42 +903,20 @@ def _print_ready_result(result: dict[str, object]) -> None:
         )
 
 
-def _with_local_analysis_path(result: dict[str, object]) -> dict[str, object]:
+def _with_analysis_url(result: dict[str, object]) -> dict[str, object]:
+    """Replace the server file fields of an analysis response with its URL."""
+
     cli_result = dict(result)
-    file_content = cli_result.pop("file_content", None)
-    file_name = cli_result.pop("file_name", None)
+    cli_result.pop("file_content", None)
+    cli_result.pop("file_name", None)
     cli_result.pop("content_type", None)
-    if not isinstance(file_content, str):
+    cli_result.pop("path", None)
+    url = cli_result.get("url")
+    if not isinstance(url, str) or not url:
         raise WorkdashControlError(
             "invalid_response",
-            "Workdash server analysis response is missing base64 file_content.",
+            "Workdash server analysis response is missing the analysis url.",
         )
-
-    base_name = (
-        os.path.basename(file_name) if isinstance(file_name, str) and file_name else "analysis.md"
-    )
-    stem, suffix = os.path.splitext(base_name)
-    stem = "".join(character if character.isalnum() else "-" for character in stem).strip("-")
-    prefix = f"workdash-{(stem or 'analysis')[:32]}-"
-    analysis_path: str | None = None
-    try:
-        content = base64.b64decode(file_content, validate=True)
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            prefix=prefix,
-            suffix=suffix or ".md",
-        ) as analysis_file:
-            analysis_path = analysis_file.name
-            analysis_file.write(content)
-    except (binascii.Error, ValueError, OSError) as error:
-        if analysis_path is not None:
-            with suppress(OSError):
-                os.unlink(analysis_path)
-        raise WorkdashControlError(
-            "invalid_response", "Workdash server returned invalid analysis content."
-        ) from error
-    cli_result["analysis_path"] = analysis_path
-    cli_result.pop("path", None)
     return cli_result
 
 
@@ -944,7 +924,7 @@ def _print_analysis_result(result: dict[str, object]) -> None:
     print(f"Item: {result['item_id']}")
     print(f"Agent: {result['agent']}")
     print(f"Status: {result['status']}")
-    print(f"Analysis path: {result['analysis_path']}")
+    print(f"Analysis URL: {result['url']}")
 
 
 def _print_todo_result(result: dict[str, object]) -> None:

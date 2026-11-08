@@ -982,26 +982,16 @@ def _server_analysis_response_includes_content(scenario_state: dict[str, Any]) -
     assert "content_encoding" not in result
 
 
-@then(
-    "the system returns JSON with the item ID, selected agent, local analysis path, and cache status"
-)
+@then("the system returns JSON with the item ID, selected agent, analysis URL, and cache status")
 def _returns_analyze_json(scenario_state: dict[str, Any]) -> None:
     payload = json.loads(scenario_state["stdout"])
-    analysis_path = Path(payload.pop("analysis_path"))
-    try:
-        assert payload == {
-            "item_id": "owner/repo#ISSUE-1",
-            "agent": "codex",
-            "cache_used": False,
-            "status": "generated",
-        }
-        assert analysis_path.name.startswith("workdash-analysis-")
-        assert analysis_path.suffix == ".md"
-        assert analysis_path.read_text(encoding="utf-8") == scenario_state.get(
-            "analysis_content", "analysis body\n"
-        )
-    finally:
-        analysis_path.unlink(missing_ok=True)
+    assert payload == {
+        "item_id": "owner/repo#ISSUE-1",
+        "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
+        "agent": "codex",
+        "cache_used": False,
+        "status": "generated",
+    }
 
 
 @then("the system launches code for the current item with the selected configured agent")
@@ -1230,28 +1220,22 @@ def _returns_pane_close_json(scenario_state: dict[str, Any]) -> None:
 
 
 @then(
-    "the system returns JSON with the item ID, selected agent, local analysis path, cache status, "
-    "and no server file content fields"
+    "the system returns JSON with the item ID, selected agent, analysis URL, cache status, "
+    "and no server file or content fields"
 )
-def _returns_analyze_json_with_local_path(scenario_state: dict[str, Any]) -> None:
+def _returns_analyze_json_with_url(scenario_state: dict[str, Any]) -> None:
     payload = json.loads(scenario_state["stdout"])
-    analysis_path = Path(payload.pop("analysis_path"))
-    try:
-        assert payload == {
-            "item_id": "owner/repo#ISSUE-1",
-            "agent": "codex",
-            "cache_used": False,
-            "status": "generated",
-        }
-        assert "file_content" not in payload
-        assert "file_name" not in payload
-        assert "content_type" not in payload
-        assert "copy_path" not in payload
-        assert analysis_path.name.startswith("workdash-analysis-")
-        assert analysis_path.suffix == ".md"
-        assert analysis_path.read_text(encoding="utf-8") == "analysis body\n"
-    finally:
-        analysis_path.unlink(missing_ok=True)
+    assert payload == {
+        "item_id": "owner/repo#ISSUE-1",
+        "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
+        "agent": "codex",
+        "cache_used": False,
+        "status": "generated",
+    }
+    assert "file_content" not in payload
+    assert "file_name" not in payload
+    assert "content_type" not in payload
+    assert "path" not in payload
 
 
 @then("the command still sends the request to the local Workdash server")

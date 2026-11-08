@@ -530,12 +530,13 @@ def _preloaded_with_cache(scenario_state: dict[str, Any]) -> None:
     # is exercised end-to-end rather than recomputed locally.
     item: WorkItem = scenario_state["selected_item"]
     cache: AnalysisCache = scenario_state["cache"]
-    expected_analysis_path = cache.build_analysis_path(item)
+    expected_analysis_url = AnalysisCache.build_analysis_url_path(item)
     launched_prompts = scenario_state["launched_prompts"]
     assert launched_prompts, "Expected the launch path to produce a prompt"
     prompt = launched_prompts[0]
     assert "PREVIOUS ANALYSIS:" in prompt
-    assert str(expected_analysis_path) in prompt
+    assert expected_analysis_url in prompt
+    assert str(cache.build_analysis_path(item)) not in prompt
     assert item.url in prompt
     assert scenario_state["github_context"]["body"] in prompt
 

@@ -160,7 +160,8 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
-def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch):
+@pytest.mark.parametrize("tab_name", ["epic", "-foo"])
+def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, tab_name):
     from workdash.launcher import launch_agent_context, load_zellij_panes
 
     zellij = shutil.which("zellij")
@@ -185,7 +186,7 @@ def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch):
             time.sleep(0.1)
         else:
             pytest.fail("Zellij did not start")
-        for repo, group in [("first", "epic"), ("second", "epic"), ("third", None)]:
+        for repo, group in [("first", tab_name), ("second", tab_name), ("third", None)]:
             path = tmp_path / repo
             path.mkdir()
             launch = launch_agent_context(
@@ -201,7 +202,7 @@ def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch):
             if group:
                 assert pane["tab_name"] == group
             else:
-                assert pane["tab_name"] != "epic"
-        assert len({p["tab_id"] for p in panes if p.get("tab_name") == "epic"}) == 1
+                assert pane["tab_name"] != tab_name
+        assert len({p["tab_id"] for p in panes if p.get("tab_name") == tab_name}) == 1
     finally:
         _cleanup_sessions(zellij, env, [(name, pid, fd)])
