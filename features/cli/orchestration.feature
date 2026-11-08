@@ -29,6 +29,8 @@ Feature: CLI orchestration commands
     - Missing optional agent commands mean that agent operation is not configured, not that the whole config is invalid.
     - `workdash analyze` accepts only configured analysis agents reported by `workdash show-config`.
     - `workdash code` launches only configured coding agents reported by `workdash show-config`.
+    - `workdash code --group NAME` asks the server to open a new agent in the named Zellij tab, creating it if needed; without the option it opens in the current tab.
+    - Code results report the actual tab of the agent pane, including an already-running pane, in human and JSON output.
     - `workdash code` always asks the server to autostart the agent, so the new agent works autonomously from its briefing; there is no `--autostart` option and the TUI never asks for it.
     - A configured agent that lacks the command for the requested action is reported as unable to do that action, not as unconfigured.
     - Without `--agent`, `workdash analyze` and `workdash code` use the first configured agent for that action, in configuration order.
@@ -344,3 +346,11 @@ Feature: CLI orchestration commands
       | command     |
       | --server    |
       | show-config |
+
+  @id:F-CLI-ORCHESTRATION-S043
+  Scenario: A remote client launches an agent in a group
+    Given a server-backed Workdash session is ready to answer
+    And GitHub repository `owner/repo` has open issue #1
+    When the user runs `workdash code owner/repo#ISSUE-1 --group epic --host dashboard.lan --json`
+    Then the command connects to host `dashboard.lan`
+    And the result reports the agent in tab `epic`

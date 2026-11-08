@@ -31,6 +31,8 @@ Feature: Local JSON control API
     - A pull request outside the dashboard accepts any of its `PR`, `REVIEW`, or `CHECK` IDs and is reported with the ID its GitHub data implies.
     - Acting on a target outside the dashboard neither adds it to the dashboard list nor to the included items.
     - `POST /api/v0/code` accepts an optional boolean `autostart`, false when omitted, that makes a newly launched coding agent work autonomously; any non-boolean value is rejected as a bad request without launching anything.
+    - `POST /api/v0/code` accepts an optional nonempty `group` string naming the Zellij tab for a new agent; the server creates the tab if absent, and omitting it opens the pane in the current tab.
+    - Code responses report the actual tab of the live pane, including when an existing agent already holds the worktree.
     - Target errors are distinct: a malformed target is `invalid_target` (400), an issue or pull request GitHub cannot find or the server cannot access is `unknown_item` (404), an issue reference naming a pull request or the reverse is `unsupported_item_type` (400), and a failing GitHub request is `github_error` (502).
     - `POST /api/v0/ready` takes a required `scope` and returns the ready work as an ordered `items` list; a pull request ID or URL is not an issue scope and is `unsupported_item_type` (400).
     - Code responses include `status`: `launched` when the request started a coding agent, `already_running` when a live agent pane already works in the item's worktree.

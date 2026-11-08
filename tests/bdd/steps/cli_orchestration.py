@@ -151,6 +151,7 @@ def _run_workdash(
                         target=payload["target"],
                         agent=payload.get("agent"),
                         autostart=payload.get("autostart", False),
+                        group=payload.get("group"),
                     )
                 if endpoint == "terminal":
                     return scenario_state["api_session"].terminal(
@@ -1022,6 +1023,7 @@ def _returns_code_json(scenario_state: dict[str, Any]) -> None:
         "cwd": str(Path(scenario_state["workdir"]) / "owner_repo_1"),
         "pane_title": "code_owner_repo_1",
         "pane_id": "terminal_23",
+        "tab_name": None,
     }
 
 
@@ -1309,3 +1311,18 @@ def _prints_already_running(scenario_state: dict[str, Any]) -> None:
     assert "Status: already_running" in scenario_state["stdout"]
     assert "Agent: -" in scenario_state["stdout"]
     assert "Pane id: terminal_7" in scenario_state["stdout"]
+
+
+@when("the user runs `workdash code owner/repo#ISSUE-1 --group epic --host dashboard.lan --json`")
+def _run_grouped_code(scenario_state, monkeypatch, capsys):
+    _run_workdash(
+        ["code", "owner/repo#ISSUE-1", "--group", "epic", "--host", "dashboard.lan", "--json"],
+        scenario_state,
+        monkeypatch,
+        capsys,
+    )
+
+
+@then("the result reports the agent in tab `epic`")
+def _grouped_code_result(scenario_state):
+    assert json.loads(scenario_state["stdout"])["tab_name"] == "epic"

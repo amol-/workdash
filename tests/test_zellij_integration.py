@@ -157,3 +157,52 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
         assert json.loads(agent_result.read_text())["items"][0]["title"] == sessions[1][0]
     finally:
         _cleanup_sessions(zellij, zellij_env, sessions)
+
+
+@pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
+@pytest.mark.parametrize("tab_name", ["epic", "-foo"])
+def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, tab_name):
+    from workdash.launcher import launch_agent_context, load_zellij_panes
+
+    zellij = shutil.which("zellij")
+    name = f"workdash-group-test-{uuid.uuid4().hex}"
+    env = os.environ.copy()
+    for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
+        env.pop(key, None)
+    env.update(TERM="xterm-256color", SHELL="/bin/sh")
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    pid, fd = pty.fork()
+    if pid == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        os.execve(zellij, [zellij, "--session", name], env)
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                if load_zellij_panes(name):
+                    break
+            except RuntimeError:
+                pass
+            time.sleep(0.1)
+        else:
+            pytest.fail("Zellij did not start")
+        for repo, group in [("first", tab_name), ("second", tab_name), ("third", None)]:
+            path = tmp_path / repo
+            path.mkdir()
+            launch = launch_agent_context(
+                str(path), "hello", ["/bin/sh", "-c", "sleep 120"], zellij_session=name, group=group
+            )
+            panes = load_zellij_panes(name)
+            pane = next(
+                p
+                for p in panes
+                if p.get("id") == int(launch.pane_id.removeprefix("terminal_"))
+                and not p.get("is_plugin")
+            )
+            if group:
+                assert pane["tab_name"] == group
+            else:
+                assert pane["tab_name"] != tab_name
+        assert len({p["tab_id"] for p in panes if p.get("tab_name") == tab_name}) == 1
+    finally:
+        _cleanup_sessions(zellij, env, [(name, pid, fd)])

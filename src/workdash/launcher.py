@@ -480,6 +480,7 @@ def _launch_zellij_command(
     context: str,
     work_action: str,
     zellij_session: str | None = None,
+    group: str | None = None,
 ) -> ZellijPaneLaunch:
     target_session = (zellij_session or "").strip()
     if not target_session and not os.getenv("ZELLIJ", "").strip():
@@ -494,6 +495,35 @@ def _launch_zellij_command(
         if target_session
         else set()
     )
+    tab_id = None
+    if group is not None:
+        if not target_session:
+            raise RuntimeError(f"{context}: grouping requires a selected Zellij session.")
+        panes = load_zellij_panes(target_session)
+        tab_id = next((pane.get("tab_id") for pane in panes if pane.get("tab_name") == group), None)
+        if tab_id is None:
+            try:
+                result = subprocess.run(
+                    [
+                        zellij,
+                        "--session",
+                        target_session,
+                        "action",
+                        "new-tab",
+                        f"--name={group}",
+                        "--no-focus",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as error:
+                raise RuntimeError(
+                    f"{context}: {error.stderr.strip() or error.stdout.strip()}"
+                ) from error
+            tab_id = result.stdout.strip()
+            if not tab_id.isdigit():
+                raise RuntimeError(f"{context}: Zellij did not report the new tab ID.")
     _run_launch_command(
         _build_zellij_new_pane_command(
             zellij,
@@ -501,6 +531,7 @@ def _launch_zellij_command(
             command,
             work_action=work_action,
             zellij_session=target_session or None,
+            tab_id=tab_id,
         ),
         context=context,
     )
@@ -536,6 +567,7 @@ def _build_zellij_new_pane_command(
     *,
     work_action: str,
     zellij_session: str | None = None,
+    tab_id: object = None,
 ) -> list[str]:
     session_args = ["--session", zellij_session] if zellij_session is not None else []
     return [
@@ -543,6 +575,7 @@ def _build_zellij_new_pane_command(
         *session_args,
         "action",
         "new-pane",
+        *(["--tab-id", str(tab_id)] if tab_id is not None else []),
         *_zellij_pane_name_argument(work_action, repo_path),
         "--cwd",
         repo_path,
@@ -665,6 +698,7 @@ def launch_agent_context(
     agent_command_tokens: list[str],
     *,
     zellij_session: str | None = None,
+    group: str | None = None,
 ) -> ZellijPaneLaunch:
     if not isinstance(repo_path, str) or not repo_path.strip():
         raise ValueError("Repository path must be a non-empty string.")
@@ -683,6 +717,7 @@ def launch_agent_context(
         context="Failed to launch coding agent in zellij",
         work_action="code",
         zellij_session=zellij_session,
+        group=group,
     )
 
 

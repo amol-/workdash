@@ -1858,3 +1858,35 @@ def test_workdash_control_skill_examples_are_valid_commands_and_explain_code_cla
         "never start a server just to run `ready`",
     ):
         assert text in skill
+
+
+def test_code_group_is_forwarded_to_remote_server_and_reports_actual_tab(monkeypatch, capsys):
+    class Client:
+        def __init__(self, host):
+            assert host == "dashboard.lan"
+
+        def request(self, endpoint, payload):
+            assert endpoint == "code"
+            assert payload == {
+                "target": "owner/repo#1",
+                "agent": None,
+                "group": "epic",
+                "autostart": True,
+            }
+            return {
+                "status": "already_running",
+                "item_id": "owner/repo#ISSUE-1",
+                "agent": None,
+                "session": "server",
+                "cwd": "/repo",
+                "pane_title": "code_repo",
+                "pane_id": "terminal_1",
+                "tab_name": "actual",
+            }
+
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", Client)
+    assert (
+        workdash_module.main(["code", "owner/repo#1", "--group", "epic", "--host", "dashboard.lan"])
+        == 0
+    )
+    assert "Tab: actual" in capsys.readouterr().out
