@@ -80,6 +80,7 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
         "created_at=datetime.now(UTC), updated_at=datetime.now(UTC), url='https://example.com/1')\n"
         f"control.ensure_worktree = lambda *_args: {str(tmp_path)!r}\n"
         "control.get_merge_base = lambda *_args: None\n"
+        "control.work_pull_request = lambda *_args, **_kwargs: None\n"
         "control.prepare_launch_agent_prompt = lambda *_args, **_kwargs: 'test prompt'\n"
         "cli._check_gh_preflight = lambda: None\n"
         "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "

@@ -210,3 +210,10 @@ def test_a_briefing_does_not_redirect_an_issue_to_a_merged_pull_request(monkeypa
     assert (item.item_type, item.number) == (WorkItemType.ISSUE, 42)
     assert "Continue the assigned issue https://github.com/owner/repo/issues/42." in text
     assert github.pull_requests["owner/repo#51"]["lookups"] == 1
+
+
+def test_implementation_instruction_proves_a_parent_goal_already_met_by_subissues():
+    text = render_work_instruction("implement", _item(WorkItemType.ISSUE, 7))
+    assert "verify" in text.lower()
+    assert "sub-issues" in text
+    assert "test" in text.lower()

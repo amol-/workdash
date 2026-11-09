@@ -26,6 +26,7 @@ from gh_todo_fake import (
     fake_gh_todo_run,
     gh_todo_failure,
 )
+from gh_work_state_fake import install_fake_github, todo_body
 from workdash.backend import WorkdashBackend
 from workdash.config import load_config
 from workdash.control import format_work_item_id
@@ -545,6 +546,8 @@ def _user_launches_coding_session_for_item(
     scenario_state["work_item"] = item
     scenario_state["workdir"] = workdir
     _install_fake_git(scenario_state, monkeypatch, workdir=workdir)
+    github = install_fake_github(monkeypatch)
+    github.add_issue(f"{item.repo}#{item.number}", body=todo_body(item.todo_target))
 
     scenario_state["todo_github_body"] = "body-from-gh: what the todo issue says"
     monkeypatch.setattr(

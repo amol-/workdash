@@ -6,9 +6,9 @@ Feature: CLI orchestration commands
   humans or pass structured JSON through for agents.
 
   Rules:
-    - `workdash list`, `workdash info`, `workdash ready`, `workdash analyze`, `workdash code`, `workdash terminal`, `workdash todo`, `workdash read`, `workdash write`, and `workdash close` require a running `workdash --server` session.
-    - All ten server-backed CLI commands accept `--host HOST[:PORT]` before or after the command, overriding `WORKDASH_HOST`; otherwise they use `WORKDASH_HOST` or `127.0.0.1:8765`. A host without a port uses 8765.
-    - `--host` is rejected for server startup and commands other than the ten server-backed clients; `--version` exits immediately.
+    - `workdash list`, `workdash info`, `workdash ready`, `workdash dispatch`, `workdash analyze`, `workdash code`, `workdash terminal`, `workdash todo`, `workdash read`, `workdash write`, and `workdash close` require a running `workdash --server` session.
+    - All eleven server-backed CLI commands accept `--host HOST[:PORT]` before or after the command, overriding `WORKDASH_HOST`; otherwise they use `WORKDASH_HOST` or `127.0.0.1:8765`. A host without a port uses 8765.
+    - `--host` is rejected for server startup and commands other than the eleven server-backed clients; `--version` exits immediately.
     - `WORKDASH_HOST` must be an IPv4 address with an optional port; an explicit `--host` may be a DNS hostname and overrides even an invalid `WORKDASH_HOST`. Host selection preserves positional item targets and todo targets, whether GitHub `owner/repo` names or git URLs.
     - Server-backed CLI commands do not load configuration, run GitHub preflight, inspect Zellij, or fetch GitHub directly.
     - Server-backed CLI commands report a clear error naming the selected host when the Workdash server is not reachable.

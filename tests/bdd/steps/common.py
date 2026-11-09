@@ -572,6 +572,7 @@ def install_github_item_lookup(
                 "body": "",
                 "repository": {"nameWithOwner": f"{tree[1]}/{tree[2]}"},
                 "subIssuesSummary": {"total": 0},
+                "subIssues": {"nodes": []},
                 "issueDependenciesSummary": {"blockedBy": 0},
                 "closedByPullRequestsReferences": {"nodes": []},
             }

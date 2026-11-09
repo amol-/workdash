@@ -139,6 +139,63 @@ class GitHelper:
             return None
         return result.stdout.strip() or None
 
+    def branch_tracks_repository(self, candidate: Path, branch: str, repo: str) -> bool:
+        """Verify the checked-out branch tracks the requested repository and branch."""
+        if not self.is_worktree_root(candidate):
+            return False
+        local_branch = get_current_branch(candidate)
+        if not local_branch:
+            return False
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "for-each-ref",
+                    "--format=%(upstream:remotename)%09%(upstream:remoteref)",
+                    f"refs/heads/{local_branch}",
+                ],
+                cwd=candidate,
+                capture_output=True,
+                text=True,
+            )
+            remote, ref = result.stdout.strip().split("\t")
+            upstream = subprocess.run(
+                ["git", "rev-parse", "--verify", "@{upstream}"],
+                cwd=candidate,
+                capture_output=True,
+                text=True,
+            )
+            merge = subprocess.run(
+                ["git", "config", "--get-all", f"branch.{local_branch}.merge"],
+                cwd=candidate,
+                capture_output=True,
+                text=True,
+            )
+            configured_remote = subprocess.run(
+                ["git", "config", "--get-all", f"branch.{local_branch}.remote"],
+                cwd=candidate,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, ValueError):
+            return False
+        actual = self.repository_identity(self.remote_url(candidate, remote) or "")
+        expected = self.repository_identity(repo)
+        if actual and expected and actual[0] == expected[0] == "github.com":
+            actual = (actual[0], actual[1].lower())
+            expected = (expected[0], expected[1].lower())
+        return (
+            result.returncode == 0
+            and upstream.returncode == 0
+            and ref == f"refs/heads/{branch}"
+            and merge.returncode == 0
+            and merge.stdout.splitlines() == [ref]
+            and configured_remote.returncode == 0
+            and configured_remote.stdout.splitlines() == [remote]
+            and expected is not None
+            and actual == expected
+        )
+
     def repository_matches(
         self, candidate: Path, target: str, *, directory: Path | None = None
     ) -> bool:

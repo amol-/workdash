@@ -246,14 +246,14 @@ def _targeted_todo(scenario_state: dict[str, Any], repo: str, number: int, targe
 @given(
     parsers.parse(
         "the server's todo repository `{repo}` has open todo #{number:d} closed by "
-        "pull request `{pull_request}` whose CI failed"
+        "authored pull request `{pull_request}` whose CI failed"
     )
 )
 def _todo_closed_by_failing_pull_request(
     scenario_state: dict[str, Any], repo: str, number: int, pull_request: str
 ) -> None:
     github = _github(scenario_state)
-    github.add_issue(f"{repo}#{number}", body=todo_body(None))
+    github.add_issue(f"{repo}#{number}", body=todo_body(pull_request.partition("#")[0]))
     github.add_pull_request(
         pull_request,
         closes=(f"{repo}#{number}",),
@@ -284,7 +284,7 @@ def _owner_repositories(
 
 @given(
     parsers.re(
-        r"GitHub issue `(?P<issue>[^`]+)` is open and closed by open pull request "
+        r"GitHub issue `(?P<issue>[^`]+)` is open and closed by (?:authored )?open pull request "
         r"`(?P<pull_request>[^`]+)`(?P<other> of another author)?(?P<failed> whose CI failed)?"
     )
 )
@@ -439,14 +439,15 @@ def _repository_with_ready_items(
     scenario_state: dict[str, Any], repo: str, datatable: list[list[str]]
 ) -> None:
     github = _github(scenario_state)
-    for item, created in datatable[1:]:
-        kind, _, number = item.partition(" ")
-        if kind == "issue":
-            github.add_issue(f"{repo}#{number}", created=f"{created}T00:00:00Z")
-        else:
+    for item, created, pr_created in datatable[1:]:
+        number = int(item.split()[1])
+        ref = f"{repo}#{number}"
+        github.add_issue(ref, created=f"{created}T00:00:00Z")
+        if "actionable" in item:
             github.add_pull_request(
-                f"{repo}#{number}",
-                created=f"{created}T00:00:00Z",
+                f"{repo}#{number + 100}",
+                closes=(ref,),
+                created=f"{pr_created}T00:00:00Z",
                 checks={HEAD_SHA: _CI_CHECKS["failing"]},
             )
 
@@ -477,8 +478,8 @@ def _work_outside_the_tree(scenario_state: dict[str, Any]) -> None:
     parsers.re(
         r"GitHub issue `(?P<ref>[^`]+)` (?P<state>is open|is closed|"
         r"is open and blocked by an open issue|"
-        r"is open and closed by open pull request #51 with pending CI|"
-        r"is (?:open|closed) and closed by open pull request #51 whose CI failed)"
+        r"is open and closed by authored open pull request #51 with pending CI|"
+        r"is (?:open|closed) and closed by authored open pull request #51 whose CI failed)"
     )
 )
 def _leaf_issue(scenario_state: dict[str, Any], ref: str, state: str) -> None:
@@ -657,7 +658,7 @@ def _lists_issues_once_each(
     scenario_state: dict[str, Any], first: str, second: str, item_id: str
 ) -> None:
     # The issues share a creation time, so they are ordered by repository.
-    assert [item for item in _ready_ids(scenario_state) if "#ISSUE-" in item] == [
+    assert [item for item in _ready_ids(scenario_state) if "#ISSUE-WT" not in item] == [
         item_id,
         f"{first}#ISSUE-1",
         f"{second}#ISSUE-1",
@@ -700,7 +701,7 @@ def _issue_number_not_listed(scenario_state: dict[str, Any], number: int) -> Non
 
 @then(
     parsers.parse(
-        "that entry links issue `{issue_id}`, reports CI status `{ci_status}` with failing "
+        "that entry links pull request `{issue_id}`, reports CI status `{ci_status}` with failing "
         "check `{check}`, and the current head SHA"
     )
 )
@@ -708,18 +709,22 @@ def _entry_reports_failing_ci(
     scenario_state: dict[str, Any], issue_id: str, ci_status: str, check: str
 ) -> None:
     entry = scenario_state["ready_entry"]
-    assert entry["issue_id"] == issue_id
+    assert entry["pr_id"] == issue_id
     assert entry["issue_url"] == "https://github.com/owner/repo/issues/42"
     assert (entry["ci_status"], entry["failing_checks"]) == (ci_status, [check])
     assert entry["pr_head_sha"] == HEAD_SHA
 
 
-@then(parsers.parse("that entry references the actionable feedback and links issue `{issue_id}`"))
+@then(
+    parsers.parse(
+        "that entry references the actionable feedback and links pull request `{issue_id}`"
+    )
+)
 def _entry_references_feedback(scenario_state: dict[str, Any], issue_id: str) -> None:
     entry = scenario_state["ready_entry"]
     assert [feedback["url"] for feedback in entry["feedback"]] == [scenario_state["feedback_url"]]
     assert entry["feedback"][0]["author"] == REVIEWER
-    assert entry["issue_id"] == issue_id
+    assert entry["pr_id"] == issue_id
 
 
 @then(
@@ -805,3 +810,60 @@ def _human_output_matches(
     for line, item in zip(lines, items, strict=True):
         assert line.split()[:3] == [item["type"].upper(), item["id"], item["action"]]
         assert f"{item['title']} {item['url']}" in line
+
+
+@then(parsers.re(r"the result lists `(?P<first>[^`]+)` and `(?P<second>[^`]+)`"))
+def _lists_two(scenario_state: dict[str, Any], first: str, second: str) -> None:
+    assert set(_ready_ids(scenario_state)) == {first, second}
+
+
+@then(
+    parsers.parse(
+        "the result lists `{item_id}` once with action `{action}` and linked pull request `{pr_id}`"
+    )
+)
+def _lists_issue_with_pr(
+    scenario_state: dict[str, Any], item_id: str, action: str, pr_id: str
+) -> None:
+    entry = _entry(scenario_state, item_id)
+    assert (entry["action"], entry["pr_id"]) == (action, pr_id)
+
+
+@given(
+    parsers.parse(
+        "GitHub issue `{issue}` is open and closed by authored pull request `{pr}` from a fork the server cannot push to, and its CI failed"
+    )
+)
+def _issue_with_read_only_pr(scenario_state: dict[str, Any], issue: str, pr: str) -> None:
+    github = _github(scenario_state)
+    github.add_issue(issue)
+    github.add_pull_request(
+        pr, closes=(issue,), head_permission="READ", checks={HEAD_SHA: _CI_CHECKS["failing"]}
+    )
+
+
+@given(
+    parsers.parse(
+        "GitHub issue `{issue}` is open and closed by authored pull request `{pr}` which has passing CI and is mergeable"
+    )
+)
+def _issue_with_mergeable_pr(scenario_state: dict[str, Any], issue: str, pr: str) -> None:
+    github = _github(scenario_state)
+    github.add_issue(issue)
+    github.add_pull_request(pr, closes=(issue,), base_sha="base1")
+
+
+@given(
+    parsers.parse(
+        "GitHub issue `{issue}` is open and closed by authored pull request `{pr}` with a reviewer comment posted after its current head was pushed"
+    )
+)
+def _issue_with_commented_pr(scenario_state: dict[str, Any], issue: str, pr: str) -> None:
+    github = _github(scenario_state)
+    github.add_issue(issue)
+    github.add_pull_request(pr, closes=(issue,), comments=[comment(REVIEWER, created=AFTER_PUSH)])
+
+
+@then(parsers.parse("pull request `{item_id}` is not listed as a ready item"))
+def _pr_not_listed(scenario_state: dict[str, Any], item_id: str) -> None:
+    assert item_id not in _ready_ids(scenario_state)

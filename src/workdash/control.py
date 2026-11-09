@@ -23,6 +23,8 @@ from .analysis_cache import AnalysisCache
 from .autoclose import AutocloseSupervisor
 from .backend import IncludeResult, SuggestionMarkers, WorkdashBackend, compute_suggestion_markers
 from .config import WorkdashConfig
+from .git import GitHelper
+from .github import GithubHelper
 from .github_client import parse_github_item_url
 from .launcher import (
     _zellij_pane_name_for_work_action,
@@ -36,12 +38,19 @@ from .launcher import (
     prepare_launch_agent_prompt,
     send_zellij_pane_input,
 )
-from .models import WorkItem, WorkItemType, display_repo, format_type_label
+from .models import (
+    REVIEW_KINDS,
+    WorkItem,
+    WorkItemKind,
+    WorkItemType,
+    display_repo,
+    format_type_label,
+)
 from .repo_resolver import validate_repository_selectors
-from .repo_worktree import ensure_worktree, existing_worktree_path, get_merge_base
+from .repo_worktree import ensure_worktree, existing_worktree_path, get_merge_base, main_repo_path
 from .todo import create_todo, is_repository_name, is_todo_target
 from .work_instruction import autostart_briefing
-from .work_state import ReadyWork, find_ready_work
+from .work_state import ReadyWork, find_ready_work, work_pull_request
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8765
@@ -278,6 +287,7 @@ class WorkdashSession:
         autostart: bool = False,
         group: str | None = None,
         autoclose: bool = False,
+        _ready_work: ReadyWork | None = None,
     ) -> dict[str, object]:
         """Launch a coding agent for an explicit target unless one already works in its worktree.
 
@@ -314,7 +324,7 @@ class WorkdashSession:
             )
         # Without Zellij no agent pane can exist, and VSCode needs none to launch.
         no_zellij_vscode = self.zellij_session is None and selected_agent == "vscode"
-        if autostart:
+        if autostart or item.kind == WorkItemKind.AUTHORED_PR:
             # A live agent answers without reading GitHub, so an outage cannot hide it. Only
             # a worktree known locally is checked here; the briefing may redirect the work to
             # another item, whose claim is checked below.
@@ -325,8 +335,38 @@ class WorkdashSession:
                     claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
                     if claimed is not None:
                         return claimed
+        analysis_item = (
+            item if item.item_type == WorkItemType.ISSUE or item.kind in REVIEW_KINDS else None
+        )
+        if _ready_work is not None:
+            item = _ready_work.item
+        if item.kind == WorkItemKind.AUTHORED_PR:
             try:
-                item, autostart_text = autostart_briefing(
+                state = work_pull_request(
+                    item,
+                    github_username=self.config.github_username,
+                    todo_repository=self.config.todo_repository,
+                )
+                if state and state.linked_issues:
+                    linked = min(
+                        state.linked_issues, key=lambda issue: (issue.repo.lower(), issue.number)
+                    )
+                    item = self._require_item(f"{linked.repo}#ISSUE-{linked.number}")
+                    analysis_item = item
+                    item_id = format_work_item_id(item)
+            except RuntimeError as error:
+                raise WorkdashControlError(
+                    "github_error",
+                    f"GitHub lookup for {target!r} failed: {error}",
+                    status=HTTPStatus.BAD_GATEWAY,
+                ) from error
+        if (
+            not autostart
+            and item.item_type == WorkItemType.ISSUE
+            and existing_worktree_path(self.config.workdir, item) is None
+        ):
+            try:
+                state = work_pull_request(
                     item,
                     github_username=self.config.github_username,
                     todo_repository=self.config.todo_repository,
@@ -337,22 +377,72 @@ class WorkdashSession:
                     f"GitHub lookup for {target!r} failed: {error}",
                     status=HTTPStatus.BAD_GATEWAY,
                 ) from error
+            if state is not None and state.state == "OPEN":
+                item = state.item
+        if autostart:
+            try:
+                item, autostart_text = autostart_briefing(
+                    item,
+                    github_username=self.config.github_username,
+                    todo_repository=self.config.todo_repository,
+                    ready_work=_ready_work,
+                )
+            except RuntimeError as error:
+                raise WorkdashControlError(
+                    "github_error",
+                    f"GitHub lookup for {target!r} failed: {error}",
+                    status=HTTPStatus.BAD_GATEWAY,
+                ) from error
+        selected_head = None
+        if item.kind == WorkItemKind.AUTHORED_PR:
+            selected_head = GithubHelper().fetch_worktree_head(item)
+
+        def verify_selected_head(path: str | Path) -> None:
+            if selected_head is not None:
+                branch, repo = selected_head
+                if not GitHelper().branch_tracks_repository(Path(path), branch, repo):
+                    raise RuntimeError(
+                        f"Cannot verify worktree {path} is on {repo}'s branch {branch}. "
+                        "Verify the checkout and configure its upstream to the PR head branch."
+                    )
+
         with self._lock:
             panes = [] if no_zellij_vscode else self._live_panes()
-            # Checked before ensure_worktree so an agent in a locally proven worktree is
-            # reused without pulling its checkout. A worktree that only ensure_worktree
-            # finds (e.g. by branch) may be pulled before the second check.
+            # Reuse a live agent and verify its checkout before any pull.
             repo_path = existing_worktree_path(self.config.workdir, item)
-            if repo_path is None or not _agent_panes_in_worktree(panes, repo_path):
-                repo_path = ensure_worktree(self.config.workdir, item)
+            if (
+                selected_head is not None
+                and analysis_item is not None
+                and analysis_item.todo_target
+            ):
+                todo_path = existing_worktree_path(self.config.workdir, analysis_item)
+                if todo_path is not None:
+                    repo_path = todo_path
+            if repo_path is None and selected_head is not None:
+                branch, repo = selected_head
+                repo_path = GitHelper().find_worktree_for_branch(
+                    main_repo_path(self.config.workdir, repo), branch
+                )
+            if repo_path is not None:
+                claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
+                if claimed is not None:
+                    return claimed
+            if repo_path is not None:
+                verify_selected_head(repo_path)
+            repo_path = ensure_worktree(self.config.workdir, item)
             claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
             if claimed is not None:
                 return claimed
+            verify_selected_head(repo_path)
             launch_key = _normalized_path(repo_path)
             prompt = prepare_launch_agent_prompt(
                 item,
                 repo_path,
-                analysis_path=self.analysis_url(item) if item.analysis is not None else None,
+                analysis_path=(
+                    self.analysis_url(analysis_item)
+                    if analysis_item is not None and analysis_item.analysis is not None
+                    else None
+                ),
                 merge_base=get_merge_base(repo_path),
             )
             if autostart:
@@ -491,7 +581,7 @@ class WorkdashSession:
                 "pane_id": launch.pane_id,
             }
 
-    def ready(self, *, scope: str) -> dict[str, object]:
+    def ready(self, *, scope: str, fail_unconfirmed: bool = False) -> dict[str, object]:
         """Report the ready work of a scope, ready pull requests first.
 
         The scope is ``owner/repo``, an issue, ``todo``, or ``any``. Work a live
@@ -499,6 +589,14 @@ class WorkdashSession:
         the dashboard is left alone.
         """
 
+        return {
+            "scope": scope,
+            "items": [_ready_work_payload(work) for work in self._ready(scope, fail_unconfirmed)],
+        }
+
+    def _ready(
+        self, scope: str, fail_unconfirmed: bool, *, include_shared_pr_issues: bool = False
+    ) -> list[ReadyWork]:
         issue = None
         if scope == "todo":
             repositories = [self.config.todo_repository]
@@ -528,6 +626,7 @@ class WorkdashSession:
                 issue=issue,
                 github_username=self.config.github_username,
                 todo_repository=self.config.todo_repository,
+                include_shared_pr_issues=include_shared_pr_issues,
             )
         except RuntimeError as error:
             raise WorkdashControlError(
@@ -538,6 +637,14 @@ class WorkdashSession:
         with self._lock:
             panes = self._live_panes()
             now = time.monotonic()
+            if fail_unconfirmed:
+                for work in candidates:
+                    for claim in work.claims:
+                        path = existing_worktree_path(self.config.workdir, claim)
+                        if path is not None:
+                            self._claimed_launch(
+                                format_work_item_id(claim), path, panes, autoclose=False
+                            )
             # An agent launch `code` has not confirmed yet holds its worktree too.
             unclaimed = [
                 work
@@ -551,7 +658,42 @@ class WorkdashSession:
                     for claim in work.claims
                 )
             ]
-        return {"scope": scope, "items": [_ready_work_payload(work) for work in unclaimed]}
+        return unclaimed
+
+    def dispatch_once(
+        self, *, scope: str, agent: str | None = None, group: str | None = None
+    ) -> dict[str, object]:
+        """Launch at most one currently ready issue, in ready order."""
+        if group is not None and (not isinstance(group, str) or not group.strip()):
+            raise WorkdashControlError(
+                "bad_request", "Group must be a non-empty string.", status=HTTPStatus.BAD_REQUEST
+            )
+        candidates = self._ready(scope, True, include_shared_pr_issues=True)
+        for candidate in candidates:
+            candidate_id = format_work_item_id(candidate.item)
+            had_pull_request = candidate.pull_request is not None
+            current = self._ready(candidate_id, True)
+            candidate = next(
+                (work for work in current if format_work_item_id(work.item) == candidate_id), None
+            )
+            if candidate is None or (had_pull_request and candidate.pull_request is None):
+                continue
+            implementation = (
+                candidate.pull_request.item if candidate.pull_request else candidate.item
+            )
+            selected_group = group or display_repo(implementation).rsplit("/", 1)[-1]
+            launch = self.code(
+                target=candidate_id,
+                agent=agent,
+                group=selected_group,
+                autostart=True,
+                autoclose=True,
+                _ready_work=candidate,
+            )
+            if launch["status"] == "already_running":
+                continue
+            return {**_ready_work_payload(candidate), **launch, "group": selected_group}
+        return {"status": "no_ready_task", "scope": scope}
 
     def pane_content(self, *, pane_id: str, full: bool = False) -> dict[str, object]:
         """Return visible or full scrollback content for a Zellij pane."""
@@ -916,6 +1058,8 @@ def _ready_work_payload(work: ReadyWork) -> dict[str, object]:
     }
     if pull_request is not None:
         payload |= {
+            "pr_id": format_work_item_id(pull_request.item),
+            "pr_url": pull_request.item.url,
             "pr_head_sha": pull_request.head_sha,
             "base_ref": pull_request.base_ref,
             "base_head_sha": pull_request.base_head_sha,
@@ -1074,6 +1218,18 @@ def _make_turbogears_app(session: WorkdashSession):
                 request,
                 response,
                 lambda payload: self._session.ready(scope=_required_text(payload, "scope")),
+            )
+
+        @expose("json")
+        def dispatch(self):
+            return _handle_json_request(
+                request,
+                response,
+                lambda payload: self._session.dispatch_once(
+                    scope=_required_text(payload, "scope"),
+                    agent=_optional_text(payload, "agent"),
+                    **({"group": _required_text(payload, "group")} if "group" in payload else {}),
+                ),
             )
 
         @expose("json")
