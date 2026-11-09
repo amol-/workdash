@@ -39,6 +39,26 @@ def get_current_branch(repo_path: Path) -> str:
     return result.stdout.strip()
 
 
+def has_unpublished_work(worktree: str, head_sha: str) -> bool:
+    """Whether a worktree still holds work GitHub does not: local changes or another HEAD.
+
+    That includes a file the agent created but never added. Only the worktree's
+    ``.workdash`` artifact directory is left out.
+
+    :param str head_sha: The head commit GitHub reports for the worktree's pull request.
+    """
+
+    def git(*args: str) -> str:
+        result = subprocess.run(["git", "-C", worktree, *args], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to inspect {worktree}: {result.stderr.strip()}")
+        return result.stdout
+
+    return bool(git("status", "--porcelain", "--", ".", ":(exclude).workdash").strip()) or (
+        git("rev-parse", "HEAD").strip() != head_sha
+    )
+
+
 class GitHelper:
     """Local git command helpers used to prepare and prove Workdash worktrees."""
 

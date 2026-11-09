@@ -282,6 +282,16 @@ def load_zellij_panes(session: str) -> list[dict[str, object]]:
     return [pane for pane in panes if isinstance(pane, dict)]
 
 
+def is_live_zellij_pane(pane: dict[str, object]) -> bool:
+    """Whether a listed pane is a running, visible terminal pane rather than a plugin or exit."""
+
+    return (
+        pane.get("is_plugin") is not True
+        and pane.get("exited") is not True
+        and pane.get("is_held") is not True
+    )
+
+
 @contextmanager
 def zellij_fullscreen_pane() -> Iterator[None]:
     """Fill the surrounding Zellij pane while the block runs and restore its size afterwards.
@@ -388,27 +398,41 @@ def send_zellij_pane_input(session: str, pane_id: str, data: str, *, raw: bool =
             text=True,
         )
         if not raw:
-            subprocess.run(
-                [
-                    zellij,
-                    "--session",
-                    session,
-                    "action",
-                    "send-keys",
-                    "--pane-id",
-                    pane_id,
-                    "Enter",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            press_zellij_pane_enter(session, pane_id)
     except subprocess.CalledProcessError as error:
-        details = (error.stderr or "").strip() or (error.stdout or "").strip()
-        raise RuntimeError(
-            f"Failed to send input to Zellij pane {pane_id} in {session}: "
-            f"{details or error.returncode}"
-        ) from error
+        raise _pane_input_error(session, pane_id, error) from error
+
+
+def press_zellij_pane_enter(session: str, pane_id: str) -> None:
+    """Submit whatever the pane's input line already holds."""
+
+    try:
+        subprocess.run(
+            [
+                _resolve_zellij_binary(),
+                "--session",
+                session,
+                "action",
+                "send-keys",
+                "--pane-id",
+                pane_id,
+                "Enter",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        raise _pane_input_error(session, pane_id, error) from error
+
+
+def _pane_input_error(
+    session: str, pane_id: str, error: subprocess.CalledProcessError
+) -> RuntimeError:
+    details = (error.stderr or "").strip() or (error.stdout or "").strip()
+    return RuntimeError(
+        f"Failed to send input to Zellij pane {pane_id} in {session}: {details or error.returncode}"
+    )
 
 
 def _build_direct_workdash_command(original_args: Sequence[str]) -> list[str]:

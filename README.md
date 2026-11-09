@@ -153,7 +153,7 @@ workdash list --json         # list items as machine-readable JSON
 workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
 workdash ready SCOPE [--json]   # list the GitHub work ready to be picked up next
 workdash analyze ITEM [--agent NAME] [--json]  # analyze an item
-workdash code ITEM [--agent NAME] [--group NAME] [--json]  # launch an autonomous coding agent, or report the running one
+workdash code ITEM [--agent NAME] [--group NAME] [--autoclose] [--json]  # launch an autonomous coding agent, or report the running one
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
 workdash todo TEXT [--target REPOSITORY] [--body BODY] [--json]  # capture a todo
 workdash read PANE_ID [--full] [--json]  # read text from a live pane
@@ -395,7 +395,7 @@ base64 content.
 
 ## Code command
 
-`workdash code ITEM [--agent NAME] [--group NAME] [--json]` requires a running
+`workdash code ITEM [--agent NAME] [--group NAME] [--autoclose] [--json]` requires a running
 `workdash --server` session and launches a configured coding agent for a work
 item. `ITEM` accepts the same items as `workdash analyze`. With `--group NAME`,
 the server opens a new agent pane in the named Zellij tab, creating it if needed;
@@ -429,11 +429,76 @@ own branch with every reason included. A pull request waiting on CI, review, or
 merge is described, not reworked, and somebody else's pull request stays a
 review-only session. There is no `--autostart` option; the TUI's `c` keeps the
 plan-first briefing and never commits or pushes by itself, and the HTTP
-`POST /api/v0/code` takes an optional boolean `autostart`, false when omitted.
-`already_running` injects nothing into the running agent.
+`POST /api/v0/code` takes optional boolean `autostart` and `autoclose`, both
+false when omitted. `already_running` injects nothing into the running agent.
 
 Human output reports the status, item, agent, selected session, actual tab, cwd,
-pane title, and pane id when available. `--json` emits the same result as machine-readable JSON.
+pane title, and pane id when available, plus an `Autoclose` line saying whether
+monitoring was enabled when the request asked for autoclose. `--json` emits the
+same result as machine-readable JSON.
+
+### Autoclose supervision
+
+`workdash code ITEM --autoclose` leaves the agent in its normal interactive pane
+and asks the server to supervise the pane it just launched. The CLI polls
+nothing itself: it sends `autostart` and `autoclose` to the server, which owns
+the GitHub lookups, the messages, and the pane. Autoclose requires autostart, so
+the HTTP API answers `bad_request` (400) to `{"autoclose": true}` without
+`autostart: true`; the CLI always autostarts, and the TUI asks for neither.
+`already_running` never turns a pane started elsewhere into a supervised one, and
+the response reports `autoclose_enabled` only when a request asked for it.
+
+About once a minute the server compares the pane's screen with the previous
+check. New output postpones every decision. After 15 minutes without new output
+and without a message from Workdash, the server asks GitHub what the work still
+needs, using the same classification `workdash ready` uses, and sends the same
+instruction the agent was briefed with: implement the issue, fix failing checks,
+resolve merge conflicts, or address review feedback. A new head, check result,
+review, base head, or mergeability is a new state; the same state is never
+messaged twice, and every message restarts the 15 minutes. A pull request that
+merged closes its pane on the next check, even while the agent is still writing.
+A supervised session on somebody else's pull request is never messaged and closes
+only once that pull request merges.
+
+Only a known pull request's state is read on every check: finding the pull
+request an issue now has, and deciding what an idle pane needs, each cost a whole
+work state, so each runs at most every fifth check. That lookup also finds a pull
+request that opened and merged since the previous one, so such work closes its
+pane at the next lookup, at most about five minutes late. An instruction whose
+text reached the pane is never typed again: a failed Enter keystroke is retried
+on its own, unless the pane printed something since, which abandons that
+instruction instead of answering whatever the agent now asks.
+
+Work counts as finished only when GitHub reports the current head's checks as
+passing or verifiably absent, clean mergeability against the current base, and no
+outstanding review feedback, and the worktree holds no local work GitHub does not
+have: an edited file, a new file the agent never added, or a commit it lacks. Only
+the worktree's `.workdash/` artifact directory is left out of that check; any other
+local work keeps the pane open and the server logs that reason. That check reads
+the GitHub state of a pane already found idle, and the pane's identity and screen
+are compared once more right before closing; the worktree, branch, and pull
+request are left alone. Pending, unknown, or unavailable GitHub answers
+close nothing and report no success, and a failed GitHub or Zellij call backs off
+instead of messaging. A pull request closed without merging is neither completion
+nor work to redo on its own: its pane is left open, supervision of it stops, and
+the server logs that the pane needs review.
+
+**Limitation:** supervision lives only in the running `workdash --server`
+process, so it stops when the server restarts and never resumes on its own. The
+pane's identity is the session name, the pane ID, and the pane title Zellij
+reports after the launch, revalidated immediately before every message or close,
+and a pane whose identity stops matching is dropped from supervision for good:
+the action is abandoned and it is never messaged or closed again. A Zellij
+session recreated under the same name can reuse a pane ID, so this identity is
+the strongest evidence Zellij offers rather than a guarantee about which program
+owns the pane. Supervision is a heuristic: a silent long-running command, a
+pending question, or an agent waiting for permission looks exactly like a
+finished one, except when the pull request merges. A pane that cannot be checked
+surfaces only in the server log, as warnings spaced two, five, then fifteen
+minutes apart; once its checks keep failing at the longest of those waits, one
+further line reports the pane as stalled, and a stall after a successful check is
+reported again. A pane whose GitHub state does not change is never messaged
+twice.
 
 ## Read and write commands
 

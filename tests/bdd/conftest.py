@@ -21,6 +21,9 @@ from .steps import (
     api as _api,
 )
 from .steps import (
+    autoclose as _autoclose,
+)
+from .steps import (
     branchdiff as _branchdiff,
 )
 from .steps import (
@@ -66,6 +69,7 @@ from .steps import (
 for _step_module in (
     _common,
     _api,
+    _autoclose,
     _branchdiff,
     _cli_orchestration,
     _triage,

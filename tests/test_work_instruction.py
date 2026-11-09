@@ -2,8 +2,9 @@ from datetime import UTC, datetime
 
 import pytest
 
+from gh_work_state_fake import install_fake_github
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
-from workdash.work_instruction import render_work_instruction
+from workdash.work_instruction import autostart_briefing, render_work_instruction
 from workdash.work_state import PullRequestWorkState, ReviewFeedback
 
 NOW = datetime(2026, 3, 1, tzinfo=UTC)
@@ -190,3 +191,22 @@ def test_an_action_that_disagrees_with_the_work_is_refused() -> None:
         render_work_instruction("fix_ci", _state(mergeability="conflicting"))
     with pytest.raises(ValueError, match="does not match"):
         render_work_instruction("fix_ci", _item(WorkItemType.ISSUE, 7))
+
+
+def test_a_briefing_does_not_redirect_an_issue_to_a_merged_pull_request(monkeypatch) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    # GitHub reports a merged head as UNKNOWN mergeable, which is not worth asking about again.
+    github.add_pull_request(
+        "owner/repo#51", closes=("owner/repo#42",), state="MERGED", mergeable="UNKNOWN"
+    )
+
+    item, text = autostart_briefing(
+        _item(WorkItemType.ISSUE, 42),
+        github_username="testuser",
+        todo_repository="testuser/todos",
+    )
+
+    assert (item.item_type, item.number) == (WorkItemType.ISSUE, 42)
+    assert "Continue the assigned issue https://github.com/owner/repo/issues/42." in text
+    assert github.pull_requests["owner/repo#51"]["lookups"] == 1

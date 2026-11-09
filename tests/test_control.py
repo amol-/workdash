@@ -1024,15 +1024,19 @@ def test_autostart_reads_github_outside_the_session_lock(monkeypatch, tmp_path) 
 
 
 @pytest.mark.parametrize(
-    ("body", "autostart"),
+    ("body", "autostart", "autoclose"),
     [
-        ({}, False),
-        ({"autostart": None}, False),
-        ({"autostart": False}, False),
-        ({"autostart": True}, True),
+        ({}, False, False),
+        ({"autostart": None}, False, False),
+        ({"autostart": False}, False, False),
+        ({"autostart": True}, True, False),
+        ({"autostart": True, "autoclose": True}, True, True),
+        ({"autostart": True, "autoclose": False}, True, False),
     ],
 )
-def test_code_api_forwards_a_boolean_autostart_and_defaults_it_to_false(body, autostart) -> None:
+def test_code_api_forwards_boolean_autostart_and_autoclose_defaulting_to_false(
+    body, autostart, autoclose
+) -> None:
     session = MagicMock()
     session.code.return_value = {"status": "launched"}
     request = Request.blank(
@@ -1045,17 +1049,20 @@ def test_code_api_forwards_a_boolean_autostart_and_defaults_it_to_false(body, au
     response = request.get_response(control_module._make_turbogears_app(session))
 
     assert response.status_int == 200
-    session.code.assert_called_once_with(target="owner/repo#1", agent=None, autostart=autostart)
+    session.code.assert_called_once_with(
+        target="owner/repo#1", agent=None, autostart=autostart, autoclose=autoclose
+    )
 
 
 @pytest.mark.parametrize("value", ["false", "true", 1, 0, [], {}])
-def test_code_api_rejects_a_non_boolean_autostart(value) -> None:
+@pytest.mark.parametrize("field", ["autostart", "autoclose"])
+def test_code_api_rejects_a_non_boolean_flag(field, value) -> None:
     session = MagicMock()
     request = Request.blank(
         "/api/v0/code",
         method="POST",
         content_type="application/json",
-        body=json.dumps({"target": "owner/repo#1", "autostart": value}).encode(),
+        body=json.dumps({"target": "owner/repo#1", field: value}).encode(),
     )
 
     response = request.get_response(control_module._make_turbogears_app(session))
@@ -1254,6 +1261,31 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
         with socket.socket() as replacement:
             replacement.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             replacement.bind((host, port))
+
+
+def test_starting_the_server_starts_autoclose_and_stopping_it_ends_its_worker(monkeypatch) -> None:
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setattr(control_module, "SERVER_PORT", port)
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="Shared item")],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+    server = control_module.WorkdashControlServer(session)
+
+    server.start()
+    worker = session.autoclose._worker
+    assert worker is not None and worker.is_alive()
+
+    server.stop()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
 
 
 def test_listener_bind_failure_releases_all_earlier_sockets(monkeypatch) -> None:
@@ -1556,7 +1588,7 @@ def test_code_api_forwards_group_and_rejects_invalid_group():
         )
         assert request.get_response(app).status_int == status
     session.code.assert_called_once_with(
-        target="owner/repo#1", agent=None, autostart=False, group="epic"
+        target="owner/repo#1", agent=None, autostart=False, group="epic", autoclose=False
     )
 
 
