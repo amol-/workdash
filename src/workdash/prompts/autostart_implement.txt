@@ -5,6 +5,13 @@ GitHub context, inspect the issue or pull request, the checkout and branch, the
 existing commits and uncommitted changes, then start implementing without asking
 for routine confirmation or approval of your plan. A short internal plan is fine;
 execute it right away. Make reasonable engineering decisions and continue.
+Commit and push are explicitly requested and permitted for this autonomous work;
+the rule against committing or pushing without a request applies to ad-hoc,
+human-directed sessions such as the plan-first TUI flow, not this request.
+Follow higher-priority instructions and repository restrictions. If needed,
+force-push only the pull request branch, preferably using --force-with-lease;
+never force-push another branch. Other destructive actions still require explicit
+permission.
 
 Use the development practices, skills, and coordination workflows you have been
 configured to follow, and choose and apply the approach best suited to the task's

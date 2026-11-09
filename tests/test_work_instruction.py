@@ -163,7 +163,8 @@ def test_the_merge_conflict_instruction_integrates_safely_and_never_merges() -> 
     text = " ".join(render_work_instruction(state.action, state).split())
 
     assert "Do not create another pull request, merge the pull request into the base" in text
-    assert "force-push unless the repository's explicit policy authorizes it" in text
+    assert "force-push any branch other than this pull request's branch" in text
+    assert "Follow repository restrictions and prefer --force-with-lease" in text
     assert "check the CI of the NEW head SHA" in text
     assert "conflict-free against the current base" in text
 
@@ -209,4 +210,5 @@ def test_a_briefing_does_not_redirect_an_issue_to_a_merged_pull_request(monkeypa
 
     assert (item.item_type, item.number) == (WorkItemType.ISSUE, 42)
     assert "Continue the assigned issue https://github.com/owner/repo/issues/42." in text
+    assert "--add-assignee" not in text
     assert github.pull_requests["owner/repo#51"]["lookups"] == 1
