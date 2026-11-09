@@ -210,4 +210,5 @@ def test_a_briefing_does_not_redirect_an_issue_to_a_merged_pull_request(monkeypa
 
     assert (item.item_type, item.number) == (WorkItemType.ISSUE, 42)
     assert "Continue the assigned issue https://github.com/owner/repo/issues/42." in text
+    assert "--add-assignee" not in text
     assert github.pull_requests["owner/repo#51"]["lookups"] == 1

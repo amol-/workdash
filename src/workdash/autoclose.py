@@ -180,9 +180,7 @@ class AutocloseSupervisor:
             fingerprint = _state_fingerprint(action, state)
             if fingerprint != entry.notified:
                 work = entry.item if state is None else state
-                instruction = render_autonomous_work_instruction(
-                    action, work, self._config.github_username
-                )
+                instruction = render_autonomous_work_instruction(action, work)
                 self._send(entry, instruction, fingerprint)
         elif state is not None and _finished(state):
             if has_unpublished_work(entry.repo_path, state.head_sha):

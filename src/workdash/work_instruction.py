@@ -60,19 +60,17 @@ def autostart_briefing(
             item = state.item
 
     if state is None:
-        return item, render_autonomous_work_instruction("implement", item, github_username)
+        return item, render_autonomous_work_instruction("implement", item)
     # Nothing to implement or repair, so the briefing carries no order to start working.
     if state.action in _AWAITING:
         return item, render_work_instruction(state.action, state)
-    return item, render_autonomous_work_instruction(state.action, state, github_username)
+    return item, render_autonomous_work_instruction(state.action, state)
 
 
-def render_autonomous_work_instruction(
-    action: str, work: WorkItem | PullRequestWorkState, github_username: str
-) -> str:
+def render_autonomous_work_instruction(action: str, work: WorkItem | PullRequestWorkState) -> str:
     """Render actionable work with its autonomous publishing rules."""
 
-    appendix = _load("autostart_implement.txt").format(github_username=github_username)
+    appendix = _load("autostart_implement.txt")
     return f"{appendix}\n{render_work_instruction(action, work)}"
 
 

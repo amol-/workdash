@@ -360,11 +360,11 @@ def _pane_receives_instruction(action: str, scenario_state: dict[str, Any]) -> N
     scenario_state["sent_count"] = len(scenario_state["sent"])
 
 
-@then("the instruction permits publishing and assigns the pull request to the configured user")
-def _instruction_publishes_to_configured_user(scenario_state: dict[str, Any]) -> None:
+@then("the instruction permits publishing")
+def _instruction_permits_publishing(scenario_state: dict[str, Any]) -> None:
     instruction = scenario_state["sent"][-1][1]
     assert "Commit and push are explicitly requested and permitted" in instruction
-    assert "gh pr edit <number> --add-assignee testuser" in instruction
+    assert "--add-assignee" not in instruction
 
 
 @then(parsers.parse("the supervised pane receives the `{action}` instruction again"))

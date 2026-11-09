@@ -184,7 +184,7 @@ def test_awaiting_launch_gets_publishing_rules_when_ci_fails(monkeypatch, tmp_pa
     instruction = supervision.sent[-1][1]
     assert "has failing checks: tests" in instruction
     assert "Commit and push are explicitly requested and permitted" in instruction
-    assert "gh pr edit <number> --add-assignee testuser" in instruction
+    assert "--add-assignee" not in instruction
 
 
 def test_the_worker_waits_a_minute_between_checks(monkeypatch) -> None:

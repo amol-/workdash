@@ -418,8 +418,7 @@ with a live agent pane focuses that pane instead of opening the dialog.
 
 `workdash code` always autostarts the agent: its briefing ends with an appendix
 telling it to work without routine confirmation, commit, push, and open a pull
-request that closes the issue (or update the existing one), assign it to the
-configured GitHub user, and verify the pull request's current head: CI `passing`, or GitHub reporting no required or
+request that closes the issue (or update the existing one), and verify the pull request's current head: CI `passing`, or GitHub reporting no required or
 observed checks (`no_checks`), and a clean merge. It never merges or closes
 anything, and the agent stays in its interactive pane. Commit and push are
 explicitly requested; if a force-push is needed, the briefing permits it only

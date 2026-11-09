@@ -33,9 +33,7 @@ not proof of completion. A pull request existing is not completion either.
 
 For an issue, create a pull request that closes it with GitHub's closing keyword
 (`Fixes owner/repo#NUMBER`). For an existing pull request, update THAT pull
-request's head branch and never create a second one. After opening or updating
-the pull request, assign it to the configured Workdash GitHub user with
-`gh pr edit <number> --add-assignee {github_username}` or the API equivalent.
+request's head branch and never create a second one.
 
 After each push, classify the newest head SHA's CI from GitHub's check results and
 required-check rules for it as passing, failing, pending, no_checks, or unknown.

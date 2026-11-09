@@ -12,7 +12,7 @@ Feature: Supervise an autoclosed coding pane
     - Only the server supervises: the CLI is a thin client with no polling of its own, and every GitHub and Zellij call happens in the server process.
     - A pane is not judged while its output keeps changing.
     - Fifteen minutes without new output and without a Workdash message make the pane a candidate for a decision; every message Workdash sends restarts that wait.
-    - The decision uses the same GitHub work classification as `ready`; an actionable message includes the autonomous publishing rules and assigns the updated pull request to the configured user.
+    - The decision uses the same GitHub work classification as `ready`; an actionable message includes the autonomous publishing rules.
     - A pull request merged for the supervised work closes its pane on the next check, even while the agent is still writing; one that already merged before the pane was launched is not the work it was launched for, so the pane is left alone.
     - Finished work (current-head CI passing or verifiably absent, clean mergeability, no outstanding feedback, no local work GitHub does not have: an edited file, a new file the agent never added, or an unpushed commit) closes its pane after the wait, rechecked immediately before closing, and the reason is logged when unpublished work keeps the pane open. Only the worktree's `.workdash/` artifact directory is left out of that check.
     - A known pull request is cheap to check, so its state is read on every check; finding the pull request an issue now has and deciding what an idle pane needs cost a whole work state, so each happens at most every fifth check, and a pull request that opens and merges between two of them is found at the next one.
@@ -83,7 +83,7 @@ Feature: Supervise an autoclosed coding pane
     Then nothing is sent to the supervised pane
     When another minute passes
     Then the supervised pane receives the `fix_ci` instruction
-    And the instruction permits publishing and assigns the pull request to the configured user
+    And the instruction permits publishing
 
   @id:F-CODING-AUTOCLOSE-S007
   Scenario: An unchanged GitHub state is never messaged twice

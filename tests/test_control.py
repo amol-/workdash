@@ -808,7 +808,7 @@ def test_code_with_autostart_adds_the_implementation_appendix_once(monkeypatch, 
 
 
 @pytest.mark.parametrize("conflict", [False, True])
-def test_autostart_full_briefing_publishes_as_configured_user(monkeypatch, tmp_path, conflict):
+def test_autostart_full_briefing_publishes(monkeypatch, tmp_path, conflict):
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
     if conflict:
@@ -830,7 +830,7 @@ def test_autostart_full_briefing_publishes_as_configured_user(monkeypatch, tmp_p
     assert "force-push only the pull request branch" in prompt
     assert "--force-with-lease" in prompt
     assert "repository" in prompt and "restrictions" in prompt
-    assert "After opening or updating" in prompt and "--add-assignee testuser" in prompt
+    assert "--add-assignee" not in prompt
     assert "Never merge the pull request or close the issue" in prompt
     if conflict:
         assert "cannot merge cleanly" in prompt
