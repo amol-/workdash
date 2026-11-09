@@ -649,6 +649,24 @@ def _agent_told_to_publish(issue: str, scenario_state: dict[str, Any]) -> None:
 
 
 @then(
+    "the agent is explicitly permitted to commit and push, and to force-push only the pull request branch"
+)
+def _agent_told_publish_permissions(scenario_state: dict[str, Any]) -> None:
+    _assert_told(
+        scenario_state,
+        "Commit and push are explicitly requested and permitted",
+        "force-push only the pull request branch",
+        "--force-with-lease",
+    )
+
+
+@then("the agent is told to assign opened or updated pull requests to the configured GitHub user")
+def _agent_told_assign_pull_request(scenario_state: dict[str, Any]) -> None:
+    username = scenario_state["api_session"].config.github_username
+    _assert_told(scenario_state, f"--add-assignee {username}", "After opening or updating")
+
+
+@then(
     "the agent is told to wait for the current head's CI "
     "or confirm that no checks are required or reported"
 )

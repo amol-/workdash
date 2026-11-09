@@ -12,6 +12,7 @@ import pytest
 from webob import Request
 
 import workdash.control as control_module
+import workdash.launcher as launcher_module
 from gh_todo_fake import fake_gh_todo_run
 from gh_work_state_fake import (
     AFTER_PUSH,
@@ -806,6 +807,36 @@ def test_code_with_autostart_adds_the_implementation_appendix_once(monkeypatch, 
     assert prompt.count("coordination workflows") == 1
 
 
+@pytest.mark.parametrize("conflict", [False, True])
+def test_autostart_full_briefing_publishes_as_configured_user(monkeypatch, tmp_path, conflict):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    if conflict:
+        github.add_pull_request("owner/repo#51", closes=("owner/repo#1",), mergeable="CONFLICTING")
+    session, _worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
+    session.config = replace(
+        session.config, github_username="testuser", todo_repository="testuser/todos"
+    )
+    monkeypatch.setattr(
+        control_module, "prepare_launch_agent_prompt", launcher_module.prepare_launch_agent_prompt
+    )
+    monkeypatch.setattr(launcher_module, "collect_launch_github_context", lambda _item: {})
+
+    session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+
+    prompt = _launched_prompt(launch_agent)
+    assert "TASK: IMPLEMENT" in prompt and "Do not start implementing code yet" in prompt
+    assert "Commit and push are explicitly requested and permitted" in prompt
+    assert "force-push only the pull request branch" in prompt
+    assert "--force-with-lease" in prompt
+    assert "repository" in prompt and "restrictions" in prompt
+    assert "After opening or updating" in prompt and "--add-assignee testuser" in prompt
+    assert "Never merge the pull request or close the issue" in prompt
+    if conflict:
+        assert "cannot merge cleanly" in prompt
+        assert "force-push unless the repository's explicit policy authorizes it" not in prompt
+
+
 def test_code_on_a_live_agent_sends_nothing_and_reads_no_github_state_even_when_it_is_down(
     monkeypatch, tmp_path
 ) -> None:
@@ -926,6 +957,7 @@ def test_autostarting_a_pull_request_waiting_for_others_orders_no_work(
     prompt = _launched_prompt(launch_agent)
     assert "AUTOSTART" not in prompt
     assert "still without a final CI result" in prompt
+    assert "--add-assignee" not in prompt and "force-push" not in prompt
 
 
 def test_autostarting_an_issue_closed_by_somebody_elses_pull_request_still_implements_it(
@@ -988,6 +1020,7 @@ def test_autostarting_a_review_reads_no_github_state_and_stays_review_only(
     prompt = _launched_prompt(launch_agent)
     assert prompt.startswith("PROMPT\n\nAUTOSTART: REVIEW")
     assert "coordination workflows" not in prompt
+    assert "--add-assignee" not in prompt and "force-push" not in prompt
     assert github.operations == []
 
 

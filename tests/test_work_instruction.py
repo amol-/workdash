@@ -163,7 +163,8 @@ def test_the_merge_conflict_instruction_integrates_safely_and_never_merges() -> 
     text = " ".join(render_work_instruction(state.action, state).split())
 
     assert "Do not create another pull request, merge the pull request into the base" in text
-    assert "force-push unless the repository's explicit policy authorizes it" in text
+    assert "force-push any branch other than this pull request's branch" in text
+    assert "Follow repository restrictions and prefer --force-with-lease" in text
     assert "check the CI of the NEW head SHA" in text
     assert "conflict-free against the current base" in text
 

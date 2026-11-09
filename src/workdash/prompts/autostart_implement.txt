@@ -5,6 +5,13 @@ GitHub context, inspect the issue or pull request, the checkout and branch, the
 existing commits and uncommitted changes, then start implementing without asking
 for routine confirmation or approval of your plan. A short internal plan is fine;
 execute it right away. Make reasonable engineering decisions and continue.
+Commit and push are explicitly requested and permitted for this autonomous work;
+the rule against committing or pushing without a request applies to ad-hoc,
+human-directed sessions such as the plan-first TUI flow, not this request.
+Follow higher-priority instructions and repository restrictions. If needed,
+force-push only the pull request branch, preferably using --force-with-lease;
+never force-push another branch. Other destructive actions still require explicit
+permission.
 
 Use the development practices, skills, and coordination workflows you have been
 configured to follow, and choose and apply the approach best suited to the task's
@@ -26,7 +33,9 @@ not proof of completion. A pull request existing is not completion either.
 
 For an issue, create a pull request that closes it with GitHub's closing keyword
 (`Fixes owner/repo#NUMBER`). For an existing pull request, update THAT pull
-request's head branch and never create a second one.
+request's head branch and never create a second one. After opening or updating
+the pull request, assign it to the configured Workdash GitHub user with
+`gh pr edit <number> --add-assignee {github_username}` or the API equivalent.
 
 After each push, classify the newest head SHA's CI from GitHub's check results and
 required-check rules for it as passing, failing, pending, no_checks, or unknown.

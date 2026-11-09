@@ -42,6 +42,7 @@ Feature: Launch a coding session
     - Coding is plan-first by default: the TUI never asks for autonomous work, so its agent proposes a plan and waits before implementing, and nothing commits, pushes, or opens a pull request without the user's instruction.
     - A coding request may ask for autostart. The briefing of a newly launched agent then ends with an autonomous appendix, once, saying to start without routine confirmation and overriding the plan-first pause. The pane stays an ordinary interactive agent session.
     - The implementation appendix tells the agent to use the development practices, skills, and coordination workflows it is configured to follow, whatever the task needs (implementing an issue, or fixing CI, merge conflicts, or review feedback of a pull request), without naming a skill or mandating coordination; the review-only appendix and the plan-first briefing do not. It also tells the agent to inspect the checkout, branch, commits and uncommitted changes, continue valid partial work and replace it only for demonstrable defects, commit and push, and open a pull request that closes the issue. It tells the agent never to merge or close the issue, and to report the pull request URL, head SHA and actual CI status when done.
+    - Autonomous implementation explicitly permits commits and pushes, assigns every opened or updated pull request to the configured GitHub user, and permits force-pushing only the pull request branch, preferably with a lease and subject to repository restrictions. Other destructive actions still require explicit permission.
     - The agent may report completion only when the pull request's current head is `passing` or `no_checks` and GitHub reports it as mergeable. `no_checks` is reported as no checks required or reported, never as CI passed; `pending` is waited for; `unknown` is reported as incomplete.
     - After the appendix the agent is given what the GitHub work state says the work needs, from the same classification `workdash ready` uses: implement an issue, fix failing CI, resolve merge conflicts, or address review feedback. Several needs are all included, most urgent first: review feedback, then merge conflicts, then CI.
     - An autostarted issue that an open pull request of the user's already closes works on that pull request's branch and updates it, never a second pull request. A pull request of somebody else closing the issue does not change the issue's implementation briefing, and a targeted todo is never redirected.
@@ -269,6 +270,8 @@ Feature: Launch a coding session
     And the agent is told to start without routine confirmation, overriding the plan-first pause
     And the agent is told to inspect existing commits and uncommitted work and continue it unless demonstrably defective
     And the agent is told to commit, push, and open a pull request that closes issue `owner/repo#42`
+    And the agent is explicitly permitted to commit and push, and to force-push only the pull request branch
+    And the agent is told to assign opened or updated pull requests to the configured GitHub user
     And the agent is told to wait for the current head's CI or confirm that no checks are required or reported
     And the agent is told never to merge the pull request or close the issue
     And the agent is told to stay in its interactive session after reporting

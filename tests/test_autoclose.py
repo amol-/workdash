@@ -164,6 +164,29 @@ def failing_head(supervision: Supervision, head: str = HEAD_SHA) -> None:
     )
 
 
+def test_awaiting_launch_gets_publishing_rules_when_ci_fails(monkeypatch, tmp_path) -> None:
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests["owner/repo#51"]["checks"] = {
+        HEAD_SHA: [check_run("tests", None, status="IN_PROGRESS")]
+    }
+    launch = MagicMock(side_effect=supervision._launch)
+    monkeypatch.setattr(control_module, "launch_agent_context", launch)
+
+    supervision.launch(autoclose=True)
+    briefing = launch.call_args.args[1]
+    assert "still without a final CI result" in briefing
+    assert "AUTOSTART: IMPLEMENT, PUBLISH AND VERIFY" not in briefing
+    supervision.poll(15)
+    assert not supervision.sent
+
+    failing_head(supervision)
+    supervision.poll(5)
+    instruction = supervision.sent[-1][1]
+    assert "has failing checks: tests" in instruction
+    assert "Commit and push are explicitly requested and permitted" in instruction
+    assert "gh pr edit <number> --add-assignee testuser" in instruction
+
+
 def test_the_worker_waits_a_minute_between_checks(monkeypatch) -> None:
     supervisor = autoclose_module.AutocloseSupervisor(
         config=WorkdashConfig(), lock=threading.RLock()
