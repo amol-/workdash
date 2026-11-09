@@ -2531,6 +2531,56 @@ def test_dispatch_uses_current_reasons_when_pr_remains_actionable(monkeypatch, t
     assert "merge conflict" not in _launched_prompt(launch).lower()
 
 
+@pytest.mark.parametrize("replacement_pr", [False, True])
+def test_dispatch_briefs_current_github_work_after_revalidation(
+    monkeypatch, tmp_path, replacement_pr
+):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    pr = github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#1",),
+        checks={HEAD_SHA: [check_run("old-check", "FAILURE")]},
+    )
+    session, _, ensure, launch, prepare = _authored_session(monkeypatch, tmp_path)
+    issue = session.work_items[0]
+    issue.analysis = "issue analysis"
+    ready = session._ready
+    calls = 0
+    current_number = 52 if replacement_pr else 51
+    current_head = "new-head"
+
+    def change_after_revalidation(*args, **kwargs):
+        nonlocal calls
+        result = ready(*args, **kwargs)
+        calls += 1
+        if calls == 2:
+            current = pr
+            if replacement_pr:
+                pr["state"] = "CLOSED"
+                current = github.add_pull_request("owner/repo#52", closes=("owner/repo#1",))
+            current["head"] = current_head
+            current["checks"] = {current_head: [check_run("current-check", "FAILURE")]}
+        return result
+
+    monkeypatch.setattr(session, "_ready", change_after_revalidation)
+    result = session.dispatch_once(scope="owner/repo", agent="pi")
+
+    assert result["status"] == "launched"
+    assert result["pr_id"] == "owner/repo#PR-51"
+    assert result["failing_checks"] == ["old-check"]
+    assert ensure.call_args.args[1].number == current_number
+    assert prepare.call_args.args[0].number == current_number
+    assert prepare.call_args.kwargs["analysis_path"] == session.analysis_url(issue)
+    prompt = _launched_prompt(launch)
+    assert f"https://github.com/owner/repo/pull/{current_number} at head {current_head}" in prompt
+    assert "has failing checks: current-check" in prompt
+    assert "old-check" not in prompt
+    assert launch.call_count == 1
+    supervised = session.autoclose._panes[("workdash-main", result["pane_id"])]
+    assert supervised.item.number == current_number
+
+
 def test_dispatch_uses_newly_actionable_pr_before_launch(monkeypatch, tmp_path):
     import workdash.repo_worktree as repo_worktree
 

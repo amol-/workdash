@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .models import REVIEW_KINDS, WorkItem, WorkItemType
-from .work_state import PullRequestWorkState, ReadyWork, work_pull_request
+from .work_state import PullRequestWorkState, work_pull_request
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _ALSO = {
@@ -40,7 +40,6 @@ def autostart_briefing(
     *,
     github_username: str,
     todo_repository: str,
-    ready_work: ReadyWork | None = None,
 ) -> tuple[WorkItem, str]:
     """Return the item an autostarted agent works on and the text closing its briefing.
 
@@ -54,12 +53,8 @@ def autostart_briefing(
     if item.kind in REVIEW_KINDS:
         return item, _load("autostart_review.txt")
 
-    state = (
-        ready_work.pull_request
-        if ready_work is not None
-        else work_pull_request(
-            item, github_username=github_username, todo_repository=todo_repository
-        )
+    state = work_pull_request(
+        item, github_username=github_username, todo_repository=todo_repository
     )
     if item.item_type == WorkItemType.ISSUE:
         # Only an open pull request carries the issue's work on; a merged one has finished it.

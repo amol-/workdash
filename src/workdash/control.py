@@ -287,7 +287,6 @@ class WorkdashSession:
         autostart: bool = False,
         group: str | None = None,
         autoclose: bool = False,
-        _ready_work: ReadyWork | None = None,
     ) -> dict[str, object]:
         """Launch a coding agent for an explicit target unless one already works in its worktree.
 
@@ -338,8 +337,6 @@ class WorkdashSession:
         analysis_item = (
             item if item.item_type == WorkItemType.ISSUE or item.kind in REVIEW_KINDS else None
         )
-        if _ready_work is not None:
-            item = _ready_work.item
         if item.kind == WorkItemKind.AUTHORED_PR:
             try:
                 state = work_pull_request(
@@ -385,7 +382,6 @@ class WorkdashSession:
                     item,
                     github_username=self.config.github_username,
                     todo_repository=self.config.todo_repository,
-                    ready_work=_ready_work,
                 )
             except RuntimeError as error:
                 raise WorkdashControlError(
@@ -688,7 +684,6 @@ class WorkdashSession:
                 group=selected_group,
                 autostart=True,
                 autoclose=True,
-                _ready_work=candidate,
             )
             if launch["status"] == "already_running":
                 continue

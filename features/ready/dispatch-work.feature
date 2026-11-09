@@ -8,9 +8,9 @@ Feature: Dispatch one ready issue
     - `workdash dispatch TARGET [--agent NAME] [--group NAME] [--host HOST] [--json]` is a thin client of the running server. TARGET is a repository or issue scope accepted by `ready`, including targeted todos and issue URLs.
     - The server selects the first still-eligible issue from the same ordered results as `ready TARGET`, using the same scope resolution, readiness and GitHub metadata-only CI classification. It rechecks eligibility before launch, including current base mergeability.
     - The server uses the same code operation and instruction renderer as explicit code and autoclose, targeting the issue with autostart and autoclose enabled. When multiple authored pull requests are linked, the oldest actionable one is resumed, matching readiness. An actionable authored linked pull request, including one linked to a targeted todo, is resumed on its existing branch with all its reasons in the instruction, ordered review, conflicts, then CI.
-    - Dispatch resumes a targeted todo's pushed worktree branch even if it still tracks the default branch, preserving local work. Dispatch fails without launching if it cannot verify that the selected pull request's checkout is on its head branch in its head repository; it does not switch an existing checkout to another branch.
+    - Dispatch resumes a targeted todo's pushed worktree branch only when its upstream is verified as the selected pull request's head branch in its head repository, preserving local work. If the checkout cannot be verified, dispatch asks the user to configure the PR-head upstream without changing tracking, switching branches, or launching.
     - A newly launched agent's default group is the basename of the implementation repository, not the parent issue's repository. `--group` overrides it.
-    - If the selected issue remains ready with an actionable pull request when rechecked, dispatch uses its currently actionable pull request and reasons, even if they changed, and reports its current action and state. If a selected pull request disappears without a replacement, another caller claims a candidate, or the selected work is no longer eligible, the server retries the next still-eligible candidate, bounded by the candidates. At most one confirmed pane is launched per dispatch; uncertainty or an upstream failure is an error, never a false empty result or a second launch.
+    - If the selected issue remains ready when rechecked, dispatch passes its issue ID to ordinary code, which independently reads the target's current GitHub work for the checkout and briefing. Readiness metadata in the result describes selection; the launched agent follows the newer state, even if the pull request or reasons changed or it now waits for CI, review, or merge. These reads are not atomic. If a selected pull request disappears without a replacement at recheck, another caller claims a candidate, or the selected work is no longer eligible, the server retries the next still-eligible candidate, bounded by the candidates. At most one confirmed pane is launched per dispatch; uncertainty or an upstream failure is an error, never a false empty result or a second launch.
     - A successful launch returns immediately with status `launched`, issue, action, reasons, and actual pane ID; the server owns the agent and its autoclose supervision after the client exits. An empty or exhausted scope returns success with status `no_ready_task`.
     - Dispatch does not create sub-issues, merge, wait for completion, or run a scheduler. There is no `autocode` command.
 
@@ -105,6 +105,16 @@ Feature: Dispatch one ready issue
       | GitHub cannot report the work state             |
       | Zellij cannot report live panes                 |
       | a launched pane cannot be confirmed             |
+
+  @id:F-DISPATCH-S011
+  Scenario: The initial briefing follows GitHub changes after readiness was rechecked
+    Given a server-backed Workdash session is ready to answer
+    And issue `owner/repo#42` has an authored pull request whose only problem is a merge conflict
+    And the conflict is resolved after eligibility is rechecked but before coding reads GitHub
+    When the user runs `workdash dispatch owner/repo#42 --json`
+    Then the result reports status `launched` and issue `owner/repo#ISSUE-42`
+    And the initial briefing describes pull request #51 waiting for review instead of repairing conflicts
+    And the server supervises the launched pane
 
   @id:F-DISPATCH-S010
   Scenario: A remote dispatch uses the server and honors a group override

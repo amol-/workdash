@@ -148,6 +148,35 @@ def _resolve(scenario_state, monkeypatch):
     monkeypatch.setattr(control, "find_ready_work", resolve)
 
 
+@given("the conflict is resolved after eligibility is rechecked but before coding reads GitHub")
+def _resolve_after_recheck(scenario_state, monkeypatch):
+    session = scenario_state["api_session"]
+    ready = session._ready
+    calls = 0
+
+    def resolve(*args, **kwargs):
+        nonlocal calls
+        result = ready(*args, **kwargs)
+        calls += 1
+        if calls == 2:
+            scenario_state["github"].pull_requests["owner/repo#51"]["mergeable"] = "MERGEABLE"
+        return result
+
+    monkeypatch.setattr(session, "_ready", resolve)
+
+
+@then(
+    "the initial briefing describes pull request #51 waiting for review instead of repairing conflicts"
+)
+def _current_briefing(scenario_state):
+    [launch] = scenario_state["agent_launches"]
+    prompt = launch[1]
+    assert "https://github.com/owner/repo/pull/51" in prompt
+    assert "waiting for human review" in prompt
+    assert "cannot merge cleanly" not in prompt
+    assert "AUTOSTART: IMPLEMENT" not in prompt
+
+
 @given("GitHub cannot report the work state")
 def _github_down(scenario_state):
     scenario_state["github"].failures["ReadyRepositoryIssues"] = failure("HTTP 502")
