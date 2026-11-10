@@ -1,7 +1,9 @@
 """Tests for workdash.repo_worktree — worktree management for work items."""
 
 import json
+import os
 import subprocess
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -9,13 +11,14 @@ import pytest
 
 from workdash.git import GitHelper
 from workdash.github import GithubHelper
-from workdash.models import WorkItem, WorkItemKind, WorkItemType
+from workdash.models import WorkItem, WorkItemKind, WorkItemType, display_repo
 from workdash.repo_worktree import (
     ensure_worktree,
     existing_worktree_path,
     main_repo_path,
     worktree_path,
 )
+from workdash.todo import create_todo, todo_target_from_body
 
 _SAME_REPO_HEAD_INFO = json.dumps(
     {
@@ -1014,6 +1017,8 @@ def test_ensure_worktree_pulls_existing_worktree(
         ["git", "rev-parse", "--show-toplevel"],
         ["git", "config", "--local", "--get", "remote.origin.url"],
         ["git", "pull", "--ff-only"],
+        ["git", "rev-parse", "--show-toplevel"],
+        ["git", "config", "--local", "--get", "remote.origin.url"],
     ]
 
 
@@ -1053,6 +1058,8 @@ def test_ensure_worktree_finds_fork_worktree_with_upstream_without_gh_call(
         ["git", "config", "--local", "--get", "remote.origin.url"],
         ["git", "config", "--local", "--get", "remote.upstream.url"],
         ["git", "pull", "--ff-only"],
+        ["git", "rev-parse", "--show-toplevel"],
+        ["git", "config", "--local", "--get", "remote.origin.url"],
         ["git", "fetch", "--prune", "upstream"],
     ]
 
@@ -1355,6 +1362,9 @@ def test_ensure_new_issue_worktree_fast_forwards_parent_and_child_to_origin_defa
         ("https://codeberg.org/owner/repo", "https://github.com/owner/repo", False),
         ("owner/repo", "https://codeberg.org/owner/repo", False),
         ("owner/repo", "git@github.com:owner/repo.git", True),
+        ("owner/repo", "git@github.com:Owner/Repo.git", True),
+        ("https://github.com/owner/repo", "git@github.com:Owner/Repo.git", True),
+        ("https://codeberg.org/owner/repo", "git@codeberg.org:Owner/Repo.git", False),
         ("https://gitlab.com/group/owner/repo", "https://gitlab.com/other/owner/repo", False),
     ],
 )
@@ -1376,11 +1386,173 @@ def test_targeted_todo_discovery_requires_host_and_full_path(
     assert existing_worktree_path(str(tmp_path), item) == (candidate if matches else None)
 
 
+@pytest.mark.parametrize("existing", ["main", "worktree"])
+def test_github_issue_reuses_repository_with_differently_cased_origin(
+    tmp_path, monkeypatch, existing
+):
+    path = tmp_path / ("Owner_Repo" if existing == "main" else "Owner_Repo_42")
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:owner/repo.git"], cwd=path, check=True
+    )
+    item = make_issue(repo="Owner/Repo")
+    if existing == "worktree":
+        monkeypatch.setattr(GitHelper, "pull_ff_only", lambda self, path: None)
+        assert ensure_worktree(str(tmp_path), item) == str(path)
+    else:
+        monkeypatch.setattr(GitHelper, "find_worktree_for_branch", lambda self, path, branch: None)
+        monkeypatch.setattr(GitHelper, "fetch_remote", lambda self, path, remote: None)
+        monkeypatch.setattr(GitHelper, "fast_forward_default_branch", lambda self, path: None)
+        monkeypatch.setattr(GitHelper, "create_worktree", lambda self, *args: None)
+        assert ensure_worktree(str(tmp_path), item) == str(tmp_path / "Owner_Repo_42")
+
+
+def test_same_repo_pr_reused_with_differently_cased_directory(tmp_path, monkeypatch):
+    path = tmp_path / "owner_repo_42"
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:owner/repo.git"], cwd=path, check=True
+    )
+    subprocess.run(
+        ["git", "remote", "add", "upstream", "git@github.com:other/repo.git"], cwd=path, check=True
+    )
+    monkeypatch.setattr(GitHelper, "pull_ff_only", lambda self, path: None)
+    fetches = []
+    monkeypatch.setattr(
+        GitHelper, "fetch_remote", lambda self, path, remote: fetches.append((path, remote))
+    )
+    monkeypatch.setattr(
+        GithubHelper, "fetch_worktree_head", lambda *args: pytest.fail("unexpected lookup")
+    )
+
+    assert ensure_worktree(str(tmp_path), make_pr(repo="Owner/Repo")) == str(path)
+    assert fetches == []
+
+
+def test_fork_worktree_reused_with_differently_cased_upstream(tmp_path, monkeypatch):
+    path = tmp_path / "contributor_repo_42"
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:contributor/repo.git"],
+        cwd=path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "remote", "add", "upstream", "git@github.com:Owner/Repo.git"], cwd=path, check=True
+    )
+    monkeypatch.setattr(GitHelper, "pull_ff_only", lambda self, path: None)
+    fetches = []
+    monkeypatch.setattr(
+        GitHelper, "fetch_remote", lambda self, path, remote: fetches.append((path, remote))
+    )
+    monkeypatch.setattr(
+        GithubHelper, "fetch_worktree_head", lambda *args: pytest.fail("unexpected lookup")
+    )
+
+    assert ensure_worktree(str(tmp_path), make_pr(repo="owner/repo")) == str(path)
+    assert fetches == [(path, "upstream")]
+
+
+def test_github_issue_reuses_worktree_with_mixed_casing(tmp_path, monkeypatch):
+    path = tmp_path / "Owner_Repo_42"
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:owner/repo.git"], cwd=path, check=True
+    )
+    monkeypatch.setattr(GitHelper, "pull_ff_only", lambda self, path: None)
+    monkeypatch.setattr(
+        GithubHelper, "clone_repository", lambda *args: pytest.fail("unexpected clone")
+    )
+    assert ensure_worktree(str(tmp_path), make_issue(repo="OWNER/REPO")) == str(path)
+
+
+@pytest.mark.parametrize(
+    ("target", "origin", "reused"),
+    [
+        ("https://github.com/OWNER/REPO.git", "git@github.com:owner/repo.git", True),
+        ("https://codeberg.org/owner/repo.git", "git@codeberg.org:owner/repo.git", False),
+        ("https://codeberg.org/Owner/Repo.git", "git@codeberg.org:owner/repo.git", False),
+        ("https://github.com/Owner/Repo.git", "git@codeberg.org:owner/repo.git", False),
+    ],
+)
+def test_targeted_todo_worktree_casing_depends_on_host(
+    tmp_path, monkeypatch, target, origin, reused
+):
+    path = tmp_path / "Owner_Repo_todo_110"
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", origin], cwd=path, check=True)
+    (path / "work.txt").write_text("todo work")
+    item = make_targeted_todo(target=target)
+    assert existing_worktree_path(str(tmp_path), item) == (path if reused else None)
+    with ExitStack() as pinned:
+        result = existing_worktree_path(str(tmp_path), item, pinned=pinned)
+        assert (result[0] if result else None) == (path if reused else None)
+        if reused:
+            _, fd = result
+            assert os.path.samestat(os.fstat(fd), path.stat())
+            file_fd = os.open("work.txt", os.O_RDONLY, dir_fd=fd)
+            try:
+                assert os.read(file_fd, 100) == b"todo work"
+            finally:
+                os.close(file_fd)
+    if reused:
+        pulls = []
+        monkeypatch.setattr(GitHelper, "pull_ff_only", lambda self, path: pulls.append(path))
+        assert ensure_worktree(str(tmp_path), item) == str(path)
+        assert pulls == [path]
+
+
+def test_targeted_todo_reuses_matching_worktree_when_main_clone_is_another_repository(
+    tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    main = workdir / "owner_repo"
+    worktree = workdir / "owner_repo_todo_110"
+    source = tmp_path / "source"
+    target = "https://codeberg.org/owner/repo.git"
+    for path, origin in ((main, "https://github.com/owner/repo.git"), (source, target)):
+        subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+        subprocess.run(["git", "remote", "add", "origin", origin], cwd=path, check=True)
+    (source / "work.txt").write_text("todo work")
+    subprocess.run(["git", "add", "work.txt"], cwd=source, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "initial",
+        ],
+        cwd=source,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "wt-110", str(worktree)],
+        cwd=source,
+        check=True,
+        capture_output=True,
+    )
+    (main / "work.txt").write_text("other repository work")
+    (worktree / "work.txt").write_text("uncommitted todo work")
+    pulls = []
+    monkeypatch.setattr(GitHelper, "pull_ff_only", lambda self, path: pulls.append(path))
+
+    assert ensure_worktree(str(workdir), make_targeted_todo(target=target)) == str(worktree)
+    assert pulls == [worktree]
+    assert (main / "work.txt").read_text() == "other repository work"
+    assert (worktree / "work.txt").read_text() == "uncommitted todo work"
+
+
 @pytest.mark.parametrize("occupied", ["main", "worktree", "branch"])
 def test_targeted_todo_conflicts_never_mutate_another_repository(tmp_path, monkeypatch, occupied):
     main = tmp_path / "owner_repo"
     main.mkdir()
-    candidate = tmp_path / ("custom" if occupied == "branch" else "owner_repo_todo_110")
+    candidate = tmp_path / ("owner_repo_todo_110" if occupied == "worktree" else "custom")
     candidate.mkdir()
     marker = candidate / "work.txt"
     marker.write_text("uncommitted work")
@@ -1424,8 +1596,24 @@ def test_url_target_clone_worktree_reuse_and_missing_default_head(tmp_path, monk
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{origin}.insteadOf")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", target)
-    item = make_targeted_todo()
-    item.todo_target = target
+    real_run = subprocess.run
+    issue_bodies = []
+
+    def run(command, **kwargs):
+        if command[:3] == ["gh", "label", "create"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:3] == ["gh", "issue", "create"]:
+            issue_bodies.append(command[command.index("--body") + 1])
+            return subprocess.CompletedProcess(
+                command, 0, stdout="https://github.com/testuser/todos/issues/110\n", stderr=""
+            )
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    item = create_todo(todo_repository="testuser/todos", text="Test todo", target=target)
+    item.todo_target = todo_target_from_body(issue_bodies[0])
+    assert item.todo_target == target
+    assert display_repo(item) == "owner/repo"
     workdir = tmp_path / "workdir"
 
     worktree = Path(ensure_worktree(str(workdir), item))
@@ -1434,6 +1622,12 @@ def test_url_target_clone_worktree_reuse_and_missing_default_head(tmp_path, monk
     assert (worktree / "source.py").read_text() == "value = 42\n"
     assert existing_worktree_path(str(workdir), item) == worktree
     assert ensure_worktree(str(workdir), item) == str(worktree)
+    item.todo_target = "https://github.com/group/owner/repo.git"
+    assert existing_worktree_path(str(workdir), item) is None
+    with pytest.raises(RuntimeError, match="belongs to a different repository"):
+        ensure_worktree(str(workdir), item)
+    assert (worktree / "source.py").read_text() == "value = 42\n"
+    item.todo_target = target
     main = workdir / "owner_repo"
     subprocess.run(
         ["git", "symbolic-ref", "--delete", "refs/remotes/origin/HEAD"], cwd=main, check=True
@@ -1505,3 +1699,45 @@ def test_github_issue_rejects_same_named_clone_or_worktree_on_another_host(
     with pytest.raises(RuntimeError, match="belongs to a different repository"):
         ensure_worktree(str(tmp_path), make_issue())
     assert (candidate / "work.txt").read_text() == "local work"
+
+
+@pytest.mark.parametrize("existing_branch", [False, True])
+def test_same_repo_pr_head_casing_does_not_configure_fork_upstream(
+    tmp_path, monkeypatch, existing_branch
+):
+    main = tmp_path / "owner_repo"
+    subprocess.run(["git", "init", str(main)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:owner/repo.git"], cwd=main, check=True
+    )
+    branch_worktree = tmp_path / "other-worktree"
+    monkeypatch.setattr(
+        GithubHelper, "fetch_worktree_head", lambda self, item: ("feature", "owner/repo")
+    )
+    monkeypatch.setattr(
+        GitHelper,
+        "find_worktree_for_branch",
+        lambda self, path, branch: branch_worktree if existing_branch else None,
+    )
+    monkeypatch.setattr(GitHelper, "pull_ff_only", lambda self, path: None)
+    fetches = []
+    monkeypatch.setattr(
+        GitHelper, "fetch_remote", lambda self, path, remote: fetches.append(remote)
+    )
+    monkeypatch.setattr(GitHelper, "fast_forward_default_branch", lambda self, path: None)
+    monkeypatch.setattr(
+        GitHelper, "ensure_upstream_remote", lambda *args: pytest.fail("unexpected fork upstream")
+    )
+    created = []
+    monkeypatch.setattr(GitHelper, "create_worktree", lambda self, *args: created.append(args))
+
+    result = ensure_worktree(str(tmp_path), make_pr(repo="Owner/Repo"))
+
+    if existing_branch:
+        assert result == str(branch_worktree)
+        assert fetches == []
+        assert created == []
+    else:
+        assert result == str(tmp_path / "owner_repo_42")
+        assert fetches == ["origin"]
+        assert created == [(main, tmp_path / "owner_repo_42", "feature", "origin/feature")]
