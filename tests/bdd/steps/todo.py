@@ -379,7 +379,7 @@ def _new_todo_appears_as_item_of_todo_repository(scenario_state: dict[str, Any])
     rows = scenario_state["todo_rows"]
     row = next((entry for entry in rows if entry[1] == TODO_REPOSITORY), None)
     assert row is not None, rows
-    assert type_column_label(row[0]) == f"ISSUE#{TODO_ISSUE_NUMBER}", row
+    assert type_column_label(row[0]) == f"IS {TODO_ISSUE_NUMBER}", row
     assert TODO_TEXT in row[2], row
     assert (
         _listed_todo(scenario_state, TODO_ISSUE_NUMBER)["id"]

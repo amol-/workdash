@@ -52,9 +52,9 @@ Feature: Include a work item by URL
   Scenario: Included items are distinguished by a "+" type suffix in TUI and list command
     Given the user has an included pull request, an included issue, and an included review-requested pull request
     When the user opens the dashboard
-    Then the included pull request's type column reads "CHECK+#111"
-    And the included issue's type column reads "ISSUE+#222"
-    And the included review-requested pull request's type column reads "REVIEW+#333"
+    Then the included pull request's type column reads "VR+ 111"
+    And the included issue's type column reads "IS+ 222"
+    And the included review-requested pull request's type column reads "RV+ 333"
     And the same suffixes appear when the user runs `workdash list`
 
   @id:F-TRIAGE-INCLUDE-S005

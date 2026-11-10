@@ -255,12 +255,12 @@ def _authored_prs_carry_ci_symbols(scenario_state: dict[str, Any]) -> None:
     expected_symbols = {"SUCCESS": "✓ ", "FAILURE": "✗ ", "PENDING": "● "}
     type_cells = _rendered_type_cells(scenario_state)
     for number, ci_state in scenario_state["ci_states"].items():
-        assert type_cells[f"PR#{number}"] == expected_symbols[ci_state], (number, type_cells)
+        assert type_cells[f"PR {number}"] == expected_symbols[ci_state], (number, type_cells)
 
 
 @then("an issue's Type column carries no CI symbol")
 def _issue_carries_no_ci_symbol(scenario_state: dict[str, Any]) -> None:
-    assert _rendered_type_cells(scenario_state)["ISSUE#11"] == "  "
+    assert _rendered_type_cells(scenario_state)["IS 11"] == "  "
 
 
 @given("the user has authored a pull request whose CI passed and whose review is approved")
@@ -368,19 +368,19 @@ def _rendered_type_cell_strings(scenario_state: dict[str, Any]) -> list[str]:
 @then("the approved pull request's Type column carries a green review checkmark")
 def _approved_pr_carries_green_review_checkmark(scenario_state: dict[str, Any]) -> None:
     number = scenario_state["approved_pr_number"]
-    assert f"✓✓PR#{number}" in _rendered_type_cell_strings(scenario_state)
+    assert f"✓✓PR {number}" in _rendered_type_cell_strings(scenario_state)
 
 
 @then("the other pull request's Type column carries a red review cross")
 def _other_pr_carries_red_review_cross(scenario_state: dict[str, Any]) -> None:
     number = scenario_state["changes_requested_pr_number"]
-    assert f"✓✗PR#{number}" in _rendered_type_cell_strings(scenario_state)
+    assert f"✓✗PR {number}" in _rendered_type_cell_strings(scenario_state)
 
 
 @then("the pending pull request's Type column carries a question mark review symbol")
 def _pending_pr_carries_question_mark(scenario_state: dict[str, Any]) -> None:
     number = scenario_state["pending_review_pr_number"]
-    assert f" ?PR#{number}" in _rendered_type_cell_strings(scenario_state)
+    assert f" ?PR {number}" in _rendered_type_cell_strings(scenario_state)
 
 
 @then("the pending pull request's question mark review symbol is yellow")
@@ -404,7 +404,7 @@ def _review_symbol_style(scenario_state: dict[str, Any], number: int) -> tuple[s
         table = app.query_one("#work-items", DataTable)
         for index in range(table.row_count):
             cell = table.get_row_at(index)[0]
-            if type_column_label(cell) == f"PR#{number}":
+            if type_column_label(cell) == f"PR {number}":
                 (span,) = (s for s in cell.spans if s.start == 1)
                 captured.append((cell.plain[1], str(span.style)))
 
@@ -415,7 +415,7 @@ def _review_symbol_style(scenario_state: dict[str, Any], number: int) -> tuple[s
 @then("the other pull request's Type column carries no review symbol")
 def _other_pr_carries_no_review_symbol(scenario_state: dict[str, Any]) -> None:
     number = scenario_state["no_reviewer_pr_number"]
-    assert f"  PR#{number}" in _rendered_type_cell_strings(scenario_state)
+    assert f"  PR {number}" in _rendered_type_cell_strings(scenario_state)
 
 
 def _rendered_type_cells(scenario_state: dict[str, Any]) -> dict[str, str]:
@@ -433,7 +433,7 @@ def _rendered_type_cells(scenario_state: dict[str, Any]) -> dict[str, str]:
     return captured
 
 
-@then("the Type column shows `ISSUE#1`, `PR#2`, and `REVIEW#3`")
+@then("the Type column shows `IS 1`, `PR 2`, and `RV 3`")
 def _type_column_shows_github_numbers(scenario_state: dict[str, Any]) -> None:
     captured: list[str] = []
 
@@ -445,7 +445,7 @@ def _type_column_shows_github_numbers(scenario_state: dict[str, Any]) -> None:
 
     run_app(work_items=scenario_state["work_items"], interactions=interactions)
 
-    assert set(captured) == {"ISSUE#1", "PR#2", "REVIEW#3"}
+    assert set(captured) == {"IS 1", "PR 2", "RV 3"}
 
 
 # -- S002: direct vs team review requests ---------------------------------
@@ -2303,19 +2303,19 @@ def _work_item_appears_once(scenario_state: dict[str, Any]) -> None:
     assert len(matches) == 1, matches
 
 
-@then('the included pull request\'s type column reads "CHECK+#111"')
+@then('the included pull request\'s type column reads "VR+ 111"')
 def _pr_plus_label(scenario_state: dict[str, Any]) -> None:
-    _assert_type_column(scenario_state, number=111, expected="CHECK+#111")
+    _assert_type_column(scenario_state, number=111, expected="VR+ 111")
 
 
-@then('the included issue\'s type column reads "ISSUE+#222"')
+@then('the included issue\'s type column reads "IS+ 222"')
 def _issue_plus_label(scenario_state: dict[str, Any]) -> None:
-    _assert_type_column(scenario_state, number=222, expected="ISSUE+#222")
+    _assert_type_column(scenario_state, number=222, expected="IS+ 222")
 
 
-@then('the included review-requested pull request\'s type column reads "REVIEW+#333"')
+@then('the included review-requested pull request\'s type column reads "RV+ 333"')
 def _review_plus_label(scenario_state: dict[str, Any]) -> None:
-    _assert_type_column(scenario_state, number=333, expected="REVIEW+#333")
+    _assert_type_column(scenario_state, number=333, expected="RV+ 333")
     # The merged row must keep the REVIEW_REQUESTED_PR kind so the "+" suffix
     # genuinely comes from the `included` flag layered onto a REVIEW row,
     # not a fallback that infers "REVIEW" from some other signal.
@@ -2648,10 +2648,7 @@ def _only_matching_titles_listed(scenario_state: dict[str, Any]) -> None:
 def _only_that_work_item_listed(scenario_state: dict[str, Any]) -> None:
     target = scenario_state["search_target"]
     assert _listed_titles(scenario_state) == [target.title]
-    assert (
-        type_column_label(scenario_state["search_rows"][0][0])
-        == f"{format_type_label(target)}#{target.number}"
-    )
+    assert type_column_label(scenario_state["search_rows"][0][0]).endswith(f" {target.number}")
 
 
 @then("only the work items from that repository are listed")
@@ -2698,9 +2695,9 @@ def _all_refreshed_items_listed(scenario_state: dict[str, Any]) -> None:
 
 @then("the included work item is listed")
 def _included_work_item_listed(scenario_state: dict[str, Any]) -> None:
-    assert any(
-        type_column_label(row[0]) == "CHECK+#111" for row in scenario_state["search_rows"]
-    ), scenario_state["search_rows"]
+    assert any(type_column_label(row[0]) == "VR+ 111" for row in scenario_state["search_rows"]), (
+        scenario_state["search_rows"]
+    )
 
 
 @then("the action bar lists the search action first")

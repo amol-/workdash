@@ -169,13 +169,13 @@ workdash --version           # print version and exit
 
 `workdash` gathers the following for your configured GitHub username:
 
-- Open pull requests you authored (shown as `PR`).
+- Open pull requests you authored (shown as `PR` in the TUI).
 - Open pull requests where you are a requested reviewer, plus open pull
-  requests you have already reviewed (shown as `REVIEW`).
-- Open issues assigned to you (shown as `ISSUE`).
+  requests you have already reviewed (shown as `RV` in the TUI).
+- Open issues assigned to you (shown as `IS` in the TUI).
 - Open issues and pull requests across the tracked repositories. A pull request
-  that is neither yours nor yours to review is shown as `CHECK`; once you review
-  it, the next refresh lists it as `REVIEW`.
+  that is neither yours nor yours to review is shown as `VR` (voluntary review) in the TUI; once
+  you review it, the next refresh lists it as `RV`.
 
 Items are merged, deduplicated, and sorted by last update. A pull request that
 closes an issue replaces that issue, so the same work never takes two rows. One
@@ -190,8 +190,10 @@ The `repositories` list in `config.json` accepts:
 
 ## TUI keybindings
 
-- `/` — search/filter the listed items by Type, Repo, or Title. Press `/` again
-  to clear.
+- `/` — search/filter the listed items by Type, Repo, or Title. Matching is
+  literal and case-insensitive, including the full repository and title. Search
+  by the displayed type and number (e.g. `IS 42`) or the legacy form
+  (e.g. `ISSUE#42`). Press `/` again to clear.
 - `o` — open the selected item with your configured viewer.
 - `r` — refresh the list from GitHub.
 - `a` — analyze the selected item. Opens a dialog to open the cached analysis

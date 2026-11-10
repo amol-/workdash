@@ -9,15 +9,15 @@ Feature: List work items
     - The list includes open pull requests the user authored, open pull requests where the user is a REVIEW item, open issues assigned to the user, open issues and pull requests across tracked repositories, and items the user has explicitly included by URL.
     - A pull request is a REVIEW item when the user is directly requested as a reviewer, or when the user has already reviewed it.
     - Review requests addressed only to a team the user belongs to do not make the pull request a REVIEW item; only direct user review requests do.
-    - Each TUI entry's Type column shows its item type (ISSUE, PR, REVIEW, or CHECK) followed immediately by its GitHub number (for example, `ISSUE#123`), alongside the owning repository, last update date, item's age, and title.
-    - A pull request the user neither authored nor was asked to review nor already reviewed is a CHECK item, so an open pull request waiting to be looked at is never confused with the user's own work.
+    - Each TUI entry's Type column shows its item type as IS, PR, RV, or VR, followed by a space and its GitHub number (for example, `IS 123`), alongside the owning repository, last update date, item's age, and title. Included items retain their `+` indicator.
+    - A pull request the user neither authored nor was asked to review nor already reviewed is a CHECK item, displayed as VR (voluntary review) in the TUI, so it is never confused with the user's own work.
     - Reviewing a CHECK item needs no extra action: the next refresh finds the same pull request as a reviewed one and lists it as a REVIEW item instead.
     - A pull request that closes an issue replaces that issue: the issue is not listed on its own, so the same work never occupies two rows. This holds for PR, REVIEW, and CHECK items alike, and also for an issue the user included by URL.
     - The closed issue is dropped while the list is loaded, so it can no longer be addressed by its Workdash item ID or its URL. Including it again by URL brings it back for the rest of the session, and the next refresh drops it again.
     - Tracked repositories can hold years of open work, so the number of discovered work items is capped and the oldest ones beyond that cap are dropped. Todo items and items the user included by URL are asked for by hand, so they are always listed even when they are older than everything else.
     - An authored pull request's Type column is prefixed with a one-character symbol for the latest CI result GitHub reports on it: passing, failing, or still running. Every other row, including issues and pull requests the user did not author, is prefixed with a blank instead so the Type labels stay aligned.
     - An authored pull request's Type column carries a second one-character symbol for its review state, independent of the CI symbol: a green checkmark when the review is approved, a red cross when changes are requested, a yellow question mark when a reviewer is requested but has not yet reviewed, a blue question mark when a reviewer left review comments nobody has resolved yet without approving or requesting changes, and a blank when neither applies. Approval and requested changes win over unresolved comments.
-    - The Repo column is capped at the width of `posit-dev/rsconnect-python`, leaving the title more room. A longer repository is truncated on its left so the repository name itself stays readable, and the leading character is replaced with an ellipsis to show the owner was cut.
+    - The Repo column is capped at 15 characters, leaving the title more room. A longer repository is truncated on its left so the repository name itself stays readable, and the leading character is replaced with an ellipsis to show the owner was cut.
     - Entries are sorted by last update, most recently updated first.
     - The same GitHub issue or pull request never appears twice in the list.
     - When the same item qualifies for multiple sources, the strongest relationship wins in this order: authored pull request, then REVIEW pull request, then assigned issue, then plain tracked item.
@@ -39,7 +39,7 @@ Feature: List work items
   Scenario: Type column shows the GitHub number
     Given the dashboard has issue, pull request, and review work items
     When the user opens the dashboard
-    Then the Type column shows `ISSUE#1`, `PR#2`, and `REVIEW#3`
+    Then the Type column shows `IS 1`, `PR 2`, and `RV 3`
 
   @id:F-TRIAGE-LIST-S002
   Scenario: Only direct user review requests are treated as REVIEW items
