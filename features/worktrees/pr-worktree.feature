@@ -9,6 +9,7 @@ Feature: Pull request worktree
     - A pull request's worktree is checked out on the pull request's head branch when the system creates that worktree.
     - When the system creates the worktree for a pull request that originates in a fork, it clones the fork's repository rather than the upstream one.
     - A fork clone the system creates has an `upstream` remote pointing at the pull request's base repository.
+    - A pull request whose head and base GitHub repository names differ only in casing is treated as same-repository when creating or reusing its worktree; no fork upstream is configured or fetched.
     - The system fetches the remote before creating the worktree so the branch reflects the latest state of the pull request.
     - A coding session or analysis running in the worktree has access to a stable diff target that represents only this pull request's changes.
     - An authored pull request that closes an issue in the same repository is the implementation of that issue, so it uses the worktree directory named after the linked issue instead of opening a second checkout for the same work.

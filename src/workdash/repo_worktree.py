@@ -82,23 +82,13 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
     :param WorkItem item: The work item to prepare a worktree for.
     """
     git = GitHelper()
-    if item.todo_target is not None or item.item_type != WorkItemType.PR:
-        repo = item.todo_target or item.repo
-        _require_repository_paths(
-            repo,
-            main_repo_path(workdir, repo),
-            worktree_path(workdir, repo, item.number, todo=item.todo_target is not None),
-        )
     existing = existing_worktree_path(workdir, item)
     if existing is not None:
         # Local divergence or missing upstream shouldn't block the user.
         with contextlib.suppress(subprocess.CalledProcessError, OSError):
             git.pull_ff_only(existing)
-        # A checkout named after another repository is a fork of item.repo, whose
-        # base branches are only reachable through the upstream remote.
-        if item.item_type == WorkItemType.PR and existing.name not in {
-            git.worktree_name(item.repo, number) for number in accepted_worktree_numbers(item)
-        }:
+        # A fork's base branches are only reachable through the upstream remote.
+        if item.item_type == WorkItemType.PR and not git.repository_matches(existing, item.repo):
             with contextlib.suppress(RuntimeError):
                 git.fetch_remote(existing, "upstream")
         return str(existing)
@@ -121,8 +111,7 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
 
     wt = worktree_path(workdir, repo, worktree_item_number(item), todo=todo_target is not None)
     main = main_repo_path(workdir, repo)
-    if item.item_type == WorkItemType.PR and todo_target is None:
-        _require_repository_paths(repo, main, wt)
+    _require_repository_paths(repo, main, wt)
 
     # Check if git already tracks a worktree for this branch before creating another one.
     git_existing = git.find_worktree_for_branch(main, branch)
@@ -130,7 +119,7 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
         _require_repository_paths(repo, git_existing)
         with contextlib.suppress(subprocess.CalledProcessError, OSError):
             git.pull_ff_only(git_existing)
-        if item.item_type == WorkItemType.PR and head_repo != item.repo:
+        if item.item_type == WorkItemType.PR and head_repo.lower() != item.repo.lower():
             git.ensure_upstream_remote(main, item.repo)
             git.fetch_remote(main, "upstream")
         return str(git_existing)
@@ -144,7 +133,7 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
     git.fetch_remote(main, "origin")
     git.fast_forward_default_branch(main)
     if item.item_type == WorkItemType.PR:
-        if head_repo != item.repo:
+        if head_repo.lower() != item.repo.lower():
             git.ensure_upstream_remote(main, item.repo)
             git.fetch_remote(main, "upstream")
         git.create_worktree(main, wt, head_ref, f"origin/{head_ref}")

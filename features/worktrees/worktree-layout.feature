@@ -12,6 +12,7 @@ Feature: Work directory layout
     - Two kinds of work item are named differently: a targeted todo uses "<owner>_<repo>_todo_<number>" under its target repository, and an authored pull request that closes an issue in the same repository shares that issue's worktree, so its directory carries the linked issue's number.
     - Worktrees for pull requests from a fork are named after the fork's owner and repository, not the upstream repository, even when the number they carry comes from a linked issue in the upstream repository.
     - Preparing a worktree never disturbs other worktrees.
+    - When checking an existing clone or worktree's origin against a GitHub target, owner and repository names are compared regardless of casing; other hosts' paths are compared with their original casing. Existing GitHub worktree names are matched regardless of casing after repository identity is verified; worktree names for other hosts remain case-sensitive. Main clone directories are located by the target's exact casing, not by case-insensitive directory lookup.
 
   @id:F-WORKTREES-LAYOUT-S001
   Scenario: First use of a repository clones it into the work directory

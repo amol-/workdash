@@ -115,6 +115,16 @@ Feature: Targeted todo work actions
     And no terminal is opened
     And the existing clone and its worktrees remain untouched
 
+  @id:F-TODO-TARGET-S011
+  Scenario: An existing target worktree is reused despite an unrelated main clone
+    Given the dashboard includes a todo issue number 110 with target `https://codeberg.org/owner/repo.git`
+    And the local clone directory `owner_repo` belongs to `https://github.com/owner/repo.git`
+    And the todo already has a worktree of its target repository with local changes
+    When the user opens a terminal for that item
+    Then the terminal starts in the target repository's todo worktree
+    And the todo's local changes remain in that worktree
+    And the unrelated clone remains untouched
+
   @id:F-TODO-TARGET-S010
   Scenario: A targeted todo outside the dashboard resolves to the todo issue and its target
     Given the dashboard does not list the todo issue number 42 with target `owner/repo`

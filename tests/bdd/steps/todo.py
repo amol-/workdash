@@ -934,7 +934,8 @@ def _open_target_terminal(scenario_state, monkeypatch):
     session = scenario_state["api_session"]
     workdir = Path(session.config.workdir)
     scenario_state["workdir"] = workdir
-    _install_fake_git(scenario_state, monkeypatch, workdir=workdir)
+    if not scenario_state.get("real_target_git"):
+        _install_fake_git(scenario_state, monkeypatch, workdir=workdir)
     launches = []
 
     def launch(repo_path, *, zellij_session=None):
@@ -965,6 +966,64 @@ def _conflicting_clone(directory, origin, scenario_state):
     (path / "work.txt").write_text("local changes")
     scenario_state["origin_url"] = origin
     scenario_state["conflicting_clone"] = path
+
+
+@given("the todo already has a worktree of its target repository with local changes")
+def _existing_target_worktree(scenario_state, tmp_path, monkeypatch):
+    main = scenario_state["conflicting_clone"]
+    source = tmp_path / "target-source"
+    for path, origin in (
+        (main, scenario_state["origin_url"]),
+        (source, scenario_state["todo_item"].todo_target),
+    ):
+        subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+        subprocess.run(["git", "remote", "add", "origin", origin], cwd=path, check=True)
+    (source / "work.txt").write_text("original todo work")
+    subprocess.run(["git", "add", "work.txt"], cwd=source, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "initial",
+        ],
+        cwd=source,
+        check=True,
+        capture_output=True,
+    )
+    worktree = main.parent / "owner_repo_todo_110"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "wt-110", str(worktree)],
+        cwd=source,
+        check=True,
+        capture_output=True,
+    )
+    (worktree / "work.txt").write_text("local todo changes")
+    scenario_state["real_target_git"] = True
+    monkeypatch.setattr(GitHelper, "pull_ff_only", lambda self, path: None)
+
+
+@then("the todo's local changes remain in that worktree")
+def _todo_changes_remain(scenario_state):
+    assert (Path(scenario_state["worktree_path"]) / "work.txt").read_text() == "local todo changes"
+
+
+@then("the unrelated clone remains untouched")
+def _unrelated_clone_untouched(scenario_state):
+    main = scenario_state["conflicting_clone"]
+    assert (main / "work.txt").read_text() == "local changes"
+    origin = subprocess.run(
+        ["git", "remote", "get-url", "origin"], cwd=main, check=True, capture_output=True, text=True
+    )
+    assert origin.stdout.strip() == scenario_state["origin_url"]
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=main, check=True, capture_output=True, text=True
+    )
+    assert status.stdout == "?? work.txt\n"
 
 
 @then("the system reports that the local directory belongs to a different repository")

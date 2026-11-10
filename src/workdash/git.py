@@ -68,23 +68,29 @@ class GitHelper:
         if item.todo_target is not None:
             # A targeted todo works on the target's code, so its worktree is a
             # clone of the target under a name of its own.
-            return self.repository_matches(
-                candidate, item.todo_target, directory=directory
-            ) and candidate.name == self.worktree_name(item.todo_target, item.number, todo=True)
+            if not self.repository_matches(candidate, item.todo_target, directory=directory):
+                return False
+            name = self.worktree_name(item.todo_target, item.number, todo=True)
+            identity = self.repository_identity(item.todo_target)
+            if identity is not None and identity[0] == "github.com":
+                return candidate.name.lower() == name.lower()
+            return candidate.name == name
         if not self.is_worktree_root(directory or candidate):
             return False
         origin_repo = self.remote_repo(directory or candidate, "origin")
         if origin_repo is None:
             return False
         accepted_names = {
-            self.worktree_name(origin_repo, number) for number in accepted_worktree_numbers(item)
+            self.worktree_name(origin_repo, number).lower()
+            for number in accepted_worktree_numbers(item)
         }
-        if origin_repo == item.repo:
-            return candidate.name in accepted_names
+        if origin_repo.lower() == item.repo.lower():
+            return candidate.name.lower() in accepted_names
         if item.item_type == WorkItemType.PR:
-            if self.remote_repo(directory or candidate, "upstream") != item.repo:
+            upstream_repo = self.remote_repo(directory or candidate, "upstream")
+            if upstream_repo is None or upstream_repo.lower() != item.repo.lower():
                 return False
-            return candidate.name in accepted_names
+            return candidate.name.lower() in accepted_names
         return False
 
     def is_worktree_root(self, candidate: Path) -> bool:
@@ -204,7 +210,12 @@ class GitHelper:
             return False
         origin = self.remote_url(directory or candidate, "origin")
         identity = self.repository_identity(target)
-        return identity is not None and self.repository_identity(origin or "") == identity
+        origin_identity = self.repository_identity(origin or "")
+        if identity is None or origin_identity is None or identity[0] != origin_identity[0]:
+            return False
+        if identity[0] == "github.com":
+            return identity[1].lower() == origin_identity[1].lower()
+        return identity[1] == origin_identity[1]
 
     @staticmethod
     def repository_identity(target: str) -> tuple[str, str] | None:
