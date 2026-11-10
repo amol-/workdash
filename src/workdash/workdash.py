@@ -55,6 +55,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "info",
         "ready",
         "dispatch",
+        "autodispatch",
+        "autodispatch-stop",
         "analyze",
         "code",
         "read",
@@ -249,6 +251,23 @@ class WorkdashCommands:
             _print_code_result(result)
             print(f"Action: {result['action']}")
             print(f"Reasons: {', '.join(result['reasons'])}")
+        return 0
+
+    def autodispatch_cli(
+        self, *, target: str, agent: str | None, group: str | None, stop: bool, json_output: bool
+    ) -> int:
+        payload = {"id": target} if stop else {"scope": target, "group": group, "agent": agent}
+        try:
+            result = self._client.request("autodispatch_stop" if stop else "autodispatch", payload)
+        except WorkdashControlError as error:
+            _print_control_error(error)
+            return 1
+        if json_output:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        else:
+            print(
+                f"Autodispatch {result['id']}: {result['status']} ({result['scope']}, {result['group']})"
+            )
         return 0
 
     def todo_cli(
@@ -478,6 +497,14 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             group=options.group,
             json_output=options.json_output,
         )
+    if options.command in {"autodispatch", "autodispatch-stop"}:
+        return commands.autodispatch_cli(
+            target=options.target or "",
+            agent=options.agent,
+            group=options.group,
+            stop=options.command == "autodispatch-stop",
+            json_output=options.json_output,
+        )
     if options.command == "analyze":
         return commands.analyze_cli(
             target=options.target or "",
@@ -705,6 +732,20 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         default=argparse.SUPPRESS,
         help="Emit machine-readable JSON.",
     )
+    autodispatch_parser = subparsers.add_parser(
+        "autodispatch", help="Start a sequence of ready work."
+    )
+    autodispatch_parser.add_argument("target", metavar="SCOPE")
+    autodispatch_parser.add_argument("--group", required=True, help="Zellij tab for agents.")
+    autodispatch_parser.add_argument("--agent", help="Coding agent to launch.")
+    autodispatch_stop_parser = subparsers.add_parser(
+        "autodispatch-stop", help="Stop an autodispatch session."
+    )
+    autodispatch_stop_parser.add_argument("target", metavar="SESSION_ID")
+    for session_parser in (autodispatch_parser, autodispatch_stop_parser):
+        session_parser.add_argument(
+            "--json", dest="json_output", action="store_true", default=argparse.SUPPRESS
+        )
     todo_parser = subparsers.add_parser(
         "todo",
         help="Capture a todo in the configured todo repository.",
@@ -782,6 +823,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         info_parser,
         ready_parser,
         dispatch_parser,
+        autodispatch_parser,
+        autodispatch_stop_parser,
         analyze_parser,
         code_parser,
         terminal_parser,
@@ -825,6 +868,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         "info",
         "ready",
         "dispatch",
+        "autodispatch",
+        "autodispatch-stop",
         "analyze",
         "code",
         "terminal",
@@ -1014,6 +1059,12 @@ def _print_terminal_result(result: dict[str, object]) -> None:
 def _print_pane_info(info: dict[str, object]) -> None:
     print(f"Session: {info['session']}")
     panes = info["panes"]
+    for entry in info.get("autodispatch_sessions", []):
+        print(
+            f"Autodispatch {entry['id']} {entry['status']} group={entry['group']} scope={entry['scope']} item={entry['current_item'] or '-'} elapsed={entry['elapsed_seconds']}s"
+        )
+        if entry.get("error"):
+            print(f"  Error: {entry['error']}")
     if not panes:
         print("No Workdash-owned panes found.")
         return

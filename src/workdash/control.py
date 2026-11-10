@@ -11,8 +11,10 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Callable, Collection, Sequence
 from contextlib import ExitStack
+from datetime import UTC, datetime
 from http import HTTPStatus
 from ipaddress import IPv4Address, ip_address
 from pathlib import Path
@@ -60,6 +62,7 @@ SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 _ITEM_REFERENCE_RE = re.compile(
     r"^(?P<repo>[^#\s]+)#(?:(?P<label>ISSUE|PR|REVIEW|CHECK)-(?P<todo>WT)?)?(?P<number>\d+)$"
 )
+_AUTODISPATCH_POLL_SECONDS = 5.0
 # Zellij lists a new pane shortly after creating it; a launched agent whose pane
 # is still missing after these checks is reported as unconfirmed.
 _LAUNCH_VISIBILITY_CHECKS = 10
@@ -122,6 +125,8 @@ class WorkdashSession:
         # Normalized worktree path -> monotonic deadline of an unconfirmed agent launch.
         self._unconfirmed_launches: dict[str, float] = {}
         self.autoclose = AutocloseSupervisor(config=config, lock=self._lock)
+        self._autodispatch_lock = threading.RLock()
+        self._autodispatch: dict[str, _AutodispatchSession] = {}
 
     def list_items(self, *, refresh: bool = False) -> dict[str, object]:
         """Return the dashboard items currently known to the shared session."""
@@ -146,12 +151,14 @@ class WorkdashSession:
                 status=HTTPStatus.CONFLICT,
             )
         with self._lock:
-            return _pane_info_payload(
+            result = _pane_info_payload(
                 self.zellij_session,
                 self.config.workdir,
                 self.work_items,
                 include_all_panes=include_all_panes,
             )
+        result["autodispatch_sessions"] = self.autodispatch_sessions()
+        return result
 
     def show_config(self) -> dict[str, object]:
         """Return configured automation choices visible to local API clients."""
@@ -656,6 +663,46 @@ class WorkdashSession:
             ]
         return unclaimed
 
+    def start_autodispatch(
+        self, *, scope: str, group: str, agent: str | None = None
+    ) -> dict[str, object]:
+        """Start an independent server-owned sequence of dispatches."""
+        if (
+            not isinstance(scope, str)
+            or not scope.strip()
+            or not isinstance(group, str)
+            or not group.strip()
+        ):
+            raise WorkdashControlError(
+                "bad_request",
+                "Scope and group must be non-empty strings.",
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        entry = _AutodispatchSession(self, scope.strip(), group.strip(), agent)
+        with self._autodispatch_lock:
+            self._autodispatch[entry.id] = entry
+            entry.thread.start()
+        return entry.snapshot()
+
+    def autodispatch_sessions(self) -> list[dict[str, object]]:
+        with self._autodispatch_lock:
+            return [entry.snapshot() for entry in self._autodispatch.values()]
+
+    def stop_autodispatch(self, session_id: str) -> dict[str, object]:
+        with self._autodispatch_lock:
+            entry = self._autodispatch.get(session_id)
+            if entry is None:
+                raise WorkdashControlError(
+                    "not_found", "Autodispatch session not found.", status=HTTPStatus.NOT_FOUND
+                )
+            entry.stop()
+            return entry.snapshot()
+
+    def stop_autodispatch_sessions(self) -> None:
+        with self._autodispatch_lock:
+            for entry in self._autodispatch.values():
+                entry.stop()
+
     def dispatch_once(
         self, *, scope: str, agent: str | None = None, group: str | None = None
     ) -> dict[str, object]:
@@ -869,6 +916,74 @@ class WorkdashSession:
         focus_zellij_pane(self.zellij_session, pane_id)
 
 
+class _AutodispatchSession:
+    """One independently running sequence of supervised dispatches."""
+
+    def __init__(self, owner: WorkdashSession, scope: str, group: str, agent: str | None):
+        self.owner, self.scope, self.group, self.agent = owner, scope, group, agent
+        self.id = uuid.uuid4().hex
+        self.started_at = datetime.now(UTC).isoformat()
+        self.started = time.monotonic()
+        self.ended: float | None = None
+        self.status = "running"
+        self.current_item: str | None = None
+        self.error: str | None = None
+        self.event = threading.Event()
+        self.lock = threading.Lock()
+        self.thread = threading.Thread(target=self.run, name=f"autodispatch-{self.id}", daemon=True)
+
+    def snapshot(self) -> dict[str, object]:
+        with self.lock:
+            return {
+                "id": self.id,
+                "scope": self.scope,
+                "group": self.group,
+                "agent": self.agent,
+                "started_at": self.started_at,
+                "elapsed_seconds": int((self.ended or time.monotonic()) - self.started),
+                "current_item": self.current_item,
+                "status": self.status,
+                "error": self.error,
+            }
+
+    def stop(self) -> None:
+        with self.lock:
+            self.event.set()
+            if self.status == "running":
+                self.status = "stopped"
+                self.ended = time.monotonic()
+
+    def run(self) -> None:
+        try:
+            while not self.event.is_set():
+                result = self.owner.dispatch_once(
+                    scope=self.scope, group=self.group, agent=self.agent
+                )
+                with self.lock:
+                    if self.event.is_set():
+                        return
+                    if result["status"] == "no_ready_task":
+                        self.status = "finished"
+                        self.current_item = None
+                        self.ended = time.monotonic()
+                        return
+                    self.current_item = str(result["item_id"])
+                while not self.event.wait(_AUTODISPATCH_POLL_SECONDS):
+                    panes = load_zellij_panes(str(result["session"]))
+                    if not any(
+                        _format_pane_id(pane.get("id")) == result["pane_id"]
+                        and pane.get("is_plugin") is not True
+                        for pane in panes
+                    ):
+                        break
+        except Exception as error:
+            with self.lock:
+                if not self.event.is_set():
+                    self.status = "failed"
+                    self.error = str(error)
+                    self.ended = time.monotonic()
+
+
 class WorkdashControlServer:
     """Background HTTP listeners for a server-backed Workdash session."""
 
@@ -917,6 +1032,7 @@ class WorkdashControlServer:
         self._session.autoclose.start()
 
     def stop(self) -> None:
+        self._session.stop_autodispatch_sessions()
         self._session.autoclose.stop()
         for httpd in self._httpds[: len(self._threads)]:
             httpd.shutdown()
@@ -1225,6 +1341,26 @@ def _make_turbogears_app(session: WorkdashSession):
                     agent=_optional_text(payload, "agent"),
                     **({"group": _required_text(payload, "group")} if "group" in payload else {}),
                 ),
+            )
+
+        @expose("json")
+        def autodispatch(self):
+            return _handle_json_request(
+                request,
+                response,
+                lambda payload: self._session.start_autodispatch(
+                    scope=_required_text(payload, "scope"),
+                    group=_required_text(payload, "group"),
+                    agent=_optional_text(payload, "agent"),
+                ),
+            )
+
+        @expose("json")
+        def autodispatch_stop(self):
+            return _handle_json_request(
+                request,
+                response,
+                lambda payload: self._session.stop_autodispatch(_required_text(payload, "id")),
             )
 
         @expose("json")

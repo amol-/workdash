@@ -153,6 +153,8 @@ workdash list --json         # list items as machine-readable JSON
 workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
 workdash ready SCOPE [--json]   # list the GitHub work ready to be picked up next
 workdash dispatch SCOPE [--agent NAME] [--group NAME] [--host HOST] [--json]  # launch one ready issue
+workdash autodispatch SCOPE --group NAME [--agent NAME] [--host HOST] [--json]  # start a session
+workdash autodispatch-stop SESSION_ID [--host HOST] [--json]  # stop a session
 workdash analyze ITEM [--agent NAME] [--json]  # analyze an item
 workdash code ITEM [--agent NAME] [--group NAME] [--autoclose] [--json]  # launch an autonomous coding agent, or report the running one
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
@@ -293,7 +295,7 @@ and use the same peer access checks as the control API.
 Allowed clients can execute dashboard actions; do not expose it to untrusted
 networks or treat the IP allowlist as authentication or encryption.
 
-Client commands `list`, `info`, `ready`, `dispatch`, `analyze`, `code`, `terminal`, `todo`, `read`,
+Client commands `list`, `info`, `ready`, `dispatch`, `autodispatch`, `autodispatch-stop`, `analyze`, `code`, `terminal`, `todo`, `read`,
 `write`, and `close` accept `--host HOST[:PORT]` before or after the command.
 Set `WORKDASH_HOST` to an IPv4 address or IPv4 address:port to select the default
 for both server and clients; omitted ports use 8765. An explicit `--host` replaces
@@ -391,6 +393,29 @@ accepts `POST /api/v0/dispatch` with `scope` and optional `agent` and `group`.
 Dispatch returns immediately; it does not wait for completion, create
 sub-issues, merge, or run a scheduler. Supervision is subject to the limitations
 in *Autoclose supervision* below.
+
+## Autodispatch sessions
+
+`workdash autodispatch SCOPE --group NAME [--agent NAME]` starts a server-owned
+session and returns its ID immediately. It uses the same scopes, readiness,
+parent behavior, claims and agent supervision as `dispatch`. The group is
+required. Each session dispatches one issue at a time, waits for its pane to
+disappear, then dispatches again until no work is ready. It does not merge PRs.
+Multiple independent sessions can run at once; there are no retry or skip limits.
+
+`workdash info` and `workdash info --json` report sessions, their current task,
+status, elapsed time and any failure. The TUI shows running sessions above the
+work table without blocking interaction. Stop a session with
+`workdash autodispatch-stop SESSION_ID`; stopping does not close its agent pane.
+A dispatch already in progress may still finish launching its pane after stopping.
+Pane disappearance is not proof that the work was merged or completed.
+If dispatch or the pane lookup fails, the session fails rather than treating the
+failure as an empty result. Sessions live only in the server process. After a
+restart, start another session on the same scope; readiness is checked afresh.
+
+The API accepts `POST /api/v0/autodispatch` with `scope`, required `group` and
+optional `agent`, and `POST /api/v0/autodispatch_stop` with the session `id`.
+Session state is included in `POST /api/v0/info` as `autodispatch_sessions`.
 
 ## Info command
 

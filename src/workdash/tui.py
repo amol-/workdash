@@ -334,6 +334,11 @@ class WorkdashApp(App[None]):
 
     TITLE = "workdash"
     DEFAULT_CSS = """
+        #autodispatch-progress {
+            display: none;
+            height: auto;
+            padding: 0 1;
+        }
         #status-footer {
             dock: bottom;
             height: 1;
@@ -411,15 +416,33 @@ class WorkdashApp(App[None]):
         self._status_message = "Ready."
 
     def compose(self) -> ComposeResult:
+        yield Static("", id="autodispatch-progress", markup=False)
         yield DataTable(id="work-items")
         yield Static(self._status_message, id="status-footer", markup=False)
         yield Static(self._command_hint(), id="command-footer")
 
     def on_mount(self) -> None:
         if self._session is not None:
+            self.set_interval(1, self._update_autodispatch_progress)
+            self._update_autodispatch_progress()
             self.refresh_from_session()
         else:
             self._render_table()
+
+    def _update_autodispatch_progress(self) -> None:
+        if self._session is None:
+            return
+        entries = [
+            entry for entry in self._session.autodispatch_sessions() if entry["status"] == "running"
+        ]
+        widget = self.query_one("#autodispatch-progress", Static)
+        widget.display = bool(entries)
+        widget.update(
+            "\n".join(
+                f"{entry['group']}  {entry['scope']}  {entry['current_item'] or '-'}  {entry['elapsed_seconds']}s"
+                for entry in entries
+            )
+        )
 
     def refresh_from_session(self) -> None:
         if self._session is None:

@@ -23,6 +23,7 @@ from .steps import (
 from .steps import (
     autoclose as _autoclose,
 )
+from .steps import autodispatch as _autodispatch
 from .steps import (
     branchdiff as _branchdiff,
 )
@@ -73,6 +74,7 @@ for _step_module in (
     _common,
     _api,
     _autoclose,
+    _autodispatch,
     _branchdiff,
     _cli_orchestration,
     _triage,
@@ -94,6 +96,7 @@ for _step_module in (
             "scenario_state",
             "work_items",
             "valid_config",
+            "autodispatch_state",
             "config_path",
         }:
             globals()[_name] = getattr(_step_module, _name)
