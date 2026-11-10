@@ -668,7 +668,9 @@ def _another_review_requested_pr_has_direct_request(
         GitHubClient, "list_open_authored_prs", lambda self, login, progress_callback=None: []
     )
     monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
-    monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient, "list_open_assigned_issues", lambda self, login, progress_callback=None: []
+    )
     monkeypatch.setattr(
         GitHubClient,
         "list_recent_tracked_items",
@@ -984,7 +986,7 @@ def _pull_request_and_issue_are_open_work(
     monkeypatch.setattr(
         GitHubClient,
         "list_open_assigned_issues",
-        lambda self, login: [
+        lambda self, login, progress_callback=None: [
             {
                 "id": f"ISSUE-{issue_number}",
                 "repo": "owner/repo",
@@ -1845,6 +1847,18 @@ def _install_gh_fetch_fake(
                 return result
         if is_linked_issues_query(command):
             return linked_issues_response(command)
+        if command[:3] == ["gh", "api", "graphql"] and "subIssuesSummary" in command[4]:
+            number = re.search(r"issue\(number: (\d+)\)", command[4]).group(1)
+            result = responses.get(("issue", number))
+            if isinstance(result, Exception):
+                raise result
+            if result is not None:
+                node = json.loads(result.stdout)
+                node["subIssuesSummary"] = {"total": 0}
+                payload = {"data": {"repository": {"issue": node}}}
+                return subprocess.CompletedProcess(
+                    command, 0, stdout=json.dumps(payload), stderr=""
+                )
         raise AssertionError(f"Unexpected gh command in include scenario: {command}")
 
     monkeypatch.setattr(gc.subprocess, "run", fake_run)
@@ -1864,7 +1878,9 @@ def _install_empty_github_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda self, login, progress_callback=None: [],
     )
     monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
-    monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient, "list_open_assigned_issues", lambda self, login, progress_callback=None: []
+    )
     monkeypatch.setattr(
         GitHubClient,
         "list_recent_tracked_items",
@@ -2039,7 +2055,9 @@ def _seed_three_included_items(
         ],
     )
     monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
-    monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient, "list_open_assigned_issues", lambda self, login, progress_callback=None: []
+    )
     monkeypatch.setattr(
         GitHubClient,
         "list_open_todo_issues",
@@ -2737,3 +2755,41 @@ def _reports_no_matches(scenario_state: dict[str, Any], work_items: list[WorkIte
     assert scenario_state["search_status"] == (f"Search matched 0 of {len(work_items)} item(s)."), (
         scenario_state["search_status"]
     )
+
+
+@given("the dashboard contains a parent issue, a leaf issue, and a pull request")
+def _container_rows(work_items: list[WorkItem]) -> None:
+    parent = make_work_item(number=1, title="Example parent")
+    parent.has_sub_issues = True
+    work_items.extend(
+        [
+            parent,
+            make_work_item(number=2, title="Example leaf"),
+            make_work_item(
+                number=3,
+                title="Example pull",
+                item_type=WorkItemType.PR,
+                kind=WorkItemKind.TRACKED_PR,
+            ),
+        ]
+    )
+
+
+@when("the user filters the dashboard to those items")
+def _filter_container_rows() -> None:
+    pass
+
+
+@then("the parent issue title is visually distinguished from the leaf and pull request titles")
+def _container_title_style(work_items: list[WorkItem]) -> None:
+    async def interactions(app, pilot):
+        await _apply_search_filter(app, pilot, "Example")
+        table = app.query_one("#work-items", DataTable)
+        parent = table.get_row("issue:owner/repo#1")[2]
+        leaf = table.get_row("issue:owner/repo#2")[2]
+        pull = table.get_row("pr:owner/repo#3")[2]
+        assert isinstance(parent, Text) and parent.style == "bold cyan"
+        assert not isinstance(leaf, Text) or leaf.style != "bold cyan"
+        assert not isinstance(pull, Text) or pull.style != "bold cyan"
+
+    run_app(work_items=work_items, interactions=interactions)

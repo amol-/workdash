@@ -1,5 +1,6 @@
 import json
 import subprocess
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -955,6 +956,7 @@ def _tracked_issue_node(
 ) -> dict[str, object]:
     node: dict[str, object] = {
         "__typename": "Issue",
+        "subIssuesSummary": {"total": 0},
         "id": f"ISSUE-{number}",
         "number": number,
         "title": f"issue {number}",
@@ -988,7 +990,7 @@ def test_list_recent_tracked_items_returns_issue_and_pr_results(
             "... on PullRequest { id number title url createdAt updatedAt state "
             "repository { nameWithOwner } } "
             "... on Issue { id number title url createdAt updatedAt state "
-            "repository { nameWithOwner } } } } }"
+            "repository { nameWithOwner } subIssuesSummary { total } } } } }"
         )
         return subprocess.CompletedProcess(
             args=command,
@@ -997,7 +999,10 @@ def test_list_recent_tracked_items_returns_issue_and_pr_results(
                 {
                     "data": {
                         "tracked": _tracked_search_response(
-                            [_tracked_issue_node(1), _tracked_pr_node(2)]
+                            [
+                                _tracked_issue_node(1, subIssuesSummary={"total": 3}),
+                                _tracked_pr_node(2),
+                            ]
                         )
                     }
                 }
@@ -1020,6 +1025,7 @@ def test_list_recent_tracked_items_returns_issue_and_pr_results(
             "created_at": "2026-02-20T00:00:00Z",
             "updated_at": "2026-02-21T00:00:00Z",
             "is_pull_request": False,
+            "sub_issue_total": 3,
         },
         {
             "id": "PR-2",
@@ -1302,46 +1308,31 @@ def test_list_open_assigned_issues_returns_assigned_issues(
     def fake_run(*args, **kwargs):
         command = args[0]
         captured["command"] = command
+        node = _tracked_issue_node(5)
+        node["subIssuesSummary"] = {"total": 2}
         return subprocess.CompletedProcess(
             args=command,
             returncode=0,
-            stdout=(
-                '[{"id":"I1","number":5,"title":"assigned issue","url":"https://example.com/issues/5",'
-                '"createdAt":"2026-02-01T00:00:00Z","updatedAt":"2026-02-02T00:00:00Z",'
-                '"repository":{"name":"repo","nameWithOwner":"owner/repo"}}]'
-            ),
+            stdout=json.dumps({"data": {"assigned": {"nodes": [node]}}}),
             stderr="",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     result = GitHubClient().list_open_assigned_issues("testuser")
-
-    assert captured["command"] == [
-        "gh",
-        "search",
-        "issues",
-        "--assignee",
-        "testuser",
-        "--state",
-        "open",
-        "--sort",
-        "updated",
-        "--order",
-        "desc",
-        "--limit",
-        "100",
-        "--json",
-        "id,number,title,url,createdAt,updatedAt,repository",
-    ]
+    command = captured["command"]
+    assert command[:3] == ["gh", "api", "graphql"]
+    assert "is:issue is:open assignee:testuser sort:updated-desc" in command[4]
+    assert "subIssuesSummary { total }" in command[4]
     assert result == [
         {
-            "id": "I1",
-            "repo": "owner/repo",
+            "id": "ISSUE-5",
+            "repo": "owner/repo-one",
             "number": 5,
-            "title": "assigned issue",
+            "title": "issue 5",
             "url": "https://example.com/issues/5",
-            "created_at": "2026-02-01T00:00:00Z",
-            "updated_at": "2026-02-02T00:00:00Z",
+            "created_at": "2026-02-20T00:00:00Z",
+            "updated_at": "2026-02-21T00:00:00Z",
+            "sub_issue_total": 2,
         }
     ]
 
@@ -1515,6 +1506,7 @@ def test_list_open_todo_issues_reads_targets_from_issue_body_metadata(
     captured: dict[str, object] = {}
     payload = [
         {
+            "subIssuesSummary": {"total": 0},
             "id": "I110",
             "number": 110,
             "title": "Fix the flaky test",
@@ -1524,6 +1516,7 @@ def test_list_open_todo_issues_reads_targets_from_issue_body_metadata(
             "body": '```json\n{"workdash_todo_version": 1, "target": "owner/repo"}\n```\n',
         },
         {
+            "subIssuesSummary": {"total": 0},
             "id": "I111",
             "number": 111,
             "title": "Buy milk",
@@ -1536,26 +1529,22 @@ def test_list_open_todo_issues_reads_targets_from_issue_body_metadata(
 
     def fake_run(*args, **kwargs):
         captured["command"] = args[0]
-        return subprocess.CompletedProcess(args[0], 0, stdout=json.dumps(payload), stderr="")
+        return subprocess.CompletedProcess(
+            args[0],
+            0,
+            stdout=json.dumps({"data": {"repository": {"issues": {"nodes": payload}}}}),
+            stderr="",
+        )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     result = GitHubClient().list_open_todo_issues("testuser/todos")
 
-    assert captured["command"] == [
-        "gh",
-        "issue",
-        "list",
-        "--repo",
-        "testuser/todos",
-        "--state",
-        "open",
-        "--label",
-        "workdash-todo",
-        "--limit",
-        "100",
-        "--json",
-        "id,number,title,url,createdAt,updatedAt,body",
-    ]
+    assert captured["command"][:3] == ["gh", "api", "graphql"]
+    query = captured["command"][-1]
+    assert 'labels: ["workdash-todo"]' in query
+    assert "states: OPEN" in query
+    assert "field: CREATED_AT, direction: DESC" in query
+    assert "subIssuesSummary { total } body" in query
     assert [(issue["repo"], issue["number"], issue["target"]) for issue in result] == [
         ("testuser/todos", 110, "owner/repo"),
         ("testuser/todos", 111, None),
@@ -1569,7 +1558,10 @@ def test_list_open_todo_issues_rejects_a_malformed_gh_payload(
         subprocess,
         "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
-            args[0], 0, stdout='[{"number":"110"}]', stderr=""
+            args[0],
+            0,
+            stdout='{"data":{"repository":{"issues":{"nodes":[{"number":"110"}]}}}}',
+            stderr="",
         ),
     )
 
@@ -1687,7 +1679,9 @@ def test_fetch_item_reads_the_todo_target_only_for_todo_repository_issues(
     monkeypatch: pytest.MonkeyPatch, repo: str, expected_target: str | None
 ) -> None:
     body = '```json\n{"workdash_todo_version": 1, "target": "owner/repo"}\n```\n'
-    payload = _item_lookup_payload(repo, {"__typename": "Issue", "body": body})
+    payload = _item_lookup_payload(
+        repo, {"__typename": "Issue", "body": body, "subIssuesSummary": {"total": 0}}
+    )
     monkeypatch.setattr(subprocess, "run", _item_lookup_run(payload))
 
     item = GitHubClient().fetch_item(
@@ -1728,3 +1722,360 @@ def test_fetch_item_raises_on_other_github_errors(monkeypatch: pytest.MonkeyPatc
         GitHubClient().fetch_item(
             "owner/repo", 5, github_username="testuser", todo_repository="testuser/todos"
         )
+
+
+def test_assigned_graphql_search_keeps_resolved_open_issues_and_rejects_other_errors(monkeypatch):
+    node = _tracked_issue_node(1, subIssuesSummary={"total": 0})
+    payload = {
+        "data": {"assigned": {"nodes": [node, _tracked_issue_node(2, state="CLOSED")]}},
+        "errors": [{"message": "Could not resolve to a Repository"}],
+    }
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+    result = GitHubClient().list_open_assigned_issues("user")
+    assert [(item["number"], item["sub_issue_total"]) for item in result] == [(1, 0)]
+    payload["errors"] = [{"message": "API rate limit exceeded"}]
+    with pytest.raises(RuntimeError, match="API rate limit exceeded"):
+        GitHubClient().list_open_assigned_issues("user")
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["Could not resolve to a Repository", "Resource protected by organization SAML enforcement."],
+)
+def test_assigned_search_skips_only_null_nodes_with_inaccessible_errors(monkeypatch, message):
+    payload = {
+        "data": {"assigned": {"nodes": [_tracked_issue_node(1), None]}},
+        "errors": [{"message": message, "path": ["assigned", "nodes", 1]}],
+    }
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+    assert [item["number"] for item in GitHubClient().list_open_assigned_issues("user")] == [1]
+    payload["errors"][0]["path"] = ["assigned", "nodes", 0]
+    with pytest.raises(RuntimeError):
+        GitHubClient().list_open_assigned_issues("user")
+    payload["errors"] = []
+    with pytest.raises(RuntimeError):
+        GitHubClient().list_open_assigned_issues("user")
+
+
+def test_graphql_todos_include_target_and_sub_issue_count(monkeypatch):
+    node = {
+        "id": "I1",
+        "number": 1,
+        "title": "Todo",
+        "url": "https://github.com/u/t/issues/1",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-02T00:00:00Z",
+        "state": "OPEN",
+        "repository": {"nameWithOwner": "u/t"},
+        "subIssuesSummary": {"total": 2},
+        "body": '```json\n{"workdash_todo_version": 1, "target": "o/r"}\n```',
+    }
+    payload = {"data": {"repository": {"issues": {"nodes": [node]}}}}
+    monkeypatch.setattr(subprocess, "run", _item_lookup_run(payload))
+    item = GitHubClient().list_open_todo_issues("u/t")[0]
+    assert (item["target"], item["sub_issue_total"]) == ("o/r", 2)
+
+
+def test_direct_issue_includes_native_sub_issue_count(monkeypatch):
+    payload = _item_lookup_payload(
+        "owner/repo", {"__typename": "Issue", "subIssuesSummary": {"total": 2}}
+    )
+    run = MagicMock(side_effect=_item_lookup_run(payload))
+    monkeypatch.setattr(subprocess, "run", run)
+    item = GitHubClient().fetch_item("owner/repo", 5, github_username="u", todo_repository="u/t")
+    assert item is not None and item.has_sub_issues and item.sub_issue_total == 2
+    query = run.call_args.args[0][4]
+    issue_selection = query.split("... on Issue {", 1)[1].split("... on PullRequest", 1)[0]
+    assert "subIssuesSummary { total }" in issue_selection
+
+
+def test_included_issue_uses_graphql_and_retains_sub_issue_count(monkeypatch):
+    payload = _item_lookup_payload(
+        "owner/repo", {"__typename": "Issue", "state": "OPEN", "subIssuesSummary": {"total": 2}}
+    )
+    payload["data"]["repository"]["issue"] = payload["data"]["repository"].pop("issueOrPullRequest")
+    run = MagicMock(side_effect=_item_lookup_run(payload))
+    monkeypatch.setattr(subprocess, "run", run)
+    parsed = parse_github_item_url("https://github.com/owner/repo/issues/5")
+    item = GitHubClient().fetch_item_by_url(parsed, "u")
+    assert item is not None and item.included and item.has_sub_issues
+    query = run.call_args.args[0][4]
+    issue_selection = query.split("issue(number: 5) {", 1)[1]
+    assert "subIssuesSummary { total }" in issue_selection
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ({"data": {"repository": {"issue": {"state": "CLOSED"}}}}, "none"),
+        (
+            {
+                "data": {"repository": None},
+                "errors": [{"message": "Could not resolve to a Repository"}],
+            },
+            "none",
+        ),
+        ({"data": {"repository": {"issue": {"state": "OPEN"}}}}, "transient"),
+        ({"errors": [{"message": "API rate limit exceeded"}]}, "transient"),
+        ({"errors": [{"message": "Bad credentials"}]}, "none"),
+        (
+            {
+                "errors": [
+                    {"message": "missing", "type": "NOT_FOUND", "path": ["repository", "issue"]}
+                ]
+            },
+            "none",
+        ),
+        (
+            {
+                "errors": [
+                    {
+                        "message": "missing",
+                        "type": "NOT_FOUND",
+                        "path": ["repository", "issue", "title"],
+                    }
+                ]
+            },
+            "transient",
+        ),
+        (
+            {
+                "errors": [
+                    {"message": "Could not resolve to a Repository"},
+                    {"message": "Bad credentials"},
+                ]
+            },
+            "none",
+        ),
+    ],
+)
+def test_included_issue_graphql_preserves_drop_and_retry_semantics(monkeypatch, response, expected):
+    monkeypatch.setattr(subprocess, "run", _item_lookup_run(response))
+    parsed = parse_github_item_url("https://github.com/owner/repo/issues/5")
+    if expected == "transient":
+        with pytest.raises(TransientFetchError):
+            GitHubClient().fetch_item_by_url(parsed, "u")
+    else:
+        assert GitHubClient().fetch_item_by_url(parsed, "u") is None
+
+
+def test_included_issue_permanent_command_error_is_dropped(monkeypatch):
+    def fail(command, **kwargs):
+        raise subprocess.CalledProcessError(1, command, stderr="Bad credentials")
+
+    monkeypatch.setattr(subprocess, "run", fail)
+    parsed = parse_github_item_url("https://github.com/owner/repo/issues/5")
+    assert GitHubClient().fetch_item_by_url(parsed, "u") is None
+
+
+def test_todo_rejects_invalid_native_sub_issue_count(monkeypatch):
+    node = {
+        "id": "I1",
+        "number": 1,
+        "title": "Todo",
+        "url": "https://github.com/u/t/issues/1",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-02T00:00:00Z",
+        "subIssuesSummary": {"total": "invalid"},
+    }
+    payload = {"data": {"repository": {"issues": {"nodes": [node]}}}}
+    monkeypatch.setattr(subprocess, "run", _item_lookup_run(payload))
+    with pytest.raises(RuntimeError, match="subIssuesSummary"):
+        GitHubClient().list_open_todo_issues("u/t")
+
+
+def test_direct_issue_rejects_invalid_sub_issue_count(monkeypatch):
+    payload = _item_lookup_payload(
+        "owner/repo", {"__typename": "Issue", "subIssuesSummary": {"total": "bad"}}
+    )
+    monkeypatch.setattr(subprocess, "run", _item_lookup_run(payload))
+    with pytest.raises(RuntimeError, match="subIssuesSummary"):
+        GitHubClient().fetch_item("owner/repo", 5, github_username="u", todo_repository="u/t")
+
+
+@pytest.mark.parametrize("source", ["assigned", "tracked", "todo", "direct", "included"])
+@pytest.mark.parametrize("message", ["summary unavailable", "API rate limit exceeded"])
+def test_summary_partial_error_keeps_issue_without_highlight(monkeypatch, source, message):
+    node = _tracked_issue_node(5, subIssuesSummary=None, body="", author={"login": "u"})
+    if source in ("assigned", "tracked"):
+        path = [source, "nodes", 0]
+        payload = {"data": {source: {"nodes": [node]}}}
+    elif source == "todo":
+        path = ["repository", "issues", "nodes", 0]
+        payload = {"data": {"repository": {"issues": {"nodes": [node]}}}}
+    else:
+        key = "issueOrPullRequest" if source == "direct" else "issue"
+        path = ["repository", key]
+        payload = {"data": {"repository": {"nameWithOwner": "owner/repo", key: node}}}
+    payload["errors"] = [{"message": message, "path": path + ["subIssuesSummary"]}]
+    calls = []
+
+    def failed_gh(command, **kwargs):
+        calls.append(command)
+        raise subprocess.CalledProcessError(
+            1, command, output=json.dumps(payload), stderr=f"GraphQL: {message}"
+        )
+
+    monkeypatch.setattr(subprocess, "run", failed_gh)
+    monkeypatch.setattr("workdash.github_client.time.sleep", lambda _: None)
+    client = GitHubClient()
+    if source == "assigned":
+        item = client.list_open_assigned_issues("u")[0]
+    elif source == "tracked":
+        item = client.list_recent_tracked_items("repo:owner/repo")[0]
+    elif source == "todo":
+        item = client.list_open_todo_issues("u/t")[0]
+    elif source == "direct":
+        item = client.fetch_item("owner/repo", 5, github_username="u", todo_repository="u/t")
+    else:
+        item = client.fetch_item_by_url(
+            parse_github_item_url("https://github.com/owner/repo/issues/5"), "u"
+        )
+    assert item is not None
+    assert len(calls) == 1
+    if isinstance(item, dict):
+        assert item.get("sub_issue_total") is None
+    else:
+        assert item.sub_issue_total is None and not item.has_sub_issues
+
+
+@pytest.mark.parametrize("source", ["assigned", "tracked"])
+@pytest.mark.parametrize(
+    "message",
+    ["Resource protected by organization SAML enforcement", "Could not resolve to a Repository"],
+)
+def test_search_keeps_results_with_transient_summary_and_inaccessible_item(
+    monkeypatch, source, message
+):
+    node = _tracked_issue_node(5, subIssuesSummary=None)
+    payload = {
+        "data": {source: {"nodes": [node]}},
+        "errors": [
+            {
+                "message": "API rate limit exceeded",
+                "path": [source, "nodes", 0, "subIssuesSummary"],
+            },
+            {"message": message, "path": [source, "nodes", 1]},
+        ],
+    }
+    calls = []
+
+    def failed_gh(command, **kwargs):
+        calls.append(command)
+        raise subprocess.CalledProcessError(
+            1,
+            command,
+            output=json.dumps(payload),
+            stderr=f"GraphQL: API rate limit exceeded; {message}",
+        )
+
+    monkeypatch.setattr(subprocess, "run", failed_gh)
+    monkeypatch.setattr("workdash.github_client.time.sleep", lambda _: None)
+    client = GitHubClient()
+    items = (
+        client.list_open_assigned_issues("u")
+        if source == "assigned"
+        else client.list_recent_tracked_items("repo:owner/repo")
+    )
+    assert [(item["number"], item.get("sub_issue_total")) for item in items] == [(5, None)]
+    assert len(calls) == 1
+
+
+def test_search_does_not_accept_fatal_error_with_transient_summary_and_denial(monkeypatch):
+    payload = {
+        "data": {"tracked": {"nodes": [_tracked_issue_node(5, subIssuesSummary=None)]}},
+        "errors": [
+            {
+                "message": "API rate limit exceeded",
+                "path": ["tracked", "nodes", 0, "subIssuesSummary"],
+            },
+            {"message": "Resource protected by organization SAML enforcement"},
+            {"message": "Unexpected query failure", "path": ["tracked"]},
+        ],
+    }
+
+    def failed_gh(command, **kwargs):
+        raise subprocess.CalledProcessError(
+            1, command, output=json.dumps(payload), stderr="GraphQL: API rate limit exceeded"
+        )
+
+    monkeypatch.setattr(subprocess, "run", failed_gh)
+    monkeypatch.setattr("workdash.github_client.time.sleep", lambda _: None)
+    with pytest.raises(TransientFetchError):
+        GitHubClient().list_recent_tracked_items("repo:owner/repo")
+
+
+@pytest.mark.parametrize("other_error", [False, True])
+def test_transient_partial_response_retries_without_usable_summary_only_data(
+    monkeypatch, other_error
+):
+    node = _tracked_issue_node(5, subIssuesSummary=None)
+    errors = [
+        {"message": "API rate limit exceeded", "path": ["tracked", "nodes", 0, "subIssuesSummary"]}
+    ]
+    if other_error:
+        errors.append(
+            {"message": "API rate limit exceeded", "path": ["tracked", "nodes", 0, "title"]}
+        )
+    payload = {"data": {"tracked": {"nodes": [node]}} if other_error else None, "errors": errors}
+    calls = []
+
+    def failed_gh(command, **kwargs):
+        calls.append(command)
+        raise subprocess.CalledProcessError(
+            1, command, output=json.dumps(payload), stderr="GraphQL: API rate limit exceeded"
+        )
+
+    monkeypatch.setattr(subprocess, "run", failed_gh)
+    monkeypatch.setattr("workdash.github_client.time.sleep", lambda _: None)
+    with pytest.raises(TransientFetchError):
+        GitHubClient().list_recent_tracked_items("repo:owner/repo")
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("source", ["assigned", "tracked"])
+@pytest.mark.parametrize("summary", [None, {}, {"total": None}, {"total": True}, {"total": -1}])
+def test_search_rejects_missing_or_invalid_issue_summary(monkeypatch, source, summary):
+    node = _tracked_issue_node(1, subIssuesSummary=summary)
+    payload = {"data": {source: {"nodes": [node]}}}
+    monkeypatch.setattr(subprocess, "run", _item_lookup_run(payload))
+    client = GitHubClient()
+    with pytest.raises(RuntimeError, match="subIssuesSummary"):
+        if source == "assigned":
+            client.list_open_assigned_issues("u")
+        else:
+            client.list_recent_tracked_items("repo:owner/repo")
+
+
+def test_summary_error_does_not_hide_another_search_error_or_other_issue_failure(monkeypatch):
+    nodes = [
+        _tracked_issue_node(1, subIssuesSummary=None),
+        _tracked_issue_node(2, subIssuesSummary=None),
+    ]
+    payload = {
+        "data": {"tracked": {"nodes": nodes}},
+        "errors": [
+            {"message": "summary unavailable", "path": ["tracked", "nodes", 0, "subIssuesSummary"]}
+        ],
+    }
+    monkeypatch.setattr(subprocess, "run", _item_lookup_run(payload, failed=True))
+    with pytest.raises(RuntimeError, match="subIssuesSummary"):
+        GitHubClient().list_recent_tracked_items("repo:owner/repo")
+    nodes[1]["subIssuesSummary"] = {"total": 0}
+    payload["errors"].append(
+        {"message": "unexpected failure", "path": ["tracked", "nodes", 1, "title"]}
+    )
+    with pytest.raises(RuntimeError, match="unexpected failure"):
+        GitHubClient().list_recent_tracked_items("repo:owner/repo")

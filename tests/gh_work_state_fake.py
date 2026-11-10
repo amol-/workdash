@@ -271,6 +271,7 @@ class FakeGitHub:
         if ref in self.issues:
             node = {"__typename": "Issue", **_identity(self._issue_node(ref))}
             node["body"] = self.issues[ref]["body"]
+            node["subIssuesSummary"] = self._issue_node(ref)["subIssuesSummary"]
         elif ref in self.pull_requests:
             node = {"__typename": "PullRequest", **_identity(self._pull_request_node(ref))}
             node["closingIssuesReferences"] = {

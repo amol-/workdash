@@ -18,6 +18,7 @@ Feature: List work items
     - An authored pull request's Type column is prefixed with a one-character symbol for the latest CI result GitHub reports on it: passing, failing, or still running. Every other row, including issues and pull requests the user did not author, is prefixed with a blank instead so the Type labels stay aligned.
     - An authored pull request's Type column carries a second one-character symbol for its review state, independent of the CI symbol: a green checkmark when the review is approved, a red cross when changes are requested, a yellow question mark when a reviewer is requested but has not yet reviewed, a blue question mark when a reviewer left review comments nobody has resolved yet without approving or requesting changes, and a blank when neither applies. Approval and requested changes win over unresolved comments.
     - The Repo column is capped at 15 characters, leaving the title more room. A longer repository is truncated on its left so the repository name itself stays readable, and the leading character is replaced with an ellipsis to show the owner was cut.
+    - Issue titles with native sub-issues are visually distinguished, whether the sub-issues are open or closed; leaf issues and pull requests retain their usual style. This also applies to filtered and newly included items. If sub-issue information is unavailable, issues remain listed with their usual title style.
     - Entries are sorted by last update, most recently updated first.
     - The same GitHub issue or pull request never appears twice in the list.
     - When the same item qualifies for multiple sources, the strongest relationship wins in this order: authored pull request, then REVIEW pull request, then assigned issue, then plain tracked item.
@@ -25,6 +26,12 @@ Feature: List work items
     - When no work items match, the system reports that no work items were found.
     - Scrolling the TUI list keeps each visual row tied to the same GitHub issue or pull request; included items may show a "+" type suffix but must not create stale, duplicate, or empty visual rows.
     - The dashboard is keyboard-driven: it never captures mouse input, so mouse behavior (text selection, wheel scrolling) stays with the terminal.
+
+  @id:F-TRIAGE-LIST-S010
+  Scenario: Issues with sub-issues stand out in the dashboard
+    Given the dashboard contains a parent issue, a leaf issue, and a pull request
+    When the user filters the dashboard to those items
+    Then the parent issue title is visually distinguished from the leaf and pull request titles
 
   @id:F-TRIAGE-LIST-S001
   Scenario: Authored, review, assigned, and tracked items appear together

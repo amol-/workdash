@@ -49,6 +49,8 @@ class WorkItem:
     review_requested: bool = False
     has_unresolved_comments: bool = False
     closing_issue_numbers: tuple[int, ...] = ()
+    has_sub_issues: bool = False
+    sub_issue_total: int | None = None
 
 
 _TYPE_LABELS = {

@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TypedDict, cast
+from typing import NotRequired, TypedDict, cast
 from urllib.parse import urlsplit
 
 from .models import WorkItem, WorkItemKind, WorkItemType
@@ -89,16 +89,13 @@ _UNRESOLVED_THREADS_SELECTION = "reviewThreads(first: 100) { nodes { isResolved 
 _CLOSING_ISSUES_SELECTION = (
     "closingIssuesReferences(first: 5) { nodes { number repository { nameWithOwner } } }"
 )
-_ISSUE_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,repository"
-# `gh issue list` runs inside one repository and cannot report `repository`,
-# but it can report the body that carries the todo target metadata.
-_TODO_ISSUE_JSON_FIELDS = "id,number,title,url,createdAt,updatedAt,body"
 # `search` returns a union type, so PullRequest and Issue each need their own
 # inline fragment even though they ask for the same fields.
+_ISSUE_FIELDS = "id number title url createdAt updatedAt state repository { nameWithOwner } subIssuesSummary { total }"
 _RECENT_TRACKED_ITEM_FRAGMENT = (
     "__typename "
     "... on PullRequest { id number title url createdAt updatedAt state repository { nameWithOwner } } "
-    "... on Issue { id number title url createdAt updatedAt state repository { nameWithOwner } }"
+    f"... on Issue {{ {_ISSUE_FIELDS} }}"
 )
 _TRANSIENT_RETRIES = 2
 _TRANSIENT_RETRY_DELAY_SECONDS = 2.0
@@ -232,6 +229,39 @@ def _is_unresolvable_item_error(message: str) -> bool:
     return "could not resolve to a" in message.lower()
 
 
+def _accept_summary_error(error: object, data: object, prefix: list[object]) -> bool:
+    """Accept only an error attached to an existing issue's summary field."""
+    if not isinstance(error, dict) or not isinstance(error.get("message"), str):
+        return False
+    path = error.get("path")
+    if not isinstance(path, list) or path[: len(prefix)] != prefix:
+        return False
+    if path[len(prefix) :] not in (["subIssuesSummary"], ["subIssuesSummary", "total"]):
+        return False
+    node = data
+    try:
+        for part in prefix:
+            node = node[part]
+    except (KeyError, IndexError, TypeError):
+        return False
+    if not isinstance(node, dict) or node.get("__typename", "Issue") != "Issue":
+        return False
+    summary = node.get("subIssuesSummary")
+    if summary is None or (isinstance(summary, dict) and summary.get("total") is None):
+        node["_summary_error"] = True
+    return True
+
+
+def _sub_issue_total(node: dict, error: Exception) -> int | None:
+    summary = node.get("subIssuesSummary")
+    total = summary.get("total") if isinstance(summary, dict) else None
+    if total is None and node.get("_summary_error"):
+        return None
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise error
+    return total
+
+
 def _recent_tracked_items_selection(query: str) -> str:
     """Build the single-page ``search`` selection for the tracked-items GraphQL query."""
 
@@ -293,6 +323,35 @@ def _run_gh_command_with_retry(
         except subprocess.CalledProcessError as error:
             stderr = (error.stderr or "").strip()
             transient = _is_transient_gh_error(error)
+            if transient and tolerate_partial_response and error.stdout:
+                try:
+                    payload = json.loads(error.stdout)
+                except json.JSONDecodeError:
+                    payload = None
+                if isinstance(payload, dict) and isinstance(payload.get("errors"), list):
+                    errors = payload["errors"]
+                    summary_errors = 0
+                    for entry in errors:
+                        path = entry.get("path") if isinstance(entry, dict) else None
+                        message = entry.get("message") if isinstance(entry, dict) else None
+                        if (
+                            isinstance(path, list)
+                            and "subIssuesSummary" in path
+                            and _accept_summary_error(
+                                entry, payload.get("data"), path[: path.index("subIssuesSummary")]
+                            )
+                        ):
+                            summary_errors += 1
+                        elif not isinstance(message, str) or not (
+                            _is_repository_authorization_error(message)
+                            or _is_unresolvable_item_error(message)
+                        ):
+                            break
+                    else:
+                        if summary_errors:
+                            return subprocess.CompletedProcess(
+                                command, error.returncode, stdout=error.stdout, stderr=stderr
+                            )
             if attempt < _TRANSIENT_RETRIES and transient:
                 delay = (
                     _RATE_LIMIT_RETRY_DELAY_SECONDS
@@ -365,6 +424,7 @@ class RecentTrackedItem(TypedDict):
     created_at: str
     updated_at: str
     is_pull_request: bool
+    sub_issue_total: NotRequired[int | None]
 
 
 class AssignedIssue(TypedDict):
@@ -377,6 +437,7 @@ class AssignedIssue(TypedDict):
     url: str
     created_at: str
     updated_at: str
+    sub_issue_total: NotRequired[int | None]
 
 
 class TodoIssue(TypedDict):
@@ -390,6 +451,7 @@ class TodoIssue(TypedDict):
     created_at: str
     updated_at: str
     target: str | None
+    sub_issue_total: NotRequired[int | None]
 
 
 def parse_github_datetime(timestamp: str) -> datetime:
@@ -450,6 +512,7 @@ def normalize_recent_tracked_item(item: RecentTrackedItem) -> WorkItem:
         created_at=parse_github_datetime(item["created_at"]),
         updated_at=parse_github_datetime(item["updated_at"]),
         url=item["url"],
+        sub_issue_total=item.get("sub_issue_total"),
     )
 
 
@@ -465,6 +528,7 @@ def normalize_assigned_issue(item: AssignedIssue) -> WorkItem:
         created_at=parse_github_datetime(item["created_at"]),
         updated_at=parse_github_datetime(item["updated_at"]),
         url=item["url"],
+        sub_issue_total=item.get("sub_issue_total"),
     )
 
 
@@ -485,6 +549,7 @@ def normalize_todo_issue(item: TodoIssue) -> WorkItem:
         updated_at=parse_github_datetime(item["updated_at"]),
         url=item["url"],
         todo_target=item["target"],
+        sub_issue_total=item.get("sub_issue_total"),
     )
 
 
@@ -537,14 +602,20 @@ def merge_normalized_work_items(
     for item in primary_items:
         identity = (item.item_type, item.repo, item.number)
         if identity in indexes_by_identity:
+            existing = merged_items[indexes_by_identity[identity]]
+            if existing.sub_issue_total is None:
+                existing.sub_issue_total = item.sub_issue_total
             continue
         indexes_by_identity[identity] = len(merged_items)
         merged_items.append(item)
     for item in secondary_items:
         identity = (item.item_type, item.repo, item.number)
         if identity in indexes_by_identity:
+            existing = merged_items[indexes_by_identity[identity]]
             if item.included:
-                merged_items[indexes_by_identity[identity]].included = True
+                existing.included = True
+            if existing.sub_issue_total is None:
+                existing.sub_issue_total = item.sub_issue_total
             continue
         indexes_by_identity[identity] = len(merged_items)
         merged_items.append(item)
@@ -635,74 +706,6 @@ class GitHubClient:
                 )
             )
         return pull_requests
-
-    @staticmethod
-    def _parse_issue_payload(
-        payload: object,
-        *,
-        context: str,
-    ) -> list[AssignedIssue]:
-        if not isinstance(payload, list):
-            raise RuntimeError(f"Invalid gh {context} issue payload: expected a JSON array.")
-
-        issues: list[AssignedIssue] = []
-        for index, entry in enumerate(payload):
-            if not isinstance(entry, dict):
-                raise RuntimeError(
-                    f"Invalid gh {context} issue payload: entry {index} is not an object."
-                )
-            repository = entry.get("repository")
-            if not isinstance(repository, dict):
-                raise RuntimeError(
-                    f"Invalid gh {context} issue payload: entry {index} has missing or invalid repository."
-                )
-            repository_name_with_owner = repository.get("nameWithOwner")
-            if not isinstance(repository_name_with_owner, str) or not repository_name_with_owner:
-                raise RuntimeError(
-                    f"Invalid gh {context} issue payload: entry {index} has missing or invalid repository.nameWithOwner."
-                )
-            record_id = entry.get("id")
-            if not isinstance(record_id, (str, int)):
-                raise RuntimeError(
-                    f"Invalid gh {context} issue payload: entry {index} has missing or invalid id."
-                )
-            number = entry.get("number")
-            if not isinstance(number, int):
-                raise RuntimeError(
-                    f"Invalid gh {context} issue payload: entry {index} has missing or invalid number."
-                )
-            title = entry.get("title")
-            if not isinstance(title, str):
-                raise RuntimeError(
-                    f"Invalid gh {context} issue payload: entry {index} has missing or invalid title."
-                )
-            url = entry.get("url")
-            if not isinstance(url, str):
-                raise RuntimeError(
-                    f"Invalid gh {context} issue payload: entry {index} has missing or invalid url."
-                )
-            created_at = entry.get("createdAt")
-            if not isinstance(created_at, str):
-                raise RuntimeError(
-                    f"Invalid gh {context} issue payload: entry {index} has missing or invalid createdAt."
-                )
-            updated_at = entry.get("updatedAt")
-            if not isinstance(updated_at, str):
-                raise RuntimeError(
-                    f"Invalid gh {context} issue payload: entry {index} has missing or invalid updatedAt."
-                )
-            issues.append(
-                AssignedIssue(
-                    id=record_id,
-                    repo=repository_name_with_owner,
-                    number=number,
-                    title=title,
-                    url=url,
-                    created_at=created_at,
-                    updated_at=updated_at,
-                )
-            )
-        return issues
 
     def list_open_authored_prs(
         self,
@@ -925,34 +928,29 @@ class GitHubClient:
     def list_open_assigned_issues(
         self,
         assignee_login: str,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> list[AssignedIssue]:
         """List open issues assigned to the given user, most recently updated first."""
 
+        report_progress = (
+            progress_callback if progress_callback is not None else _noop_progress_callback
+        )
+        query = f"is:issue is:open assignee:{assignee_login} sort:updated-desc"
         command = [
             "gh",
-            "search",
-            "issues",
-            "--assignee",
-            assignee_login,
-            "--state",
-            "open",
-            "--sort",
-            "updated",
-            "--order",
-            "desc",
-            "--limit",
-            str(_ITEMS_FETCH_LIMIT),
-            "--json",
-            _ISSUE_JSON_FIELDS,
+            "api",
+            "graphql",
+            "-f",
+            (
+                f"query={{ assigned: search(type: ISSUE, first: {_ITEMS_FETCH_LIMIT}, "
+                f"query: {json.dumps(query)}) {{ nodes {{ __typename ... on Issue {{ {_ISSUE_FIELDS} }} }} }} }}"
+            ),
         ]
         completed = _run_gh_command_with_retry(
             command,
-            not_found_message=(
-                "Failed to run gh assigned issue search: gh CLI is not installed or not on PATH."
-            ),
-            failure_message_prefix=(
-                f"Failed to list open assigned issues for {assignee_login!r} via gh"
-            ),
+            not_found_message="Failed to run gh assigned issue search: gh CLI is not installed or not on PATH.",
+            failure_message_prefix=f"Failed to list open assigned issues for {assignee_login!r} via gh",
+            tolerate_partial_response=True,
         )
         try:
             payload = json.loads(completed.stdout)
@@ -960,10 +958,60 @@ class GitHubClient:
             raise RuntimeError(
                 f"Failed to parse gh assigned issue JSON for {assignee_login!r}: {error.msg}"
             ) from error
-        return self._parse_issue_payload(
-            payload,
-            context=f"assigned for {assignee_login!r}",
+        data = payload.get("data") if isinstance(payload, dict) else None
+        assigned = data.get("assigned") if isinstance(data, dict) else None
+        errors = payload.get("errors") if isinstance(payload, dict) else None
+        inaccessible_nodes = set()
+        if isinstance(errors, list) and errors:
+            for entry in errors:
+                message = entry.get("message") if isinstance(entry, dict) else None
+                path = entry.get("path") if isinstance(entry, dict) else None
+                if (
+                    isinstance(path, list)
+                    and len(path) > 2
+                    and path[:2] == ["assigned", "nodes"]
+                    and type(path[2]) is int
+                    and path[2] >= 0
+                    and _accept_summary_error(entry, data, path[:3])
+                ):
+                    report_progress(f"Warning: sub-issue lookup failed: {message}")
+                    continue
+                if not isinstance(message, str) or not (
+                    _is_repository_authorization_error(message)
+                    or _is_unresolvable_item_error(message)
+                ):
+                    raise RuntimeError(
+                        f"Failed to list open assigned issues for {assignee_login!r} via gh: {message or 'unknown error'}"
+                    )
+                if (
+                    isinstance(path, list)
+                    and len(path) > 2
+                    and path[:2] == ["assigned", "nodes"]
+                    and type(path[2]) is int
+                    and path[2] >= 0
+                ):
+                    inaccessible_nodes.add(path[2])
+        nodes = assigned.get("nodes") if isinstance(assigned, dict) else None
+        if not isinstance(nodes, list):
+            if errors and isinstance(data, dict):
+                nodes = []
+            else:
+                raise RuntimeError(
+                    f"Failed to list open assigned issues for {assignee_login!r} via gh: response contained no data"
+                )
+        items = self._parse_recent_tracked_item_payload(
+            [
+                _recent_tracked_item_node_entry(node)
+                for index, node in enumerate(nodes)
+                if node is not None or index not in inaccessible_nodes
+            ],
+            repositories=[assignee_login],
         )
+        return [
+            cast(AssignedIssue, {k: v for k, v in item.items() if k != "is_pull_request"})
+            for item in items
+            if not item["is_pull_request"]
+        ]
 
     def list_open_todo_issues(
         self,
@@ -979,20 +1027,15 @@ class GitHubClient:
         report_progress = (
             progress_callback if progress_callback is not None else _noop_progress_callback
         )
+        owner, _, name = todo_repository.partition("/")
         command = [
             "gh",
-            "issue",
-            "list",
-            "--repo",
-            todo_repository,
-            "--state",
-            "open",
-            "--label",
-            TODO_LABEL,
-            "--limit",
-            str(_ITEMS_FETCH_LIMIT),
-            "--json",
-            _TODO_ISSUE_JSON_FIELDS,
+            "api",
+            "graphql",
+            "-f",
+            f"query={{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+            f"{{ issues(first: {_ITEMS_FETCH_LIMIT}, states: OPEN, labels: [{json.dumps(TODO_LABEL)}], "
+            f"orderBy: {{field: CREATED_AT, direction: DESC}}) {{ nodes {{ {_ISSUE_FIELDS} body }} }} }} }}",
         ]
         try:
             completed = _run_gh_command_with_retry(
@@ -1003,6 +1046,7 @@ class GitHubClient:
                 failure_message_prefix=(
                     f"Failed to list open todo issues in {todo_repository} via gh"
                 ),
+                tolerate_partial_response=True,
             )
         except TransientFetchError:
             # A retry-exhausted failure says nothing about the repository existing.
@@ -1018,7 +1062,32 @@ class GitHubClient:
             raise RuntimeError(
                 f"Failed to parse gh todo issue JSON for {todo_repository}: {error.msg}"
             ) from error
-        return self._parse_todo_issue_payload(payload, todo_repository=todo_repository)
+        data = payload.get("data") if isinstance(payload, dict) else None
+        errors = payload.get("errors") if isinstance(payload, dict) else None
+        for entry in errors if isinstance(errors, list) else []:
+            message = entry.get("message") if isinstance(entry, dict) else None
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if (
+                isinstance(path, list)
+                and len(path) > 3
+                and path[:3] == ["repository", "issues", "nodes"]
+                and type(path[3]) is int
+                and path[3] >= 0
+                and _accept_summary_error(entry, data, path[:4])
+            ):
+                report_progress(f"Warning: sub-issue lookup failed: {message}")
+                continue
+            if isinstance(message, str) and is_missing_repository_error(message):
+                report_progress(f"Todo repository {todo_repository} does not exist yet.")
+                return []
+            raise RuntimeError(
+                f"Failed to list open todo issues in {todo_repository} via gh: {message or 'unknown error'}"
+            )
+        data = payload.get("data") if isinstance(payload, dict) else None
+        repository = data.get("repository") if isinstance(data, dict) else None
+        issues = repository.get("issues") if isinstance(repository, dict) else None
+        nodes = issues.get("nodes") if isinstance(issues, dict) else None
+        return self._parse_todo_issue_payload(nodes, todo_repository=todo_repository)
 
     @staticmethod
     def _parse_todo_issue_payload(
@@ -1046,6 +1115,9 @@ class GitHubClient:
                 if not isinstance(value, expected_types):
                     raise RuntimeError(f"{context}: entry {index} has missing or invalid {key}.")
                 values[key] = value
+            total = _sub_issue_total(
+                entry, RuntimeError(f"{context}: entry {index} has invalid subIssuesSummary.total.")
+            )
             issues.append(
                 TodoIssue(
                     id=cast(str | int, values["id"]),
@@ -1056,6 +1128,7 @@ class GitHubClient:
                     created_at=cast(str, values["createdAt"]),
                     updated_at=cast(str, values["updatedAt"]),
                     target=todo_target_from_body(entry.get("body")),
+                    sub_issue_total=total,
                 )
             )
         return issues
@@ -1115,6 +1188,17 @@ class GitHubClient:
         if isinstance(errors, list) and errors:
             for entry in errors:
                 message = entry.get("message") if isinstance(entry, dict) else None
+                path = entry.get("path") if isinstance(entry, dict) else None
+                if (
+                    isinstance(path, list)
+                    and len(path) > 2
+                    and path[:2] == ["tracked", "nodes"]
+                    and type(path[2]) is int
+                    and path[2] >= 0
+                    and _accept_summary_error(entry, data, path[:3])
+                ):
+                    report_progress(f"Warning: sub-issue lookup failed: {message}")
+                    continue
                 if not isinstance(message, str) or not (
                     _is_repository_authorization_error(message)
                     or _is_unresolvable_item_error(message)
@@ -1187,18 +1271,27 @@ class GitHubClient:
                 )
             if cast(str, values["state"]).upper() != "OPEN":
                 continue
-            items.append(
-                RecentTrackedItem(
-                    id=cast(str | int, values["id"]),
-                    repo=repository_name_with_owner,
-                    number=cast(int, values["number"]),
-                    title=cast(str, values["title"]),
-                    url=cast(str, values["url"]),
-                    created_at=cast(str, values["createdAt"]),
-                    updated_at=cast(str, values["updatedAt"]),
-                    is_pull_request=cast(bool, values["isPullRequest"]),
+            if values["isPullRequest"]:
+                summary = entry.get("subIssuesSummary")
+                total = summary.get("total") if isinstance(summary, dict) else None
+            else:
+                total = _sub_issue_total(
+                    entry,
+                    RuntimeError(f"{context}: entry {index} has invalid subIssuesSummary.total."),
                 )
+            item = RecentTrackedItem(
+                id=cast(str | int, values["id"]),
+                repo=repository_name_with_owner,
+                number=cast(int, values["number"]),
+                title=cast(str, values["title"]),
+                url=cast(str, values["url"]),
+                created_at=cast(str, values["createdAt"]),
+                updated_at=cast(str, values["updatedAt"]),
+                is_pull_request=cast(bool, values["isPullRequest"]),
             )
+            if total is not None:
+                item["sub_issue_total"] = total
+            items.append(item)
         return items
 
     def fetch_linked_issues(
@@ -1349,7 +1442,7 @@ class GitHubClient:
             "-f",
             f"query={{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
             f"{{ nameWithOwner issueOrPullRequest(number: {number}) {{ __typename "
-            f"... on Issue {{ {fields} body }} "
+            f"... on Issue {{ {_ISSUE_FIELDS} body }} "
             f"... on PullRequest {{ {fields} {_CLOSING_ISSUES_SELECTION} }} }} }} }}",
         ]
         failure_message_prefix = f"Failed to look up {subject} via gh"
@@ -1367,9 +1460,12 @@ class GitHubClient:
             raise RuntimeError(
                 f"Failed to parse gh item JSON for {subject}: {error.msg}"
             ) from error
+        data = payload.get("data") if isinstance(payload, dict) else None
         errors = payload.get("errors") if isinstance(payload, dict) else None
         for entry in errors if isinstance(errors, list) else []:
             message = entry.get("message") if isinstance(entry, dict) else None
+            if _accept_summary_error(entry, data, ["repository", "issueOrPullRequest"]):
+                continue
             if isinstance(message, str) and (
                 _is_unresolvable_item_error(message) or _is_repository_authorization_error(message)
             ):
@@ -1393,6 +1489,9 @@ class GitHubClient:
         ):
             raise RuntimeError(f"{context}: missing or invalid fields.")
         if typename == "Issue":
+            total = _sub_issue_total(
+                node, RuntimeError(f"{context}: invalid subIssuesSummary.total.")
+            )
             return WorkItem(
                 kind=WorkItemKind.TRACKED_ISSUE,
                 item_type=WorkItemType.ISSUE,
@@ -1402,6 +1501,8 @@ class GitHubClient:
                 created_at=parse_github_datetime(created_at),
                 updated_at=parse_github_datetime(updated_at),
                 url=url,
+                sub_issue_total=total,
+                has_sub_issues=(total or 0) > 0,
                 todo_target=todo_target_from_body(node.get("body"))
                 if repo.lower() == todo_repository.lower()
                 else None,
@@ -1432,7 +1533,10 @@ class GitHubClient:
         )
 
     def fetch_item_by_url(
-        self, parsed_url: ParsedGitHubItemURL, github_username: str
+        self,
+        parsed_url: ParsedGitHubItemURL,
+        github_username: str,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> WorkItem | None:
         """Fetch a single issue or pull request described by ``parsed_url``.
 
@@ -1441,12 +1545,105 @@ class GitHubClient:
         to be looked at.
 
         Returns a ``WorkItem`` when the item is OPEN. Returns ``None`` for
-        permanent-drop cases: state != OPEN (closed/merged) or a permanent
-        ``gh`` error (e.g. 404 not-found). Raises ``TransientFetchError``
-        on retryable failures (5xx, 429, common network errors, missing
-        ``gh`` binary, malformed JSON) so callers can retain the URL for
-        a later retry.
+        permanent-drop cases: state != OPEN (closed/merged), an inaccessible
+        item, or a permanent ``gh`` command error. Raises ``TransientFetchError``
+        when the URL should be retained for a later retry.
         """
+
+        if parsed_url.item_type == WorkItemType.ISSUE:
+            owner, _, name = parsed_url.repo.partition("/")
+            command = [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                f"query={{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+                f"{{ issue(number: {parsed_url.number}) {{ {_ISSUE_FIELDS} }} }} }}",
+            ]
+            try:
+                completed = _run_gh_command_with_retry(
+                    command,
+                    not_found_message="Failed to run gh item view: gh CLI is not installed or not on PATH.",
+                    failure_message_prefix=f"Failed to view issue {parsed_url.repo}#{parsed_url.number} via gh",
+                    tolerate_partial_response=True,
+                )
+            except TransientFetchError:
+                raise
+            except RuntimeError:
+                return None
+            try:
+                payload = json.loads(completed.stdout)
+                if not isinstance(payload, dict):
+                    raise ValueError("expected an object")
+                errors = payload.get("errors", [])
+                if errors:
+                    if not isinstance(errors, list) or any(
+                        not isinstance(error, dict) or not isinstance(error.get("message"), str)
+                        for error in errors
+                    ):
+                        raise ValueError("invalid errors")
+                    remaining_errors = []
+                    for error in errors:
+                        if _accept_summary_error(
+                            error, payload.get("data"), ["repository", "issue"]
+                        ):
+                            if progress_callback is not None:
+                                progress_callback(
+                                    f"Warning: sub-issue lookup failed: {error['message']}"
+                                )
+                        else:
+                            remaining_errors.append(error)
+                    errors = remaining_errors
+                    if errors:
+                        if all(
+                            "bad credentials" in error["message"].lower()
+                            or _is_repository_authorization_error(error["message"])
+                            or error.get("path") in (None, ["repository"], ["repository", "issue"])
+                            and (
+                                error.get("type") == "NOT_FOUND"
+                                or error["message"].startswith(
+                                    (
+                                        "Could not resolve to a Repository",
+                                        "Could not resolve to an Issue",
+                                    )
+                                )
+                            )
+                            for error in errors
+                        ):
+                            return None
+                        raise ValueError(" ".join(error["message"] for error in errors))
+                repository = payload["data"]["repository"]
+                if repository is None or repository["issue"] is None:
+                    return None
+                node = repository["issue"]
+                state = node["state"]
+                if not isinstance(state, str):
+                    raise ValueError("invalid state")
+                if state.upper() != "OPEN":
+                    return None
+                total = _sub_issue_total(node, ValueError("invalid sub-issue count"))
+                title, url, created, updated = (
+                    node[key] for key in ("title", "url", "createdAt", "updatedAt")
+                )
+                if not all(isinstance(value, str) for value in (title, url, created, updated)):
+                    raise ValueError("missing required fields")
+                return WorkItem(
+                    kind=WorkItemKind.TRACKED_ISSUE,
+                    item_type=WorkItemType.ISSUE,
+                    repo=parsed_url.repo,
+                    number=parsed_url.number,
+                    title=title,
+                    url=url,
+                    created_at=parse_github_datetime(created),
+                    updated_at=parse_github_datetime(updated),
+                    included=True,
+                    sub_issue_total=total,
+                    has_sub_issues=(total or 0) > 0,
+                )
+            except (ValueError, KeyError, TypeError, RuntimeError) as error:
+                raise TransientFetchError(
+                    f"Malformed gh view payload for {parsed_url.repo}#{parsed_url.number}: {error}"
+                ) from error
 
         kind_subcommand = "pr" if parsed_url.item_type == WorkItemType.PR else "issue"
         command = [

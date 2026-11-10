@@ -12,6 +12,8 @@ Feature: Refresh work items
     - After a successful refresh, the TUI reports how many work items are now shown.
     - A refresh clears any active search filter.
     - If a refresh fails, the TUI closes the progress overlay, reports the failure details, and keeps the previous list visible.
+    - If an issue's sub-issue information cannot be loaded, refresh keeps the issue and reports a warning.
+    - Inaccessible assigned issues do not prevent other accessible work from being refreshed.
 
   @id:F-TRIAGE-REFRESH-S001
   Scenario: Interactive refresh updates the dashboard in place

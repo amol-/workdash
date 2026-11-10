@@ -488,12 +488,13 @@ class WorkdashApp(App[None]):
             age_days = max(0, (self._now_utc - _to_utc(item.created_at)).days)
             update_days = max(0, (self._now_utc - _to_utc(item.updated_at)).days)
             title = self._title_with_suggestion_marker(item)
+            container = item.item_type == WorkItemType.ISSUE and item.has_sub_issues
             row_key = f"{item.item_type.value}:{item.repo}#{item.number}"
             if _to_utc(item.updated_at) >= cutoff:
                 table.add_row(
                     _type_column(item, bold=True),
                     Text(_repo_column(item), style="bold"),
-                    Text(title, style="bold"),
+                    Text(title, style="bold cyan" if container else "bold"),
                     Text(f"{age_days}d", style="bold"),
                     Text(f"{update_days}d", style="bold"),
                     key=row_key,
@@ -502,7 +503,7 @@ class WorkdashApp(App[None]):
                 table.add_row(
                     _type_column(item, bold=False),
                     _repo_column(item),
-                    title,
+                    Text(title, style="bold cyan") if container else title,
                     f"{age_days}d",
                     f"{update_days}d",
                     key=row_key,

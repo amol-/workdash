@@ -129,7 +129,9 @@ class WorkdashBackend:
         report_progress(f"Fetched {len(reviewed_pull_requests)} open reviewed pull request(s).")
 
         report_progress("Fetching open assigned issues...")
-        assigned_issues = self.github_client.list_open_assigned_issues(github_username)
+        assigned_issues = self.github_client.list_open_assigned_issues(
+            github_username, progress_callback=report_progress
+        )
         report_progress(f"Fetched {len(assigned_issues)} open assigned issue(s).")
 
         report_progress("Fetching tracked issues and pull requests...")
@@ -208,6 +210,9 @@ class WorkdashBackend:
                 if item.item_type != WorkItemType.ISSUE
                 or (item.repo, item.number) not in hidden_issues
             ]
+        for item in merged_items:
+            if item.item_type == WorkItemType.ISSUE:
+                item.has_sub_issues = (item.sub_issue_total or 0) > 0
         report_progress(
             f"Merged {len(merged_items)} unique work item(s); loading cached analyses..."
         )
@@ -236,7 +241,9 @@ class WorkdashBackend:
             if parsed is None:
                 continue
             try:
-                item = self.github_client.fetch_item_by_url(parsed, self.config.github_username)
+                item = self.github_client.fetch_item_by_url(
+                    parsed, self.config.github_username, progress_callback=report_progress
+                )
             except TransientFetchError:
                 survivors.append(parsed.canonical_url)
                 continue
