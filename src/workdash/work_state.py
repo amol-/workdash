@@ -39,42 +39,65 @@ _PENDING_RESULTS = {"PENDING", "EXPECTED"}
 _SUCCESSFUL_RESULTS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 _PAGE_INFO = "pageInfo { hasNextPage endCursor }"
 # Nobody closes an issue with more than a handful of pull requests.
-_ISSUE_FRAGMENT = (
-    "fragment ReadyIssue on Issue { number title url createdAt updatedAt state body "
-    "repository { nameWithOwner } subIssuesSummary { total } "
-    "issueDependenciesSummary { blockedBy } "
-    "closedByPullRequestsReferences(first: 10) "
-    "{ nodes { number state repository { nameWithOwner } } } }"
-)
+_ISSUE_FRAGMENT = """
+fragment ReadyIssue on Issue {
+    number title url createdAt updatedAt state body
+    repository { nameWithOwner }
+    subIssuesSummary { total }
+    issueDependenciesSummary { blockedBy }
+    closedByPullRequestsReferences(first: 10) {
+        nodes { number state repository { nameWithOwner } }
+    }
+}
+"""
 _ACTOR = "author { __typename login }"
-_CHECK_CONTEXTS = (
-    f"{_PAGE_INFO} nodes {{ __typename "
-    "... on CheckRun { name status conclusion startedAt "
-    "checkSuite { app { slug } workflowRun { workflow { databaseId } } } } "
-    "... on StatusContext { context state } }"
-)
+_CHECK_CONTEXTS = f"""
+    {_PAGE_INFO}
+    nodes {{
+        __typename
+        ... on CheckRun {{
+            name status conclusion startedAt
+            checkSuite {{ app {{ slug }} workflowRun {{ workflow {{ databaseId }} }} }}
+        }}
+        ... on StatusContext {{ context state }}
+    }}
+"""
 # Per pull request feedback lists stop at GitHub's page size of 100, keeping the
 # newest entries: only feedback after the latest push can be actionable.
-_PULL_REQUEST_FRAGMENT = (
-    f"fragment ReadyPullRequest on PullRequest {{ number title url createdAt updatedAt state "
-    f"{_ACTOR} repository {{ nameWithOwner }} headRefOid mergedAt maintainerCanModify "
-    "headRef { refUpdateRule { viewerCanPush } } "
-    "headRepository { viewerPermission } baseRepository { viewerPermission } "
-    "baseRefName baseRef { target { oid } } mergeable reviewDecision "
-    "closingIssuesReferences(first: 10) "
-    "{ nodes { number title url createdAt updatedAt body repository { nameWithOwner } } } "
-    "commits(last: 1) { nodes { commit { oid committedDate statusCheckRollup { "
-    f"contexts(first: 100) {{ {_CHECK_CONTEXTS} }} }} }} }} }} "
-    "timelineItems(last: 1, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) "
-    "{ nodes { ... on HeadRefForcePushedEvent { createdAt afterCommit { oid } } } } "
-    "latestOpinionatedReviews(first: 100) { nodes { state url submittedAt isMinimized "
-    f"commit {{ oid }} {_ACTOR} }} }} "
-    f"reviews(last: 100) {{ nodes {{ state body url submittedAt isMinimized {_ACTOR} }} }} "
-    # A thread is judged by its latest human comment, which bots may have replied to.
-    "reviewThreads(last: 100) { nodes { isResolved isOutdated "
-    f"comments(last: 10) {{ nodes {{ url publishedAt isMinimized {_ACTOR} }} }} }} }} "
-    f"comments(last: 100) {{ nodes {{ url createdAt isMinimized {_ACTOR} }} }} }}"
-)
+_PULL_REQUEST_FRAGMENT = f"""
+fragment ReadyPullRequest on PullRequest {{
+    number title url createdAt updatedAt state
+    {_ACTOR}
+    repository {{ nameWithOwner }}
+    headRefOid mergedAt maintainerCanModify
+    headRef {{ refUpdateRule {{ viewerCanPush }} }}
+    headRepository {{ viewerPermission }}
+    baseRepository {{ viewerPermission }}
+    baseRefName baseRef {{ target {{ oid }} }} mergeable reviewDecision
+    closingIssuesReferences(first: 10) {{
+        nodes {{ number title url createdAt updatedAt body repository {{ nameWithOwner }} }}
+    }}
+    commits(last: 1) {{
+        nodes {{ commit {{
+            oid committedDate
+            statusCheckRollup {{ contexts(first: 100) {{ {_CHECK_CONTEXTS} }} }}
+        }} }}
+    }}
+    timelineItems(last: 1, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) {{
+        nodes {{ ... on HeadRefForcePushedEvent {{ createdAt afterCommit {{ oid }} }} }}
+    }}
+    latestOpinionatedReviews(first: 100) {{
+        nodes {{ state url submittedAt isMinimized commit {{ oid }} {_ACTOR} }}
+    }}
+    reviews(last: 100) {{ nodes {{ state body url submittedAt isMinimized {_ACTOR} }} }}
+    reviewThreads(last: 100) {{
+        nodes {{ isResolved isOutdated
+            comments(last: 10) {{ nodes {{ url publishedAt isMinimized {_ACTOR} }} }}
+        }}
+    }}
+    comments(last: 100) {{ nodes {{ url createdAt isMinimized {_ACTOR} }} }}
+}}
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +187,6 @@ class ReadyWork:
     """An issue ready to be worked on, with its actionable pull request if any."""
 
     item: WorkItem
-    issue: WorkItem | None
     pull_request: PullRequestWorkState | None = None
 
     @property
@@ -224,9 +246,14 @@ def find_ready_work(
                 nodes = _all_nodes(
                     repo,
                     lambda after, owner=owner, name=name: (
-                        f"query ReadyRepositoryPullRequests {{ repository(owner: {json.dumps(owner)}, "
-                        f"name: {json.dumps(name)}) {{ pullRequests(states: OPEN, first: 100, "
-                        f"after: {after}) {{ {_PAGE_INFO} nodes {{ number }} }} }} }}"
+                        f"""query ReadyRepositoryPullRequests {{
+                            repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{
+                                pullRequests(states: OPEN, first: 100, after: {after}) {{
+                                    {_PAGE_INFO}
+                                    nodes {{ number }}
+                                }}
+                            }}
+                        }}"""
                     ),
                     ("repository", "pullRequests"),
                 )
@@ -288,7 +315,7 @@ def find_ready_work(
             continue
         linked = [states[(repo.lower(), number)] for repo, number in entry.open_pull_requests]
         if not linked:
-            ready.append(ReadyWork(item=entry.item, issue=entry.item))
+            ready.append(ReadyWork(item=entry.item))
         elif all(
             state.author and state.author.lower() == github_username.lower() for state in linked
         ):
@@ -302,7 +329,7 @@ def find_ready_work(
                         state.item.number,
                     ),
                 )
-                ready.append(ReadyWork(item=entry.item, issue=entry.item, pull_request=state))
+                ready.append(ReadyWork(item=entry.item, pull_request=state))
     ready = sorted(
         ready,
         key=lambda work: (
@@ -337,21 +364,10 @@ def resolve_issue_scope(
 ) -> list[IssueWorkState]:
     """Return the issue and its native descendants with open-descendant eligibility."""
 
-    def tree(repo: str, number: int) -> dict:
-        owner, _, name = repo.partition("/")
-        # GitHub allows at most 100 sub-issues per issue.
-        data = _graphql(
-            f"query ReadyIssueTree {{ repository(owner: {json.dumps(owner)}, "
-            f"name: {json.dumps(name)}) {{ issue(number: {number}) {{ ...ReadyIssue "
-            f"subIssues(first: 100) {{ nodes {{ ...ReadyIssue }} }} }} }} }} {_ISSUE_FRAGMENT}",
-            f"{repo}#{number}",
-        )
-        return data["repository"]["issue"]
-
     with _github_payload(f"{repo}#{number}"):
         if _states is not None and (repo.lower(), number) in _states:
             return [_states[(repo.lower(), number)]]
-        root = tree(repo, number)
+        root = _issue_tree(repo, number)
         issues = []
 
         def visit(node: dict) -> bool:
@@ -367,7 +383,9 @@ def resolve_issue_scope(
                     issues.append(child_state)
                     descendant_open = child_state.has_open_descendants
                 elif child_state.has_sub_issues:
-                    descendant_open = visit(tree(child_state.item.repo, child_state.item.number))
+                    descendant_open = visit(
+                        _issue_tree(child_state.item.repo, child_state.item.number)
+                    )
                 else:
                     issues.append(child_state)
                     descendant_open = False
@@ -427,10 +445,9 @@ def work_pull_request(
     if item.item_type == WorkItemType.PR:
         candidates = [(item.repo, item.number)]
     else:
-        for entry in resolve_issue_scope(item.repo, item.number, todo_repository=todo_repository):
-            # GitHub names the repository canonically, which may differ in case from the target's.
-            if (entry.item.repo.lower(), entry.item.number) == (item.repo.lower(), item.number):
-                candidates = [*entry.open_pull_requests, *entry.merged_pull_requests]
+        with _github_payload(f"{item.repo}#{item.number}"):
+            entry = _issue_state(_issue_tree(item.repo, item.number), todo_repository)
+            candidates = [*entry.open_pull_requests, *entry.merged_pull_requests]
     if not candidates:
         return None
     states = evaluate_pull_requests(
@@ -469,6 +486,18 @@ def pull_request_states(pull_requests: Sequence[tuple[str, int]]) -> dict[tuple[
     return states
 
 
+def _issue_tree(repo: str, number: int) -> dict:
+    owner, _, name = repo.partition("/")
+    # GitHub allows at most 100 sub-issues per issue.
+    data = _graphql(
+        f"query ReadyIssueTree {{ repository(owner: {json.dumps(owner)}, "
+        f"name: {json.dumps(name)}) {{ issue(number: {number}) {{ ...ReadyIssue "
+        f"subIssues(first: 100) {{ nodes {{ ...ReadyIssue }} }} }} }} }} {_ISSUE_FRAGMENT}",
+        f"{repo}#{number}",
+    )
+    return data["repository"]["issue"]
+
+
 def _owner_repositories(owner: str) -> list[str]:
     nodes = _all_nodes(
         f"{owner}/*",
@@ -495,9 +524,15 @@ def _repository_issues(repo: str, todo_repository: str) -> list[IssueWorkState]:
     nodes = _all_nodes(
         repo,
         lambda after: (
-            f"query ReadyRepositoryIssues {{ repository(owner: {json.dumps(owner)}, "
-            f"name: {json.dumps(name)}) {{ issues(states: OPEN, first: 100, after: {after}) "
-            f"{{ {_PAGE_INFO} nodes {{ ...ReadyIssue }} }} }} }} {_ISSUE_FRAGMENT}"
+            f"""query ReadyRepositoryIssues {{
+                repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{
+                    issues(states: OPEN, first: 100, after: {after}) {{
+                        {_PAGE_INFO}
+                        nodes {{ ...ReadyIssue }}
+                    }}
+                }}
+            }}
+            {_ISSUE_FRAGMENT}"""
         ),
         ("repository", "issues"),
     )
@@ -666,10 +701,17 @@ def _ci_status(
         contexts = _all_nodes(
             f"{repo}@{head_sha}",
             lambda after: (
-                f"query ReadyCommitChecks {{ repository(owner: {json.dumps(owner)}, "
-                f"name: {json.dumps(name)}) {{ object(oid: {json.dumps(head_sha)}) "
-                "{ ... on Commit { statusCheckRollup { "
-                f"contexts(first: 100, after: {after}) {{ {_CHECK_CONTEXTS} }} }} }} }} }} }}"
+                f"""query ReadyCommitChecks {{
+                    repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{
+                        object(oid: {json.dumps(head_sha)}) {{
+                            ... on Commit {{
+                                statusCheckRollup {{
+                                    contexts(first: 100, after: {after}) {{ {_CHECK_CONTEXTS} }}
+                                }}
+                            }}
+                        }}
+                    }}
+                }}"""
             ),
             ("repository", "object", "statusCheckRollup", "contexts"),
         )

@@ -1037,7 +1037,7 @@ def _work_items_payload(
 
 
 def _ready_work_payload(work: ReadyWork) -> dict[str, object]:
-    item, issue, pull_request = work.item, work.issue, work.pull_request
+    item, pull_request = work.item, work.pull_request
     payload: dict[str, object] = {
         "id": format_work_item_id(item),
         "type": item.item_type.value,
@@ -1048,8 +1048,8 @@ def _ready_work_payload(work: ReadyWork) -> dict[str, object]:
         "created_at": item.created_at.isoformat(),
         "action": work.action,
         "reasons": list(work.reasons),
-        "issue_id": format_work_item_id(issue) if issue else None,
-        "issue_url": issue.url if issue else None,
+        "issue_id": format_work_item_id(item),
+        "issue_url": item.url,
     }
     if pull_request is not None:
         payload |= {

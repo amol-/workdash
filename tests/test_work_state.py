@@ -640,7 +640,6 @@ def test_issue_scope_follows_sub_issues_across_repositories(monkeypatch) -> None
         ("other/lib", 4, "fix_ci"),
         ("owner/repo", 5, "implement"),
     ]
-    assert (ready[0].issue.repo, ready[0].issue.number) == ("other/lib", 4)
 
 
 def test_a_ready_pull_request_is_listed_once_for_eligible_issues_in_scope(monkeypatch) -> None:
