@@ -254,6 +254,10 @@ def _todo_captured_in_earlier_session(
         },
     ]
 
+    monkeypatch.setattr(
+        GitHubClient, "fetch_sub_issue_parents", lambda self, issues, progress_callback=None: set()
+    )
+
     def fake_run(command, **kwargs):
         assert command[:3] == ["gh", "issue", "list"], command
         scenario_state["todo_list_command"] = list(command)

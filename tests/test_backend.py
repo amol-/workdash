@@ -43,6 +43,10 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
     captured: dict[str, object] = {}
 
     class FakeGitHubClient:
+        def fetch_sub_issue_parents(self, issues, progress_callback=None):
+            captured["summary_issues"] = issues
+            return {("owner/repo", 11)}
+
         def list_open_authored_prs(self, login, progress_callback=None):
             captured["authored_called"] = True
             return [
@@ -213,6 +217,8 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
     assert work_items[0].analysis is None
     assert work_items[1].analysis is None
     assert work_items[2].analysis is None
+    assert captured["summary_issues"] == [("owner/repo", 11)]
+    assert work_items[3].has_sub_issues is True
     assert work_items[3].analysis == "cached analysis"
     assert work_items[3].analyzed_at is None
     assert suggestion_markers == {(WorkItemType.PR, "owner/repo", 10): "*"}
@@ -242,6 +248,9 @@ def test_load_items_keeps_only_the_most_recently_updated_items(
     ]
 
     class FakeGitHubClient:
+        def fetch_sub_issue_parents(self, issues, progress_callback=None):
+            return set()
+
         def list_open_authored_prs(self, login, progress_callback=None):
             return []
 
@@ -317,6 +326,9 @@ def test_load_items_keeps_a_hand_picked_item_older_than_every_discovered_item(
     included_item.included = True
 
     class FakeGitHubClient:
+        def fetch_sub_issue_parents(self, issues, progress_callback=None):
+            return set()
+
         def list_open_authored_prs(self, login, progress_callback=None):
             return []
 
@@ -364,6 +376,9 @@ def test_load_items_keeps_the_todo_target_when_the_same_issue_is_also_assigned(
     }
 
     class FakeGitHubClient:
+        def fetch_sub_issue_parents(self, issues, progress_callback=None):
+            return set()
+
         def list_open_authored_prs(self, login, progress_callback=None):
             return []
 
@@ -428,6 +443,10 @@ def test_load_items_survives_a_todo_repository_that_does_not_exist_yet(
         lambda self, search_scope, progress_callback=None: [],
     )
 
+    monkeypatch.setattr(
+        GitHubClient, "fetch_sub_issue_parents", lambda self, issues, progress_callback=None: set()
+    )
+
     def fake_run(command, **kwargs):
         assert command[:3] == ["gh", "issue", "list"], command
         raise subprocess.CalledProcessError(
@@ -483,6 +502,9 @@ def test_load_items_hides_every_issue_a_pull_request_closes(
     expected_closing_issue_numbers: tuple[int, ...],
 ) -> None:
     class FakeGitHubClient:
+        def fetch_sub_issue_parents(self, issues, progress_callback=None):
+            return set()
+
         def list_open_authored_prs(self, login, progress_callback=None):
             return [
                 {
@@ -578,6 +600,9 @@ def test_load_items_hides_an_included_issue_that_a_listed_pull_request_closes(
     included_issue.included = True
 
     class FakeGitHubClient:
+        def fetch_sub_issue_parents(self, issues, progress_callback=None):
+            return set()
+
         def list_open_authored_prs(self, login, progress_callback=None):
             return [
                 {
@@ -659,6 +684,9 @@ def test_compute_suggestion_markers_returns_empty_for_no_work_items() -> None:
 
 def test_analyze_item_uses_cache_then_falls_back_to_analyzer_and_saves() -> None:
     class FakeGitHubClient:
+        def fetch_sub_issue_parents(self, issues, progress_callback=None):
+            return set()
+
         def list_open_authored_prs(
             self, login, progress_callback=None
         ):  # pragma: no cover - unused here
@@ -752,6 +780,9 @@ def test_analyze_item_uses_cache_then_falls_back_to_analyzer_and_saves() -> None
 
 def test_analyze_item_tool_claude_bypasses_cache() -> None:
     class FakeGitHubClient:
+        def fetch_sub_issue_parents(self, issues, progress_callback=None):
+            return set()
+
         def list_open_authored_prs(
             self, login, progress_callback=None
         ):  # pragma: no cover - unused here
@@ -1054,3 +1085,48 @@ def test_include_item_by_url_duplicate_identity_persists_canonical_without_fetch
     assert second == IncludeResult(duplicate_identity=identity)
     github_client.fetch_item_by_url.assert_not_called()
     assert store.load() == ["https://github.com/owner/repo/pull/1"]
+
+
+def test_included_issue_immediately_has_its_native_sub_issue_status(tmp_path):
+    github_client = MagicMock(spec=GitHubClient)
+    item = _make_fetched_item(1)
+    item.item_type = WorkItemType.ISSUE
+    item.kind = WorkItemKind.TRACKED_ISSUE
+    github_client.fetch_item_by_url.return_value = item
+    github_client.fetch_sub_issue_parents.return_value = {("owner/repo", 1)}
+    backend, _ = _make_include_backend(tmp_path, github_client)
+
+    result = backend.include_item_by_url("https://github.com/owner/repo/issues/1", set())
+
+    assert result.fetched_item.has_sub_issues is True
+    github_client.fetch_sub_issue_parents.assert_called_once_with([("owner/repo", 1)])
+
+
+@pytest.mark.parametrize("error", [TransientFetchError("HTTP 503"), RuntimeError("bad response")])
+def test_sub_issue_lookup_failure_keeps_included_issue_on_include_and_refresh(tmp_path, error):
+    github_client = MagicMock(spec=GitHubClient)
+    for name in (
+        "list_open_authored_prs",
+        "list_open_review_requested_prs",
+        "list_open_reviewed_prs",
+        "list_open_assigned_issues",
+        "list_recent_tracked_items",
+        "list_open_todo_issues",
+    ):
+        getattr(github_client, name).return_value = []
+    item = _make_fetched_item(1)
+    item.item_type = WorkItemType.ISSUE
+    item.kind = WorkItemKind.TRACKED_ISSUE
+    github_client.fetch_item_by_url.return_value = item
+    github_client.fetch_sub_issue_parents.side_effect = error
+    backend, store = _make_include_backend(tmp_path, github_client)
+    url = "https://github.com/owner/repo/issues/1"
+
+    result = backend.include_item_by_url(url, set())
+
+    assert result.fetched_item == item
+    assert not result.fetched_item.has_sub_issues
+    assert store.load() == [url]
+    items, _ = backend.load_items()
+    assert items == [item]
+    assert not items[0].has_sub_issues

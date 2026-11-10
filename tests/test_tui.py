@@ -34,6 +34,7 @@ def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_colum
             repo="owner/repo",
             number=22,
             title="Implement renderer",
+            has_sub_issues=True,
             created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
             updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
             url="https://example.com/pull/22",
@@ -66,6 +67,7 @@ def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_colum
                 "Last Update",
             ]
             assert table.row_count == 2
+            assert table.get_row_at(0)[2].style == "bold"
             # Sorted by updated_at descending; PR #22 (updated 2/25) before issue #11 (updated 2/20)
             # PR #22 is within 24h of now_utc so cells are bold Text objects
             assert [str(c) for c in table.get_row_at(0)] == [
@@ -1123,7 +1125,7 @@ def test_workdash_app_code_reports_a_failed_focus_of_the_running_agent_pane() ->
     asyncio.run(run_smoke())
 
 
-def test_workdash_app_include_recomputes_suggestion_marker() -> None:
+def test_workdash_app_include_recomputes_suggestion_marker(monkeypatch, tmp_path) -> None:
     """A successful include must reshuffle the suggestion marker to the new oldest item.
 
     The v1 suggestion heuristic picks the item with the earliest ``created_at``.
@@ -1131,6 +1133,11 @@ def test_workdash_app_include_recomputes_suggestion_marker() -> None:
     the render would still star the previously-suggested row even though the
     freshly fetched item is now the oldest (and thus the true suggestion).
     """
+    import json
+    import subprocess
+
+    from workdash.backend import WorkdashBackend
+    from workdash.included_items import IncludedItemsStore
 
     now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
     existing_item = WorkItem(
@@ -1155,11 +1162,29 @@ def test_workdash_app_include_recomputes_suggestion_marker() -> None:
         url="https://github.com/owner/repo/issues/77",
         included=True,
     )
+    backend = WorkdashBackend(
+        config=WorkdashConfig(github_username="user"),
+        cache_root=tmp_path / "cache",
+        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+    )
+    monkeypatch.setattr(
+        backend.github_client, "fetch_item_by_url", lambda *args: newly_fetched_item
+    )
 
+    def fake_gh(command, **kwargs):
+        assert "subIssuesSummary { total }" in command[4]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({"data": {"i0": {"issue": {"subIssuesSummary": {"total": 1}}}}}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_gh)
     app = WorkdashApp(
         work_items=[existing_item],
         suggestion_markers={(WorkItemType.PR, "owner/repo", 22): "*"},
-        include_callback=lambda _url, _identities: IncludeResult(fetched_item=newly_fetched_item),
+        include_callback=backend.include_item_by_url,
         now_utc=now_utc,
     )
 
@@ -1170,6 +1195,8 @@ def test_workdash_app_include_recomputes_suggestion_marker() -> None:
             await pilot.pause()
             # Marker must now point at the freshly included item's identity.
             assert app._suggestion_markers == {(WorkItemType.ISSUE, "owner/repo", 77): "*"}
+            title = app.query_one("#work-items", DataTable).get_row("issue:owner/repo#77")[2]
+            assert title.style == "bold cyan"
             await pilot.press("q")
 
     asyncio.run(run_smoke())
@@ -1783,3 +1810,98 @@ def test_workdash_app_session_refresh_dropping_the_selected_item_clamps_the_curs
             await pilot.press("q")
 
     asyncio.run(run_smoke())
+
+
+def test_refresh_renders_sub_issue_parents_from_github(monkeypatch, tmp_path) -> None:
+    import json
+    import re
+    import subprocess
+
+    from workdash.backend import WorkdashBackend
+    from workdash.included_items import IncludedItemsStore
+
+    children = {("alpha", "one", "41"): ["CLOSED", "CLOSED"]}
+    nodes = []
+    for typename, repo, number, title in [
+        ("Issue", "alpha/one", 41, "Parent with closed children"),
+        ("Issue", "beta/two", 41, "Leaf"),
+        ("PullRequest", "alpha/one", 42, "Pull request"),
+    ]:
+        nodes.append(
+            {
+                "__typename": typename,
+                "id": f"{repo}-{number}",
+                "number": number,
+                "title": title,
+                "url": f"https://github.com/{repo}/issues/{number}",
+                "createdAt": "2026-02-20T00:00:00Z",
+                "updatedAt": "2026-02-20T00:00:00Z",
+                "state": "OPEN",
+                "repository": {"nameWithOwner": repo},
+            }
+        )
+
+    def fake_gh(command, **kwargs):
+        if command[:3] in (
+            ["gh", "search", "prs"],
+            ["gh", "search", "issues"],
+            ["gh", "issue", "list"],
+        ):
+            payload = []
+        elif "subIssuesSummary" in command[4]:
+            selections = re.findall(
+                r'i(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ issue\(number: (\d+)\)',
+                command[4],
+            )
+            payload = {
+                "data": {
+                    f"i{alias}": {
+                        "issue": {
+                            "subIssuesSummary": {
+                                "total": len(children.get((owner, repo, number), []))
+                            }
+                        }
+                    }
+                    for alias, owner, repo, number in selections
+                }
+            }
+        elif "closingIssuesReferences" in command[4]:
+            payload = {"data": {"p0": {"pullRequest": {"closingIssuesReferences": {"nodes": []}}}}}
+        else:
+            payload = {"data": {"tracked": {"nodes": nodes}}}
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_gh)
+    backend = WorkdashBackend(
+        config=WorkdashConfig(github_username="user", repositories=("alpha/one", "beta/two")),
+        cache_root=tmp_path / "cache",
+        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+    )
+    app = WorkdashApp(
+        work_items=[],
+        refresh_callback=backend.load_items,
+        now_utc=datetime(2026, 2, 26, tzinfo=UTC),
+    )
+
+    async def run() -> None:
+        async with app.run_test() as pilot:
+            await app.action_refresh_items()
+            await pilot.pause()
+            table = app.query_one("#work-items", DataTable)
+            parent = table.get_row("issue:alpha/one#41")
+            leaf = table.get_row("issue:beta/two#41")
+            pr = table.get_row("pr:alpha/one#42")
+            assert str(parent[0]).endswith("IS 41") and str(parent[1]) == "alpha/one"
+            assert (
+                str(parent[2]).endswith("Parent with closed children")
+                and parent[2].style == "bold cyan"
+            )
+            assert str(leaf[0]).endswith("IS 41") and str(leaf[1]) == "beta/two"
+            assert str(leaf[2]).endswith("Leaf") and isinstance(leaf[2], str)
+            assert (
+                str(pr[0]).endswith("VR 42")
+                and str(pr[2]).endswith("Pull request")
+                and isinstance(pr[2], str)
+            )
+
+    asyncio.run(run())

@@ -265,6 +265,7 @@ def _run_gh_command_with_retry(
     report_progress: Callable[[str], None] = _noop_progress_callback,
     retry_label: str | None = None,
     tolerate_partial_response: bool = False,
+    retry_rate_limits: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run a ``gh`` subprocess with bounded retry on transient failures.
 
@@ -293,7 +294,11 @@ def _run_gh_command_with_retry(
         except subprocess.CalledProcessError as error:
             stderr = (error.stderr or "").strip()
             transient = _is_transient_gh_error(error)
-            if attempt < _TRANSIENT_RETRIES and transient:
+            if (
+                attempt < _TRANSIENT_RETRIES
+                and transient
+                and (retry_rate_limits or not _is_rate_limit_error(stderr))
+            ):
                 delay = (
                     _RATE_LIMIT_RETRY_DELAY_SECONDS
                     if _is_rate_limit_error(stderr)
@@ -1200,6 +1205,70 @@ class GitHubClient:
                 )
             )
         return items
+
+    def fetch_sub_issue_parents(
+        self, issues: list[tuple[str, int]], progress_callback: Callable[[str], None] | None = None
+    ) -> set[tuple[str, int]]:
+        """Find issues with native sub-issues, including closed sub-issues."""
+        parents = set()
+        for offset in range(0, len(issues), 50):
+            batch = issues[offset : offset + 50]
+            selections = [
+                f"i{index}: repository(owner: {json.dumps(repo.partition('/')[0])}, "
+                f"name: {json.dumps(repo.partition('/')[2])}) "
+                f"{{ issue(number: {number}) {{ subIssuesSummary {{ total }} }} }}"
+                for index, (repo, number) in enumerate(batch)
+            ]
+            completed = _run_gh_command_with_retry(
+                ["gh", "api", "graphql", "-f", f"query={{ {' '.join(selections)} }}"],
+                not_found_message="Failed to run gh sub-issue lookup: gh CLI is not installed or not on PATH.",
+                failure_message_prefix="Failed to inspect sub-issues via gh",
+                tolerate_partial_response=True,
+                retry_rate_limits=False,
+            )
+            try:
+                payload = json.loads(completed.stdout)
+            except json.JSONDecodeError as error:
+                raise RuntimeError(f"Failed to parse gh sub-issue JSON: {error.msg}") from error
+            data = payload.get("data") if isinstance(payload, dict) else None
+            if not isinstance(data, dict):
+                raise RuntimeError(
+                    "Failed to inspect sub-issues via gh: response contained no data"
+                )
+            skipped = set()
+            for error in payload.get("errors", []):
+                message, path = error.get("message", "unknown error"), error.get("path", [])
+                if (
+                    path
+                    and path[0] in data
+                    and (
+                        _is_repository_authorization_error(message)
+                        or _is_unresolvable_item_error(message)
+                    )
+                ):
+                    skipped.add(path[0])
+                    if progress_callback:
+                        progress_callback(f"Warning: skipped sub-issue lookup: {message}")
+                else:
+                    raise RuntimeError(f"Failed to inspect sub-issues via gh: {message}")
+            for index, issue in enumerate(batch):
+                alias = f"i{index}"
+                if alias in skipped:
+                    continue
+                try:
+                    repository = data[alias]
+                    if repository is None or repository["issue"] is None:
+                        continue
+                    total = repository["issue"]["subIssuesSummary"]["total"]
+                    if not isinstance(total, int):
+                        raise ValueError("invalid total")
+                except (KeyError, TypeError, ValueError) as error:
+                    raise RuntimeError(
+                        f"Invalid gh sub-issue payload for {issue[0]}#{issue[1]}"
+                    ) from error
+                if total > 0:
+                    parents.add(issue)
+        return parents
 
     def fetch_linked_issues(
         self,

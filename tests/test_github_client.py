@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 
 import pytest
@@ -1728,3 +1729,113 @@ def test_fetch_item_raises_on_other_github_errors(monkeypatch: pytest.MonkeyPatc
         GitHubClient().fetch_item(
             "owner/repo", 5, github_username="testuser", todo_repository="testuser/todos"
         )
+
+
+def test_sub_issue_summary_reports_parents_and_leaves(monkeypatch):
+    commands = []
+    children = {1: ["CLOSED", "CLOSED"], 2: []}
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "i0": {"issue": {"subIssuesSummary": {"total": len(children[1])}}},
+                        "i1": {"issue": {"subIssuesSummary": {"total": len(children[2])}}},
+                    }
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = GitHubClient().fetch_sub_issue_parents([("owner/repo", 1), ("owner/repo", 2)])
+    assert result == {("owner/repo", 1)}
+    assert commands[0][4].count("subIssuesSummary { total }") == 2
+    assert len(commands) == 1
+
+
+def test_sub_issue_lookup_handles_many_issues(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        query = command[4]
+        if len(query.encode()) > 100_000:
+            raise OSError(7, "Argument list too long")
+        calls.append(query)
+        selections = re.findall(
+            r'i(\d+): repository\(owner: "owner", name: "repo"\) \{ issue\(number: (\d+)\)', query
+        )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        f"i{alias}": {"issue": {"subIssuesSummary": {"total": int(number) % 2}}}
+                        for alias, number in selections
+                    }
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    issues = [("owner/repo", number) for number in range(1, 1801)]
+    assert GitHubClient().fetch_sub_issue_parents(issues) == set(issues[::2])
+    assert len(calls) > 1
+
+
+def test_sub_issue_lookup_skips_inaccessible_issue_and_reports_other_parents(monkeypatch):
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "data": {"i0": None, "i1": {"issue": {"subIssuesSummary": {"total": 1}}}},
+                    "errors": [{"path": ["i0"], "message": "Could not resolve to a Repository"}],
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    warnings = []
+    parents = GitHubClient().fetch_sub_issue_parents(
+        [("owner/missing", 1), ("owner/repo", 2)], progress_callback=warnings.append
+    )
+    assert parents == {("owner/repo", 2)}
+    assert warnings
+
+
+@pytest.mark.parametrize("unavailable", [None, {"issue": None}])
+def test_sub_issue_lookup_keeps_other_parents_when_issue_is_null(monkeypatch, unavailable):
+    payload = {"data": {"i0": unavailable, "i1": {"issue": {"subIssuesSummary": {"total": 1}}}}}
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+    assert GitHubClient().fetch_sub_issue_parents([("owner/gone", 1), ("owner/repo", 2)]) == {
+        ("owner/repo", 2)
+    }
+
+
+def test_sub_issue_lookup_does_not_retry_rate_limits(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        raise subprocess.CalledProcessError(1, command, stderr="API rate limit exceeded")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("workdash.github_client.time.sleep", lambda _: None)
+    with pytest.raises(RuntimeError, match="rate limit"):
+        GitHubClient().fetch_sub_issue_parents([("owner/repo", 1)])
+    assert len(calls) == 1
