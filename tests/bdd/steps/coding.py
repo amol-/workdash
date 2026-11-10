@@ -666,6 +666,18 @@ def _agent_told_to_publish(issue: str, scenario_state: dict[str, Any]) -> None:
 
 
 @then(
+    "the agent is explicitly permitted to commit and push, and to force-push only the pull request branch"
+)
+def _agent_told_publish_permissions(scenario_state: dict[str, Any]) -> None:
+    _assert_told(
+        scenario_state,
+        "Commit and push are explicitly requested and permitted",
+        "force-push only the pull request branch",
+        "--force-with-lease",
+    )
+
+
+@then(
     "the agent is told to wait for the current head's CI "
     "or confirm that no checks are required or reported"
 )

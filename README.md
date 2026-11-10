@@ -443,10 +443,12 @@ with a live agent pane focuses that pane instead of opening the dialog.
 
 `workdash code` always autostarts the agent: its briefing ends with an appendix
 telling it to work without routine confirmation, commit, push, and open a pull
-request that closes the issue (or update the existing one), and verify the
-pull request's current head: CI `passing`, or GitHub reporting no required or
+request that closes the issue (or update the existing one), and verify the pull request's current head: CI `passing`, or GitHub reporting no required or
 observed checks (`no_checks`), and a clean merge. It never merges or closes
-anything, and the agent stays in its interactive pane. The state-specific task
+anything, and the agent stays in its interactive pane. Commit and push are
+explicitly requested; if a force-push is needed, the briefing permits it only
+on the pull request branch, preferably with a lease and subject to repository
+restrictions. The state-specific task
 comes from the same GitHub classification as `ready`: an issue is implemented, an
 issue an open pull request of yours closes resumes that pull request in place, and a pull
 request with review feedback, merge conflicts, or failing CI is repaired on its
