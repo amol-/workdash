@@ -224,7 +224,9 @@ def _todo_captured_in_earlier_session(
         lambda self, login, progress_callback=None: [],
     )
     monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
-    monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient, "list_open_assigned_issues", lambda self, login, progress_callback=None: []
+    )
     monkeypatch.setattr(
         GitHubClient,
         "list_recent_tracked_items",
@@ -232,6 +234,7 @@ def _todo_captured_in_earlier_session(
     )
     stored_issues = [
         {
+            "subIssuesSummary": {"total": 0},
             "id": "I110",
             "number": TODO_ISSUE_NUMBER,
             "title": TODO_TEXT,
@@ -244,6 +247,7 @@ def _todo_captured_in_earlier_session(
             ),
         },
         {
+            "subIssuesSummary": {"total": 0},
             "id": "I111",
             "number": 111,
             "title": "Buy milk",
@@ -254,14 +258,11 @@ def _todo_captured_in_earlier_session(
         },
     ]
 
-    monkeypatch.setattr(
-        GitHubClient, "fetch_sub_issue_parents", lambda self, issues, progress_callback=None: set()
-    )
-
     def fake_run(command, **kwargs):
-        assert command[:3] == ["gh", "issue", "list"], command
+        assert command[:3] == ["gh", "api", "graphql"], command
         scenario_state["todo_list_command"] = list(command)
-        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(stored_issues), stderr="")
+        payload = {"data": {"repository": {"issues": {"nodes": stored_issues}}}}
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
 
     monkeypatch.setattr(github_client_module.subprocess, "run", fake_run)
     # Keyed by issue number: the list order is owned by the most-recently-updated
@@ -458,8 +459,9 @@ def _no_issue_is_created(scenario_state: dict[str, Any]) -> None:
 )
 def _open_todo_issues_recognized(label: str, scenario_state: dict[str, Any]) -> None:
     command = scenario_state["todo_list_command"]
-    assert _flag_value(command, "--repo") == TODO_REPOSITORY, command
-    assert _flag_value(command, "--label") == label, command
+    assert f'owner: "{TODO_REPOSITORY.split("/")[0]}"' in command[-1]
+    assert f'name: "{TODO_REPOSITORY.split("/")[1]}"' in command[-1]
+    assert f'labels: ["{label}"]' in command[-1]
     items = scenario_state["refreshed_todo_items"]
     assert {(item.repo, item.number) for item in items} == {
         (TODO_REPOSITORY, TODO_ISSUE_NUMBER),

@@ -43,10 +43,6 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
     captured: dict[str, object] = {}
 
     class FakeGitHubClient:
-        def fetch_sub_issue_parents(self, issues, progress_callback=None):
-            captured["summary_issues"] = issues
-            return {("owner/repo", 11)}
-
         def list_open_authored_prs(self, login, progress_callback=None):
             captured["authored_called"] = True
             return [
@@ -116,10 +112,11 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
                 },
             ]
 
-        def list_open_assigned_issues(self, login):
+        def list_open_assigned_issues(self, login, progress_callback=None):
             captured["assigned_called"] = True
             return [
                 {
+                    "sub_issue_total": 2,
                     "id": "ASSIGNED-ISSUE-1",
                     "repo": "owner/repo",
                     "number": 11,
@@ -217,7 +214,6 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
     assert work_items[0].analysis is None
     assert work_items[1].analysis is None
     assert work_items[2].analysis is None
-    assert captured["summary_issues"] == [("owner/repo", 11)]
     assert work_items[3].has_sub_issues is True
     assert work_items[3].analysis == "cached analysis"
     assert work_items[3].analyzed_at is None
@@ -248,9 +244,6 @@ def test_load_items_keeps_only_the_most_recently_updated_items(
     ]
 
     class FakeGitHubClient:
-        def fetch_sub_issue_parents(self, issues, progress_callback=None):
-            return set()
-
         def list_open_authored_prs(self, login, progress_callback=None):
             return []
 
@@ -260,7 +253,7 @@ def test_load_items_keeps_only_the_most_recently_updated_items(
         def list_open_reviewed_prs(self, login):
             return []
 
-        def list_open_assigned_issues(self, login):
+        def list_open_assigned_issues(self, login, progress_callback=None):
             return []
 
         def list_open_todo_issues(self, repository, progress_callback=None):
@@ -326,9 +319,6 @@ def test_load_items_keeps_a_hand_picked_item_older_than_every_discovered_item(
     included_item.included = True
 
     class FakeGitHubClient:
-        def fetch_sub_issue_parents(self, issues, progress_callback=None):
-            return set()
-
         def list_open_authored_prs(self, login, progress_callback=None):
             return []
 
@@ -338,7 +328,7 @@ def test_load_items_keeps_a_hand_picked_item_older_than_every_discovered_item(
         def list_open_reviewed_prs(self, login):
             return []
 
-        def list_open_assigned_issues(self, login):
+        def list_open_assigned_issues(self, login, progress_callback=None):
             return []
 
         def list_open_todo_issues(self, repository, progress_callback=None):
@@ -376,9 +366,6 @@ def test_load_items_keeps_the_todo_target_when_the_same_issue_is_also_assigned(
     }
 
     class FakeGitHubClient:
-        def fetch_sub_issue_parents(self, issues, progress_callback=None):
-            return set()
-
         def list_open_authored_prs(self, login, progress_callback=None):
             return []
 
@@ -388,7 +375,7 @@ def test_load_items_keeps_the_todo_target_when_the_same_issue_is_also_assigned(
         def list_open_reviewed_prs(self, login):
             return []
 
-        def list_open_assigned_issues(self, login):
+        def list_open_assigned_issues(self, login, progress_callback=None):
             return [dict(issue_payload)]
 
         def list_recent_tracked_items(self, search_scope, progress_callback=None):
@@ -435,7 +422,9 @@ def test_load_items_survives_a_todo_repository_that_does_not_exist_yet(
     )
     monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
     monkeypatch.setattr(
-        GitHubClient, "list_open_assigned_issues", lambda self, login: [assigned_issue]
+        GitHubClient,
+        "list_open_assigned_issues",
+        lambda self, login, progress_callback=None: [assigned_issue],
     )
     monkeypatch.setattr(
         GitHubClient,
@@ -443,12 +432,8 @@ def test_load_items_survives_a_todo_repository_that_does_not_exist_yet(
         lambda self, search_scope, progress_callback=None: [],
     )
 
-    monkeypatch.setattr(
-        GitHubClient, "fetch_sub_issue_parents", lambda self, issues, progress_callback=None: set()
-    )
-
     def fake_run(command, **kwargs):
-        assert command[:3] == ["gh", "issue", "list"], command
+        assert command[:3] == ["gh", "api", "graphql"], command
         raise subprocess.CalledProcessError(
             1,
             command,
@@ -502,9 +487,6 @@ def test_load_items_hides_every_issue_a_pull_request_closes(
     expected_closing_issue_numbers: tuple[int, ...],
 ) -> None:
     class FakeGitHubClient:
-        def fetch_sub_issue_parents(self, issues, progress_callback=None):
-            return set()
-
         def list_open_authored_prs(self, login, progress_callback=None):
             return [
                 {
@@ -529,7 +511,7 @@ def test_load_items_hides_every_issue_a_pull_request_closes(
         def list_open_reviewed_prs(self, login):
             return []
 
-        def list_open_assigned_issues(self, login):
+        def list_open_assigned_issues(self, login, progress_callback=None):
             return [
                 {
                     "id": "ISSUE-41830",
@@ -600,9 +582,6 @@ def test_load_items_hides_an_included_issue_that_a_listed_pull_request_closes(
     included_issue.included = True
 
     class FakeGitHubClient:
-        def fetch_sub_issue_parents(self, issues, progress_callback=None):
-            return set()
-
         def list_open_authored_prs(self, login, progress_callback=None):
             return [
                 {
@@ -627,7 +606,7 @@ def test_load_items_hides_an_included_issue_that_a_listed_pull_request_closes(
         def list_open_reviewed_prs(self, login):
             return []
 
-        def list_open_assigned_issues(self, login):
+        def list_open_assigned_issues(self, login, progress_callback=None):
             return []
 
         def list_recent_tracked_items(self, search_scope, progress_callback=None):
@@ -636,7 +615,7 @@ def test_load_items_hides_an_included_issue_that_a_listed_pull_request_closes(
         def list_open_todo_issues(self, todo_repository, progress_callback=None):
             return []
 
-        def fetch_item_by_url(self, parsed_url, github_username):
+        def fetch_item_by_url(self, parsed_url, github_username, progress_callback=None):
             return included_issue
 
         def fetch_linked_issues(self, pull_requests, progress_callback=None):
@@ -684,9 +663,6 @@ def test_compute_suggestion_markers_returns_empty_for_no_work_items() -> None:
 
 def test_analyze_item_uses_cache_then_falls_back_to_analyzer_and_saves() -> None:
     class FakeGitHubClient:
-        def fetch_sub_issue_parents(self, issues, progress_callback=None):
-            return set()
-
         def list_open_authored_prs(
             self, login, progress_callback=None
         ):  # pragma: no cover - unused here
@@ -698,7 +674,9 @@ def test_analyze_item_uses_cache_then_falls_back_to_analyzer_and_saves() -> None
         def list_open_reviewed_prs(self, login):  # pragma: no cover - unused here
             raise AssertionError("list_open_reviewed_prs should not be called")
 
-        def list_open_assigned_issues(self, login):  # pragma: no cover - unused here
+        def list_open_assigned_issues(
+            self, login, progress_callback=None
+        ):  # pragma: no cover - unused here
             raise AssertionError("list_open_assigned_issues should not be called")
 
         def list_recent_tracked_items(
@@ -780,9 +758,6 @@ def test_analyze_item_uses_cache_then_falls_back_to_analyzer_and_saves() -> None
 
 def test_analyze_item_tool_claude_bypasses_cache() -> None:
     class FakeGitHubClient:
-        def fetch_sub_issue_parents(self, issues, progress_callback=None):
-            return set()
-
         def list_open_authored_prs(
             self, login, progress_callback=None
         ):  # pragma: no cover - unused here
@@ -794,7 +769,9 @@ def test_analyze_item_tool_claude_bypasses_cache() -> None:
         def list_open_reviewed_prs(self, login):  # pragma: no cover - unused here
             raise AssertionError("list_open_reviewed_prs should not be called")
 
-        def list_open_assigned_issues(self, login):  # pragma: no cover - unused here
+        def list_open_assigned_issues(
+            self, login, progress_callback=None
+        ):  # pragma: no cover - unused here
             raise AssertionError("list_open_assigned_issues should not be called")
 
         def list_recent_tracked_items(
@@ -1087,24 +1064,45 @@ def test_include_item_by_url_duplicate_identity_persists_canonical_without_fetch
     assert store.load() == ["https://github.com/owner/repo/pull/1"]
 
 
-def test_included_issue_immediately_has_its_native_sub_issue_status(tmp_path):
-    github_client = MagicMock(spec=GitHubClient)
-    item = _make_fetched_item(1)
-    item.item_type = WorkItemType.ISSUE
-    item.kind = WorkItemKind.TRACKED_ISSUE
-    github_client.fetch_item_by_url.return_value = item
-    github_client.fetch_sub_issue_parents.return_value = {("owner/repo", 1)}
-    backend, _ = _make_include_backend(tmp_path, github_client)
+@pytest.mark.parametrize("total, expected", [(0, False), (2, True)])
+def test_included_issue_immediately_has_its_native_sub_issue_status(
+    monkeypatch, tmp_path, total, expected
+):
+    import json
 
-    result = backend.include_item_by_url("https://github.com/owner/repo/issues/1", set())
+    url = "https://github.com/owner/repo/issues/1"
+    payload = {
+        "data": {
+            "repository": {
+                "issue": {
+                    "state": "OPEN",
+                    "title": "Work",
+                    "url": url,
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-02T00:00:00Z",
+                    "subIssuesSummary": {"total": total},
+                }
+            }
+        }
+    }
 
-    assert result.fetched_item.has_sub_issues is True
-    github_client.fetch_sub_issue_parents.assert_called_once_with([("owner/repo", 1)])
+    def fake_run(command, **kwargs):
+        assert command[:3] == ["gh", "api", "graphql"]
+        assert "subIssuesSummary { total }" in command[4]
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    backend, store = _make_include_backend(tmp_path, GitHubClient())
+    result = backend.include_item_by_url(f"{url}?query=1#fragment", set())
+
+    assert result.fetched_item is not None
+    assert result.fetched_item.has_sub_issues is expected
+    assert result.fetched_item.sub_issue_total == total
+    assert store.load() == [url]
 
 
-@pytest.mark.parametrize("error", [TransientFetchError("HTTP 503"), RuntimeError("bad response")])
-def test_sub_issue_lookup_failure_keeps_included_issue_on_include_and_refresh(tmp_path, error):
-    github_client = MagicMock(spec=GitHubClient)
+def test_native_sub_issue_totals_survive_dedup(tmp_path):
+    client = MagicMock(spec=GitHubClient)
     for name in (
         "list_open_authored_prs",
         "list_open_review_requested_prs",
@@ -1113,20 +1111,242 @@ def test_sub_issue_lookup_failure_keeps_included_issue_on_include_and_refresh(tm
         "list_recent_tracked_items",
         "list_open_todo_issues",
     ):
-        getattr(github_client, name).return_value = []
-    item = _make_fetched_item(1)
-    item.item_type = WorkItemType.ISSUE
-    item.kind = WorkItemKind.TRACKED_ISSUE
-    github_client.fetch_item_by_url.return_value = item
-    github_client.fetch_sub_issue_parents.side_effect = error
-    backend, store = _make_include_backend(tmp_path, github_client)
-    url = "https://github.com/owner/repo/issues/1"
-
-    result = backend.include_item_by_url(url, set())
-
-    assert result.fetched_item == item
-    assert not result.fetched_item.has_sub_issues
-    assert store.load() == [url]
+        getattr(client, name).return_value = []
+    issue = {
+        "id": "I1",
+        "repo": "owner/repo",
+        "number": 1,
+        "title": "parent",
+        "url": "https://github.com/owner/repo/issues/1",
+        "created_at": "2026-02-01T00:00:00Z",
+        "updated_at": "2026-02-02T00:00:00Z",
+    }
+    client.list_open_assigned_issues.return_value = [
+        {**issue, "sub_issue_total": 2},
+        {**issue, "number": 4, "sub_issue_total": 0},
+        {**issue, "number": 5, "sub_issue_total": 2},
+        {**issue, "number": 6, "sub_issue_total": None},
+    ]
+    client.list_open_todo_issues.return_value = [{**issue, "target": None}]
+    client.list_recent_tracked_items.return_value = [
+        {**issue, "number": 2, "is_pull_request": False, "sub_issue_total": 1},
+        {**issue, "number": 3, "is_pull_request": False, "sub_issue_total": 0},
+        {**issue, "number": 4, "is_pull_request": False, "sub_issue_total": 2},
+        {**issue, "number": 5, "is_pull_request": False, "sub_issue_total": 0},
+        {**issue, "number": 6, "is_pull_request": False, "sub_issue_total": 2},
+    ]
+    backend, _ = _make_include_backend(tmp_path, client)
     items, _ = backend.load_items()
-    assert items == [item]
-    assert not items[0].has_sub_issues
+    assert {item.number: (item.sub_issue_total, item.has_sub_issues) for item in items} == {
+        1: (2, True),
+        2: (1, True),
+        3: (0, False),
+        4: (0, False),
+        5: (2, True),
+        6: (2, True),
+    }
+
+
+@pytest.mark.parametrize(
+    ("stderr", "retained"),
+    [("Bad credentials", False), ("HTTP 503: Service Unavailable", True)],
+)
+def test_included_issue_command_failure_lifecycle(monkeypatch, tmp_path, stderr, retained):
+    url = "https://github.com/owner/repo/issues/5"
+
+    def fail(command, **kwargs):
+        raise subprocess.CalledProcessError(1, command, stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", fail)
+    monkeypatch.setattr(github_client_module.time, "sleep", lambda _: None)
+    backend, store = _make_include_backend(tmp_path, GitHubClient())
+    store.save([url])
+
+    assert backend._load_included_items(lambda _: None) == []
+    assert store.load() == ([url] if retained else [])
+
+
+@pytest.mark.parametrize("failed_command", [False, True])
+@pytest.mark.parametrize(
+    ("message", "retained"),
+    [("Bad credentials", False), ("API rate limit exceeded", True)],
+)
+def test_included_issue_graphql_error_lifecycle(
+    monkeypatch, tmp_path, failed_command, message, retained
+):
+    import json
+
+    url = "https://github.com/owner/repo/issues/5"
+    payload = json.dumps({"errors": [{"message": message}]})
+
+    def run(command, **kwargs):
+        if failed_command:
+            raise subprocess.CalledProcessError(1, command, output=payload, stderr=message)
+        return subprocess.CompletedProcess(command, 0, stdout=payload, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(github_client_module.time, "sleep", lambda _: None)
+    backend, store = _make_include_backend(tmp_path, GitHubClient())
+    store.save([url])
+
+    assert backend._load_included_items(lambda _: None) == []
+    assert store.load() == ([url] if retained else [])
+
+
+@pytest.mark.parametrize("failed_command", [False, True])
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"message": "Something went wrong"},
+        {
+            "message": "Could not resolve to an Issue",
+            "type": "NOT_FOUND",
+            "path": ["repository", "issue", "title"],
+        },
+    ],
+)
+def test_included_issue_unexpected_graphql_error_survives_refresh_and_recovers(
+    monkeypatch, tmp_path, failed_command, error
+):
+    import json
+
+    url = "https://github.com/owner/repo/issues/5"
+    payload = {"errors": [error]}
+
+    def run(command, **kwargs):
+        if failed_command and "errors" in payload:
+            raise subprocess.CalledProcessError(
+                1, command, output=json.dumps(payload), stderr="GraphQL error"
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    backend, store = _make_include_backend(tmp_path, GitHubClient())
+    store.save([url])
+
+    assert backend._load_included_items(lambda _: None) == []
+    assert store.load() == [url]
+    payload.clear()
+    payload.update(
+        {
+            "data": {
+                "repository": {
+                    "issue": {
+                        "state": "OPEN",
+                        "title": "Work",
+                        "url": url,
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "updatedAt": "2026-01-02T00:00:00Z",
+                        "subIssuesSummary": {"total": 0},
+                    }
+                }
+            }
+        }
+    )
+    items = backend._load_included_items(lambda _: None)
+    assert len(items) == 1 and items[0].url == url
+    assert store.load() == [url]
+
+
+def test_included_issue_summary_error_survives_refresh_and_recovers(monkeypatch, tmp_path):
+    import json
+
+    url = "https://github.com/owner/repo/issues/5"
+    node = {
+        "state": "OPEN",
+        "title": "Work",
+        "url": url,
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-02T00:00:00Z",
+        "subIssuesSummary": None,
+    }
+    payload = {
+        "data": {"repository": {"issue": node}},
+        "errors": [
+            {"message": "summary unavailable", "path": ["repository", "issue", "subIssuesSummary"]}
+        ],
+    }
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+    backend, store = _make_include_backend(tmp_path, GitHubClient())
+    store.save([url])
+    items = backend._load_included_items(lambda _: None)
+    assert len(items) == 1 and not items[0].has_sub_issues
+    assert store.load() == [url]
+    node["subIssuesSummary"] = {"total": 2}
+    del payload["errors"]
+    items = backend._load_included_items(lambda _: None)
+    assert len(items) == 1 and items[0].has_sub_issues
+    assert store.load() == [url]
+
+
+@pytest.mark.parametrize("source", ["assigned", "tracked", "todo", "included"])
+def test_refresh_warns_when_sub_issue_lookup_fails(monkeypatch, tmp_path, source):
+    import json
+
+    url = "https://github.com/owner/repo/issues/5"
+    node = {
+        "__typename": "Issue",
+        "id": "I5",
+        "number": 5,
+        "title": "Work",
+        "url": url,
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-02T00:00:00Z",
+        "state": "OPEN",
+        "repository": {"nameWithOwner": "owner/repo"},
+        "subIssuesSummary": None,
+        "body": "",
+    }
+    if source in ("assigned", "tracked"):
+        path = [source, "nodes", 0]
+        data = {source: {"nodes": [node]}}
+    elif source == "todo":
+        path = ["repository", "issues", "nodes", 0]
+        data = {"repository": {"issues": {"nodes": [node]}}}
+    else:
+        path = ["repository", "issue"]
+        data = {"repository": {"issue": node}}
+    payload = {
+        "data": data,
+        "errors": [{"message": "summary unavailable", "path": path + ["subIssuesSummary"]}],
+    }
+
+    def failed_gh(command, **kwargs):
+        raise subprocess.CalledProcessError(
+            1, command, output=json.dumps(payload), stderr="GraphQL: summary unavailable"
+        )
+
+    monkeypatch.setattr(subprocess, "run", failed_gh)
+    methods = {
+        "assigned": "list_open_assigned_issues",
+        "tracked": "list_recent_tracked_items",
+        "todo": "list_open_todo_issues",
+        "included": "fetch_item_by_url",
+    }
+    for name in (
+        "list_open_authored_prs",
+        "list_open_review_requested_prs",
+        "list_open_reviewed_prs",
+        "list_open_assigned_issues",
+        "list_recent_tracked_items",
+        "list_open_todo_issues",
+    ):
+        if name != methods[source]:
+            monkeypatch.setattr(GitHubClient, name, lambda *args, **kwargs: [])
+    backend, store = _make_include_backend(tmp_path, GitHubClient())
+    backend.config = WorkdashConfig(repositories=("owner/repo",), todo_repository="owner/repo")
+    if source == "included":
+        store.save([url])
+    progress = []
+    items, _ = backend.load_items(progress_callback=progress.append)
+    assert [(item.number, item.sub_issue_total) for item in items] == [(5, None)]
+    assert any(
+        "Warning" in line and "sub-issue" in line and "summary unavailable" in line
+        for line in progress
+    )

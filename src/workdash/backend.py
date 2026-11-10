@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -130,7 +129,9 @@ class WorkdashBackend:
         report_progress(f"Fetched {len(reviewed_pull_requests)} open reviewed pull request(s).")
 
         report_progress("Fetching open assigned issues...")
-        assigned_issues = self.github_client.list_open_assigned_issues(github_username)
+        assigned_issues = self.github_client.list_open_assigned_issues(
+            github_username, progress_callback=report_progress
+        )
         report_progress(f"Fetched {len(assigned_issues)} open assigned issue(s).")
 
         report_progress("Fetching tracked issues and pull requests...")
@@ -209,21 +210,9 @@ class WorkdashBackend:
                 if item.item_type != WorkItemType.ISSUE
                 or (item.repo, item.number) not in hidden_issues
             ]
-        issue_items = [item for item in merged_items if item.item_type == WorkItemType.ISSUE]
-        try:
-            parents = (
-                self.github_client.fetch_sub_issue_parents(
-                    [(item.repo, item.number) for item in issue_items],
-                    progress_callback=report_progress,
-                )
-                if issue_items
-                else set()
-            )
-        except RuntimeError as error:
-            report_progress(f"Warning: sub-issue lookup failed: {error}")
-            parents = set()
-        for item in issue_items:
-            item.has_sub_issues = (item.repo, item.number) in parents
+        for item in merged_items:
+            if item.item_type == WorkItemType.ISSUE:
+                item.has_sub_issues = (item.sub_issue_total or 0) > 0
         report_progress(
             f"Merged {len(merged_items)} unique work item(s); loading cached analyses..."
         )
@@ -252,7 +241,9 @@ class WorkdashBackend:
             if parsed is None:
                 continue
             try:
-                item = self.github_client.fetch_item_by_url(parsed, self.config.github_username)
+                item = self.github_client.fetch_item_by_url(
+                    parsed, self.config.github_username, progress_callback=report_progress
+                )
             except TransientFetchError:
                 survivors.append(parsed.canonical_url)
                 continue
@@ -294,15 +285,6 @@ class WorkdashBackend:
             return IncludeResult(transient_failure=True)
         if item is None:
             return IncludeResult(invalid=True)
-        if item.item_type == WorkItemType.ISSUE:
-            try:
-                item.has_sub_issues = (
-                    item.repo,
-                    item.number,
-                ) in self.github_client.fetch_sub_issue_parents([(item.repo, item.number)])
-            except RuntimeError as error:
-                logging.getLogger(__name__).warning("Sub-issue lookup failed: %s", error)
-                item.has_sub_issues = False
         self.included_items_store.add(parsed.canonical_url)
         return IncludeResult(fetched_item=item)
 

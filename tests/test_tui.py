@@ -1133,9 +1133,6 @@ def test_workdash_app_include_recomputes_suggestion_marker(monkeypatch, tmp_path
     the render would still star the previously-suggested row even though the
     freshly fetched item is now the oldest (and thus the true suggestion).
     """
-    import json
-    import subprocess
-
     from workdash.backend import WorkdashBackend
     from workdash.included_items import IncludedItemsStore
 
@@ -1161,6 +1158,8 @@ def test_workdash_app_include_recomputes_suggestion_marker(monkeypatch, tmp_path
         updated_at=datetime(2026, 2, 24, 0, 0, 0, tzinfo=UTC),
         url="https://github.com/owner/repo/issues/77",
         included=True,
+        has_sub_issues=True,
+        sub_issue_total=1,
     )
     backend = WorkdashBackend(
         config=WorkdashConfig(github_username="user"),
@@ -1171,16 +1170,6 @@ def test_workdash_app_include_recomputes_suggestion_marker(monkeypatch, tmp_path
         backend.github_client, "fetch_item_by_url", lambda *args: newly_fetched_item
     )
 
-    def fake_gh(command, **kwargs):
-        assert "subIssuesSummary { total }" in command[4]
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=json.dumps({"data": {"i0": {"issue": {"subIssuesSummary": {"total": 1}}}}}),
-            stderr="",
-        )
-
-    monkeypatch.setattr(subprocess, "run", fake_gh)
     app = WorkdashApp(
         work_items=[existing_item],
         suggestion_markers={(WorkItemType.PR, "owner/repo", 22): "*"},
@@ -1814,7 +1803,6 @@ def test_workdash_app_session_refresh_dropping_the_selected_item_clamps_the_curs
 
 def test_refresh_renders_sub_issue_parents_from_github(monkeypatch, tmp_path) -> None:
     import json
-    import re
     import subprocess
 
     from workdash.backend import WorkdashBackend
@@ -1838,6 +1826,15 @@ def test_refresh_renders_sub_issue_parents_from_github(monkeypatch, tmp_path) ->
                 "updatedAt": "2026-02-20T00:00:00Z",
                 "state": "OPEN",
                 "repository": {"nameWithOwner": repo},
+                **(
+                    {
+                        "subIssuesSummary": {
+                            "total": len(children.get((*repo.split("/"), str(number)), []))
+                        }
+                    }
+                    if typename == "Issue"
+                    else {}
+                ),
             }
         )
 
@@ -1848,23 +1845,12 @@ def test_refresh_renders_sub_issue_parents_from_github(monkeypatch, tmp_path) ->
             ["gh", "issue", "list"],
         ):
             payload = []
-        elif "subIssuesSummary" in command[4]:
-            selections = re.findall(
-                r'i(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ issue\(number: (\d+)\)',
-                command[4],
-            )
-            payload = {
-                "data": {
-                    f"i{alias}": {
-                        "issue": {
-                            "subIssuesSummary": {
-                                "total": len(children.get((owner, repo, number), []))
-                            }
-                        }
-                    }
-                    for alias, owner, repo, number in selections
-                }
-            }
+        elif "assigned: search" in command[4]:
+            payload = {"data": {"assigned": {"nodes": []}}}
+        elif "tracked: search" in command[4]:
+            payload = {"data": {"tracked": {"nodes": nodes}}}
+        elif "issues(first:" in command[4]:
+            payload = {"data": {"repository": {"issues": {"nodes": []}}}}
         elif "closingIssuesReferences" in command[4]:
             payload = {"data": {"p0": {"pullRequest": {"closingIssuesReferences": {"nodes": []}}}}}
         else:

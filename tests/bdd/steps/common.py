@@ -527,6 +527,7 @@ def github_item_node(
     }
     if item_type == WorkItemType.ISSUE:
         node["body"] = body
+        node["subIssuesSummary"] = {"total": 0}
     else:
         node["closingIssuesReferences"] = {
             "nodes": [{"number": issue, "repository": {"nameWithOwner": repo}} for issue in closes]

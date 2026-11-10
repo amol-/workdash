@@ -668,7 +668,9 @@ def _another_review_requested_pr_has_direct_request(
         GitHubClient, "list_open_authored_prs", lambda self, login, progress_callback=None: []
     )
     monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
-    monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient, "list_open_assigned_issues", lambda self, login, progress_callback=None: []
+    )
     monkeypatch.setattr(
         GitHubClient,
         "list_recent_tracked_items",
@@ -984,7 +986,7 @@ def _pull_request_and_issue_are_open_work(
     monkeypatch.setattr(
         GitHubClient,
         "list_open_assigned_issues",
-        lambda self, login: [
+        lambda self, login, progress_callback=None: [
             {
                 "id": f"ISSUE-{issue_number}",
                 "repo": "owner/repo",
@@ -1846,12 +1848,17 @@ def _install_gh_fetch_fake(
         if is_linked_issues_query(command):
             return linked_issues_response(command)
         if command[:3] == ["gh", "api", "graphql"] and "subIssuesSummary" in command[4]:
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=json.dumps({"data": {"i0": {"issue": {"subIssuesSummary": {"total": 0}}}}}),
-                stderr="",
-            )
+            number = re.search(r"issue\(number: (\d+)\)", command[4]).group(1)
+            result = responses.get(("issue", number))
+            if isinstance(result, Exception):
+                raise result
+            if result is not None:
+                node = json.loads(result.stdout)
+                node["subIssuesSummary"] = {"total": 0}
+                payload = {"data": {"repository": {"issue": node}}}
+                return subprocess.CompletedProcess(
+                    command, 0, stdout=json.dumps(payload), stderr=""
+                )
         raise AssertionError(f"Unexpected gh command in include scenario: {command}")
 
     monkeypatch.setattr(gc.subprocess, "run", fake_run)
@@ -1871,7 +1878,9 @@ def _install_empty_github_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda self, login, progress_callback=None: [],
     )
     monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
-    monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient, "list_open_assigned_issues", lambda self, login, progress_callback=None: []
+    )
     monkeypatch.setattr(
         GitHubClient,
         "list_recent_tracked_items",
@@ -2046,7 +2055,9 @@ def _seed_three_included_items(
         ],
     )
     monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
-    monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda self, login: [])
+    monkeypatch.setattr(
+        GitHubClient, "list_open_assigned_issues", lambda self, login, progress_callback=None: []
+    )
     monkeypatch.setattr(
         GitHubClient,
         "list_open_todo_issues",
