@@ -24,7 +24,8 @@ RefreshCallbackResult = Sequence[WorkItem] | tuple[Sequence[WorkItem], Suggestio
 AnalyzeCallbackResult = str | None
 _CallbackResult = TypeVar("_CallbackResult")
 # The Repo column is capped at this reference name so the title keeps more room.
-_MAX_REPO_WIDTH = len("posit-dev/rsconnect-python")
+_MAX_REPO_WIDTH = 15
+_TYPE_CODES = {"ISSUE": "IS", "PR": "PR", "REVIEW": "RV", "CHECK": "VR"}
 
 if TYPE_CHECKING:
     from .control import WorkdashSession
@@ -50,8 +51,10 @@ def _type_column(item: WorkItem, *, bold: bool) -> Text:
         item.ci_state, item.review_decision, item.review_requested, item.has_unresolved_comments
     )
     prefix = f"{ci_symbol}{review_symbol}"
+    label = format_type_label(item)
+    code = _TYPE_CODES[label.removesuffix("+")] + ("+" if item.included else "")
     cell = Text(
-        f"{prefix}{format_type_label(item)}#{item.number}",
+        f"{prefix}{code} {item.number}",
         style="bold" if bold else "",
     )
     if ci_color is not None:
@@ -449,14 +452,6 @@ class WorkdashApp(App[None]):
         # would silently move the selection to a different work item.
         if focus_item is None:
             focus_item = self._selected_item()
-        if table.columns:
-            table.clear()
-        else:
-            table.add_column("Type", key="type")
-            table.add_column("Repo", key="repo")
-            table.add_column("Title", key="title")
-            table.add_column("Age", key="age")
-            table.add_column("Last Update", key="last_update")
         needle = self._search_filter.lower()
         # Match the rendered Type/Repo/Title text. The raw title and the
         # unprefixed type label are used so neither the "* " suggestion marker
@@ -467,12 +462,22 @@ class WorkdashApp(App[None]):
             if any(
                 needle in value.lower()
                 for value in (
+                    str(_type_column(item, bold=False))[2:],
                     f"{format_type_label(item)}#{item.number}",
                     display_repo(item),
                     item.title,
                 )
             )
         ]
+        table.clear(columns=True)
+        type_width = max(
+            (len(str(_type_column(item, bold=False))) for item in matched_items), default=4
+        )
+        table.add_column("Type", key="type", width=max(4, type_width))
+        table.add_column("Repo", key="repo")
+        table.add_column("Title", key="title")
+        table.add_column("Age", key="age")
+        table.add_column("Last Update", key="last_update")
         self._sorted_work_items = sorted(
             matched_items,
             key=lambda entry: entry.updated_at,

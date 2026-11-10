@@ -69,14 +69,14 @@ def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_colum
             # Sorted by updated_at descending; PR #22 (updated 2/25) before issue #11 (updated 2/20)
             # PR #22 is within 24h of now_utc so cells are bold Text objects
             assert [str(c) for c in table.get_row_at(0)] == [
-                "  CHECK#22",
+                "  VR 22",
                 "owner/repo",
                 "Implement renderer",
                 "1d",
                 "1d",
             ]
             assert [str(c) for c in table.get_row_at(1)] == [
-                "  ISSUE#11",
+                "  IS 11",
                 "owner/repo",
                 "* Fix parser",
                 "6d",
@@ -92,7 +92,7 @@ def test_workdash_app_truncates_a_long_repo_column_on_the_left() -> None:
         WorkItem(
             kind=WorkItemKind.TRACKED_PR,
             item_type=WorkItemType.PR,
-            repo="posit-dev/rsconnect-python",  # exactly the column width
+            repo="owner/123456789",  # exactly the column width
             number=22,
             title="Implement renderer",
             created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
@@ -115,10 +115,10 @@ def test_workdash_app_truncates_a_long_repo_column_on_the_left() -> None:
     async def run_smoke() -> None:
         async with app.run_test() as _:
             table = app.query_one("#work-items", DataTable)
-            assert str(table.get_row_at(0)[1]) == "posit-dev/rsconnect-python"
+            assert str(table.get_row_at(0)[1]) == "owner/123456789"
             # The owner is cut, the repository name itself stays readable.
-            assert str(table.get_row_at(1)[1]) == "…v/rsconnect-python-longer"
-            assert len(str(table.get_row_at(1)[1])) == len("posit-dev/rsconnect-python")
+            assert str(table.get_row_at(1)[1]) == "…-python-longer"
+            assert len(str(table.get_row_at(1)[1])) == 15
 
     asyncio.run(run_smoke())
 
@@ -173,7 +173,7 @@ def test_workdash_app_colors_the_ci_and_review_symbols_in_the_type_column(
             table = app.query_one("#work-items", DataTable)
             cell = table.get_row_at(0)[0]
 
-            assert cell.plain == f"{expected_prefix}PR#22"
+            assert cell.plain == f"{expected_prefix}PR 22"
             assert [(s.start, s.end, s.style) for s in cell.spans] == expected_spans
 
     asyncio.run(run_smoke())
@@ -199,7 +199,7 @@ def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label()
             row_key = "pr:owner/repo#22"
             assert [key.value for key in table.rows] == [row_key]
             assert [str(c) for c in table.get_row(row_key)] == [
-                "  CHECK#22",
+                "  VR 22",
                 "owner/repo",
                 "Implement renderer",
                 "6d",
@@ -211,7 +211,7 @@ def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label()
 
             assert [key.value for key in table.rows] == [row_key]
             assert [str(c) for c in table.get_row(row_key)] == [
-                "  CHECK+#22",
+                "  VR+ 22",
                 "owner/repo",
                 "Implement renderer",
                 "6d",
@@ -245,7 +245,7 @@ def test_workdash_app_renders_review_for_review_requested_pr_type() -> None:
         async with app.run_test() as _:
             table = app.query_one("#work-items", DataTable)
             assert [str(c) for c in table.get_row_at(0)] == [
-                "  REVIEW#22",
+                "  RV 22",
                 "owner/repo",
                 "Needs review",
                 "1d",
@@ -359,7 +359,7 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
             ]
             assert terminal_calls == [(WorkItemType.PR, 22)]
             assert [str(c) for c in table.get_row_at(0)] == [
-                "  CHECK#22",
+                "  VR 22",
                 "owner/repo",
                 "Implement renderer",
                 "1d",
@@ -412,7 +412,7 @@ def test_workdash_app_refresh_keybinding_invokes_callback_and_reloads_rows() -> 
             assert refresh_calls == ["called"]
             assert table.row_count == 1
             assert [str(c) for c in table.get_row_at(0)] == [
-                "  CHECK#33",
+                "  VR 33",
                 "owner/repo",
                 "* Ship refresh",
                 "0d",
@@ -465,7 +465,7 @@ def test_workdash_app_uses_session_state_for_first_render() -> None:
             table = app.query_one("#work-items", DataTable)
             assert table.row_count == 1
             assert [str(c) for c in table.get_row_at(0)] == [
-                "  CHECK#33",
+                "  VR 33",
                 "owner/repo",
                 "* Session state before Textual starts",
                 "0d",
@@ -514,7 +514,7 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
         async with app.run_test() as pilot:
             table = app.query_one("#work-items", DataTable)
             assert [str(c) for c in table.get_row_at(0)] == [
-                "  ISSUE#11",
+                "  IS 11",
                 "owner/repo",
                 "Fix parser",
                 "6d",
@@ -527,7 +527,7 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
 
             assert table.row_count == 1
             assert [str(c) for c in table.get_row_at(0)] == [
-                "  CHECK#33",
+                "  VR 33",
                 "owner/repo",
                 "* Ship refresh",
                 "0d",
@@ -707,7 +707,7 @@ def test_workdash_app_analyze_runs_without_blocking_ui_loop(
             await analyze_press
             await pilot.pause()
             assert [str(c) for c in table.get_row_at(0)] == [
-                "  ISSUE#11",
+                "  IS 11",
                 "owner/repo",
                 "Fix parser",
                 "6d",
@@ -1380,6 +1380,25 @@ def _listed_titles(app: WorkdashApp) -> list[str]:
 _ALL_SEARCH_TITLES = ["Unrelated chore", "Ship the docs", "Fix the parser"]
 
 
+def test_type_width_tracks_widest_visible_item_after_search() -> None:
+    work_items = _search_work_items()
+    work_items[0].number = 123456789
+    work_items[0].included = True
+    app = WorkdashApp(work_items=work_items, now_utc=_SEARCH_NOW_UTC)
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            table = app.query_one("#work-items", DataTable)
+            assert table.columns["type"].width == len("  IS+ 123456789")
+            await _submit_search(app, pilot, "ship the docs")
+            assert table.columns["type"].width == len("  VR 22")
+            await pilot.press("/")
+            await pilot.pause()
+            assert table.columns["type"].width == len("  IS+ 123456789")
+
+    asyncio.run(run_smoke())
+
+
 def test_workdash_app_search_matches_the_owner_cut_from_the_repo_column() -> None:
     work_items = _search_work_items()
     work_items[0].repo = "a-very-long-owner-name/some-repository"
@@ -1435,6 +1454,21 @@ def test_workdash_app_search_matches_rendered_columns_ignoring_case() -> None:
             await pilot.pause()
             await _submit_search(app, pilot, "issue#33")
             assert _listed_titles(app) == ["Unrelated chore"]
+
+            await pilot.press("/")
+            await pilot.pause()
+            await _submit_search(app, pilot, "is 33")
+            assert _listed_titles(app) == ["Unrelated chore"]
+
+            await pilot.press("/")
+            await pilot.pause()
+            await _submit_search(app, pilot, "vr 22")
+            assert _listed_titles(app) == ["Ship the docs"]
+
+            await pilot.press("/")
+            await pilot.pause()
+            await _submit_search(app, pilot, "check#22")
+            assert _listed_titles(app) == ["Ship the docs"]
 
             await pilot.press("/")
             await pilot.pause()

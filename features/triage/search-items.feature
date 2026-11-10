@@ -9,7 +9,7 @@ Feature: Search work items
   Rules:
     - The search action is the first entry in the TUI action bar and is bound to "/".
     - Pressing "/" with no active search filter opens a search box; submitting a non-empty string filters the list to matching items.
-    - The search filter matches when the typed text appears, ignoring case, anywhere in the entry's Type column (which includes the item number), its Repo column, or its Title column. The typed text is matched literally, including spaces.
+    - The search filter matches literal text, ignoring case, anywhere in the displayed Type and number (such as `VR 42`), the legacy full type and number (such as `CHECK#42`), the full repository, or the full title. Spaces are matched literally.
     - The Repo column is matched on the full repository name, so an owner cut off by the column's width is still searchable.
     - The Age and Last Update columns are never searched.
     - Pressing "/" while a search filter is active clears the filter and shows the full list again.
