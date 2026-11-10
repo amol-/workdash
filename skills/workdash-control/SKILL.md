@@ -46,41 +46,60 @@ naming a pull request fails with `unsupported_item_type`.
 
 ## Find ready work
 
-`workdash ready SCOPE` answers "what can be worked on next?" straight from
-GitHub, independent of what `workdash list` shows. It is read-only advice: it
-claims nothing and launches nothing. Use it to pick the next target for
-`workdash code`; use `workdash list` for dashboard triage instead.
+`workdash ready SCOPE` previews what can be worked on next, straight from
+GitHub rather than the dashboard. It claims and launches nothing. Use the same
+scope with `dispatch` to select and supervise one of these tasks.
 
 ```bash
-workdash ready owner/repo              # open issues and pull requests of one repository
-workdash ready owner/repo#42           # an issue and its whole sub-issue tree
-workdash ready todo                    # the server's todo repository
-workdash ready any                     # every configured repository plus the todo repository
+workdash ready owner/repo
+workdash ready owner/repo#42
+workdash ready todo
 workdash ready any --json
 workdash ready owner/repo#ISSUE-42 --host dashboard.lan --json
 ```
 
-`ready ISSUE` (`owner/repo#42`, `owner/repo#ISSUE-42`, a targeted todo ID, or an
-issue URL) previews every actionable native sub-issue descendant, recursively and
-across repositories, or the issue itself when it has no sub-issues. An issue
-with sub-issues is never listed itself. A pull request ID or URL is not a scope.
+Scopes include a repository, `todo`, `any`, or an issue ID, targeted todo ID, or
+issue URL. Issue scopes include the issue and its native descendants recursively
+across repositories; even a closed parent can scope open descendants. An open
+parent is eligible once it has no open descendants, so its overall goal can be
+verified. Pull requests are never ready items.
 
-Results come in priority order, so the first one is the next to pick:
+Results are issue IDs in priority order: issues with actionable authored pull
+requests first, then unstarted issues, oldest first within each group. The linked
+pull request is context. Its reasons are ordered `address_review`,
+`fix_merge_conflicts`, `fix_ci`; all applicable reasons are reported. An issue
+with somebody else's open pull request, or a pull request only waiting for CI,
+review, or merge, is not ready. Open blockers and live code panes also exclude
+work. `--json` includes CI, mergeability, head and base SHAs, and feedback.
+`No ready work found.` means an empty result; GitHub or Zellij failures are errors.
 
-- Pull requests needing work come first. `action` is `address_review`,
-  `fix_merge_conflicts`, or `fix_ci`, and `reasons` lists every one of them. The
-  pull request is the target: `workdash code` its `id` to resume its existing
-  branch; `issue_id` names the issue it implements. `--json` adds `ci_status`,
-  `failing_checks`, `mergeability`, `pr_head_sha`, `base_ref`, `base_head_sha`,
-  and `feedback` references.
-- New leaf issues follow, with action `implement`.
-- Left out: blocked issues, issues with sub-issues or an open pull request, work
-  a live code pane already holds, and pull requests merely awaiting CI, review,
-  or merge.
-- `No ready work found.` (an empty `items` list) means nothing is ready, not a failure.
+## Dispatch one ready issue
 
-Only the server looks at GitHub and Zellij, so `ready` needs it running like
-every other command; never start a server just to run `ready`.
+Use `dispatch` when Workdash should choose the next task and supervise its
+agent; use `code ITEM` for an explicitly chosen task with its pane left open.
+`ready` previews the same ordered candidates without launching anything.
+
+```bash
+workdash dispatch owner/repo
+workdash dispatch owner/repo#42 --agent pi --json
+workdash dispatch owner/repo#42 --group project --host dashboard.lan --json
+```
+
+Dispatch selects the first still-eligible issue, rechecking readiness and
+skipping claims by other agents. It launches at most one autonomous agent and
+returns immediately; it does not wait for completion, create sub-issues, merge,
+or run a scheduler. An actionable authored pull request is resumed on its existing branch,
+with all reasons in the briefing. An open parent with no open descendants can
+be dispatched to verify its goal. By default the Zellij group is the basename
+of the implementation repository, not the parent issue's repository; `--group`
+overrides it.
+
+`status=launched` includes the issue, action, reasons, and actual `pane_id`.
+The server owns supervision and automatic pane closure after the client exits;
+supervision stops if the server restarts and is heuristic. `status=no_ready_task`
+is a successful empty or exhausted scope; GitHub or Zellij failures and
+unconfirmed launches are errors, not empty results. Remote `--host` commands
+still require an existing server: never start one yourself.
 
 ## Capture todos
 
@@ -172,6 +191,12 @@ classification `ready` reports:
   agent invents no work and opens no new pull request.
 - A pull request of somebody else stays a review: the agent starts reviewing
   without asking for confirmation and never edits, commits, or pushes.
+
+An authored pull request linked to an issue is normalized to that issue for
+implementation, using its cached issue analysis when available and continuing
+the existing branch. An authored pull request without a linked issue remains the
+target. A review of somebody else's pull request uses cached pull request
+analysis instead; linked issues are background, not implementation tasks.
 
 Successful work leaves the pull request open for a human to review and merge.
 The agent may report completion only when the current head's CI is `passing` or

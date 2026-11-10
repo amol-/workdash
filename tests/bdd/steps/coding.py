@@ -12,7 +12,7 @@ import pytest
 from pytest_bdd import given, parsers, then, when
 from textual.widgets import Static
 
-from gh_work_state_fake import failure
+from gh_work_state_fake import HEAD_SHA, check_run, failure, install_fake_github
 from workdash.analysis_cache import AnalysisCache
 from workdash.control import WorkdashSession, format_work_item_id
 from workdash.github import GithubHelper
@@ -262,7 +262,7 @@ def _agent_told_about_partial_work(scenario_state: dict[str, Any]) -> None:
 
 @then("the agent is briefed to review the pull request")
 def _agent_briefed_to_review(scenario_state: dict[str, Any]) -> None:
-    prompt = scenario_state["launched_prompts"][0]
+    prompt = _launched_prompt(scenario_state)
     assert "Discuss review findings, risks, and open questions for the author." in prompt
 
 
@@ -352,8 +352,25 @@ def run_code_dialog_scenario(
             patch.setattr(subprocess, "run", fake_gh)
             return GithubHelper().fetch_launch_context(item)
 
+    selected = work_items[0]
+    if selected.kind == WorkItemKind.AUTHORED_PR:
+        github = install_fake_github(monkeypatch)
+        github.add_pull_request(f"{selected.repo}#{selected.number}")
+
     monkeypatch.setattr(launcher_module, "collect_launch_github_context", fake_collect)
     monkeypatch.setattr(control_module, "ensure_worktree", ensure_worktree)
+    monkeypatch.setattr(
+        control_module,
+        "GithubHelper",
+        lambda: SimpleNamespace(fetch_worktree_head=lambda item: ("pr-branch", item.repo)),
+    )
+    monkeypatch.setattr(
+        control_module,
+        "GitHelper",
+        lambda: SimpleNamespace(
+            branch_tracks_repository=lambda *_: True, find_worktree_for_branch=lambda *_: None
+        ),
+    )
     monkeypatch.setattr(
         control_module, "existing_worktree_path", lambda _workdir, _item: worktree_path
     )
@@ -762,3 +779,86 @@ def _agent_not_told_to_open_pull_request(scenario_state: dict[str, Any]) -> None
     prompt = _launched_prompt(scenario_state)
     assert "IMPLEMENT" not in prompt
     assert "closing keyword" not in prompt
+
+
+@given(
+    parsers.parse(
+        "GitHub issue `{issue}` is open and closed by authored pull request `{pr}` with failed CI"
+    )
+)
+def _authored_linked_pr(scenario_state, issue, pr):
+    github = scenario_state["github"]
+    github.add_issue(issue)
+    github.add_pull_request(pr, closes=(issue,), checks={HEAD_SHA: [check_run("tests", "FAILURE")]})
+
+
+@given(parsers.parse("authored pull request `{pr}` closes no issue"))
+def _authored_pr_without_issue(scenario_state, pr):
+    scenario_state["github"].add_pull_request(pr)
+
+
+@given(parsers.parse("pull request `{pr}` of another author closes issue `{issue}`"))
+def _other_authors_pr(scenario_state, pr, issue):
+    github = scenario_state["github"]
+    github.add_issue(issue)
+    github.add_pull_request(pr, closes=(issue,), author="someone-else")
+
+
+@given("the issue and pull request each have cached analysis")
+def _both_analyses(scenario_state):
+    scenario_state["api_session"].backend.analysis_cache.load_analysis = lambda item: (
+        f"{item.item_type.value} analysis"
+    )
+
+
+@given(parsers.parse("open issue `{issue}` has only closed sub-issues"))
+def _parent_with_closed_children(scenario_state, issue):
+    github = scenario_state["github"]
+    github.add_issue(issue)
+    github.add_issue(f"{issue.partition('#')[0]}#43", parent=issue, state="CLOSED")
+
+
+@then(parsers.parse("the response targets `{item_id}`"))
+def _response_target(scenario_state, item_id):
+    assert scenario_state["api_payload"]["result"]["item_id"] == item_id
+
+
+@then(parsers.parse("the agent works on pull request `{ref}`'s existing branch"))
+def _agent_works_on_existing_branch(scenario_state, ref):
+    item = scenario_state["ensure_calls"][-1][1]
+    assert (item.repo, item.number, item.item_type) == (
+        *ref.split("#")[:1],
+        int(ref.split("#")[1]),
+        WorkItemType.PR,
+    )
+
+
+@then("the agent is given the issue analysis and not the pull request analysis")
+def _issue_analysis_only(scenario_state):
+    assert "%23ISSUE-42/analysis" in scenario_state["prompt_analysis"]
+    assert "%23PR-51/analysis" not in scenario_state["prompt_analysis"]
+
+
+@then("the agent is given the pull request analysis and not the issue analysis")
+def _pr_analysis_only(scenario_state):
+    assert "%23PR-52/analysis" in scenario_state["prompt_analysis"]
+    assert "%23ISSUE-42/analysis" not in scenario_state["prompt_analysis"]
+
+
+@then("the response reports status `already_running` with the same pane")
+def _same_pane(scenario_state):
+    responses = [response[1]["result"] for response in scenario_state["api_responses"]]
+    assert responses[-1]["status"] == "already_running"
+    assert responses[-1]["pane_id"] == responses[-2]["pane_id"]
+
+
+@then("the agent is told to achieve the issue's goal and verify its described workflow")
+def _verify_parent(scenario_state):
+    _assert_told(scenario_state, "Continue the assigned issue", "verify the described workflow")
+
+
+@then(
+    "the agent is told that if the sub-issues already solved it, a test proving the workflow works is enough"
+)
+def _prove_parent(scenario_state):
+    _assert_told(scenario_state, "If sub-issues already fulfilled", "add a test proving it works")

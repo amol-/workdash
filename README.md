@@ -152,6 +152,7 @@ workdash list --refresh      # ask the server to refresh items before listing
 workdash list --json         # list items as machine-readable JSON
 workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
 workdash ready SCOPE [--json]   # list the GitHub work ready to be picked up next
+workdash dispatch SCOPE [--agent NAME] [--group NAME] [--host HOST] [--json]  # launch one ready issue
 workdash analyze ITEM [--agent NAME] [--json]  # analyze an item
 workdash code ITEM [--agent NAME] [--group NAME] [--autoclose] [--json]  # launch an autonomous coding agent, or report the running one
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
@@ -290,7 +291,7 @@ and use the same peer access checks as the control API.
 Allowed clients can execute dashboard actions; do not expose it to untrusted
 networks or treat the IP allowlist as authentication or encryption.
 
-Client commands `list`, `info`, `ready`, `analyze`, `code`, `terminal`, `todo`, `read`,
+Client commands `list`, `info`, `ready`, `dispatch`, `analyze`, `code`, `terminal`, `todo`, `read`,
 `write`, and `close` accept `--host HOST[:PORT]` before or after the command.
 Set `WORKDASH_HOST` to an IPv4 address or IPv4 address:port to select the default
 for both server and clients; omitted ports use 8765. An explicit `--host` replaces
@@ -331,39 +332,63 @@ rather than from the dashboard. It only reports: nothing is claimed or launched.
 
 `SCOPE` is one of:
 
-- `owner/repo`: every open issue and pull request of the repository, plus the
-  open pull requests closing its issues.
+- `owner/repo`: every open issue of the repository, including linked open pull
+  requests in other repositories, and issues linked to its actionable authored pull requests.
 - An issue (`owner/repo#42`, `owner/repo#ISSUE-42`, a targeted todo ID, or an
-  issue URL): its native sub-issues, recursively and across repositories, or the
-  issue itself when it never had sub-issues. Only pull requests closing one of
-  those issues count.
+  issue URL): the issue and its native sub-issue descendants, recursively and
+  across repositories. A closed parent can scope open descendants.
 - `todo`: the server's todo repository.
 - `any`: every repository selected by the server's `repositories`, plus the todo
   repository.
 
-A pull request is ready when the server can push to its head branch and its
-current head needs work: `address_review` (a changes-requested review on the
-current head, or review bodies, unresolved threads, and comments that other
-humans posted after the last push), `fix_merge_conflicts` (GitHub reports a
-conflict with the current base branch), or `fix_ci` (a check or status on the
-current head failed). An issue is ready when it is open, never had sub-issues,
-has no open `blocked by` issue, and no open pull request closes it. Work a live
-Workdash code pane holds is left out, and so are pull requests that only wait
-for CI, review, or merge.
+Only issues are returned, never pull requests. An open issue is eligible when it
+has no open descendants or open `blocked by` issue and no live code pane holds
+its worktree. An open parent becomes eligible when all its descendants are
+closed: work on it can verify the overall goal. With no open linked pull request
+its action is `implement`. An issue linked to somebody else's open pull request
+is excluded; an authored open pull request must be pushable and need work:
+`address_review`, `fix_merge_conflicts`, or `fix_ci`. An issue whose pull request
+only waits for CI, review, or merge is absent.
 
-Ready pull requests come first, then ready issues, each group oldest first:
-
-```
-TYPE  ID                           ACTION               title URL [REASONS] (issue ID)
-```
-
-Each ID is accepted as is by `code`, `analyze`, and `terminal`; a ready pull
-request names the issue it closes. `--json` adds the head SHA, base branch and
-its head SHA, mergeability, CI status (`passing`, `failing`, `pending`,
+Issues with actionable authored pull requests come first, ordered by pull request
+age; unstarted issues follow, ordered by issue age. Each issue is
+listed once. If one pull request links multiple eligible issues in the scope, its
+work appears once, under the issue with the first repository name and issue number.
+All applicable reasons appear in priority order: review feedback,
+merge conflicts, then failing CI. The issue ID can be passed to `code`, `analyze`,
+or `terminal`; the linked pull request is context. `--json` includes the PR head
+and base SHAs, mergeability, CI status (`passing`, `failing`, `pending`,
 `no_checks`, or `unknown`), failing checks, and feedback references. CI status
-comes from GitHub check metadata and the base branch's required checks only,
-never from repository files. If nothing is ready the output is
-`No ready work found.`.
+comes from GitHub check metadata and base-branch required checks, not repository
+files. No ready work prints `No ready work found.`; GitHub or Zellij failures
+are errors rather than an empty result.
+
+## Dispatch command
+
+`workdash dispatch SCOPE [--agent NAME] [--group NAME] [--host HOST] [--json]`
+asks the running server to select and launch at most one issue. Preview the same
+ordered candidates with `workdash ready SCOPE`; dispatch rechecks eligibility
+and skips candidates claimed by another caller. It uses the same scope forms as
+`ready`, including `todo` and `any`.
+
+```bash
+workdash dispatch owner/repo
+workdash dispatch owner/repo#42 --agent pi --group project --host dashboard.lan --json
+```
+
+Dispatch uses the issue as the coding target. If its authored pull request needs
+work, the agent resumes its existing branch with every applicable reason. The
+server supervises the new pane using autoclose after the client returns. The
+result reports `status=launched`, the issue, action, reasons, and actual pane ID;
+`status=no_ready_task` is a successful empty or exhausted scope. Unavailable
+GitHub or Zellij state and unconfirmed launches are errors, not empty results.
+The default Zellij group is the implementation repository's basename, including
+for a descendant in another repository; `--group` overrides it. The JSON API
+accepts `POST /api/v0/dispatch` with `scope` and optional `agent` and `group`.
+
+Dispatch returns immediately; it does not wait for completion, create
+sub-issues, merge, or run a scheduler. Supervision is subject to the limitations
+in *Autoclose supervision* below.
 
 ## Info command
 
@@ -433,6 +458,15 @@ review-only session. There is no `--autostart` option; the TUI's `c` keeps the
 plan-first briefing and never commits or pushes by itself, and the HTTP
 `POST /api/v0/code` takes optional boolean `autostart` and `autoclose`, both
 false when omitted. `already_running` injects nothing into the running agent.
+
+Coding an authored pull request linked to an issue is the same implementation
+task as coding that issue: it uses the issue target and cached issue analysis,
+when available, while continuing the pull request branch. An authored pull
+request without a linked issue remains the target. Reviewing somebody else's
+pull request uses its cached pull request analysis instead; linked issues are
+background, not instructions to implement. An open parent whose descendants are
+closed is briefed to verify its goal and, if already implemented, prove the
+workflow with a test.
 
 Human output reports the status, item, agent, selected session, actual tab, cwd,
 pane title, and pane id when available, plus an `Autoclose` line saying whether

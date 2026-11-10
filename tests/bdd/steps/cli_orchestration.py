@@ -154,6 +154,12 @@ def _run_workdash(
                         group=payload.get("group"),
                         autoclose=payload.get("autoclose", False),
                     )
+                if endpoint == "dispatch":
+                    return scenario_state["api_session"].dispatch_once(
+                        scope=payload["scope"],
+                        agent=payload.get("agent"),
+                        group=payload.get("group"),
+                    )
                 if endpoint == "terminal":
                     return scenario_state["api_session"].terminal(
                         target=payload["target"],
@@ -271,10 +277,29 @@ def _run_workdash(
     # Mock control_module.ensure_worktree since control.py imports it
     monkeypatch.setattr(
         control_module,
+        "GithubHelper",
+        lambda: SimpleNamespace(fetch_worktree_head=lambda item: ("pr-branch", item.repo)),
+    )
+    monkeypatch.setattr(
+        control_module,
+        "GitHelper",
+        lambda: SimpleNamespace(
+            branch_tracks_repository=lambda path, branch, repo: (
+                (str(path), branch, repo) in scenario_state["pr_worktrees"].values()
+                if "pr_worktrees" in scenario_state
+                else True
+            ),
+            find_worktree_for_branch=lambda *_: None,
+        ),
+    )
+    monkeypatch.setattr(
+        control_module,
         "ensure_worktree",
         lambda workdir, item: (
             scenario_state.setdefault("ensure_calls", []).append((workdir, item))
-            or str(Path(workdir) / "owner_repo_1")
+            or scenario_state.get("pr_worktrees", {}).get(
+                item.number, (str(Path(workdir) / "owner_repo_1"),)
+            )[0]
         ),
     )
     monkeypatch.setattr(

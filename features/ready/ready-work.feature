@@ -2,22 +2,22 @@
 Feature: Ready work
 
   Agents and users ask the Workdash server which GitHub work can be picked up
-  next: open leaf issues nobody implements yet, and open implementation pull
-  requests whose current head needs new work. The answer comes from GitHub and
+  next: open issues ready to implement or whose authored pull requests need
+  new work. The answer comes from GitHub and
   the live Zellij panes, never from the dashboard list.
 
   Rules:
     - `workdash ready SCOPE` requires a running `workdash --server`; like the other server-backed commands it accepts `--host HOST` and `--json`, and it never reads configuration, runs `gh`, or inspects Zellij or worktrees on the client.
     - SCOPE is required: `owner/repo`, an issue (`owner/repo#42`, `owner/repo#ISSUE-42`, a targeted todo ID such as `owner/repo#ISSUE-WT7`, or a GitHub issue URL), `todo`, or `any`.
     - The server resolves `todo` and `any` from its own configuration: `todo` is the todo repository, `any` is every repository selected by `repositories`, with `owner/*` expanded to every unarchived repository of that owner, plus the todo repository.
-    - A repository scope covers every open issue and every open pull request of the repository, and every open pull request that closes one of its issues, however many the dashboard lists.
-    - An issue scope covers the issue's native sub-issue descendants, recursively and across repositories, or the issue itself when it never had sub-issues. Pull requests count only when they close an issue of the scope. A closed issue can be a scope; the scope issue itself is never listed when it has sub-issues.
-    - An issue is ready when it is open, never had sub-issues (closed ones included), has no open `blocked by` issue, no open pull request closes it, and no live Workdash agent pane works in its worktree.
-    - A pull request is ready when it is open, the server's GitHub identity can push to its head branch, no live Workdash agent pane works in its worktree or in the worktree of an issue it closes, and its current head needs work for at least one reason:
+    - A repository scope covers every open issue of the repository, including linked open pull requests in other repositories, and issues in other repositories linked to its actionable authored pull requests, however many the dashboard lists.
+    - An issue scope covers the issue and its native sub-issue descendants recursively across repositories. A closed issue can scope open descendants. An open issue is considered only when it has no open descendants.
+    - An issue is ready when it is open, has no open descendants or open `blocked by` issue, and no live Workdash agent pane works in its worktree. With no open linked pull request its action is `implement`; with an authored open linked pull request it is ready only if that pull request needs work. An issue with an open pull request by somebody else is not ready.
+    - An authored linked pull request needs work when the server can push to its head branch and its current head needs work for at least one reason:
         - `address_review`: actionable review feedback on the current head.
         - `fix_merge_conflicts`: GitHub confirms the pull request conflicts with its current base branch.
         - `fix_ci`: a check or status on the current head failed.
-    - A ready pull request lists every reason, ordered `address_review`, `fix_merge_conflicts`, `fix_ci`; the first one is its `action`. A ready issue has action `implement`.
+    - An issue with an actionable authored pull request lists every reason, ordered `address_review`, `fix_merge_conflicts`, `fix_ci`; the first one is its `action`. An issue without a pull request has action `implement`.
     - Actionable review feedback is any of these on the current head:
         - a changes-requested verdict a reviewer gave on the current head commit and has not superseded;
         - a review body, an unresolved and not outdated review thread, or a pull request comment that a human other than the pull request author and the server's GitHub identity posted after the current head was pushed. A thread is judged by its latest comment that is not from a bot.
@@ -30,9 +30,9 @@ Feature: Ready work
         - `no_checks`: GitHub reports no check or status on the current head and the base branch requires none.
         - `unknown`: anything else, including a required-checks lookup that failed and a required check that has not reported.
     - Mergeability is `conflicting` only when GitHub reports a conflict with the current base branch, `mergeable` when GitHub reports none, and `unknown` while GitHub has not computed it; `unknown` never creates `fix_merge_conflicts` work.
-    - Ready pull requests are listed before ready issues. Within each group items are ordered by GitHub creation time, oldest first, then by repository, type, and number.
-    - Each issue or pull request is listed once, however many scopes or selectors include it; an issue and the pull request that closes it are never both listed.
-    - Each listed item carries the Workdash item ID its GitHub data implies, accepted as is by `workdash code`, `workdash analyze`, and `workdash terminal`; a listed pull request also names the issue it closes.
+    - Issues with actionable authored pull requests are listed before unstarted issues, ordered by pull request creation time with stable pull request ties; unstarted issues are oldest first with stable ties.
+    - Each issue is listed once, however many scopes or selectors include it; pull requests are never listed as ready items. When one actionable pull request links multiple eligible issues in the scope, its work is listed once, using the issue with the first repository name and issue number.
+    - Each listed issue carries its Workdash item ID, accepted as is by `workdash code`, `workdash analyze`, and `workdash terminal`; an actionable linked pull request is reported as context.
     - `ready` only reports: it never launches panes or reserves work.
     - No ready work is a successful empty result. A GitHub or Zellij failure fails the whole command, except that a failed required-checks lookup only makes the CI status `unknown` and a todo repository that does not exist yet has no work.
 
@@ -48,12 +48,13 @@ Feature: Ready work
     And no pane is launched
 
   @id:F-READY-S002
-  Scenario: An issue that ever had sub-issues is a container, never ready work
+  Scenario: An issue is ready after its descendants are closed
     Given a server-backed Workdash session is ready to answer
     And GitHub issue `owner/repo#10` is open with open sub-issue #11 and closed sub-issue #12
     And GitHub issue `owner/repo#20` is open and all its sub-issues are closed
     When the user runs `workdash ready owner/repo --json`
-    Then the result lists only `owner/repo#ISSUE-11`
+    Then the result lists `owner/repo#ISSUE-11` and `owner/repo#ISSUE-20`
+    And issue `owner/repo#ISSUE-10` is not listed
 
   @id:F-READY-S003
   Scenario Outline: Open blockers hold an issue back
@@ -97,16 +98,15 @@ Feature: Ready work
     And the server tracks repository selectors `owner/repo` and `team/*`
     And GitHub owner `team` has repositories `team/a` and `team/b`, each with one open leaf issue
     And GitHub repository `owner/repo` has open issue #1
-    And the server's todo repository `testuser/todos` has open todo #9 closed by pull request `owner/repo#30` whose CI failed
+    And the server's todo repository `testuser/todos` has open todo #9 closed by authored pull request `owner/repo#30` whose CI failed
     When the user runs `workdash ready any --json`
-    Then the result lists `owner/repo#PR-30` once with action `fix_ci` and issue `testuser/todos#ISSUE-9`
+    Then the result lists `owner/repo#ISSUE-WT9` once with action `fix_ci` and linked pull request `owner/repo#PR-30`
     And the result lists `team/a`, `team/b`, and `owner/repo#ISSUE-1` issues once each
-    And todo `testuser/todos#ISSUE-9` is not listed
 
   @id:F-READY-S008
   Scenario Outline: A pull request that only waits for others hides itself and its issue
     Given a server-backed Workdash session is ready to answer
-    And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51`
+    And GitHub issue `owner/repo#42` is open and closed by authored open pull request `owner/repo#51`
     And pull request #51 has <ci> CI, <mergeability> mergeability, and <reviews>
     And no agent pane works on either of them
     When the user runs `workdash ready owner/repo --json`
@@ -122,23 +122,23 @@ Feature: Ready work
       | passing   | unknown      | no reviews               |
 
   @id:F-READY-S009
-  Scenario: A pull request with failed CI is ready instead of its issue
+  Scenario: An issue with a pull request with failed CI is ready
     Given a server-backed Workdash session is ready to answer
-    And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51`
+    And GitHub issue `owner/repo#42` is open and closed by authored open pull request `owner/repo#51`
     And check `tests` failed on the current head of pull request #51, which has no reviews
     When the user runs `workdash ready owner/repo --json`
-    Then the result lists `owner/repo#PR-51` with action `fix_ci` and reasons `fix_ci`
-    And that entry links issue `owner/repo#ISSUE-42`, reports CI status `failing` with failing check `tests`, and the current head SHA
-    And issue `owner/repo#ISSUE-42` is not listed
+    Then the result lists `owner/repo#ISSUE-42` with action `fix_ci` and reasons `fix_ci`
+    And that entry links pull request `owner/repo#PR-51`, reports CI status `failing` with failing check `tests`, and the current head SHA
+    And pull request `owner/repo#PR-51` is not listed as a ready item
 
   @id:F-READY-S010
   Scenario Outline: Actionable review feedback makes a green pull request ready
     Given a server-backed Workdash session is ready to answer
-    And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51`
+    And GitHub issue `owner/repo#42` is open and closed by authored open pull request `owner/repo#51`
     And pull request #51 has passing CI and <feedback>
     When the user runs `workdash ready owner/repo --json`
-    Then the result lists `owner/repo#PR-51` with action `address_review` and reasons `address_review`
-    And that entry references the actionable feedback and links issue `owner/repo#ISSUE-42`
+    Then the result lists `owner/repo#ISSUE-42` with action `address_review` and reasons `address_review`
+    And that entry references the actionable feedback and links pull request `owner/repo#PR-51`
 
     Examples:
       | feedback                                                         |
@@ -149,11 +149,11 @@ Feature: Ready work
   @id:F-READY-S011
   Scenario Outline: A pull request needing several kinds of work is listed once with every reason
     Given a server-backed Workdash session is ready to answer
-    And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51`
+    And GitHub issue `owner/repo#42` is open and closed by authored open pull request `owner/repo#51`
     And pull request #51 has <problems>
     When the user runs `workdash ready owner/repo --json`
-    Then the result lists `owner/repo#PR-51` once with action `<action>` and reasons `<reasons>`
-    And issue `owner/repo#ISSUE-42` is not listed
+    Then the result lists `owner/repo#ISSUE-42` once with action `<action>` and reasons `<reasons>`
+    And pull request `owner/repo#PR-51` is not listed as a ready item
 
     Examples:
       | problems                                                | action              | reasons                                    |
@@ -165,7 +165,7 @@ Feature: Ready work
   @id:F-READY-S012
   Scenario Outline: Handled, stale, or non-human feedback does not make a pull request ready
     Given a server-backed Workdash session is ready to answer
-    And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51`
+    And GitHub issue `owner/repo#42` is open and closed by authored open pull request `owner/repo#51`
     And pull request #51 has passing CI and only <feedback>
     When the user runs `workdash ready owner/repo --json`
     Then neither `owner/repo#ISSUE-42` nor `owner/repo#PR-51` is listed
@@ -183,12 +183,12 @@ Feature: Ready work
   @id:F-READY-S013
   Scenario Outline: CI is judged on the current head only
     Given a server-backed Workdash session is ready to answer
-    And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51` whose CI failed
+    And GitHub issue `owner/repo#42` is open and closed by authored open pull request `owner/repo#51` whose CI failed
     When the user runs `workdash ready owner/repo --json`
-    Then pull request `owner/repo#PR-51` is listed
+    Then issue `owner/repo#ISSUE-42` is listed
     When a new head is pushed to pull request #51 and its CI is <current>
     And the user runs `workdash ready owner/repo --json`
-    Then pull request `owner/repo#PR-51` is <listed>
+    Then issue `owner/repo#ISSUE-42` is <listed>
 
     Examples:
       | current | listed     |
@@ -199,9 +199,9 @@ Feature: Ready work
   @id:F-READY-S014
   Scenario: A pull request whose head branch the server cannot push to is not ready
     Given a server-backed Workdash session is ready to answer
-    And open pull request `owner/repo#51` comes from a fork the server cannot push to and its CI failed
+    And GitHub issue `owner/repo#42` is open and closed by authored pull request `owner/repo#51` from a fork the server cannot push to, and its CI failed
     When the user runs `workdash ready owner/repo --json`
-    Then pull request `owner/repo#PR-51` is not listed
+    Then issue `owner/repo#ISSUE-42` is not listed
 
   @id:F-READY-S015
   Scenario: A live agent pane holds an issue and the pull request that closes it
@@ -247,16 +247,16 @@ Feature: Ready work
       | merged          |
 
   @id:F-READY-S019
-  Scenario: Pull requests needing work come before new issues, each group oldest first
+  Scenario: Issues with actionable authored pull requests come first in pull request age order
     Given a server-backed Workdash session is ready to answer
     And GitHub repository `owner/repo` has these ready items:
-      | item    | created    |
-      | issue 1 | 2026-01-01 |
-      | issue 2 | 2026-01-03 |
-      | pr 60   | 2026-02-02 |
-      | pr 61   | 2026-02-01 |
+      | item                                 | created    | PR created |
+      | issue 1                              | 2026-01-01 | -          |
+      | issue 2                              | 2026-01-03 | -          |
+      | issue 60 with actionable authored PR | 2026-02-01 | 2026-03-02 |
+      | issue 61 with actionable authored PR | 2026-02-02 | 2026-03-01 |
     When the user runs `workdash ready owner/repo --json`
-    Then the result lists `owner/repo#PR-61`, `owner/repo#PR-60`, `owner/repo#ISSUE-1`, `owner/repo#ISSUE-2` in this order
+    Then the result lists `owner/repo#ISSUE-61`, `owner/repo#ISSUE-60`, `owner/repo#ISSUE-1`, `owner/repo#ISSUE-2` in this order
     And `workdash ready owner/repo` prints the same items in the same order with type, ID, action, title, and URL
 
   @id:F-READY-S020
@@ -279,9 +279,9 @@ Feature: Ready work
       | is open                                                        | only `owner/repo#ISSUE-42`              |
       | is closed                                                      | nothing                                 |
       | is open and blocked by an open issue                           | nothing                                 |
-      | is open and closed by open pull request #51 with pending CI    | nothing                                 |
-      | is open and closed by open pull request #51 whose CI failed    | only `owner/repo#PR-51`                 |
-      | is closed and closed by open pull request #51 whose CI failed  | nothing                                 |
+      | is open and closed by authored open pull request #51 with pending CI    | nothing                                 |
+      | is open and closed by authored open pull request #51 whose CI failed    | only `owner/repo#ISSUE-42`                 |
+      | is closed and closed by authored open pull request #51 whose CI failed  | nothing                                 |
 
   @id:F-READY-S022
   Scenario: An issue scope lists the ready work of its whole sub-issue tree only
@@ -291,11 +291,11 @@ Feature: Ready work
       | owner/repo#100     | owner/repo#99      | open, with sub-issues                                     |
       | owner/repo#101     | owner/repo#100     | open                                                      |
       | other/lib#7        | owner/repo#100     | open                                                      |
-      | owner/repo#102     | owner/repo#99      | open and closed by open pull request #110 whose CI failed |
+      | owner/repo#102     | owner/repo#99      | open and closed by authored open pull request #110 whose CI failed |
       | owner/repo#103     | owner/repo#99      | closed                                                    |
     And GitHub repository `owner/repo` also has open issue #200 and open pull request #210 whose CI failed, outside that tree
     When the user runs `workdash ready https://github.com/owner/repo/issues/99 --json`
-    Then the result lists `owner/repo#PR-110`, `other/lib#ISSUE-7`, `owner/repo#ISSUE-101` in this order
+    Then the result lists `owner/repo#ISSUE-102`, `other/lib#ISSUE-7`, `owner/repo#ISSUE-101` in this order
     And neither issue #99, #100, #103, #200 nor pull request #210 is listed
 
   @id:F-READY-S023
@@ -334,10 +334,10 @@ Feature: Ready work
   @id:F-READY-S026
   Scenario Outline: Confirmed merge conflicts make a pull request ready whatever its CI and reviews
     Given a server-backed Workdash session is ready to answer
-    And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51`
+    And GitHub issue `owner/repo#42` is open and closed by authored open pull request `owner/repo#51`
     And pull request #51 has <ci> CI, an approval, and GitHub reports it conflicts with base branch `main`
     When the user runs `workdash ready owner/repo --json`
-    Then the result lists `owner/repo#PR-51` with action `fix_merge_conflicts`
+    Then the result lists `owner/repo#ISSUE-42` with action `fix_merge_conflicts`
     And that entry reports mergeability `conflicting`, base `main` with its head SHA, and the current head SHA
 
     Examples:
@@ -348,24 +348,31 @@ Feature: Ready work
   @id:F-READY-S027
   Scenario: A base branch update that brings conflicts makes an unchanged pull request ready
     Given a server-backed Workdash session is ready to answer
-    And open pull request `owner/repo#51` has passing CI and is mergeable
+    And GitHub issue `owner/repo#42` is open and closed by authored pull request `owner/repo#51` which has passing CI and is mergeable
     When the user runs `workdash ready owner/repo --json`
-    Then pull request `owner/repo#PR-51` is not listed
+    Then issue `owner/repo#ISSUE-42` is not listed
     When base branch `main` moves to a new head and GitHub reports pull request #51 conflicts with it
     And the user runs `workdash ready owner/repo --json`
-    Then the result lists `owner/repo#PR-51` with action `fix_merge_conflicts` and the new base head SHA
+    Then the result lists `owner/repo#ISSUE-42` with action `fix_merge_conflicts` and the new base head SHA
 
   @id:F-READY-S028
   Scenario Outline: CI status tells no reported checks from unknown checks
     Given a server-backed Workdash session is ready to answer
-    And open pull request `owner/repo#51` has a reviewer comment posted after its current head was pushed
+    And GitHub issue `owner/repo#42` is open and closed by authored pull request `owner/repo#51` with a reviewer comment posted after its current head was pushed
     And GitHub reports no check or status on its current head
     And the base branch required checks are <required>
     When the user runs `workdash ready owner/repo --json`
-    Then the result lists `owner/repo#PR-51` with action `address_review` and CI status `<ci_status>`
+    Then the result lists `owner/repo#ISSUE-42` with action `address_review` and CI status `<ci_status>`
 
     Examples:
       | required                          | ci_status |
       | none in rulesets or protection    | no_checks |
       | `build` from a ruleset            | unknown   |
       | unreadable                        | unknown   |
+
+  @id:F-READY-S029
+  Scenario: An issue with somebody else's open pull request is not ready
+    Given a server-backed Workdash session is ready to answer
+    And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51` of another author whose CI failed
+    When the user runs `workdash ready owner/repo --json`
+    Then neither `owner/repo#ISSUE-42` nor `owner/repo#PR-51` is listed

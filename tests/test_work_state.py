@@ -544,11 +544,32 @@ def test_repository_scope_reads_every_page(monkeypatch) -> None:
     )
 
     assert [(work.item.repo, work.item.number) for work in ready] == [
-        ("team/b", 10),
-        ("team/b", 11),
-        ("team/b", 12),
         *((repo, number) for repo in ("team/a", "team/b", "team/c") for number in (1, 2, 3)),
     ]
+
+
+def test_actionable_issues_are_ordered_by_pull_request_age(monkeypatch) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1", created="2026-01-01T00:00:00Z")
+    github.add_issue("owner/repo#2", created="2026-01-02T00:00:00Z")
+    github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#1",),
+        created="2026-02-02T00:00:00Z",
+        mergeable="CONFLICTING",
+    )
+    github.add_pull_request(
+        "owner/repo#52",
+        closes=("owner/repo#2",),
+        created="2026-02-01T00:00:00Z",
+        mergeable="CONFLICTING",
+    )
+
+    ready = find_ready_work(
+        repositories=["owner/repo"], github_username="testuser", todo_repository="testuser/todos"
+    )
+
+    assert [work.item.number for work in ready] == [2, 1]
 
 
 def test_items_created_together_are_ordered_by_number(monkeypatch) -> None:
@@ -616,30 +637,60 @@ def test_issue_scope_follows_sub_issues_across_repositories(monkeypatch) -> None
     )
 
     assert [(work.item.repo, work.item.number, work.action) for work in ready] == [
-        ("other/lib", 9, "fix_ci"),
+        ("other/lib", 4, "fix_ci"),
         ("owner/repo", 5, "implement"),
     ]
-    assert (ready[0].issue.repo, ready[0].issue.number) == ("other/lib", 4)
 
 
-def test_a_ready_pull_request_names_an_issue_of_its_own_repository_first(monkeypatch) -> None:
+def test_a_ready_pull_request_is_listed_once_for_eligible_issues_in_scope(monkeypatch) -> None:
     github = install_fake_github(monkeypatch)
-    github.add_issue("other/lib#1")
-    github.add_issue("owner/repo#42")
+    github.add_issue("owner/repo#100")
+    github.add_issue("other/lib#1", parent="owner/repo#100")
+    github.add_issue("owner/repo#42", parent="owner/repo#100")
     github.add_pull_request(
         PR, closes=("other/lib#1", "owner/repo#42"), checks={HEAD_SHA: [check_run("t", "FAILURE")]}
     )
 
-    [work] = find_ready_work(
+    works = find_ready_work(
         repositories=["owner/repo", "other/lib"],
         github_username="testuser",
         todo_repository="testuser/todos",
     )
 
-    assert (work.item.number, work.issue.repo, work.issue.number) == (51, "owner/repo", 42)
+    assert [
+        (work.item.repo, work.item.number, work.pull_request.item.number) for work in works
+    ] == [("other/lib", 1, 51)]
+    repository = find_ready_work(
+        repositories=["owner/repo"], github_username="testuser", todo_repository="testuser/todos"
+    )
+    assert [(work.item.repo, work.item.number) for work in repository] == [("other/lib", 1)]
+
+    scoped = find_ready_work(
+        issue=("owner/repo", 100), github_username="testuser", todo_repository="testuser/todos"
+    )
+    assert [(work.item.repo, work.item.number) for work in scoped] == [("other/lib", 1)]
+    leaf = find_ready_work(
+        issue=("owner/repo", 42), github_username="testuser", todo_repository="testuser/todos"
+    )
+    assert [(work.item.repo, work.item.number) for work in leaf] == [("owner/repo", 42)]
 
 
-def test_issue_scope_of_a_parent_with_only_closed_sub_issues_is_empty(monkeypatch) -> None:
+def test_repository_scope_fetches_nested_subtrees_once(monkeypatch) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#3", parent="other/lib#2")
+    github.add_issue("other/lib#2", parent="owner/repo#1", state="CLOSED")
+    github.add_issue("owner/repo#1")
+    github.add_issue("owner/repo#4", parent="owner/repo#3")
+
+    ready = find_ready_work(
+        repositories=["owner/repo"], github_username="testuser", todo_repository="testuser/todos"
+    )
+
+    assert [work.item.number for work in ready] == [4]
+    assert github.operations.count("ReadyIssueTree") == 3
+
+
+def test_issue_scope_of_a_parent_with_only_closed_sub_issues_is_ready(monkeypatch) -> None:
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
     github.add_issue("owner/repo#2", parent="owner/repo#1", state="CLOSED")
@@ -648,13 +699,13 @@ def test_issue_scope_of_a_parent_with_only_closed_sub_issues_is_empty(monkeypatc
         issue=("owner/repo", 1), github_username="testuser", todo_repository="testuser/todos"
     )
 
-    assert ready == []
+    assert [work.item.number for work in ready] == [1]
 
 
 def test_a_partial_graphql_answer_fails_the_lookup(monkeypatch) -> None:
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
-    github.add_pull_request(PR)
+    github.add_pull_request(PR, closes=("owner/repo#1",))
     message = "Resource not accessible by integration"
     github.failures["ReadyPullRequests"] = failure(
         f"GraphQL: {message} (p0.pullRequest)",
@@ -698,3 +749,42 @@ def test_an_answer_github_cut_off_at_its_timeout_is_retried(monkeypatch) -> None
     monkeypatch.setattr(subprocess, "run", answered)
     with pytest.raises(RuntimeError, match=f"Failed to look up {PR} via gh: unexpected end"):
         _evaluate()
+
+
+def test_ready_returns_issues_with_actionable_authored_prs_and_completed_parents(
+    monkeypatch,
+) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_issue("owner/repo#2", parent="owner/repo#1", state="CLOSED")
+    github.add_issue("other/lib#3", parent="owner/repo#2")
+    github.add_issue("owner/repo#4")
+    github.add_issue("owner/repo#5")
+    github.add_issue("owner/repo#6")
+    github.add_pull_request(
+        PR, closes=("owner/repo#4",), checks={HEAD_SHA: [check_run("t", "FAILURE")]}
+    )
+    github.add_pull_request(
+        "owner/repo#52",
+        closes=("owner/repo#5",),
+        author="someone-else",
+        checks={HEAD_SHA: [check_run("t", "FAILURE")]},
+    )
+    github.add_pull_request("owner/repo#53", checks={HEAD_SHA: [check_run("t", "FAILURE")]})
+
+    def ready():
+        return find_ready_work(
+            repositories=["owner/repo"],
+            github_username="testuser",
+            todo_repository="testuser/todos",
+        )
+
+    result = ready()
+    assert [(w.item.number, w.action) for w in result] == [(4, "fix_ci"), (6, "implement")]
+    assert result[0].pull_request.item.number == 51
+    github.issues["other/lib#3"]["state"] = "CLOSED"
+    assert [(w.item.number, w.action) for w in ready()] == [
+        (4, "fix_ci"),
+        (1, "implement"),
+        (6, "implement"),
+    ]

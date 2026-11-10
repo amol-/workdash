@@ -69,6 +69,18 @@ class Supervision:
         monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(self.panes))
         monkeypatch.setattr(control_module, "existing_worktree_path", lambda _wd, _item: None)
         monkeypatch.setattr(control_module, "ensure_worktree", lambda *_args: str(self.worktree))
+        monkeypatch.setattr(
+            control_module,
+            "GithubHelper",
+            lambda: SimpleNamespace(fetch_worktree_head=lambda item: ("pr-branch", item.repo)),
+        )
+        monkeypatch.setattr(
+            control_module,
+            "GitHelper",
+            lambda: SimpleNamespace(
+                branch_tracks_repository=lambda *_: True, find_worktree_for_branch=lambda *_: None
+            ),
+        )
         monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
         monkeypatch.setattr(
             control_module, "prepare_launch_agent_prompt", lambda *args, **kwargs: "PROMPT"

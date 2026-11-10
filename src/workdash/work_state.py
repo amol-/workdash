@@ -13,7 +13,7 @@ import time
 import urllib.parse
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from .github_client import _run_gh_command_with_retry, parse_github_datetime
@@ -39,42 +39,65 @@ _PENDING_RESULTS = {"PENDING", "EXPECTED"}
 _SUCCESSFUL_RESULTS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 _PAGE_INFO = "pageInfo { hasNextPage endCursor }"
 # Nobody closes an issue with more than a handful of pull requests.
-_ISSUE_FRAGMENT = (
-    "fragment ReadyIssue on Issue { number title url createdAt updatedAt state body "
-    "repository { nameWithOwner } subIssuesSummary { total } "
-    "issueDependenciesSummary { blockedBy } "
-    "closedByPullRequestsReferences(first: 10) "
-    "{ nodes { number state repository { nameWithOwner } } } }"
-)
+_ISSUE_FRAGMENT = """
+fragment ReadyIssue on Issue {
+    number title url createdAt updatedAt state body
+    repository { nameWithOwner }
+    subIssuesSummary { total }
+    issueDependenciesSummary { blockedBy }
+    closedByPullRequestsReferences(first: 10) {
+        nodes { number state repository { nameWithOwner } }
+    }
+}
+"""
 _ACTOR = "author { __typename login }"
-_CHECK_CONTEXTS = (
-    f"{_PAGE_INFO} nodes {{ __typename "
-    "... on CheckRun { name status conclusion startedAt "
-    "checkSuite { app { slug } workflowRun { workflow { databaseId } } } } "
-    "... on StatusContext { context state } }"
-)
+_CHECK_CONTEXTS = f"""
+    {_PAGE_INFO}
+    nodes {{
+        __typename
+        ... on CheckRun {{
+            name status conclusion startedAt
+            checkSuite {{ app {{ slug }} workflowRun {{ workflow {{ databaseId }} }} }}
+        }}
+        ... on StatusContext {{ context state }}
+    }}
+"""
 # Per pull request feedback lists stop at GitHub's page size of 100, keeping the
 # newest entries: only feedback after the latest push can be actionable.
-_PULL_REQUEST_FRAGMENT = (
-    f"fragment ReadyPullRequest on PullRequest {{ number title url createdAt updatedAt state "
-    f"{_ACTOR} repository {{ nameWithOwner }} headRefOid mergedAt maintainerCanModify "
-    "headRef { refUpdateRule { viewerCanPush } } "
-    "headRepository { viewerPermission } baseRepository { viewerPermission } "
-    "baseRefName baseRef { target { oid } } mergeable reviewDecision "
-    "closingIssuesReferences(first: 10) "
-    "{ nodes { number title url createdAt updatedAt body repository { nameWithOwner } } } "
-    "commits(last: 1) { nodes { commit { oid committedDate statusCheckRollup { "
-    f"contexts(first: 100) {{ {_CHECK_CONTEXTS} }} }} }} }} }} "
-    "timelineItems(last: 1, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) "
-    "{ nodes { ... on HeadRefForcePushedEvent { createdAt afterCommit { oid } } } } "
-    "latestOpinionatedReviews(first: 100) { nodes { state url submittedAt isMinimized "
-    f"commit {{ oid }} {_ACTOR} }} }} "
-    f"reviews(last: 100) {{ nodes {{ state body url submittedAt isMinimized {_ACTOR} }} }} "
-    # A thread is judged by its latest human comment, which bots may have replied to.
-    "reviewThreads(last: 100) { nodes { isResolved isOutdated "
-    f"comments(last: 10) {{ nodes {{ url publishedAt isMinimized {_ACTOR} }} }} }} }} "
-    f"comments(last: 100) {{ nodes {{ url createdAt isMinimized {_ACTOR} }} }} }}"
-)
+_PULL_REQUEST_FRAGMENT = f"""
+fragment ReadyPullRequest on PullRequest {{
+    number title url createdAt updatedAt state
+    {_ACTOR}
+    repository {{ nameWithOwner }}
+    headRefOid mergedAt maintainerCanModify
+    headRef {{ refUpdateRule {{ viewerCanPush }} }}
+    headRepository {{ viewerPermission }}
+    baseRepository {{ viewerPermission }}
+    baseRefName baseRef {{ target {{ oid }} }} mergeable reviewDecision
+    closingIssuesReferences(first: 10) {{
+        nodes {{ number title url createdAt updatedAt body repository {{ nameWithOwner }} }}
+    }}
+    commits(last: 1) {{
+        nodes {{ commit {{
+            oid committedDate
+            statusCheckRollup {{ contexts(first: 100) {{ {_CHECK_CONTEXTS} }} }}
+        }} }}
+    }}
+    timelineItems(last: 1, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) {{
+        nodes {{ ... on HeadRefForcePushedEvent {{ createdAt afterCommit {{ oid }} }} }}
+    }}
+    latestOpinionatedReviews(first: 100) {{
+        nodes {{ state url submittedAt isMinimized commit {{ oid }} {_ACTOR} }}
+    }}
+    reviews(last: 100) {{ nodes {{ state body url submittedAt isMinimized {_ACTOR} }} }}
+    reviewThreads(last: 100) {{
+        nodes {{ isResolved isOutdated
+            comments(last: 10) {{ nodes {{ url publishedAt isMinimized {_ACTOR} }} }}
+        }}
+    }}
+    comments(last: 100) {{ nodes {{ url createdAt isMinimized {_ACTOR} }} }}
+}}
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +167,7 @@ class IssueWorkState:
     item: WorkItem
     is_open: bool
     has_sub_issues: bool
+    has_open_descendants: bool
     blocked: bool
     open_pull_requests: tuple[tuple[str, int], ...]
     merged_pull_requests: tuple[tuple[str, int], ...]
@@ -152,7 +176,7 @@ class IssueWorkState:
     def ready(self) -> bool:
         return (
             self.is_open
-            and not self.has_sub_issues
+            and not self.has_open_descendants
             and not self.blocked
             and not self.open_pull_requests
         )
@@ -160,10 +184,9 @@ class IssueWorkState:
 
 @dataclass(frozen=True, slots=True)
 class ReadyWork:
-    """An issue or pull request ready to be worked on, with the issue it implements."""
+    """An issue ready to be worked on, with its actionable pull request if any."""
 
     item: WorkItem
-    issue: WorkItem | None
     pull_request: PullRequestWorkState | None = None
 
     @property
@@ -178,7 +201,9 @@ class ReadyWork:
     def claims(self) -> tuple[WorkItem, ...]:
         """The work items whose worktrees hold this work when an agent runs there."""
 
-        return (self.item, *(self.pull_request.linked_issues if self.pull_request else ()))
+        if self.pull_request:
+            return (self.item, self.pull_request.item, *self.pull_request.linked_issues)
+        return (self.item,)
 
 
 def find_ready_work(
@@ -187,19 +212,15 @@ def find_ready_work(
     issue: tuple[str, int] | None = None,
     github_username: str,
     todo_repository: str,
+    include_shared_pr_issues: bool = False,
 ) -> list[ReadyWork]:
-    """Return the ready pull requests and then the ready issues of a scope.
-
-    A repository scope covers every open issue and pull request of the
-    repositories, plus the open pull requests closing their issues; an issue
-    scope covers the issues of :func:`resolve_issue_scope` and the open pull
-    requests closing them. Each group is ordered oldest first.
+    """Return ready issues, actionable pull request work first, oldest first in each group.
 
     :param Sequence repositories: ``owner/repo`` or ``owner/*`` selectors.
     :param tuple issue: ``(repo, number)`` of the scope issue, instead of repositories.
     """
 
-    pull_requests: list[tuple[str, int]] = []
+    states: dict[tuple[str, int], PullRequestWorkState] = {}
     if issue is not None:
         issues = resolve_issue_scope(*issue, todo_repository=todo_repository)
     else:
@@ -212,84 +233,169 @@ def find_ready_work(
         for repo in names.values():
             try:
                 issues += _repository_issues(repo, todo_repository)
-                pull_requests += _open_pull_requests(repo)
             except RuntimeError as error:
-                # The todo repository does not exist until the first todo is captured.
                 if repo.lower() != todo_repository.lower() or not is_missing_repository_error(
                     str(error)
                 ):
                     raise
-    # A closed issue needs no more work, so the pull requests closing it are not its work.
-    pull_requests += [
-        pr for scope_issue in issues if scope_issue.is_open for pr in scope_issue.open_pull_requests
-    ]
-    unique_pull_requests = {
-        (repo.lower(), number): (repo, number) for repo, number in pull_requests
-    }
-    scope = {(entry.item.repo.lower(), entry.item.number) for entry in issues}
+        issue_states: dict[tuple[str, int], IssueWorkState] = {}
+        repository_prs = []
+        for repo in names.values():
+            try:
+                owner, _, name = repo.partition("/")
+                nodes = _all_nodes(
+                    repo,
+                    lambda after, owner=owner, name=name: (
+                        f"""query ReadyRepositoryPullRequests {{
+                            repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{
+                                pullRequests(states: OPEN, first: 100, after: {after}) {{
+                                    {_PAGE_INFO}
+                                    nodes {{ number }}
+                                }}
+                            }}
+                        }}"""
+                    ),
+                    ("repository", "pullRequests"),
+                )
+                repository_prs.extend((repo, node["number"]) for node in nodes)
+            except RuntimeError as error:
+                if repo.lower() != todo_repository.lower() or not is_missing_repository_error(
+                    str(error)
+                ):
+                    raise
+        for state in evaluate_pull_requests(
+            repository_prs, github_username=github_username, todo_repository=todo_repository
+        ):
+            states[(state.item.repo.lower(), state.item.number)] = state
+            if state.ready and state.author and state.author.lower() == github_username.lower():
+                for linked in state.linked_issues:
+                    if linked.repo.lower() not in names:
+                        issues.append(
+                            resolve_issue_scope(
+                                linked.repo,
+                                linked.number,
+                                todo_repository=todo_repository,
+                                _states=issue_states,
+                            )[0]
+                        )
+        issues = [
+            resolve_issue_scope(
+                entry.item.repo,
+                entry.item.number,
+                todo_repository=todo_repository,
+                _states=issue_states,
+            )[0]
+            if entry.has_sub_issues
+            else entry
+            for entry in issues
+        ]
 
-    ready = []
-    for state in evaluate_pull_requests(
-        list(unique_pull_requests.values()),
-        github_username=github_username,
-        todo_repository=todo_repository,
-    ):
-        if state.ready:
-            # Prefer an issue of the scope, then the pull request's own repository.
-            linked = min(
-                state.linked_issues,
-                key=lambda linked: (
-                    (linked.repo.lower(), linked.number) not in scope,
-                    linked.repo != state.item.repo,
-                    linked.number,
-                ),
-                default=None,
+    issues = list(
+        {(entry.item.repo.lower(), entry.item.number): entry for entry in issues}.values()
+    )
+    pull_requests = {
+        (repo.lower(), number): (repo, number)
+        for entry in issues
+        if entry.is_open and not entry.has_open_descendants and not entry.blocked
+        for repo, number in entry.open_pull_requests
+    }
+    states.update(
+        {
+            (state.item.repo.lower(), state.item.number): state
+            for state in evaluate_pull_requests(
+                [ref for key, ref in pull_requests.items() if key not in states],
+                github_username=github_username,
+                todo_repository=todo_repository,
             )
-            ready.append(ReadyWork(item=state.item, issue=linked, pull_request=state))
-    ready += [ReadyWork(item=entry.item, issue=entry.item) for entry in issues if entry.ready]
-    return sorted(
+        }
+    )
+    ready = []
+    for entry in issues:
+        if not entry.is_open or entry.has_open_descendants or entry.blocked:
+            continue
+        linked = [states[(repo.lower(), number)] for repo, number in entry.open_pull_requests]
+        if not linked:
+            ready.append(ReadyWork(item=entry.item))
+        elif all(
+            state.author and state.author.lower() == github_username.lower() for state in linked
+        ):
+            actionable = [state for state in linked if state.ready]
+            if actionable:
+                state = min(
+                    actionable,
+                    key=lambda state: (
+                        state.item.created_at,
+                        state.item.repo.lower(),
+                        state.item.number,
+                    ),
+                )
+                ready.append(ReadyWork(item=entry.item, pull_request=state))
+    ready = sorted(
         ready,
         key=lambda work: (
             work.pull_request is None,
-            work.item.created_at,
-            display_repo(work.item),
-            work.item.item_type.value,
+            (work.pull_request.item if work.pull_request else work.item).created_at,
+            display_repo(work.pull_request.item if work.pull_request else work.item).lower(),
+            (work.pull_request.item if work.pull_request else work.item).number,
+            work.item.repo.lower(),
             work.item.number,
         ),
     )
+    if include_shared_pr_issues:
+        return ready
+    seen_pull_requests = set()
+    unique = []
+    for work in ready:
+        if work.pull_request:
+            key = (work.pull_request.item.repo.lower(), work.pull_request.item.number)
+            if key in seen_pull_requests:
+                continue
+            seen_pull_requests.add(key)
+        unique.append(work)
+    return unique
 
 
-def resolve_issue_scope(repo: str, number: int, *, todo_repository: str) -> list[IssueWorkState]:
-    """Return the issues an issue scope covers.
-
-    That is every native sub-issue descendant, recursively and across
-    repositories, closed ones included, or the issue itself when it never had
-    sub-issues. An issue with sub-issues never covers itself.
-    """
-
-    def tree(repo: str, number: int) -> dict:
-        owner, _, name = repo.partition("/")
-        # GitHub allows at most 100 sub-issues per issue.
-        data = _graphql(
-            f"query ReadyIssueTree {{ repository(owner: {json.dumps(owner)}, "
-            f"name: {json.dumps(name)}) {{ issue(number: {number}) {{ ...ReadyIssue "
-            f"subIssues(first: 100) {{ nodes {{ ...ReadyIssue }} }} }} }} }} {_ISSUE_FRAGMENT}",
-            f"{repo}#{number}",
-        )
-        return data["repository"]["issue"]
+def resolve_issue_scope(
+    repo: str,
+    number: int,
+    *,
+    todo_repository: str,
+    _states: dict[tuple[str, int], IssueWorkState] | None = None,
+) -> list[IssueWorkState]:
+    """Return the issue and its native descendants with open-descendant eligibility."""
 
     with _github_payload(f"{repo}#{number}"):
-        root = tree(repo, number)
-        if root["subIssuesSummary"]["total"] == 0:
-            return [_issue_state(root, todo_repository)]
-        issues: list[IssueWorkState] = []
-        parents = [root]
-        while parents:
-            for child in parents.pop()["subIssues"]["nodes"]:
-                state = _issue_state(child, todo_repository)
-                issues.append(state)
-                if state.has_sub_issues:
-                    parents.append(tree(state.item.repo, state.item.number))
+        if _states is not None and (repo.lower(), number) in _states:
+            return [_states[(repo.lower(), number)]]
+        root = _issue_tree(repo, number)
+        issues = []
+
+        def visit(node: dict) -> bool:
+            state = _issue_state(node, todo_repository)
+            index = len(issues)
+            issues.append(state)
+            open_descendants = False
+            for child in node["subIssues"]["nodes"]:
+                child_state = _issue_state(child, todo_repository)
+                key = (child_state.item.repo.lower(), child_state.item.number)
+                if _states is not None and key in _states:
+                    child_state = _states[key]
+                    issues.append(child_state)
+                    descendant_open = child_state.has_open_descendants
+                elif child_state.has_sub_issues:
+                    descendant_open = visit(
+                        _issue_tree(child_state.item.repo, child_state.item.number)
+                    )
+                else:
+                    issues.append(child_state)
+                    descendant_open = False
+                open_descendants |= child_state.is_open or descendant_open
+            issues[index] = replace(state, has_open_descendants=open_descendants)
+            if _states is not None:
+                _states[(state.item.repo.lower(), state.item.number)] = issues[index]
+            return open_descendants
+
+        visit(root)
         return issues
 
 
@@ -332,17 +438,16 @@ def work_pull_request(
 
     That is the item's own pull request, or the user's closing pull request of the
     issue: the open one when there is one, otherwise one that merged before it was
-    looked for. A targeted todo has none: its checkout is the target repository's.
+    looked for.
     """
 
     candidates: list[tuple[str, int]] = []
     if item.item_type == WorkItemType.PR:
         candidates = [(item.repo, item.number)]
-    elif item.todo_target is None:
-        for entry in resolve_issue_scope(item.repo, item.number, todo_repository=todo_repository):
-            # GitHub names the repository canonically, which may differ in case from the target's.
-            if (entry.item.repo.lower(), entry.item.number) == (item.repo.lower(), item.number):
-                candidates = [*entry.open_pull_requests, *entry.merged_pull_requests]
+    else:
+        with _github_payload(f"{item.repo}#{item.number}"):
+            entry = _issue_state(_issue_tree(item.repo, item.number), todo_repository)
+            candidates = [*entry.open_pull_requests, *entry.merged_pull_requests]
     if not candidates:
         return None
     states = evaluate_pull_requests(
@@ -350,9 +455,14 @@ def work_pull_request(
     )
     if item.item_type == WorkItemType.PR:
         return states[0]
-    # Only the user's own pull request carries on the issue; somebody else's is not this work.
-    # The issue's open pull requests are listed before its merged ones, so the open one is first.
+    # Prefer the same actionable pull request that readiness selects for this issue.
     authored = [state for state in states if state.item.kind is WorkItemKind.AUTHORED_PR]
+    actionable = [state for state in authored if state.ready]
+    if actionable:
+        return min(
+            actionable,
+            key=lambda state: (state.item.created_at, state.item.repo.lower(), state.item.number),
+        )
     return authored[0] if authored else None
 
 
@@ -374,6 +484,18 @@ def pull_request_states(pull_requests: Sequence[tuple[str, int]]) -> dict[tuple[
             for index, pull_request in enumerate(batch):
                 states[pull_request] = data[f"p{index}"]["pullRequest"]["state"]
     return states
+
+
+def _issue_tree(repo: str, number: int) -> dict:
+    owner, _, name = repo.partition("/")
+    # GitHub allows at most 100 sub-issues per issue.
+    data = _graphql(
+        f"query ReadyIssueTree {{ repository(owner: {json.dumps(owner)}, "
+        f"name: {json.dumps(name)}) {{ issue(number: {number}) {{ ...ReadyIssue "
+        f"subIssues(first: 100) {{ nodes {{ ...ReadyIssue }} }} }} }} }} {_ISSUE_FRAGMENT}",
+        f"{repo}#{number}",
+    )
+    return data["repository"]["issue"]
 
 
 def _owner_repositories(owner: str) -> list[str]:
@@ -402,28 +524,20 @@ def _repository_issues(repo: str, todo_repository: str) -> list[IssueWorkState]:
     nodes = _all_nodes(
         repo,
         lambda after: (
-            f"query ReadyRepositoryIssues {{ repository(owner: {json.dumps(owner)}, "
-            f"name: {json.dumps(name)}) {{ issues(states: OPEN, first: 100, after: {after}) "
-            f"{{ {_PAGE_INFO} nodes {{ ...ReadyIssue }} }} }} }} {_ISSUE_FRAGMENT}"
+            f"""query ReadyRepositoryIssues {{
+                repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{
+                    issues(states: OPEN, first: 100, after: {after}) {{
+                        {_PAGE_INFO}
+                        nodes {{ ...ReadyIssue }}
+                    }}
+                }}
+            }}
+            {_ISSUE_FRAGMENT}"""
         ),
         ("repository", "issues"),
     )
     with _github_payload(repo):
         return [_issue_state(node, todo_repository) for node in nodes]
-
-
-def _open_pull_requests(repo: str) -> list[tuple[str, int]]:
-    owner, _, name = repo.partition("/")
-    nodes = _all_nodes(
-        repo,
-        lambda after: (
-            f"query ReadyRepositoryPullRequests {{ repository(owner: {json.dumps(owner)}, "
-            f"name: {json.dumps(name)}) {{ pullRequests(states: OPEN, first: 100, after: {after}) "
-            f"{{ {_PAGE_INFO} nodes {{ number }} }} }} }}"
-        ),
-        ("repository", "pullRequests"),
-    )
-    return [(repo, node["number"]) for node in nodes]
 
 
 def _fetch_pull_requests(pull_requests: Sequence[tuple[str, int]]) -> list[dict]:
@@ -457,6 +571,7 @@ def _issue_state(node: dict, todo_repository: str) -> IssueWorkState:
         item=_issue_item(node, todo_repository),
         is_open=node["state"] == "OPEN",
         has_sub_issues=node["subIssuesSummary"]["total"] > 0,
+        has_open_descendants=node["subIssuesSummary"]["total"] > 0,
         blocked=node["issueDependenciesSummary"]["blockedBy"] > 0,
         open_pull_requests=tuple(
             (pr["repository"]["nameWithOwner"], pr["number"])
@@ -586,10 +701,17 @@ def _ci_status(
         contexts = _all_nodes(
             f"{repo}@{head_sha}",
             lambda after: (
-                f"query ReadyCommitChecks {{ repository(owner: {json.dumps(owner)}, "
-                f"name: {json.dumps(name)}) {{ object(oid: {json.dumps(head_sha)}) "
-                "{ ... on Commit { statusCheckRollup { "
-                f"contexts(first: 100, after: {after}) {{ {_CHECK_CONTEXTS} }} }} }} }} }} }}"
+                f"""query ReadyCommitChecks {{
+                    repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{
+                        object(oid: {json.dumps(head_sha)}) {{
+                            ... on Commit {{
+                                statusCheckRollup {{
+                                    contexts(first: 100, after: {after}) {{ {_CHECK_CONTEXTS} }}
+                                }}
+                            }}
+                        }}
+                    }}
+                }}"""
             ),
             ("repository", "object", "statusCheckRollup", "contexts"),
         )

@@ -160,3 +160,26 @@ def test_fast_forward_default_branch_reports_git_failure(
         RuntimeError, match="Failed to fast-forward the default branch: not a git repository"
     ):
         GitHelper().fast_forward_default_branch(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("remote_url", "head_repo", "matches"),
+    [
+        ("https://github.com/Owner/Repo.git", "owner/repo", True),
+        ("https://github.com/Owner/Other.git", "owner/repo", False),
+        ("https://example.com/Owner/Repo.git", "https://example.com/owner/repo", False),
+    ],
+)
+def test_branch_tracking_verifies_repository_identity(tmp_path, remote_url, head_repo, matches):
+    commit_everything(tmp_path)
+    subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/pr-branch", "HEAD"], cwd=tmp_path, check=True
+    )
+    subprocess.run(
+        ["git", "branch", "--set-upstream-to", "origin/pr-branch"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    assert GitHelper().branch_tracks_repository(tmp_path, "pr-branch", head_repo) is matches

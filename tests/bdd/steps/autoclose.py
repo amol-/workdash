@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -42,6 +43,18 @@ def _install_supervision(
     worktree.mkdir(parents=True, exist_ok=True)
     existing = scenario_state.get("existing_worktree")
     monkeypatch.setattr(control_module, "ensure_worktree", lambda *_: str(worktree))
+    monkeypatch.setattr(
+        control_module,
+        "GithubHelper",
+        lambda: SimpleNamespace(fetch_worktree_head=lambda item: ("pr-branch", item.repo)),
+    )
+    monkeypatch.setattr(
+        control_module,
+        "GitHelper",
+        lambda: SimpleNamespace(
+            branch_tracks_repository=lambda *_: True, find_worktree_for_branch=lambda *_: None
+        ),
+    )
     monkeypatch.setattr(control_module, "existing_worktree_path", lambda *_: existing)
     monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
     monkeypatch.setattr(control_module, "prepare_launch_agent_prompt", lambda *a, **k: "PROMPT")

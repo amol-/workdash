@@ -54,6 +54,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "list",
         "info",
         "ready",
+        "dispatch",
         "analyze",
         "code",
         "read",
@@ -226,6 +227,28 @@ class WorkdashCommands:
             print(json.dumps(result, ensure_ascii=True, indent=2))
         else:
             _print_ready_result(result)
+        return 0
+
+    def dispatch_cli(
+        self, *, scope: str, agent: str | None, group: str | None, json_output: bool
+    ) -> int:
+        """Dispatch one ready issue through the Workdash server."""
+        payload = {"scope": scope, "agent": agent}
+        if group is not None:
+            payload["group"] = group
+        try:
+            result = self._client.request("dispatch", payload)
+        except WorkdashControlError as error:
+            _print_control_error(error)
+            return 1
+        if json_output:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        elif result["status"] == "no_ready_task":
+            print("No ready work found.")
+        else:
+            _print_code_result(result)
+            print(f"Action: {result['action']}")
+            print(f"Reasons: {', '.join(result['reasons'])}")
         return 0
 
     def todo_cli(
@@ -448,6 +471,13 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
         )
     if options.command == "ready":
         return commands.ready_cli(scope=options.target or "", json_output=options.json_output)
+    if options.command == "dispatch":
+        return commands.dispatch_cli(
+            scope=options.target or "",
+            agent=options.agent,
+            group=options.group,
+            json_output=options.json_output,
+        )
     if options.command == "analyze":
         return commands.analyze_cli(
             target=options.target or "",
@@ -664,6 +694,17 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         default=argparse.SUPPRESS,
         help="Emit machine-readable JSON.",
     )
+    dispatch_parser = subparsers.add_parser("dispatch", help="Launch one ready issue.")
+    dispatch_parser.add_argument("target", metavar="SCOPE", help="Repository or issue scope.")
+    dispatch_parser.add_argument("--agent", help="Coding agent to launch.")
+    dispatch_parser.add_argument("--group", help="Zellij tab for the coding agent.")
+    dispatch_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Emit machine-readable JSON.",
+    )
     todo_parser = subparsers.add_parser(
         "todo",
         help="Capture a todo in the configured todo repository.",
@@ -740,6 +781,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         list_parser,
         info_parser,
         ready_parser,
+        dispatch_parser,
         analyze_parser,
         code_parser,
         terminal_parser,
@@ -782,6 +824,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         "list",
         "info",
         "ready",
+        "dispatch",
         "analyze",
         "code",
         "terminal",

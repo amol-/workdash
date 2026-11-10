@@ -1,7 +1,8 @@
 TASK: IMPLEMENT
 You are starting an interactive coding session to implement this GitHub work item.
 Read the context below, then gather and confirm any additional context you need
-from the local repository checkout.
+from the local repository checkout. If sub-issues already fulfilled the issue goal,
+verify the described workflow and add a test proving it works instead of reimplementing it.
 Propose a concrete implementation plan and clarifying questions.
 Do not start implementing code yet.
 If the context lists linked issues, they describe the goal of the work.

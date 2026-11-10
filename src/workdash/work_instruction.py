@@ -36,7 +36,10 @@ _CI = {
 
 
 def autostart_briefing(
-    item: WorkItem, *, github_username: str, todo_repository: str
+    item: WorkItem,
+    *,
+    github_username: str,
+    todo_repository: str,
 ) -> tuple[WorkItem, str]:
     """Return the item an autostarted agent works on and the text closing its briefing.
 

@@ -12,7 +12,7 @@ Feature: Launch a coding session
     - The dialog lists the configured coding agents by name in configuration order, followed by VSCode Copilot.
     - Before launching a session, the system prepares the worktree for the selected work item.
     - The launched coding agent is started inside the work item's worktree.
-    - The launched coding agent is preloaded with the work item's GitHub context and, when available, the cached analysis for that item.
+    - The launched coding agent is preloaded with GitHub context and, when available, the issue analysis for implementation or pull request analysis for review. An authored pull request with a linked issue is coded as that issue, with the same context and worktree selection as coding the issue; an authored pull request without a linked issue remains the target.
     - For an issue, the GitHub context includes the issue's comments.
     - For a pull request, the GitHub context includes the pull request's conversation comments.
     - For a pull request, the GitHub context includes the pull request's reviews.
@@ -45,7 +45,7 @@ Feature: Launch a coding session
     - Autonomous implementation explicitly permits commits and pushes and permits force-pushing only the pull request branch, preferably with a lease and subject to repository restrictions. Other destructive actions still require explicit permission.
     - The agent may report completion only when the pull request's current head is `passing` or `no_checks` and GitHub reports it as mergeable. `no_checks` is reported as no checks required or reported, never as CI passed; `pending` is waited for; `unknown` is reported as incomplete.
     - After the appendix the agent is given what the GitHub work state says the work needs, from the same classification `workdash ready` uses: implement an issue, fix failing CI, resolve merge conflicts, or address review feedback. Several needs are all included, most urgent first: review feedback, then merge conflicts, then CI.
-    - An autostarted issue that an open pull request of the user's already closes works on that pull request's branch and updates it, never a second pull request. A pull request of somebody else closing the issue does not change the issue's implementation briefing, and a targeted todo is never redirected.
+    - An autostarted issue, including a targeted todo, that an open pull request of the user's already closes works on that pull request's branch and updates it, never a second pull request. Before launching on an authored pull request, the system verifies that the checkout tracks the pull request's head branch in its head repository, including a differently named local branch. If the checkout cannot be verified, it asks the user to configure the PR-head upstream without changing tracking, switching branches, or launching. A pull request of somebody else closing the issue does not change the issue's implementation briefing.
     - A pull request that is waiting for CI, review, or merge, or is already finished, is described as it is, with its CI status told apart as passing, still running, no required or observed checks, or unknown; its briefing carries no order to start working, and the agent is told not to invent work or open another pull request.
     - A pull request of somebody else stays a review: with autostart its agent starts reviewing without routine confirmation and still never edits, commits, or pushes.
     - Requesting autostart on a worktree with a live agent pane starts nothing and sends nothing to that agent, whatever mode it runs in; it is answered without reading GitHub, so a GitHub outage does not hide it.
@@ -369,3 +369,40 @@ Feature: Launch a coding session
     And the agent is briefed with the original prompt followed by the autonomous appendix once
     And the agent is told to implement `https://github.com/owner/repo/issues/42`
     And the agent is told to follow its configured practices and skills
+
+  @id:F-CODING-LAUNCH-S038
+  Scenario: Coding an authored pull request and its issue is the same implementation task
+    Given a server-backed Workdash session is ready to answer
+    And GitHub issue `owner/repo#42` is open and closed by authored pull request `owner/repo#51` with failed CI
+    And the issue and pull request each have cached analysis
+    When a client requests code with autostart `true` for `owner/repo#PR-51` with agent `pi`
+    Then the response targets `owner/repo#ISSUE-42`
+    And the agent works on pull request `owner/repo#51`'s existing branch
+    And the agent is given the issue analysis and not the pull request analysis
+    When a client requests code with autostart `true` for `owner/repo#ISSUE-42` with agent `pi`
+    Then the response reports status `already_running` with the same pane
+
+  @id:F-CODING-LAUNCH-S039
+  Scenario: Coding an authored pull request without a linked issue keeps the pull request target
+    Given a server-backed Workdash session is ready to answer
+    And authored pull request `owner/repo#51` closes no issue
+    When a client requests code for `owner/repo#PR-51` with agent `pi`
+    Then the agent works on pull request `owner/repo#51`'s existing branch
+    And the response targets `owner/repo#PR-51`
+
+  @id:F-CODING-LAUNCH-S040
+  Scenario: Reviewing somebody else's pull request uses pull request analysis
+    Given a server-backed Workdash session is ready to answer
+    And pull request `owner/repo#52` of another author closes issue `owner/repo#42`
+    And the issue and pull request each have cached analysis
+    When a client requests code for `owner/repo#CHECK-52` with agent `pi`
+    Then the agent is briefed to review the pull request
+    And the agent is given the pull request analysis and not the issue analysis
+
+  @id:F-CODING-LAUNCH-S041
+  Scenario: A completed parent workflow is proved rather than needlessly reimplemented
+    Given a server-backed Workdash session is ready to answer
+    And open issue `owner/repo#42` has only closed sub-issues
+    When a client requests code with autostart `true` for `owner/repo#42` with agent `pi`
+    Then the agent is told to achieve the issue's goal and verify its described workflow
+    And the agent is told that if the sub-issues already solved it, a test proving the workflow works is enough

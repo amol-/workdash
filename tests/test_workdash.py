@@ -1511,6 +1511,10 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
 
     monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
+    from gh_work_state_fake import install_fake_github
+
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
@@ -1900,6 +1904,7 @@ def test_workdash_control_skill_examples_are_valid_commands_and_explain_code_cla
         "list",
         "info",
         "ready",
+        "dispatch",
         "read",
         "write",
         "close",
@@ -1926,15 +1931,17 @@ def test_workdash_control_skill_examples_are_valid_commands_and_explain_code_cla
     assert "--autoclose" not in skill
     with pytest.raises(SystemExit):
         workdash_module._parse_args(["code", "owner/repo#1", "--autostart"])
-    # Agents must learn that ready is advice, ordered pull requests first, and needs the server.
+    # Ready previews issue-only dispatch, which supervises one selected task.
     for text in (
-        "read-only advice",
-        "sub-issue",
-        "Pull requests needing work come first",
+        "Pull requests are never ready items",
+        "issues with actionable authored pull",
         "No ready work found.",
-        "never start a server just to run `ready`",
+        "status=no_ready_task",
+        "actual `pane_id`",
+        "never start one yourself",
     ):
         assert text in skill
+    assert "autocode" not in skill
 
 
 def test_code_group_is_forwarded_to_remote_server_and_reports_actual_tab(monkeypatch, capsys):

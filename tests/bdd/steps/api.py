@@ -77,10 +77,35 @@ def _install_fake_ensure_worktree(
 
 def _install_code_fakes(scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
     _install_fake_ensure_worktree(scenario_state, monkeypatch)
-    monkeypatch.setattr("workdash.control.get_merge_base", lambda _path: None)
     monkeypatch.setattr(
-        "workdash.control.prepare_launch_agent_prompt", lambda *args, **kwargs: "PROMPT"
+        "workdash.control.GithubHelper",
+        lambda: SimpleNamespace(fetch_worktree_head=lambda item: ("pr-branch", item.repo)),
     )
+    monkeypatch.setattr(
+        "workdash.control.GitHelper",
+        lambda: SimpleNamespace(
+            branch_tracks_repository=lambda *_: True, find_worktree_for_branch=lambda *_: None
+        ),
+    )
+    monkeypatch.setattr("workdash.control.get_merge_base", lambda _path: None)
+
+    def prepare(item, repo_path, **kwargs):
+        scenario_state["prompt_analysis"] = kwargs.get("analysis_path")
+        if kwargs.get("analysis_path") and item.kind in {
+            WorkItemKind.REVIEW_REQUESTED_PR,
+            WorkItemKind.TRACKED_PR,
+        }:
+            from workdash.launcher import build_launch_agent_prompt
+
+            return build_launch_agent_prompt(
+                item=item,
+                github_context={},
+                repo_path=repo_path,
+                analysis_path=kwargs["analysis_path"],
+            )
+        return "PROMPT"
+
+    monkeypatch.setattr("workdash.control.prepare_launch_agent_prompt", prepare)
     install_zellij_agent_fakes(scenario_state, monkeypatch)
 
 
@@ -1172,8 +1197,17 @@ def _dashboard_includes_closing_pull_request(
     )
 )
 def _dashboard_includes_pull_request_sharing_worktree(
-    pull_request_id: str, issue_id: str, scenario_state: dict[str, Any], work_items: list[WorkItem]
+    pull_request_id: str,
+    issue_id: str,
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from gh_work_state_fake import install_fake_github
+
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_pull_request("owner/repo#5", closes=("owner/repo#1",))
     issue = seed_dashboard_item(work_items, scenario_state)
     pull_request = make_work_item(
         item_type=WorkItemType.PR, kind=WorkItemKind.AUTHORED_PR, number=5, title="Fix it"
