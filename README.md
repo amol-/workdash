@@ -399,8 +399,9 @@ in *Autoclose supervision* below.
 `workdash autodispatch SCOPE --group NAME [--agent NAME]` starts a server-owned
 session and returns its ID immediately. It uses the same scopes, readiness,
 parent behavior, claims and agent supervision as `dispatch`. The group is
-required. Each session dispatches one issue at a time, waits for its pane to
-disappear, then dispatches again until no work is ready. It does not merge PRs.
+required. Each session dispatches one issue at a time, checks about every 30
+seconds for its pane to disappear, then dispatches again until no work is ready.
+It does not merge PRs.
 Multiple independent sessions can run at once; there are no retry or skip limits.
 
 `workdash info` and `workdash info --json` report sessions, their current task,

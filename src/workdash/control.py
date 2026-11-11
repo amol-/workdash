@@ -11,10 +11,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
-import uuid
 from collections.abc import Callable, Collection, Sequence
 from contextlib import ExitStack
-from datetime import UTC, datetime
 from http import HTTPStatus
 from ipaddress import IPv4Address, ip_address
 from pathlib import Path
@@ -23,6 +21,7 @@ from wsgiref.simple_server import make_server
 
 from .analysis_cache import AnalysisCache
 from .autoclose import AutocloseSupervisor
+from .autodispatch import _AutodispatchSession, _format_pane_id
 from .backend import IncludeResult, SuggestionMarkers, WorkdashBackend, compute_suggestion_markers
 from .config import WorkdashConfig
 from .git import GitHelper
@@ -62,7 +61,6 @@ SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 _ITEM_REFERENCE_RE = re.compile(
     r"^(?P<repo>[^#\s]+)#(?:(?P<label>ISSUE|PR|REVIEW|CHECK)-(?P<todo>WT)?)?(?P<number>\d+)$"
 )
-_AUTODISPATCH_POLL_SECONDS = 5.0
 # Zellij lists a new pane shortly after creating it; a launched agent whose pane
 # is still missing after these checks is reported as unconfirmed.
 _LAUNCH_VISIBILITY_CHECKS = 10
@@ -916,74 +914,6 @@ class WorkdashSession:
         focus_zellij_pane(self.zellij_session, pane_id)
 
 
-class _AutodispatchSession:
-    """One independently running sequence of supervised dispatches."""
-
-    def __init__(self, owner: WorkdashSession, scope: str, group: str, agent: str | None):
-        self.owner, self.scope, self.group, self.agent = owner, scope, group, agent
-        self.id = uuid.uuid4().hex
-        self.started_at = datetime.now(UTC).isoformat()
-        self.started = time.monotonic()
-        self.ended: float | None = None
-        self.status = "running"
-        self.current_item: str | None = None
-        self.error: str | None = None
-        self.event = threading.Event()
-        self.lock = threading.Lock()
-        self.thread = threading.Thread(target=self.run, name=f"autodispatch-{self.id}", daemon=True)
-
-    def snapshot(self) -> dict[str, object]:
-        with self.lock:
-            return {
-                "id": self.id,
-                "scope": self.scope,
-                "group": self.group,
-                "agent": self.agent,
-                "started_at": self.started_at,
-                "elapsed_seconds": int((self.ended or time.monotonic()) - self.started),
-                "current_item": self.current_item,
-                "status": self.status,
-                "error": self.error,
-            }
-
-    def stop(self) -> None:
-        with self.lock:
-            self.event.set()
-            if self.status == "running":
-                self.status = "stopped"
-                self.ended = time.monotonic()
-
-    def run(self) -> None:
-        try:
-            while not self.event.is_set():
-                result = self.owner.dispatch_once(
-                    scope=self.scope, group=self.group, agent=self.agent
-                )
-                with self.lock:
-                    if self.event.is_set():
-                        return
-                    if result["status"] == "no_ready_task":
-                        self.status = "finished"
-                        self.current_item = None
-                        self.ended = time.monotonic()
-                        return
-                    self.current_item = str(result["item_id"])
-                while not self.event.wait(_AUTODISPATCH_POLL_SECONDS):
-                    panes = load_zellij_panes(str(result["session"]))
-                    if not any(
-                        _format_pane_id(pane.get("id")) == result["pane_id"]
-                        and pane.get("is_plugin") is not True
-                        for pane in panes
-                    ):
-                        break
-        except Exception as error:
-            with self.lock:
-                if not self.event.is_set():
-                    self.status = "failed"
-                    self.error = str(error)
-                    self.ended = time.monotonic()
-
-
 class WorkdashControlServer:
     """Background HTTP listeners for a server-backed Workdash session."""
 
@@ -1672,13 +1602,6 @@ def _pane_payload(
         "floating": pane.get("is_floating"),
         "item": mapped_item or "unknown",
     }
-
-
-def _format_pane_id(pane_id: object) -> str:
-    pane_id_text = str(pane_id)
-    if pane_id_text.startswith("terminal_"):
-        return pane_id_text
-    return f"terminal_{pane_id_text}"
 
 
 def _normalized_path(path: os.PathLike[str] | str) -> str:

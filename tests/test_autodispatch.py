@@ -18,6 +18,15 @@ from workdash.tui import WorkdashApp
 
 
 def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
+    waits = queue.Queue()
+    original_wait = threading.Event.wait
+
+    def observe_wait(event, timeout=None):
+        if threading.current_thread().name.startswith("autodispatch-"):
+            waits.put(timeout)
+        return original_wait(event, timeout)
+
+    monkeypatch.setattr(threading.Event, "wait", observe_wait)
     session = WorkdashSession(
         config=WorkdashConfig(),
         backend=MagicMock(),
@@ -36,7 +45,9 @@ def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
         },
     )
     panes = [{"id": 1, "title": "code_test", "exited": False}]
-    monkeypatch.setattr("workdash.control.load_zellij_panes", lambda _: panes)
+    monkeypatch.setattr("workdash.autodispatch.load_zellij_panes", lambda _: panes)
+    close_pane = MagicMock()
+    monkeypatch.setattr("workdash.control.close_zellij_pane", close_pane)
     app = _make_turbogears_app(session)
 
     def request(endpoint, payload):
@@ -56,10 +67,7 @@ def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
     )
     assert status == 200
     session_id = started["result"]["id"]
-    deadline = time.monotonic() + 2
-    while not session.autodispatch_sessions()[0]["current_item"]:
-        assert time.monotonic() < deadline
-        time.sleep(0.01)
+    assert waits.get(timeout=2) == 30
     status, info = request("info", {})
     entry = info["result"]["autodispatch_sessions"][0]
     assert status == 200 and entry["id"] == session_id
@@ -71,7 +79,11 @@ def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
     )
     status, stopped = request("autodispatch_stop", {"id": session_id})
     assert status == 200 and stopped["result"]["status"] == "stopped"
+    thread = session._autodispatch[session_id].thread
+    thread.join(timeout=1)
+    assert not thread.is_alive()
     assert panes == [{"id": 1, "title": "code_test", "exited": False}]
+    close_pane.assert_not_called()
 
 
 def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_path):
@@ -118,8 +130,9 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
         return list(panes)
 
     monkeypatch.setattr("workdash.control.load_zellij_panes", load_panes)
+    monkeypatch.setattr("workdash.autodispatch.load_zellij_panes", load_panes)
     monkeypatch.setattr("workdash.control.launch_agent_context", launch)
-    monkeypatch.setattr("workdash.control._AUTODISPATCH_POLL_SECONDS", 0.01)
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
     session = WorkdashSession(
         config=WorkdashConfig(
             github_username="testuser",
@@ -208,9 +221,10 @@ def test_failed_pane_lookup_fails_session_without_dispatching_again(monkeypatch)
         }
     )
     monkeypatch.setattr(session, "dispatch_once", dispatch)
-    monkeypatch.setattr("workdash.control._AUTODISPATCH_POLL_SECONDS", 0.01)
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
     monkeypatch.setattr(
-        "workdash.control.load_zellij_panes", MagicMock(side_effect=RuntimeError("unavailable"))
+        "workdash.autodispatch.load_zellij_panes",
+        MagicMock(side_effect=RuntimeError("unavailable")),
     )
     session.start_autodispatch(scope="owner/repo", group="team")
     deadline = time.monotonic() + 2

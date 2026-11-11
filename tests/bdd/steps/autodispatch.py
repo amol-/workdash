@@ -42,8 +42,8 @@ def autodispatch_state(monkeypatch):
         return list(panes)
 
     monkeypatch.setattr(session, "dispatch_once", dispatch)
-    monkeypatch.setattr("workdash.control.load_zellij_panes", load_panes)
-    monkeypatch.setattr("workdash.control._AUTODISPATCH_POLL_SECONDS", 0.01)
+    monkeypatch.setattr("workdash.autodispatch.load_zellij_panes", load_panes)
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
     yield {"session": session, "calls": calls, "panes": panes, "polled": polled}
     session.stop_autodispatch_sessions()
 

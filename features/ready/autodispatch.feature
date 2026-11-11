@@ -2,8 +2,9 @@
 Feature: Automatically dispatch ready work
 
   A server-owned session dispatches one ready issue at a time in a required group.
-  It waits for each launched pane to disappear before dispatching again, and
-  finishes when dispatch finds no ready work. It does not merge work.
+  It checks about every 30 seconds for each launched pane to disappear before
+  dispatching again, and finishes when dispatch finds no ready work. Stopping
+  a session does not wait for the next check. It does not merge work.
 
   @id:F-AUTODISPATCH-S001
   Scenario: An autodispatch session continues until no work is ready
