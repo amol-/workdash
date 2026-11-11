@@ -353,7 +353,14 @@ closed: work on it can verify the overall goal. With no open linked pull request
 its action is `implement`. An issue linked to somebody else's open pull request
 is excluded; an authored open pull request must be pushable and need work:
 `address_review`, `fix_merge_conflicts`, or `fix_ci`. An issue whose pull request
-only waits for CI, review, or merge is absent.
+only waits for CI, review, or merge is absent. Unresolved inline review threads
+are actionable regardless of author, bot status, or subsequent pushes; general
+conversation comments and review bodies without a changes-requested verdict are not.
+A formal changes-requested review remains actionable across pushes regardless of reviewer
+identity, bot status, or whether it is minimized, until that reviewer is asked to review
+again or changes their verdict. The coding agent is instructed to
+address the review body, fix or explain and resolve each inline thread, and request
+re-review from each such reviewer; a failed request must be reported as a blocker.
 
 Issues with actionable authored pull requests come first, ordered by pull request
 age; unstarted issues follow, ordered by issue age. Each issue is
@@ -401,9 +408,7 @@ in *Autoclose supervision* below.
 session and returns its ID immediately. It uses the same scopes, readiness,
 parent behavior, claims and agent supervision as `dispatch`. Without `--group`, each task uses its implementation repository basename,
 including cross-repository work; `--group` overrides it. Each session dispatches one issue at a time, checks about every 30
-seconds for its pane to disappear, then dispatches again until no work is ready.
-It does not merge PRs.
-Multiple independent sessions can run at once; there are no retry or skip limits.
+seconds for its pane to disappear, then synchronously reviews the linked open PR before checking readiness again. If there is no linked PR, review is skipped. The selected agent must support both coding and one-shot analysis. Review failure fails the session. The session fails before a tenth consecutive dispatch of the same issue; selecting another issue resets the count. It does not merge PRs. Multiple independent sessions can run at once.
 
 `workdash info` and `workdash info --json` report sessions, their current task,
 status, elapsed time and any failure. The TUI shows running sessions above the
@@ -411,7 +416,7 @@ work table without blocking interaction. Stop a session with
 `workdash autodispatch-stop SESSION_ID`; stopping does not close its agent pane.
 A dispatch already in progress may still finish launching its pane after stopping.
 Pane disappearance is not proof that the work was merged or completed.
-If dispatch or the pane lookup fails, the session fails rather than treating the
+If dispatch, review, or the pane lookup fails, the session fails rather than treating the
 failure as an empty result. Sessions live only in the server process. After a
 restart, start another session on the same scope; readiness is checked afresh.
 
@@ -468,10 +473,12 @@ permit self-approval or self-requested changes. If it cannot determine that
 identity, it is instructed not to submit a formal verdict and to say so in the
 document. The agent writes a fresh document under the
 worktree's `.workdash/reviews/`, summarizing the outcome and explicitly listing
-posted comments or saying there were none. It must have nonempty `Outcome:` and
-`Inline comments:` fields on separate lines. If the document is missing or
-incomplete, Workdash retries once, asking the agent to check existing threads
-before posting again; a failed process or missing or incomplete document after
+posted comments or saying there were none. Any non-empty document counts as success,
+without checking its format. Starting a new review removes previous generated
+`review-<UUID>.md` documents in that worktree, except documents of active reviews;
+other files are left alone. If the document is missing or empty, Workdash retries
+once, asking the agent to check existing threads before posting again; a failed
+process or missing or empty document after
 retry is logged as an error by the server. Completion and the document path are
 logged by the server at debug logging level (`--debug`). Reviews are not supervised after the
 server exits. A concurrent request for the same pull request returns the same started information

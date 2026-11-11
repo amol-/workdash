@@ -19,9 +19,11 @@ from gh_work_state_fake import (
     HEAD_SHA,
     OLD_HEAD_SHA,
     check_run,
+    comment,
     failure,
     install_fake_github,
     review,
+    thread,
 )
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession
@@ -383,8 +385,8 @@ def test_a_new_failing_check_or_another_review_is_messaged_again(monkeypatch, tm
     )
     supervision.poll(15)
     assert len(supervision.sent) == 3
-    supervision.github.pull_requests["owner/repo#51"]["reviews"].append(
-        review("reviewer", "COMMENTED", created=AFTER_PUSH, body="Also rename the helper")
+    supervision.github.pull_requests["owner/repo#51"]["threads"].append(
+        thread(comment("reviewer", created=AFTER_PUSH))
     )
     supervision.poll(15)
     assert len(supervision.sent) == 4

@@ -18,11 +18,8 @@ Feature: Ready work
         - `fix_merge_conflicts`: GitHub confirms the pull request conflicts with its current base branch.
         - `fix_ci`: a check or status on the current head failed.
     - An issue with an actionable authored pull request lists every reason, ordered `address_review`, `fix_merge_conflicts`, `fix_ci`; the first one is its `action`. An issue without a pull request has action `implement`.
-    - Actionable review feedback is any of these on the current head:
-        - a changes-requested verdict a reviewer gave on the current head commit and has not superseded;
-        - a review body, an unresolved and not outdated review thread, or a pull request comment that a human other than the pull request author and the server's GitHub identity posted after the current head was pushed. A thread is judged by its latest comment that is not from a bot.
-    - Settled feedback is not actionable: a review thread is settled by a later reply in it from the pull request author or the server's GitHub identity, a pull request comment by a later comment of either of them in the conversation, and a review body or pull request comment by a later approval of the current head from the same person.
-    - Bot comments, comments of the pull request author or the server's GitHub identity, hidden comments, dismissed reviews, resolved or outdated threads, and feedback older than the current head are never actionable.
+    - Actionable review feedback is an unresolved inline review thread, regardless of its author, age, or whether it is outdated, or a changes-requested verdict whose reviewer has not been asked to review again. Verdicts remain actionable regardless of reviewer identity, bot status, or whether the review is minimized.
+    - General pull request conversation comments and review bodies without a changes-requested verdict do not make work ready.
     - The CI status of the current head comes from GitHub metadata only: its checks and statuses, and the required checks of the base branch rulesets and branch protection. Repository files are never inspected.
         - `failing`: a check or status on the current head failed, was cancelled, timed out, or needs action.
         - `pending`: nothing failed and something is queued or running.
@@ -143,7 +140,10 @@ Feature: Ready work
     Examples:
       | feedback                                                         |
       | a reviewer requesting changes on the current head                |
-      | a reviewer comment posted after the current head was pushed      |
+      | the configured user requesting changes                           |
+      | a bot requesting changes                                       |
+      | a minimized changes-requested review                            |
+      | an unresolved bot review thread before the last push              |
       | an unresolved review thread a reviewer opened after the last push |
 
   @id:F-READY-S011
@@ -163,7 +163,7 @@ Feature: Ready work
       | merge conflicts and pending CI                          | fix_merge_conflicts | fix_merge_conflicts                        |
 
   @id:F-READY-S012
-  Scenario Outline: Handled, stale, or non-human feedback does not make a pull request ready
+  Scenario Outline: Settled or non-actionable feedback does not make a pull request ready
     Given a server-backed Workdash session is ready to answer
     And GitHub issue `owner/repo#42` is open and closed by authored open pull request `owner/repo#51`
     And pull request #51 has passing CI and only <feedback>
@@ -172,13 +172,26 @@ Feature: Ready work
 
     Examples:
       | feedback                                                       |
-      | a changes-requested review on an older head                    |
       | a dismissed changes-requested review                           |
       | a reviewer comment posted before the current head was pushed   |
       | a bot comment posted after the current head was pushed         |
       | an author reply posted after the current head was pushed       |
       | a resolved review thread                                       |
-      | an outdated review thread                                      |
+      | a review body without a changes-requested verdict               |
+
+  @id:F-READY-S030
+  Scenario: A changes-requested review waits for its reviewer after feedback is addressed
+    Given a server-backed Workdash session is ready to answer
+    And GitHub issue `owner/repo#42` is open and closed by authored open pull request `owner/repo#51`
+    And pull request #51 has passing CI and a reviewer requested changes
+    When the user runs `workdash ready owner/repo --json`
+    Then the result lists `owner/repo#ISSUE-42` with action `address_review` and reasons `address_review`
+    When that reviewer is asked to review pull request #51 again
+    And the user runs `workdash ready owner/repo --json`
+    Then neither `owner/repo#ISSUE-42` nor `owner/repo#PR-51` is listed
+    When an inline review thread on pull request #51 remains unresolved
+    And the user runs `workdash ready owner/repo --json`
+    Then the result lists `owner/repo#ISSUE-42` with action `address_review` and reasons `address_review`
 
   @id:F-READY-S013
   Scenario Outline: CI is judged on the current head only
@@ -358,7 +371,7 @@ Feature: Ready work
   @id:F-READY-S028
   Scenario Outline: CI status tells no reported checks from unknown checks
     Given a server-backed Workdash session is ready to answer
-    And GitHub issue `owner/repo#42` is open and closed by authored pull request `owner/repo#51` with a reviewer comment posted after its current head was pushed
+    And GitHub issue `owner/repo#42` is open and closed by authored pull request `owner/repo#51` with an unresolved review thread
     And GitHub reports no check or status on its current head
     And the base branch required checks are <required>
     When the user runs `workdash ready owner/repo --json`

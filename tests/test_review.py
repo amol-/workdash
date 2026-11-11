@@ -194,59 +194,55 @@ def test_issue_resolves_pr_not_on_dashboard(setup_review, monkeypatch):
 def test_missing_document_fails_after_one_retry(setup_review, monkeypatch):
     session, tmp_path = setup_review
     (tmp_path / ".workdash/reviews").mkdir(parents=True)
-    (tmp_path / ".workdash/reviews/old.md").write_text("old review")
+    (tmp_path / ".workdash/reviews/old.md").write_text("user notes")
+    (tmp_path / ".workdash/reviews/review-0123456789abcdef0123456789abcdef.md").write_text(
+        "old review"
+    )
+    (tmp_path / ".workdash/reviews/review-notes.md").write_text("user review notes")
     run = MagicMock(return_value="")
     monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
-    with pytest.raises(RuntimeError, match="missing or incomplete after retry"):
+    with pytest.raises(RuntimeError, match="missing or empty after retry"):
         session.review(target="owner/repo#PR-2")
     assert run.call_count == 2
+    assert not (tmp_path / ".workdash/reviews/review-0123456789abcdef0123456789abcdef.md").exists()
+    assert (tmp_path / ".workdash/reviews/review-notes.md").read_text() == "user review notes"
+    assert (tmp_path / ".workdash/reviews/old.md").read_text() == "user notes"
 
 
-@pytest.mark.parametrize(
-    "incomplete",
-    [
-        "",
-        "reviewed",
-        "Outcome: approved",
-        "Inline comments: none",
-        "Outcome:   \nInline comments: none",
-        "Outcome: approved\nInline comments:  ",
-    ],
-)
-def test_incomplete_document_retries_then_fails(setup_review, monkeypatch, incomplete):
-    session, _ = setup_review
-    prompts = []
-
-    def run(self, *, item, prompt, command_tokens, cwd):
-        prompts.append(prompt)
-        Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(incomplete)
-        return "previous output"
-
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
-    with pytest.raises(RuntimeError, match="incomplete"):
-        session.review(target="owner/repo#PR-2")
-    assert len(prompts) == 2
-    assert "Check existing review threads" in prompts[1]
-
-
-def test_incomplete_document_succeeds_after_retry(setup_review, monkeypatch):
+@pytest.mark.parametrize("content", ["reviewed", "Outcome: approved", " "])
+def test_any_nonempty_document_succeeds(setup_review, monkeypatch, content):
     session, _ = setup_review
     attempts = []
 
     def run(self, *, item, prompt, command_tokens, cwd):
         attempts.append(prompt)
-        content = (
-            "reviewed"
-            if len(attempts) == 1
-            else "Outcome: changes requested\nInline comments: fix the race"
-        )
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(content)
         return ""
 
     monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
-    result = session.review(target="owner/repo#PR-2")
+    assert session.review(target="owner/repo#PR-2")["content"] == content
+    assert len(attempts) == 1
+
+
+@pytest.mark.parametrize("eventually_succeeds", [False, True])
+def test_empty_document_retries(setup_review, monkeypatch, eventually_succeeds):
+    session, _ = setup_review
+    attempts = []
+
+    def run(self, *, item, prompt, command_tokens, cwd):
+        attempts.append(prompt)
+        content = "reviewed" if eventually_succeeds and len(attempts) == 2 else ""
+        Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(content)
+        return ""
+
+    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    if eventually_succeeds:
+        assert session.review(target="owner/repo#PR-2")["content"] == "reviewed"
+    else:
+        with pytest.raises(RuntimeError, match="missing or empty"):
+            session.review(target="owner/repo#PR-2")
     assert len(attempts) == 2
-    assert result["content"] == "Outcome: changes requested\nInline comments: fix the race"
+    assert "Check existing review threads" in attempts[1]
 
 
 def test_agent_failure_is_not_retried(setup_review, monkeypatch):
@@ -439,6 +435,7 @@ def test_review_prompt_instructs_agent_how_to_submit(setup_review, monkeypatch):
         in prompt
     )
     assert "or stating that none were posted" in prompt
+    assert "Use separate lines" not in prompt
 
 
 def test_review_documents_are_not_staged_in_linked_worktree(setup_review, monkeypatch, tmp_path):
@@ -481,7 +478,7 @@ def test_review_documents_are_not_staged_in_linked_worktree(setup_review, monkey
     results = [session.review(target="owner/repo#PR-2") for _ in range(2)]
     assert [result["content"] for result in results] == contents
     assert [result["document_path"] for result in results] == [str(path) for path in paths]
-    assert paths[0] != paths[1] and all(path.is_file() for path in paths)
+    assert paths[0] != paths[1] and not paths[0].exists() and paths[1].is_file()
     (worktree / ".workdash/reviews/notes.md").write_text("user notes")
     subprocess.run(["git", "-C", str(worktree), "add", "-A"], check=True)
     staged = subprocess.check_output(
@@ -685,6 +682,37 @@ def test_concurrent_reviews_reuse_same_pr_but_allow_other_pr(setup_review, monke
     assert session.review(target="owner/repo#PR-2")["status"] == "reviewed"
 
 
+def test_new_review_preserves_active_review_document(setup_review, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from dataclasses import replace
+
+    session, _ = setup_review
+    session.work_items.append(replace(session.work_items[1], number=3))
+    running, release = threading.Event(), threading.Event()
+    paths = {}
+
+    def run(self, *, item, prompt, command_tokens, cwd):
+        path = Path(re.search(r"completion document at (\S+)", prompt).group(1))
+        paths[item.number] = path
+        path.write_text(f"review {item.number}")
+        if item.number == 2:
+            running.set()
+            assert release.wait(5)
+        return ""
+
+    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(session.review, target="owner/repo#PR-2")
+        try:
+            assert running.wait(5)
+            assert session.review(target="owner/repo#PR-3")["content"] == "review 3"
+            assert paths[2].read_text() == "review 2"
+        finally:
+            release.set()
+        assert first.result(5)["content"] == "review 2"
+
+
 @pytest.mark.parametrize("failure", [False, True])
 @pytest.mark.parametrize("background", [False, True])
 def test_synchronous_review_joins_running_review(setup_review, monkeypatch, failure, background):
@@ -868,4 +896,4 @@ def test_real_server_cli_returns_while_agent_is_blocked(setup_review, monkeypatc
         release.set()
         server.stop()
     assert calls == [2, 2]
-    assert document.read_text() == "Outcome: approved\nInline comments: none"
+    assert not document.exists()

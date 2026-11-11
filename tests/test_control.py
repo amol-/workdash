@@ -22,6 +22,7 @@ from gh_work_state_fake import (
     comment,
     failure,
     install_fake_github,
+    thread,
     todo_body,
 )
 from workdash.backend import IncludeResult, WorkdashBackend
@@ -956,7 +957,7 @@ def test_autostart_does_not_launch_where_the_redirected_pull_requests_agent_live
     [
         {"checks": {HEAD_SHA: [check_run("tests", "FAILURE")]}},
         {"mergeable": "CONFLICTING"},
-        {"comments": [comment("reviewer", created=AFTER_PUSH)]},
+        {"threads": [thread(comment("reviewer", created=AFTER_PUSH))]},
     ],
     ids=["failing_ci", "merge_conflicts", "review_feedback"],
 )
@@ -1375,7 +1376,7 @@ def test_shutdown_waits_for_inflight_autodispatch_start(monkeypatch) -> None:
         port = probe.getsockname()[1]
     monkeypatch.setattr(control_module, "SERVER_PORT", port)
     session = WorkdashSession(
-        config=WorkdashConfig(),
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
         backend=MagicMock(),
         work_items=[],
         suggestion_markers={},
@@ -2335,6 +2336,20 @@ def test_dispatch_revalidates_and_retries_claimed_candidate(monkeypatch, tmp_pat
     assert all(
         call["autostart"] and call["autoclose"] and call["group"] == "repo" for call in calls
     )
+
+
+def test_dispatch_skips_claim_before_checking_launch_limit(monkeypatch, tmp_path):
+    panes = [{"id": 5, "title": "code_owner_repo_1", "pane_cwd": str(tmp_path / "owner_repo_1")}]
+    session, _worktree, _ensure, launch = _coding_session(monkeypatch, tmp_path, panes)
+    candidate = SimpleNamespace(item=session.work_items[0], pull_request=None)
+    monkeypatch.setattr(session, "_ready", lambda *args, **kwargs: [candidate])
+    limit = MagicMock(side_effect=RuntimeError("limit reached"))
+
+    result = session.dispatch_once(scope="owner/repo", agent="pi", before_launch=limit)
+
+    assert result["status"] == "no_ready_task"
+    limit.assert_not_called()
+    launch.assert_not_called()
 
 
 def test_remote_dispatch_cli_through_http(monkeypatch, tmp_path, capsys):

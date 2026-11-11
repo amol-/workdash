@@ -9,7 +9,7 @@ from threading import Barrier
 
 from pytest_bdd import given, parsers, then, when
 
-from gh_work_state_fake import AFTER_PUSH, HEAD_SHA, check_run, comment, failure
+from gh_work_state_fake import AFTER_PUSH, HEAD_SHA, check_run, comment, failure, thread
 from workdash.github_client import GitHubClient
 from workdash.work_instruction import render_work_instruction
 
@@ -97,7 +97,7 @@ def _multiple(scenario_state):
         closes=("owner/repo#42",),
         mergeable="CONFLICTING",
         checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
-        comments=[comment("reviewer", created=AFTER_PUSH)],
+        threads=[thread(comment("reviewer", created=AFTER_PUSH))],
     )
 
 

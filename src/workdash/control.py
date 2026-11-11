@@ -15,6 +15,7 @@ import urllib.request
 from collections.abc import Callable, Collection, Sequence
 from concurrent.futures import Future
 from contextlib import ExitStack
+from functools import partial
 from http import HTTPStatus
 from ipaddress import IPv4Address, ip_address
 from pathlib import Path
@@ -329,11 +330,23 @@ class WorkdashSession:
                     )
                 with self._lock:
                     cwd = ensure_worktree(
-                        self.config.workdir, item, git=self.git,
+                        self.config.workdir,
+                        item,
+                        git=self.git,
                         github_client=self.backend.github_client,
                     )
                 tokens = self.backend.resolve_analyze_command_tokens(selected)
                 document = Path(cwd) / ".workdash" / "reviews" / f"review-{uuid4().hex}.md"
+                active_documents = {
+                    Path(started["document_path"]) for started, _ in self._active_reviews.values()
+                }
+                for old_document in document.parent.glob("review-*.md"):
+                    if (
+                        re.fullmatch(r"review-[0-9a-f]{32}\.md", old_document.name)
+                        and old_document not in active_documents
+                        and old_document.is_file()
+                    ):
+                        old_document.unlink()
                 started = {
                     "status": "started",
                     "item_id": f"{item.repo}#PR-{item.number}",
@@ -350,7 +363,7 @@ class WorkdashSession:
         def run_review():
             try:
                 result = review_pull_request(
-                    item, context=context, cwd=cwd, tokens=tokens, document=document
+                    item, context=context, cwd=cwd, tokens=tokens, document=document, git=self.git
                 )
                 result["agent"] = selected
             except BaseException as error:
@@ -396,6 +409,7 @@ class WorkdashSession:
         autostart: bool = False,
         group: str | None = None,
         autoclose: bool = False,
+        before_launch: Callable[[], None] | None = None,
     ) -> dict[str, object]:
         """Launch a coding agent for an explicit target unless one already works in its worktree.
 
@@ -543,6 +557,8 @@ class WorkdashSession:
             if claimed is not None:
                 return claimed
             verify_selected_head(repo_path)
+            if before_launch is not None:
+                before_launch()
             launch_key = _normalized_path(repo_path)
             prompt = prepare_launch_agent_prompt(
                 item,
@@ -815,7 +831,12 @@ class WorkdashSession:
                 entry.stop()
 
     def dispatch_once(
-        self, *, scope: str, agent: str | None = None, group: str | None = None
+        self,
+        *,
+        scope: str,
+        agent: str | None = None,
+        group: str | None = None,
+        before_launch: Callable[[str], None] | None = None,
     ) -> dict[str, object]:
         """Launch at most one currently ready issue, in ready order."""
         if group is not None and (not isinstance(group, str) or not group.strip()):
@@ -842,6 +863,9 @@ class WorkdashSession:
                 group=selected_group,
                 autostart=True,
                 autoclose=True,
+                **(
+                    {"before_launch": partial(before_launch, candidate_id)} if before_launch else {}
+                ),
             )
             if launch["status"] == "already_running":
                 continue

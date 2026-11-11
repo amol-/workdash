@@ -173,6 +173,7 @@ class FakeGitHub:
             # Head SHA -> its checks, paged by page_size; a head missing here reports none.
             "checks": {HEAD_SHA: [check_run("tests")]},
             "reviews": [],
+            "review_requests": [],
             "threads": [],
             "comments": [],
             "lookups": 0,
@@ -439,6 +440,9 @@ class FakeGitHub:
                 "nodes": [{"createdAt": pr["force_pushed_at"], "afterCommit": {"oid": pr["head"]}}]
                 if pr["force_pushed_at"]
                 else []
+            },
+            "reviewRequests": {
+                "nodes": [{"requestedReviewer": actor(login)} for login in pr["review_requests"]]
             },
             "latestOpinionatedReviews": {"nodes": list(latest_opinions.values())},
             "reviews": {"nodes": pr["reviews"]},

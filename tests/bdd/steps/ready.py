@@ -44,9 +44,39 @@ _CI_CHECKS = {
 _MERGEABLE = {"mergeable": "MERGEABLE", "conflicting": "CONFLICTING", "unknown": "UNKNOWN"}
 # Feedback phrase -> pull request field and the entry GitHub reports in it.
 _FEEDBACK = {
+    "an unresolved bot review thread before the last push": (
+        "threads",
+        lambda: thread(comment("ci[bot]", created=BEFORE_PUSH), outdated=True),
+    ),
+    "a review body without a changes-requested verdict": (
+        "reviews",
+        lambda: review(REVIEWER, "COMMENTED", created=AFTER_PUSH, body="Feedback"),
+    ),
+    "a reviewer requested changes": (
+        "reviews",
+        lambda: review(
+            REVIEWER,
+            "CHANGES_REQUESTED",
+            created=BEFORE_PUSH,
+            commit=OLD_HEAD_SHA,
+            body="Please rework this.",
+        ),
+    ),
     "a reviewer requesting changes on the current head": (
         "reviews",
         lambda: review(REVIEWER, "CHANGES_REQUESTED", created=AFTER_PUSH),
+    ),
+    "the configured user requesting changes": (
+        "reviews",
+        lambda: review("testuser", "CHANGES_REQUESTED", created=AFTER_PUSH),
+    ),
+    "a bot requesting changes": (
+        "reviews",
+        lambda: review("ci[bot]", "CHANGES_REQUESTED", created=AFTER_PUSH),
+    ),
+    "a minimized changes-requested review": (
+        "reviews",
+        lambda: review(REVIEWER, "CHANGES_REQUESTED", created=AFTER_PUSH) | {"isMinimized": True},
     ),
     "a reviewer comment posted after the current head was pushed": (
         "comments",
@@ -332,11 +362,26 @@ def _check_failed_on_head(scenario_state: dict[str, Any]) -> None:
     assert not pull_request["reviews"]
 
 
+@when("that reviewer is asked to review pull request #51 again")
+def _request_review_again(scenario_state: dict[str, Any]) -> None:
+    _pull_request(scenario_state)["review_requests"].append(REVIEWER)
+
+
+@when("an inline review thread on pull request #51 remains unresolved")
+def _unresolved_review_thread(scenario_state: dict[str, Any]) -> None:
+    _pull_request(scenario_state)["threads"].append(thread(comment(REVIEWER, created=AFTER_PUSH)))
+
+
 @given(parsers.re(r"pull request #51 has passing CI and (?:only )?(?P<feedback>.+)"))
 def _pull_request_with_feedback(scenario_state: dict[str, Any], feedback: str) -> None:
     field, build = _FEEDBACK[feedback]
     entry = build()
     _pull_request(scenario_state)[field].append(entry)
+    scenario_state["feedback_author"] = (
+        entry["comments"]["nodes"][-1]["author"]["login"]
+        if field == "threads"
+        else entry["author"]["login"]
+    )
     scenario_state["feedback_url"] = (
         entry["comments"]["nodes"][-1]["url"] if field == "threads" else entry["url"]
     )
@@ -355,7 +400,7 @@ def _pull_request_with_problems(scenario_state: dict[str, Any], problems: str) -
     if "merge conflicts" in problems:
         pull_request["mergeable"] = "CONFLICTING"
     if "review feedback" in problems:
-        pull_request["comments"].append(comment(REVIEWER, created=AFTER_PUSH))
+        pull_request["threads"].append(thread(comment(REVIEWER, created=AFTER_PUSH)))
 
 
 @when(parsers.parse("a new head is pushed to pull request #51 and its CI is {current}"))
@@ -723,7 +768,7 @@ def _entry_reports_failing_ci(
 def _entry_references_feedback(scenario_state: dict[str, Any], issue_id: str) -> None:
     entry = scenario_state["ready_entry"]
     assert [feedback["url"] for feedback in entry["feedback"]] == [scenario_state["feedback_url"]]
-    assert entry["feedback"][0]["author"] == REVIEWER
+    assert entry["feedback"][0]["author"] == scenario_state["feedback_author"]
     assert entry["pr_id"] == issue_id
 
 
@@ -855,13 +900,15 @@ def _issue_with_mergeable_pr(scenario_state: dict[str, Any], issue: str, pr: str
 
 @given(
     parsers.parse(
-        "GitHub issue `{issue}` is open and closed by authored pull request `{pr}` with a reviewer comment posted after its current head was pushed"
+        "GitHub issue `{issue}` is open and closed by authored pull request `{pr}` with an unresolved review thread"
     )
 )
 def _issue_with_commented_pr(scenario_state: dict[str, Any], issue: str, pr: str) -> None:
     github = _github(scenario_state)
     github.add_issue(issue)
-    github.add_pull_request(pr, closes=(issue,), comments=[comment(REVIEWER, created=AFTER_PUSH)])
+    github.add_pull_request(
+        pr, closes=(issue,), threads=[thread(comment(REVIEWER, created=AFTER_PUSH))]
+    )
 
 
 @then(parsers.parse("pull request `{item_id}` is not listed as a ready item"))

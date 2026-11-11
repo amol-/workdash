@@ -62,9 +62,22 @@ class _AutodispatchSession:
 
     def run(self) -> None:
         try:
+            agents = self.owner.config.configured_code_agents()
+            selected = self.agent or (agents[0] if agents else None)
+            if selected is None or selected not in agents:
+                raise RuntimeError(f"Coding agent {selected!r} has no launch command.")
+            if selected not in self.owner.config.configured_analyze_agents():
+                raise RuntimeError(f"Coding agent {selected!r} has no analysis command.")
+            previous = None
+            consecutive = 0
+
+            def check_limit(item_id: str) -> None:
+                if item_id == previous and consecutive >= 9:
+                    raise RuntimeError(f"Issue {item_id} selected 10 consecutive times.")
+
             while not self.stop_event.is_set():
                 result = self.owner.dispatch_once(
-                    scope=self.scope, group=self.group, agent=self.agent
+                    scope=self.scope, group=self.group, agent=selected, before_launch=check_limit
                 )
                 with self.lock:
                     if self.stop_event.is_set():
@@ -75,6 +88,8 @@ class _AutodispatchSession:
                         self.ended = time.monotonic()
                         return
                     self.current_item = str(result["item_id"])
+                    consecutive = consecutive + 1 if self.current_item == previous else 1
+                    previous = self.current_item
                 while not self.stop_event.wait(_AUTODISPATCH_POLL_SECONDS):
                     panes = launcher.zellij.load_zellij_panes(str(result["session"]))
                     if not any(
@@ -83,6 +98,12 @@ class _AutodispatchSession:
                         for pane in panes
                     ):
                         break
+                if not self.stop_event.is_set():
+                    review = self.owner.review(
+                        target=str(result.get("pr_id", result["item_id"])), agent=selected
+                    )
+                    if "pr_id" in result and review["status"] == "nothing_to_review":
+                        self.owner.review(target=str(result["item_id"]), agent=selected)
         except Exception as error:
             with self.lock:
                 if not self.stop_event.is_set():

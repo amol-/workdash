@@ -6,7 +6,9 @@ Feature: Review a pull request
     - An issue without a linked open pull request, or a closed or merged pull request, has nothing to review.
     - A review reports major findings as inline comments and submits an appropriate review when permitted.
     - A review of one's own pull request is comment-only.
-    - A review document summarizes the outcome and any posted inline comments.
+    - The agent is asked to summarize the outcome and list posted inline comments in a fresh review document, but any non-empty document counts as success.
+    - Starting a new review removes prior generated review documents in its worktree, except documents belonging to reviews still in progress; other files are preserved.
+    - A missing or empty document is retried once, and an agent failure is reported as a failure.
     - A repeated request for a running review returns the same started information without starting another review.
     - A started review reports the intended document path and runs without blocking other control requests.
 

@@ -87,12 +87,12 @@ fragment ReadyPullRequest on PullRequest {{
     }}
     commits(last: 1) {{
         nodes {{ commit {{
-            oid committedDate
+            oid
             statusCheckRollup {{ contexts(first: 100) {{ {_CHECK_CONTEXTS} }} }}
         }} }}
     }}
-    timelineItems(last: 1, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) {{
-        nodes {{ ... on HeadRefForcePushedEvent {{ createdAt afterCommit {{ oid }} }} }}
+    reviewRequests(first: 100) {{
+        nodes {{ requestedReviewer {{ __typename ... on User {{ login }} }} }}
     }}
     latestOpinionatedReviews(first: 100) {{
         nodes {{ state url submittedAt isMinimized commit {{ oid }} {_ACTOR} }}
@@ -2381,11 +2381,6 @@ class GitHubClient:
             ci_status, failing_checks = self._ci_status(
                 repo, commit, head_sha, required_checks[base_key]
             )
-            pushes = [
-                event["createdAt"]
-                for event in node["timelineItems"]["nodes"]
-                if (event.get("afterCommit") or {}).get("oid") == head_sha
-            ]
             return PullRequestWorkState(
                 item=WorkItem(
                     kind=WorkItemKind.AUTHORED_PR
@@ -2426,13 +2421,7 @@ class GitHubClient:
                 review_decision=node["reviewDecision"],
                 ci_status=ci_status,
                 failing_checks=failing_checks,
-                feedback=_actionable_feedback(
-                    node,
-                    head_sha,
-                    author,
-                    github_username,
-                    parse_github_datetime(pushes[-1] if pushes else commit["committedDate"]),
-                ),
+                feedback=_actionable_feedback(node),
                 merged_at=parse_github_datetime(node["mergedAt"]) if node["mergedAt"] else None,
             )
 

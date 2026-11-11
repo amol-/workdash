@@ -10,7 +10,7 @@ from .work_state import PullRequestWorkState
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _ALSO = {
-    "address_review": "Also address these current review requests: {feedback}.",
+    "address_review": "Also address these review requests: {feedback}. Address the full body of each changes-requested review. For each inline thread, fix the valid request or reply with a concise explanation, then resolve the thread. Request re-review from each reviewer whose changes-requested review you addressed; report a blocker if the request fails.",
     "fix_merge_conflicts": (
         "Also resolve the confirmed merge conflicts into {base_ref} (base head {base_sha}) "
         "using the repository's established merge or rebase workflow and verify the "
