@@ -153,7 +153,7 @@ workdash list --json         # list items as machine-readable JSON
 workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
 workdash ready SCOPE [--json]   # list the GitHub work ready to be picked up next
 workdash dispatch SCOPE [--agent NAME] [--group NAME] [--host HOST] [--json]  # launch one ready issue
-workdash autodispatch SCOPE --group NAME [--agent NAME] [--host HOST] [--json]  # start a session
+workdash autodispatch SCOPE [--group NAME] [--agent NAME] [--host HOST] [--json]  # start a session
 workdash autodispatch-stop SESSION_ID [--host HOST] [--json]  # stop a session
 workdash analyze ITEM [--agent NAME] [--json]  # analyze an item
 workdash code ITEM [--agent NAME] [--group NAME] [--autoclose] [--json]  # launch an autonomous coding agent, or report the running one
@@ -396,10 +396,10 @@ in *Autoclose supervision* below.
 
 ## Autodispatch sessions
 
-`workdash autodispatch SCOPE --group NAME [--agent NAME]` starts a server-owned
+`workdash autodispatch SCOPE [--group NAME] [--agent NAME]` starts a server-owned
 session and returns its ID immediately. It uses the same scopes, readiness,
-parent behavior, claims and agent supervision as `dispatch`. The group is
-required. Each session dispatches one issue at a time, checks about every 30
+parent behavior, claims and agent supervision as `dispatch`. Without `--group`, each task uses its implementation repository basename,
+including cross-repository work; `--group` overrides it. Each session dispatches one issue at a time, checks about every 30
 seconds for its pane to disappear, then dispatches again until no work is ready.
 It does not merge PRs.
 Multiple independent sessions can run at once; there are no retry or skip limits.
@@ -414,9 +414,10 @@ If dispatch or the pane lookup fails, the session fails rather than treating the
 failure as an empty result. Sessions live only in the server process. After a
 restart, start another session on the same scope; readiness is checked afresh.
 
-The API accepts `POST /api/v0/autodispatch` with `scope`, required `group` and
-optional `agent`, and `POST /api/v0/autodispatch_stop` with the session `id`.
-Session state is included in `POST /api/v0/info` as `autodispatch_sessions`.
+The API accepts `POST /api/v0/autodispatch` with `scope` and optional `group` and
+`agent`, and `POST /api/v0/autodispatch_stop` with the session `id`.
+Session state is included in `POST /api/v0/info` as `autodispatch_sessions`;
+its `group` is null when no override was configured.
 
 ## Info command
 

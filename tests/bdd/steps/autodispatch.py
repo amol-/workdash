@@ -154,3 +154,70 @@ def remains(autodispatch_state):
         "stopped",
         "running",
     ]
+
+
+@given("an autodispatch server with ready issues in different implementation repositories")
+def cross_repo_server(scenario_state, monkeypatch):
+    from gh_work_state_fake import install_fake_github
+    from workdash.config import WorkdashConfig
+    from workdash.github_client import GitHubClient
+
+    github = install_fake_github(monkeypatch)
+    scenario_state["github"] = github
+    github.add_issue("owner/parent#1", state="CLOSED")
+    github.add_issue("owner/first#2", parent="owner/parent#1")
+    github.add_issue("owner/second#3", parent="owner/parent#1")
+    github.add_pull_request(
+        "owner/implementation#51", closes=("owner/second#3",), mergeable="CONFLICTING"
+    )
+    session = WorkdashSession(
+        config=WorkdashConfig(github_username="testuser"),
+        backend=MagicMock(github_client=GitHubClient()),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    scenario_state["api_session"] = session
+    launches = []
+    panes = []
+
+    def code(**kwargs):
+        launches.append(kwargs)
+        panes.append({"id": len(launches)})
+        return {
+            "status": "launched",
+            "item_id": kwargs["target"],
+            "pane_id": f"terminal_{len(launches)}",
+            "session": "workdash",
+        }
+
+    monkeypatch.setattr(session, "code", code)
+    monkeypatch.setattr("workdash.control.load_zellij_panes", lambda _: [])
+    monkeypatch.setattr("workdash.autodispatch.load_zellij_panes", lambda _: list(panes))
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
+    scenario_state.update(auto_launches=launches, auto_panes=panes)
+
+
+@when("the user starts autodispatch without a group")
+def start_without_group(scenario_state):
+    scenario_state["api_session"].start_autodispatch(scope="owner/parent#1")
+
+
+@then("each issue is dispatched in its implementation repository's group")
+def repository_groups(scenario_state):
+    launches = scenario_state["auto_launches"]
+    session = scenario_state["api_session"]
+    try:
+        wait_for(lambda: len(launches) == 1)
+        target = launches[0]["target"]
+        issue = scenario_state["github"].issues[target.replace("#ISSUE-", "#")]
+        issue["state"] = "CLOSED"
+        scenario_state["auto_panes"].clear()
+        wait_for(lambda: len(launches) == 2)
+        assert {launch["target"]: launch["group"] for launch in launches} == {
+            "owner/first#ISSUE-2": "first",
+            "owner/second#ISSUE-3": "implementation",
+        }
+        assert session.autodispatch_sessions()[0]["group"] is None
+    finally:
+        session.stop_autodispatch_sessions()

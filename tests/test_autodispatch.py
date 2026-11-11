@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from webob import Request
 
 from gh_work_state_fake import install_fake_github
@@ -61,7 +62,9 @@ def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
         resp = req.get_response(app)
         return resp.status_int, json.loads(resp.text)
 
-    status, error = request("autodispatch", {"scope": "owner/repo"})
+    status, error = request("autodispatch", {"scope": "owner/repo", "group": "  "})
+    assert status == 400 and error["error"]["code"] == "bad_request"
+    status, error = request("autodispatch", {"scope": "owner/repo", "group": None})
     assert status == 400 and error["error"]["code"] == "bad_request"
     status, started = request(
         "autodispatch", {"scope": "owner/repo", "group": "team", "agent": "pi"}
@@ -88,7 +91,8 @@ def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
     close_pane.assert_not_called()
 
 
-def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_path):
+@pytest.mark.parametrize("group", [None, "team"])
+def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_path, group):
     github = install_fake_github(monkeypatch)
     issues = [github.add_issue(f"owner/repo#{n}") for n in (1, 2)]
     now = datetime.now(UTC)
@@ -151,7 +155,9 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
         "/api/v0/autodispatch",
         method="POST",
         content_type="application/json",
-        body=json.dumps({"scope": "owner/repo", "group": "team", "agent": "pi"}).encode(),
+        body=json.dumps(
+            {"scope": "owner/repo", "agent": "pi", **({"group": group} if group else {})}
+        ).encode(),
     )
     response = request.get_response(app)
     assert response.status_int == 200
@@ -169,7 +175,7 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
 
     try:
         entry = wait_for("owner/repo#ISSUE-1")
-        assert entry["id"] == session_id
+        assert entry["id"] == session_id and entry["group"] == group
         assert [work["issue_id"] for work in session.ready(scope="owner/repo")["items"]] == [
             "owner/repo#ISSUE-2"
         ]
@@ -177,7 +183,7 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
             polls.get_nowait()
         polls.get(timeout=3)
         polls.get(timeout=3)
-        assert len(launches) == 1 and launches[0][2]["group"] == "team"
+        assert len(launches) == 1 and launches[0][2]["group"] == (group or "repo")
         panes.clear()
         deadline = time.monotonic() + 3
         while len(launches) < 2:
@@ -191,7 +197,7 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
         issues[0]["state"] = "CLOSED"
         panes.clear()
         wait_for("owner/repo#ISSUE-2")
-        assert len(launches) == 3 and launches[2][2]["group"] == "team"
+        assert len(launches) == 3 and launches[2][2]["group"] == (group or "repo")
         assert [launch[0].name for launch in launches] == [
             "owner_repo_1",
             "owner_repo_1",
@@ -265,7 +271,7 @@ def test_tui_shows_running_sessions_and_remains_interactive():
         {
             "status": "running",
             "scope": "owner/b",
-            "group": "second",
+            "group": None,
             "current_item": "owner/b#ISSUE-2",
             "elapsed_seconds": 10,
         },
@@ -276,9 +282,9 @@ def test_tui_shows_running_sessions_and_remains_interactive():
         async with app.run_test() as pilot:
             rows = [strip.text for strip in app.screen._compositor.render_strips()]
             assert any("first" in row and "ISSUE-1" in row and "5s" in row for row in rows)
-            assert any("second" in row and "ISSUE-2" in row and "10s" in row for row in rows)
+            assert any("automatic" in row and "ISSUE-2" in row and "10s" in row for row in rows)
             assert any("Visible task" in row for row in rows)
-            assert next(i for i, row in enumerate(rows) if "second" in row) < next(
+            assert next(i for i, row in enumerate(rows) if "automatic" in row) < next(
                 i for i, row in enumerate(rows) if "Visible task" in row
             )
             await pilot.press("/")
@@ -304,3 +310,42 @@ def test_cli_starts_and_stops_through_server(monkeypatch, capsys):
     assert main(["autodispatch-stop", "abc"]) == 0
     client.request.assert_called_with("autodispatch_stop", {"id": "abc"})
     assert "stopped" in capsys.readouterr().out
+
+
+def test_cli_omits_group_and_reports_automatic_group(monkeypatch, capsys):
+    from workdash.workdash import main
+
+    client = MagicMock()
+    client.request.return_value = {
+        "id": "abc",
+        "status": "running",
+        "scope": "owner/repo",
+        "group": None,
+    }
+    monkeypatch.setattr("workdash.workdash.WorkdashControlClient", lambda *args, **kwargs: client)
+    assert main(["autodispatch", "owner/repo"]) == 0
+    client.request.assert_called_with("autodispatch", {"scope": "owner/repo", "agent": None})
+    assert "None" not in capsys.readouterr().out
+
+
+def test_info_reports_automatic_group_without_none(capsys):
+    from workdash.workdash import _print_pane_info
+
+    _print_pane_info(
+        {
+            "session": "workdash",
+            "panes": [],
+            "autodispatch_sessions": [
+                {
+                    "id": "abc",
+                    "status": "running",
+                    "scope": "owner/repo",
+                    "group": None,
+                    "current_item": None,
+                    "elapsed_seconds": 1,
+                }
+            ],
+        }
+    )
+    output = capsys.readouterr().out
+    assert "group=automatic" in output and "None" not in output

@@ -256,7 +256,9 @@ class WorkdashCommands:
     def autodispatch_cli(
         self, *, target: str, agent: str | None, group: str | None, stop: bool, json_output: bool
     ) -> int:
-        payload = {"id": target} if stop else {"scope": target, "group": group, "agent": agent}
+        payload = {"id": target} if stop else {"scope": target, "agent": agent}
+        if not stop and group is not None:
+            payload["group"] = group
         try:
             result = self._client.request("autodispatch_stop" if stop else "autodispatch", payload)
         except WorkdashControlError as error:
@@ -266,7 +268,7 @@ class WorkdashCommands:
             print(json.dumps(result, ensure_ascii=True, indent=2))
         else:
             print(
-                f"Autodispatch {result['id']}: {result['status']} ({result['scope']}, {result['group']})"
+                f"Autodispatch {result['id']}: {result['status']} ({result['scope']}, {result['group'] or 'automatic'})"
             )
         return 0
 
@@ -736,7 +738,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         "autodispatch", help="Start a sequence of ready work."
     )
     autodispatch_parser.add_argument("target", metavar="SCOPE")
-    autodispatch_parser.add_argument("--group", required=True, help="Zellij tab for agents.")
+    autodispatch_parser.add_argument("--group", help="Zellij tab for agents.")
     autodispatch_parser.add_argument("--agent", help="Coding agent to launch.")
     autodispatch_stop_parser = subparsers.add_parser(
         "autodispatch-stop", help="Stop an autodispatch session."
@@ -1061,7 +1063,7 @@ def _print_pane_info(info: dict[str, object]) -> None:
     panes = info["panes"]
     for entry in info.get("autodispatch_sessions", []):
         print(
-            f"Autodispatch {entry['id']} {entry['status']} group={entry['group']} scope={entry['scope']} item={entry['current_item'] or '-'} elapsed={entry['elapsed_seconds']}s"
+            f"Autodispatch {entry['id']} {entry['status']} group={entry['group'] or 'automatic'} scope={entry['scope']} item={entry['current_item'] or '-'} elapsed={entry['elapsed_seconds']}s"
         )
         if entry.get("error"):
             print(f"  Error: {entry['error']}")

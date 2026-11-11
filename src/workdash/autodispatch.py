@@ -26,7 +26,7 @@ class _AutodispatchSession:
         FINISHED = "finished"
         FAILED = "failed"
 
-    def __init__(self, owner: WorkdashSession, scope: str, group: str, agent: str | None):
+    def __init__(self, owner: WorkdashSession, scope: str, group: str | None, agent: str | None):
         self.owner, self.scope, self.group, self.agent = owner, scope, group, agent
         self.id = uuid.uuid4().hex
         self.started_at = datetime.now(UTC).isoformat()

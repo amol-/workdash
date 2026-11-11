@@ -662,21 +662,22 @@ class WorkdashSession:
         return unclaimed
 
     def start_autodispatch(
-        self, *, scope: str, group: str, agent: str | None = None
+        self, *, scope: str, group: str | None = None, agent: str | None = None
     ) -> dict[str, object]:
         """Start an independent server-owned sequence of dispatches."""
         if (
             not isinstance(scope, str)
             or not scope.strip()
-            or not isinstance(group, str)
-            or not group.strip()
+            or (group is not None and (not isinstance(group, str) or not group.strip()))
         ):
             raise WorkdashControlError(
                 "bad_request",
-                "Scope and group must be non-empty strings.",
+                "Scope and any supplied group must be non-empty strings.",
                 status=HTTPStatus.BAD_REQUEST,
             )
-        entry = _AutodispatchSession(self, scope.strip(), group.strip(), agent)
+        entry = _AutodispatchSession(
+            self, scope.strip(), group.strip() if group is not None else None, agent
+        )
         with self._autodispatch_lock:
             self._autodispatch[entry.id] = entry
             entry.thread.start()
@@ -1280,7 +1281,7 @@ def _make_turbogears_app(session: WorkdashSession):
                 response,
                 lambda payload: self._session.start_autodispatch(
                     scope=_required_text(payload, "scope"),
-                    group=_required_text(payload, "group"),
+                    **({"group": _required_text(payload, "group")} if "group" in payload else {}),
                     agent=_optional_text(payload, "agent"),
                 ),
             )

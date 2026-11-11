@@ -47,13 +47,14 @@ naming a pull request fails with `unsupported_item_type`.
 ## Autodispatch sessions
 
 ```bash
-workdash autodispatch isocelot/substack-drafter --group substack --agent pi
+workdash autodispatch isocelot/substack-drafter --agent pi
 workdash info --json                  # sessions, current task, elapsed and status
 workdash autodispatch-stop SESSION_ID # does not close the agent pane
 ```
 
 The server dispatches one task at a time and waits for its pane to disappear.
-The group is required. Multiple independent sessions can run concurrently; the
+Each task defaults to its implementation repository basename; `--group` overrides it.
+Multiple independent sessions can run concurrently; the
 non-modal TUI header shows running sessions. A session ends when no work is
 ready, or fails if dispatch or pane lookup fails. It does not merge PRs. Session
 state disappears when the server stops; after restart, relaunch on the same

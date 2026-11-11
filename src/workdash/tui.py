@@ -439,7 +439,7 @@ class WorkdashApp(App[None]):
         widget.display = bool(entries)
         widget.update(
             "\n".join(
-                f"{entry['group']}  {entry['scope']}  {entry['current_item'] or '-'}  {entry['elapsed_seconds']}s"
+                f"{entry['group'] or 'automatic'}  {entry['scope']}  {entry['current_item'] or '-'}  {entry['elapsed_seconds']}s"
                 for entry in entries
             )
         )
