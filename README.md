@@ -116,7 +116,7 @@ command, a `launch` command, or both:
 
 ```json
 "agents": {
-  "pi": {"analyze": "pi --no-session --tools read,grep,find,ls -p", "launch": "pi"},
+  "pi": {"analyze": "pi -p", "launch": "pi"},
   "aider": {"analyze": "aider --yes"}
 }
 ```
@@ -156,6 +156,7 @@ workdash dispatch SCOPE [--agent NAME] [--group NAME] [--host HOST] [--json]  # 
 workdash autodispatch SCOPE [--group NAME] [--agent NAME] [--host HOST] [--json]  # start a session
 workdash autodispatch-stop SESSION_ID [--host HOST] [--json]  # stop a session
 workdash analyze ITEM [--agent NAME] [--json]  # analyze an item
+workdash review ITEM [--agent NAME] [--json]   # autonomously review an open PR
 workdash code ITEM [--agent NAME] [--group NAME] [--autoclose] [--json]  # launch an autonomous coding agent, or report the running one
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
 workdash todo TEXT [--target REPOSITORY] [--body BODY] [--json]  # capture a todo
@@ -296,7 +297,7 @@ Allowed clients can execute dashboard actions; do not expose it to untrusted
 networks or treat the IP allowlist as authentication or encryption.
 
 Client commands `list`, `info`, `ready`, `dispatch`, `autodispatch`, `autodispatch-stop`, `analyze`, `code`, `terminal`, `todo`, `read`,
-`write`, and `close` accept `--host HOST[:PORT]` before or after the command.
+`write`, `review`, and `close` accept `--host HOST[:PORT]` before or after the command.
 Set `WORKDASH_HOST` to an IPv4 address or IPv4 address:port to select the default
 for both server and clients; omitted ports use 8765. An explicit `--host` replaces
 that default, even if `WORKDASH_HOST` is invalid.
@@ -446,6 +447,37 @@ and base64 `file_content` so clients do not need filesystem access to the server
 cache. The CLI writes that content to a secure temporary local file and reports it
 as `analysis_path`. `--json` emits the same client-side result without the raw
 base64 content.
+
+## Review command
+
+`workdash review ITEM [--agent NAME] [--json]` requires a running server. ITEM
+accepts the same references as `analyze`: a pull request or an issue with a linked
+open pull request. If there is no open pull request, it reports nothing to review.
+The server prepares the PR worktree and starts a background review using the
+selected configured analysis agent without using the analysis cache. The command returns the
+started review, agent, and intended document path on the server without waiting for completion.
+The document may not exist yet, and a failed review may not produce it. The first analysis
+agent is selected by default. The agent needs GitHub access and permission to
+post reviews; a restricted analysis command may not be suitable.
+
+The agent is instructed to post only major findings as inline review comments,
+and submit a changes-requested review or approval as appropriate. For your own
+PR, based on the authenticated identity used to submit the review rather than
+the configured username, it submits a comment-only review, since GitHub does not
+permit self-approval or self-requested changes. If it cannot determine that
+identity, it is instructed not to submit a formal verdict and to say so in the
+document. The agent writes a fresh document under the
+worktree's `.workdash/reviews/`, summarizing the outcome and explicitly listing
+posted comments or saying there were none. It must have nonempty `Outcome:` and
+`Inline comments:` fields on separate lines. If the document is missing or
+incomplete, Workdash retries once, asking the agent to check existing threads
+before posting again; a failed process or missing or incomplete document after
+retry is logged as an error by the server. Completion and the document path are
+logged by the server at debug logging level (`--debug`). Reviews are not supervised after the
+server exits. A concurrent request for the same pull request returns the same started information
+without starting another review; reviews of other pull requests can proceed.
+The document is agent-produced, not independent verification of GitHub's review state.
+`POST /api/v0/review` accepts `target` and optional `agent`.
 
 ## Code command
 

@@ -443,7 +443,7 @@ def test_configure_fresh_adds_detected_agents_in_order_and_asks_username(tmp_pat
     assert list(config.agents.items()) == [
         ("claude", AgentConfig(analyze="claude -p", launch="claude")),
         ("codex", AgentConfig(analyze="codex exec", launch="codex")),
-        ("pi", AgentConfig(analyze="pi --no-session --tools read,grep,find,ls -p", launch="pi")),
+        ("pi", AgentConfig(analyze="pi -p", launch="pi")),
     ]
     assert config.workdir == "~/projects"
     assert config.repositories == ("octocat/*",)
@@ -455,10 +455,7 @@ def test_configure_fresh_adds_detected_agents_in_order_and_asks_username(tmp_pat
     output = capsys.readouterr().out
     assert "Detected 'claude' on PATH" in output
     assert "Detected 'codex' on PATH" in output
-    assert (
-        "Detected 'pi' on PATH, using analyze: pi --no-session --tools read,grep,find,ls -p"
-        in output
-    )
+    assert "Detected 'pi' on PATH, using analyze: pi -p" in output
     assert "octocat/*" in output
 
 

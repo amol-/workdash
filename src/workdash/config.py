@@ -36,7 +36,7 @@ _REQUIRED_FIELDS = ("github_username", "repositories", "workdir")
 _DETECTABLE_AGENTS = {
     "claude": ("claude -p", "claude"),
     "codex": ("codex exec", "codex"),
-    "pi": ("pi --no-session --tools read,grep,find,ls -p", "pi"),
+    "pi": ("pi -p", "pi"),
 }
 # Names that mean something else inside Workdash (the analyze dialog's cached analysis and
 # the code dialog's editor launch).
