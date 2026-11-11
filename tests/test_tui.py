@@ -505,6 +505,9 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
         work_items = [initial_item]
         suggestion_markers = {}
 
+        def autodispatch_sessions(self):
+            return []
+
     session = Session()
     app = WorkdashApp(
         work_items=[initial_item],

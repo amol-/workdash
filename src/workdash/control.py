@@ -21,6 +21,7 @@ from wsgiref.simple_server import make_server
 
 from .analysis_cache import AnalysisCache
 from .autoclose import AutocloseSupervisor
+from .autodispatch import _AutodispatchSession, _format_pane_id
 from .backend import IncludeResult, SuggestionMarkers, WorkdashBackend, compute_suggestion_markers
 from .config import WorkdashConfig
 from .git import GitHelper
@@ -122,6 +123,8 @@ class WorkdashSession:
         # Normalized worktree path -> monotonic deadline of an unconfirmed agent launch.
         self._unconfirmed_launches: dict[str, float] = {}
         self.autoclose = AutocloseSupervisor(config=config, lock=self._lock)
+        self._autodispatch_lock = threading.RLock()
+        self._autodispatch: dict[str, _AutodispatchSession] = {}
 
     def list_items(self, *, refresh: bool = False) -> dict[str, object]:
         """Return the dashboard items currently known to the shared session."""
@@ -146,12 +149,14 @@ class WorkdashSession:
                 status=HTTPStatus.CONFLICT,
             )
         with self._lock:
-            return _pane_info_payload(
+            result = _pane_info_payload(
                 self.zellij_session,
                 self.config.workdir,
                 self.work_items,
                 include_all_panes=include_all_panes,
             )
+        result["autodispatch_sessions"] = self.autodispatch_sessions()
+        return result
 
     def show_config(self) -> dict[str, object]:
         """Return configured automation choices visible to local API clients."""
@@ -656,6 +661,47 @@ class WorkdashSession:
             ]
         return unclaimed
 
+    def start_autodispatch(
+        self, *, scope: str, group: str | None = None, agent: str | None = None
+    ) -> dict[str, object]:
+        """Start an independent server-owned sequence of dispatches."""
+        if (
+            not isinstance(scope, str)
+            or not scope.strip()
+            or (group is not None and (not isinstance(group, str) or not group.strip()))
+        ):
+            raise WorkdashControlError(
+                "bad_request",
+                "Scope and any supplied group must be non-empty strings.",
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        entry = _AutodispatchSession(
+            self, scope.strip(), group.strip() if group is not None else None, agent
+        )
+        with self._autodispatch_lock:
+            self._autodispatch[entry.id] = entry
+            entry.thread.start()
+        return entry.snapshot()
+
+    def autodispatch_sessions(self) -> list[dict[str, object]]:
+        with self._autodispatch_lock:
+            return [entry.snapshot() for entry in self._autodispatch.values()]
+
+    def stop_autodispatch(self, session_id: str) -> dict[str, object]:
+        with self._autodispatch_lock:
+            entry = self._autodispatch.get(session_id)
+            if entry is None:
+                raise WorkdashControlError(
+                    "not_found", "Autodispatch session not found.", status=HTTPStatus.NOT_FOUND
+                )
+            entry.stop()
+            return entry.snapshot()
+
+    def stop_autodispatch_sessions(self) -> None:
+        with self._autodispatch_lock:
+            for entry in self._autodispatch.values():
+                entry.stop()
+
     def dispatch_once(
         self, *, scope: str, agent: str | None = None, group: str | None = None
     ) -> dict[str, object]:
@@ -917,6 +963,7 @@ class WorkdashControlServer:
         self._session.autoclose.start()
 
     def stop(self) -> None:
+        self._session.stop_autodispatch_sessions()
         self._session.autoclose.stop()
         for httpd in self._httpds[: len(self._threads)]:
             httpd.shutdown()
@@ -1228,6 +1275,26 @@ def _make_turbogears_app(session: WorkdashSession):
             )
 
         @expose("json")
+        def autodispatch(self):
+            return _handle_json_request(
+                request,
+                response,
+                lambda payload: self._session.start_autodispatch(
+                    scope=_required_text(payload, "scope"),
+                    **({"group": _required_text(payload, "group")} if "group" in payload else {}),
+                    agent=_optional_text(payload, "agent"),
+                ),
+            )
+
+        @expose("json")
+        def autodispatch_stop(self):
+            return _handle_json_request(
+                request,
+                response,
+                lambda payload: self._session.stop_autodispatch(_required_text(payload, "id")),
+            )
+
+        @expose("json")
         def todo(self):
             return _handle_json_request(
                 request,
@@ -1536,13 +1603,6 @@ def _pane_payload(
         "floating": pane.get("is_floating"),
         "item": mapped_item or "unknown",
     }
-
-
-def _format_pane_id(pane_id: object) -> str:
-    pane_id_text = str(pane_id)
-    if pane_id_text.startswith("terminal_"):
-        return pane_id_text
-    return f"terminal_{pane_id_text}"
 
 
 def _normalized_path(path: os.PathLike[str] | str) -> str:
