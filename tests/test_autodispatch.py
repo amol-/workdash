@@ -46,6 +46,7 @@ def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
     )
     panes = [{"id": 1, "title": "code_test", "exited": False}]
     monkeypatch.setattr("workdash.autodispatch.load_zellij_panes", lambda _: panes)
+    monkeypatch.setattr("workdash.control.load_zellij_panes", lambda _: panes)
     close_pane = MagicMock()
     monkeypatch.setattr("workdash.control.close_zellij_pane", close_pane)
     app = _make_turbogears_app(session)
@@ -69,8 +70,9 @@ def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
     session_id = started["result"]["id"]
     assert waits.get(timeout=2) == 30
     status, info = request("info", {})
+    assert status == 200, info
     entry = info["result"]["autodispatch_sessions"][0]
-    assert status == 200 and entry["id"] == session_id
+    assert entry["id"] == session_id
     assert (entry["scope"], entry["group"], entry["agent"], entry["current_item"]) == (
         "owner/repo",
         "team",
