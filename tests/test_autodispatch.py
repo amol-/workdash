@@ -136,8 +136,7 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
         return list(panes)
 
     monkeypatch.setattr("workdash.control.launcher.zellij.load_zellij_panes", load_panes)
-    monkeypatch.setattr("workdash.autodispatch.launcher.zellij.load_zellij_panes", load_panes)
-    monkeypatch.setattr("workdash.control.launch_agent_context", launch)
+    monkeypatch.setattr("workdash.agent_execution.executor.launch", launch)
     monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
     session = WorkdashSession(
         config=WorkdashConfig(

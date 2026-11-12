@@ -24,7 +24,7 @@ from gh_work_state_fake import (
     install_fake_github,
     todo_body,
 )
-from workdash.backend import IncludeResult
+from workdash.backend import IncludeResult, WorkdashBackend
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashControlError, WorkdashSession, format_work_item_id
 from workdash.github_client import GitHubClient
@@ -573,7 +573,7 @@ def _coding_session(
     monkeypatch.setattr(control_module, "ensure_worktree", ensure_worktree)
     monkeypatch.setattr(control_module, "get_merge_base", lambda _path, **kwargs: None)
     monkeypatch.setattr(control_module, "prepare_launch_agent_prompt", lambda *a, **k: "PROMPT")
-    monkeypatch.setattr(control_module, "launch_agent_context", launch_agent)
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch_agent)
     monkeypatch.setattr(control_module, "_LAUNCH_VISIBILITY_INTERVAL_SECONDS", 0)
     session = WorkdashSession(
         config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi")}, workdir=str(tmp_path)),
@@ -651,7 +651,7 @@ def test_vscode_is_not_opened_while_an_agent_pane_is_live(monkeypatch, tmp_path)
     panes = [{"id": 5, "title": "code_owner_repo_1", "pane_cwd": str(tmp_path / "owner_repo_1")}]
     session, _worktree, _ensure, _launch = _coding_session(monkeypatch, tmp_path, panes)
     launch_vscode = MagicMock()
-    monkeypatch.setattr(control_module, "launch_vscode_context", launch_vscode)
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch_vscode", launch_vscode)
 
     result = session.code(target="owner/repo#ISSUE-1", agent="vscode", allow_vscode=True)
 
@@ -664,7 +664,7 @@ def test_vscode_opens_without_a_zellij_session(monkeypatch, tmp_path) -> None:
         monkeypatch, tmp_path, [], zellij_session=None
     )
     launch_vscode = MagicMock()
-    monkeypatch.setattr(control_module, "launch_vscode_context", launch_vscode)
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch_vscode", launch_vscode)
 
     assert session.get_agent_panes_for_item(session.work_items[0]) == []
     result = session.code(target="owner/repo#ISSUE-1", agent="vscode", allow_vscode=True)
@@ -910,7 +910,7 @@ def test_autostart_appends_the_appendix_once_to_a_vscode_briefing(monkeypatch, t
     github.add_issue("owner/repo#1")
     session, worktree, _ensure, _launch_agent = _coding_session(monkeypatch, tmp_path, [])
     launch_vscode = MagicMock()
-    monkeypatch.setattr(control_module, "launch_vscode_context", launch_vscode)
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch_vscode", launch_vscode)
 
     result = session.code(
         target="owner/repo#ISSUE-1", agent="vscode", allow_vscode=True, autostart=True
@@ -3372,6 +3372,126 @@ def test_terminal_prepares_worktree_with_session_git(monkeypatch, tmp_path) -> N
     )
 
 
+def test_session_analyzes_and_launches_coding_agent_with_real_executor(
+    monkeypatch, tmp_path
+) -> None:
+    worktree = tmp_path / "owner_repo_1"
+    worktree.mkdir()
+    item = _work_item(number=1, title="Implement the issue")
+    config = WorkdashConfig(
+        agents={"pi": AgentConfig(analyze="pi -p", launch="pi")}, workdir=str(tmp_path)
+    )
+    backend = WorkdashBackend(cache_root=tmp_path / "cache", config=config)
+    session = WorkdashSession(
+        config=config,
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+    panes = []
+    launches = []
+    process = MagicMock(return_value=SimpleNamespace(stdout="  Useful analysis  \n"))
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(control_module, "ensure_worktree", lambda *_, **kwargs: str(worktree))
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *_, **kwargs: worktree)
+    monkeypatch.setattr(control_module, "get_merge_base", lambda *_, **kwargs: None)
+    monkeypatch.setattr("workdash.github.GithubHelper.fetch_analysis_context", lambda *_: {})
+    monkeypatch.setattr("workdash.github.GithubHelper.fetch_launch_context", lambda *_: {})
+    monkeypatch.setattr("workdash.agent_execution.subprocess.run", process)
+
+    fake_zellij = MagicMock()
+    fake_zellij.load_zellij_panes.side_effect = lambda _: list(panes)
+
+    def launch(repo, command, **kwargs):
+        launches.append((repo, command, kwargs))
+        panes.append({"id": 30, "title": "code_owner_repo_1", "pane_cwd": str(worktree)})
+        return launcher_module.ZellijPaneLaunch(
+            "workdash-main", "terminal_30", "code_owner_repo_1", repo
+        )
+
+    fake_zellij.launch_pane.side_effect = launch
+    monkeypatch.setattr(launcher_module, "zellij", fake_zellij)
+
+    analysis = session.analyze(target="owner/repo#ISSUE-1", agent="pi")
+    assert analysis["status"] == "generated"
+    assert base64.b64decode(analysis["file_content"]).decode() == "Useful analysis"
+    assert item.analysis == "Useful analysis"
+    assert backend.analysis_cache.load_analysis(item) == "Useful analysis"
+    args, kwargs = process.call_args
+    assert shlex.split(args[0][2])[:2] == ["pi", "-p"]
+    assert "Implement the issue" in shlex.split(args[0][2])[2]
+    assert kwargs["cwd"] == str(worktree)
+
+    coding = session.code(target="owner/repo#ISSUE-1", agent="pi", group="team")
+    assert coding["status"] == "launched"
+    assert coding["pane_id"] == "terminal_30"
+    assert coding["cwd"] == str(worktree)
+    assert len(launches) == 1
+    repo, command, kwargs = launches[0]
+    assert repo == str(worktree)
+    assert kwargs == {
+        "context": "Failed to launch coding agent in zellij",
+        "work_action": "code",
+        "zellij_session": "workdash-main",
+        "group": "team",
+    }
+    assert command[:2] == ["/bin/sh", "-ic"]
+    shell_command = shlex.split(command[2])
+    assert shell_command[0] == "pi"
+    assert "Implement the issue" in shell_command[1]
+    assert analysis["url"] in shell_command[1]
+
+
+def test_shared_agent_execution_can_simulate_analysis_and_coding(monkeypatch, tmp_path) -> None:
+    from workdash.analyzer import Analyzer
+
+    panes = []
+    session, worktree, _, _ = _coding_session(monkeypatch, tmp_path, panes)
+    item = session.work_items[0]
+
+    class FakeAgentExecution:
+        def __init__(self):
+            self.calls = []
+
+        def analyze(self, *, item, prompt, command_tokens, cwd):
+            self.calls.append(("analysis", item, prompt, command_tokens, cwd))
+            return "  Analysis from fake  \n"
+
+        def launch_vscode(self, repo_path, prompt):
+            self.calls.append(("vscode", repo_path, prompt))
+
+        def launch(self, repo_path, prompt, agent_command_tokens, *, zellij_session):
+            self.calls.append(("code", repo_path, prompt, agent_command_tokens, zellij_session))
+            panes.append({"id": 30, "title": "code_owner_repo_1", "pane_cwd": repo_path})
+            return SimpleNamespace(
+                session=zellij_session,
+                pane_id="terminal_30",
+                pane_title="code_owner_repo_1",
+                cwd=repo_path,
+            )
+
+    fake = FakeAgentExecution()
+    monkeypatch.setattr(control_module.agent_execution, "executor", fake)
+    monkeypatch.setattr(Analyzer, "_collect_github_context", lambda self, item: {})
+    monkeypatch.setattr(
+        Analyzer, "_build_agent_prompt", lambda self, item, context, **kw: "analysis prompt"
+    )
+
+    assert Analyzer().analyze(item, ["pi", "-p"], cwd=str(worktree)) == "Analysis from fake"
+    assert session.code(target="owner/repo#ISSUE-1", agent="pi")["status"] == "launched"
+    panes.clear()
+    assert (
+        session.code(target="owner/repo#ISSUE-1", agent="vscode", allow_vscode=True)["status"]
+        == "launched"
+    )
+    assert fake.calls == [
+        ("analysis", item, "analysis prompt", ["pi", "-p"], str(worktree)),
+        ("code", str(worktree), "PROMPT", ["pi"], "workdash-main"),
+        ("vscode", str(worktree), "PROMPT"),
+    ]
+
+
 def test_zellij_replacement_tracks_terminal_and_coding_lifecycle(monkeypatch, tmp_path):
     class FakeZellij:
         def __init__(self):
@@ -3449,3 +3569,20 @@ def test_zellij_replacement_tracks_terminal_and_coding_lifecycle(monkeypatch, tm
     assert session.pane_content(pane_id="terminal_2")["content"] == "continue\n"
     session.pane_close(pane_id="terminal_2")
     assert session.info()["panes"] == []
+
+
+def test_review_compatibility_delegates_raw_output_to_current_executor(monkeypatch):
+    from workdash import agent_execution
+    from workdash.analyzer import Analyzer
+
+    item = _work_item(number=1, title="Task")
+    fake = MagicMock()
+    fake.analyze.return_value = "  raw output\n"
+    monkeypatch.setattr(agent_execution, "executor", fake)
+    result = Analyzer()._run_analysis_command(
+        item=item, prompt="review prompt", command_tokens=["agent", "-p"], cwd="/tmp"
+    )
+    assert result == "  raw output\n"
+    fake.analyze.assert_called_once_with(
+        item=item, prompt="review prompt", command_tokens=["agent", "-p"], cwd="/tmp"
+    )

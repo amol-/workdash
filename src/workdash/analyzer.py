@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
-import shlex
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
 
+from . import agent_execution
 from .agent_context import render_github_context
 from .github import GithubHelper
 from .models import WorkItem, WorkItemType
@@ -25,6 +24,13 @@ def _load_prompt_template(name: str) -> str:
 
 class Analyzer:
     """Generate analysis by collecting GitHub context and invoking a coding agent."""
+
+    def _run_analysis_command(
+        self, *, item: WorkItem, prompt: str, command_tokens: list[str], cwd: str | None
+    ) -> str:
+        return agent_execution.executor.analyze(
+            item=item, prompt=prompt, command_tokens=command_tokens, cwd=cwd
+        )
 
     def _collect_github_context(self, item: WorkItem) -> dict[str, Any]:
         return GithubHelper().fetch_analysis_context(item)
@@ -61,34 +67,6 @@ class Analyzer:
             format_kwargs["diff_path"] = diff_path or ""
         return template.format(**format_kwargs)
 
-    def _run_analysis_command(
-        self, *, item: WorkItem, prompt: str, command_tokens: list[str], cwd: str | None
-    ) -> str:
-        user_shell = os.environ.get("SHELL", "/bin/sh")
-        shell_command = shlex.join([*command_tokens, prompt])
-        try:
-            completed = subprocess.run(
-                [user_shell, "-ic", shell_command],
-                check=True,
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except FileNotFoundError as error:
-            raise RuntimeError(
-                f"Failed to generate analysis: shell '{user_shell}' not found."
-            ) from error
-        except subprocess.CalledProcessError as error:
-            stderr = (error.stderr or "").strip()
-            raise RuntimeError(
-                f"Failed to generate analysis for {item.item_type.value} "
-                f"{item.repo}#{item.number}: "
-                f"{stderr or f'process exited with code {error.returncode}'}"
-            ) from error
-        return completed.stdout
-
     def analyze(
         self, item: WorkItem, command_tokens: list[str], *, cwd: str | None = None
     ) -> str | None:
@@ -119,7 +97,7 @@ class Analyzer:
 
         try:
             prompt = self._build_agent_prompt(item, github_context, diff_path=diff_file_path)
-            output = self._run_analysis_command(
+            output = agent_execution.executor.analyze(
                 item=item, prompt=prompt, command_tokens=command_tokens, cwd=cwd
             )
         finally:

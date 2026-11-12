@@ -1803,7 +1803,7 @@ def test_fake_git_prepares_and_reuses_review_worktree_with_merge_base(monkeypatc
     monkeypatch.setattr(control, "GitHelper", git_factory)
     monkeypatch.setattr(launcher, "collect_launch_github_context", lambda item: {})
     launch = MagicMock()
-    monkeypatch.setattr(control, "launch_vscode_context", launch)
+    monkeypatch.setattr(control.agent_execution.executor, "launch_vscode", launch)
     item = make_pr()
     item.kind = WorkItemKind.TRACKED_PR
     analysis_file = tmp_path / "analysis.md"
