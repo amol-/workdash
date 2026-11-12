@@ -315,7 +315,7 @@ def run_code_dialog_scenario(
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir(parents=True, exist_ok=True)
 
-    def ensure_worktree(_workdir: str, item: WorkItem) -> str:
+    def ensure_worktree(_workdir: str, item: WorkItem, **kwargs) -> str:
         if scenario_state.get("worktree_fails"):
             raise RuntimeError("worktree failed")
         worktree_calls.append(item)
@@ -372,9 +372,9 @@ def run_code_dialog_scenario(
         ),
     )
     monkeypatch.setattr(
-        control_module, "existing_worktree_path", lambda _workdir, _item: worktree_path
+        control_module, "existing_worktree_path", lambda _workdir, _item, **kwargs: worktree_path
     )
-    monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
+    monkeypatch.setattr(control_module, "get_merge_base", lambda _path, **kwargs: None)
     monkeypatch.setattr(
         control_module.agent_execution.executor,
         "launch_vscode",

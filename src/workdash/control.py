@@ -117,9 +117,19 @@ class WorkdashSession:
         self._lock = threading.RLock()
         # Normalized worktree path -> monotonic deadline of an unconfirmed agent launch.
         self._unconfirmed_launches: dict[str, float] = {}
-        self.autoclose = AutocloseSupervisor(config=config, lock=self._lock)
+        self._git = GitHelper()
+        self.autoclose = AutocloseSupervisor(config=config, lock=self._lock, git=self._git)
         self._autodispatch_lock = threading.RLock()
         self._autodispatch: dict[str, _AutodispatchSession] = {}
+
+    @property
+    def git(self) -> GitHelper:
+        return self._git
+
+    @git.setter
+    def git(self, git: GitHelper) -> None:
+        self._git = git
+        self.autoclose.git = git
 
     def list_items(self, *, refresh: bool = False) -> dict[str, object]:
         """Return the dashboard items currently known to the shared session."""
@@ -148,6 +158,7 @@ class WorkdashSession:
                 self.zellij_session,
                 self.config.workdir,
                 self.work_items,
+                git=self.git,
                 include_all_panes=include_all_panes,
             )
         result["autodispatch_sessions"] = self.autodispatch_sessions()
@@ -321,6 +332,7 @@ class WorkdashSession:
                 "No coding agents are configured.",
                 status=HTTPStatus.CONFLICT,
             )
+        git = self.git
         # Without Zellij no agent pane can exist, and VSCode needs none to launch.
         no_zellij_vscode = self.zellij_session is None and selected_agent == "vscode"
         if autostart or item.kind == WorkItemKind.AUTHORED_PR:
@@ -328,7 +340,7 @@ class WorkdashSession:
             # a worktree known locally is checked here; the briefing may redirect the work to
             # another item, whose claim is checked below.
             with self._lock:
-                repo_path = existing_worktree_path(self.config.workdir, item)
+                repo_path = existing_worktree_path(self.config.workdir, item, git=git)
                 if repo_path is not None:
                     panes = [] if no_zellij_vscode else self._live_panes()
                     claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
@@ -360,7 +372,7 @@ class WorkdashSession:
         if (
             not autostart
             and item.item_type == WorkItemType.ISSUE
-            and existing_worktree_path(self.config.workdir, item) is None
+            and existing_worktree_path(self.config.workdir, item, git=git) is None
         ):
             try:
                 state = work_pull_request(
@@ -396,7 +408,7 @@ class WorkdashSession:
         def verify_selected_head(path: str | Path) -> None:
             if selected_head is not None:
                 branch, repo = selected_head
-                if not GitHelper().branch_tracks_repository(Path(path), branch, repo):
+                if not git.branch_tracks_repository(Path(path), branch, repo):
                     raise RuntimeError(
                         f"Cannot verify worktree {path} is on {repo}'s branch {branch}. "
                         "Verify the checkout and configure its upstream to the PR head branch."
@@ -405,18 +417,18 @@ class WorkdashSession:
         with self._lock:
             panes = [] if no_zellij_vscode else self._live_panes()
             # Reuse a live agent and verify its checkout before any pull.
-            repo_path = existing_worktree_path(self.config.workdir, item)
+            repo_path = existing_worktree_path(self.config.workdir, item, git=git)
             if (
                 selected_head is not None
                 and analysis_item is not None
                 and analysis_item.todo_target
             ):
-                todo_path = existing_worktree_path(self.config.workdir, analysis_item)
+                todo_path = existing_worktree_path(self.config.workdir, analysis_item, git=git)
                 if todo_path is not None:
                     repo_path = todo_path
             if repo_path is None and selected_head is not None:
                 branch, repo = selected_head
-                repo_path = GitHelper().find_worktree_for_branch(
+                repo_path = git.find_worktree_for_branch(
                     main_repo_path(self.config.workdir, repo), branch
                 )
             if repo_path is not None:
@@ -425,7 +437,7 @@ class WorkdashSession:
                     return claimed
             if repo_path is not None:
                 verify_selected_head(repo_path)
-            repo_path = ensure_worktree(self.config.workdir, item)
+            repo_path = ensure_worktree(self.config.workdir, item, git=git)
             claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
             if claimed is not None:
                 return claimed
@@ -439,7 +451,7 @@ class WorkdashSession:
                     if analysis_item is not None and analysis_item.analysis is not None
                     else None
                 ),
-                merge_base=get_merge_base(repo_path),
+                merge_base=get_merge_base(repo_path, git=git),
             )
             if autostart:
                 prompt = f"{prompt.rstrip()}\n\n{autostart_text}"
@@ -564,7 +576,7 @@ class WorkdashSession:
         item = self._require_item(target)
         with self._lock:
             item_id = format_work_item_id(item)
-            repo_path = ensure_worktree(self.config.workdir, item)
+            repo_path = ensure_worktree(self.config.workdir, item, git=self.git)
             launch = launch_terminal_context(
                 repo_path,
                 zellij_session=self.zellij_session,
@@ -636,7 +648,7 @@ class WorkdashSession:
             if fail_unconfirmed:
                 for work in candidates:
                     for claim in work.claims:
-                        path = existing_worktree_path(self.config.workdir, claim)
+                        path = existing_worktree_path(self.config.workdir, claim, git=self.git)
                         if path is not None:
                             self._claimed_launch(
                                 format_work_item_id(claim), path, panes, autoclose=False
@@ -646,7 +658,8 @@ class WorkdashSession:
                 work
                 for work in candidates
                 if not any(
-                    (path := existing_worktree_path(self.config.workdir, claim)) is not None
+                    (path := existing_worktree_path(self.config.workdir, claim, git=self.git))
+                    is not None
                     and (
                         _agent_panes_in_worktree(panes, path)
                         or self._unconfirmed_launches.get(_normalized_path(path), 0.0) > now
@@ -776,7 +789,7 @@ class WorkdashSession:
             cached_path = self.backend.analyze_item(item, tool="cached")
             if cached_path is not None:
                 return cached_path
-        cwd = ensure_worktree(self.config.workdir, item) if tool != "cached" else None
+        cwd = ensure_worktree(self.config.workdir, item, git=self.git) if tool != "cached" else None
         return self.backend.analyze_item(item, tool=tool, cwd=cwd)
 
     def analysis_url(self, item: WorkItem) -> str:
@@ -889,7 +902,7 @@ class WorkdashSession:
     def get_agent_panes_for_item(self, item: WorkItem) -> list[dict[str, object]]:
         """Return the live agent panes working in the item's worktree, lowest pane ID first."""
 
-        worktree = existing_worktree_path(self.config.workdir, item)
+        worktree = existing_worktree_path(self.config.workdir, item, git=self.git)
         if worktree is None or not self.zellij_session:
             return []
         item_by_cwd = {_normalized_path(worktree): format_work_item_id(item)}
@@ -1119,12 +1132,13 @@ def _pane_info_payload(
     workdir: str | None,
     work_items: Sequence[WorkItem],
     *,
+    git: GitHelper,
     include_all_panes: bool = False,
 ) -> dict[str, object]:
     item_by_cwd = {}
     if workdir is not None:
         for item in work_items:
-            item_path = existing_worktree_path(workdir, item)
+            item_path = existing_worktree_path(workdir, item, git=git)
             if item_path is not None:
                 item_by_cwd[_normalized_path(item_path)] = format_work_item_id(item)
     panes = []
@@ -1338,7 +1352,7 @@ def _make_turbogears_app(session: WorkdashSession):
                     raise WorkdashControlError("not_found", "Artifact not found.", status=404)
                 with ExitStack() as stack:
                     selected = existing_worktree_path(
-                        self._session.config.workdir, item, pinned=stack
+                        self._session.config.workdir, item, pinned=stack, git=self._session.git
                     )
                     if selected is None:
                         raise WorkdashControlError("not_found", "Worktree not found.", status=404)

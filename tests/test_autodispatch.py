@@ -112,7 +112,7 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
     panes = []
     launches = []
 
-    def worktree(_workdir, item):
+    def worktree(_workdir, item, **kwargs):
         return str(tmp_path / f"owner_repo_{item.number}")
 
     def launch(repo, prompt, **kwargs):
@@ -126,7 +126,7 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
 
     monkeypatch.setattr("workdash.control.existing_worktree_path", worktree)
     monkeypatch.setattr("workdash.control.ensure_worktree", worktree)
-    monkeypatch.setattr("workdash.control.get_merge_base", lambda _: None)
+    monkeypatch.setattr("workdash.control.get_merge_base", lambda _, **kwargs: None)
     monkeypatch.setattr("workdash.launcher.collect_launch_github_context", lambda _: {})
     polls = queue.Queue()
 

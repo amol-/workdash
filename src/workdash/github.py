@@ -2,7 +2,6 @@
 
 import json
 import subprocess
-from pathlib import Path
 from typing import Any
 
 from .models import WorkItem, WorkItemType
@@ -111,24 +110,6 @@ class GithubHelper:
                 f"{item.repo}#{item.number}: expected a non-empty baseRefName."
             )
         return base_ref_name.strip(), self._head_repo_from_payload(payload, item.repo)
-
-    def clone_repository(self, repo: str, target: Path) -> None:
-        try:
-            subprocess.run(
-                ["gh", "repo", "clone", repo, str(target)],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                "Failed to clone repository: gh CLI is not installed or not on PATH."
-            ) from exc
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or "").strip()
-            raise RuntimeError(
-                f"Failed to clone {repo}: {stderr or f'exit code {exc.returncode}'}"
-            ) from exc
 
     def _fetch_item_context(
         self,

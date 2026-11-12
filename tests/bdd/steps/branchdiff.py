@@ -18,11 +18,13 @@ import pytest
 from pytest_bdd import given, parsers, then, when
 
 import workdash.branchdiff as branchdiff_module
-from workdash.branchdiff import get_base_branch, get_changed_files, get_file_diff
+from workdash.git import GitHelper
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.workdash import main as workdash_main
 
 from .common import make_work_item, modal_screen_names, run_app
+
+git = GitHelper()
 
 # -- Step Definitions -------------------------------------------------------
 
@@ -234,12 +236,12 @@ def _file_list_shows_all_changed_files(
 
     # Get the base branch
     try:
-        base_branch = get_base_branch(repo_path)
+        base_branch = git.get_base_branch(repo_path)
     except ValueError:
         base_branch = "main"
 
     # Get changed files
-    files = get_changed_files(base_branch, repo_path)
+    files = git.get_changed_files(base_branch, repo_path)
 
     # Verify we got some files
     assert len(files) > 0, "Expected to find changed files"
@@ -258,17 +260,17 @@ def _diff_viewer_displays_changes_for_first_file(
 
     # Get the base branch
     try:
-        base_branch = get_base_branch(repo_path)
+        base_branch = git.get_base_branch(repo_path)
     except ValueError:
         base_branch = "main"
 
     # Get changed files
-    files = get_changed_files(base_branch, repo_path)
+    files = git.get_changed_files(base_branch, repo_path)
     assert len(files) > 0, "Expected to find changed files"
 
     # Get diff for the first file
     first_file = files[0]
-    old_content, new_content = get_file_diff(first_file, base_branch, repo_path)
+    old_content, new_content = git.get_file_diff(first_file, base_branch, repo_path)
 
     # Verify we got actual content (at least one side has content)
     assert old_content != "" or new_content != "", (
@@ -293,7 +295,7 @@ def _diff_viewer_compares_against_modified_working_tree_content(
     assert scenario_state["branchdiff_app_files"] == [expected_file]
     assert scenario_state["branchdiff_app_base_branch"] == "main"
     assert (
-        get_file_diff(expected_file, "main", repo_path)
+        git.get_file_diff(expected_file, "main", repo_path)
         == scenario_state["branchdiff_expected_diff"]
     )
 
@@ -309,23 +311,23 @@ def _diff_viewer_displays_meaningful_diff(
     # If we don't have changed files yet, detect them
     if not files:
         try:
-            base_branch = get_base_branch(repo_path) if repo_path else "main"
+            base_branch = git.get_base_branch(repo_path) if repo_path else "main"
         except ValueError:
             base_branch = "main"
-        files = get_changed_files(base_branch, repo_path) if repo_path else []
+        files = git.get_changed_files(base_branch, repo_path) if repo_path else []
 
     assert repo_path is not None, "repo_path not set in scenario_state"
     assert len(files) > 0, "No changed files found"
 
     # Get the base branch
     try:
-        base_branch = get_base_branch(repo_path)
+        base_branch = git.get_base_branch(repo_path)
     except ValueError:
         base_branch = "main"
 
     # Find a file with actual changes
     for filepath in files:
-        old, new = get_file_diff(filepath, base_branch, repo_path)
+        old, new = git.get_file_diff(filepath, base_branch, repo_path)
         if old != new:
             # Verify we can actually get diff content
             assert isinstance(old, str), "Old content should be a string"
@@ -437,13 +439,13 @@ def _user_navigates_to_next_file(
 
     # Get the base branch
     try:
-        base_branch = get_base_branch(repo_path)
+        base_branch = git.get_base_branch(repo_path)
     except ValueError:
         base_branch = "main"
 
     # If we don't have changed files yet, get them
     if not files:
-        files = get_changed_files(base_branch, repo_path)
+        files = git.get_changed_files(base_branch, repo_path)
         scenario_state["changed_files"] = files
 
     assert len(files) >= 2, "Need at least 2 files to test navigation"
@@ -465,13 +467,13 @@ def _diff_viewer_displays_file_changes(
 
     # Get the base branch
     try:
-        base_branch = get_base_branch(repo_path)
+        base_branch = git.get_base_branch(repo_path)
     except ValueError:
         base_branch = "main"
 
     # Get diffs for first two files
-    old_content_1, new_content_1 = get_file_diff(files[0], base_branch, repo_path)
-    old_content_2, new_content_2 = get_file_diff(files[1], base_branch, repo_path)
+    old_content_1, new_content_1 = git.get_file_diff(files[0], base_branch, repo_path)
+    old_content_2, new_content_2 = git.get_file_diff(files[1], base_branch, repo_path)
 
     # Verify that the diffs are different (different files have different content)
     # This proves the pane would update when switching files
@@ -496,7 +498,7 @@ def _user_scrolls_diff_right(
     def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
         return contents[filepath]
 
-    monkeypatch.setattr(branchdiff_module, "get_file_diff", get_file_diff)
+    monkeypatch.setattr(GitHelper, "get_file_diff", lambda self, *args: get_file_diff(*args))
     app = branchdiff_module.BranchDiffApp(files, repo_path, "main")
 
     async def run_smoke() -> None:
@@ -524,7 +526,7 @@ def _user_scrolls_diff_left(
     def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
         return contents[filepath]
 
-    monkeypatch.setattr(branchdiff_module, "get_file_diff", get_file_diff)
+    monkeypatch.setattr(GitHelper, "get_file_diff", lambda self, *args: get_file_diff(*args))
     app = branchdiff_module.BranchDiffApp(files, repo_path, "main")
 
     async def run_smoke() -> None:
@@ -600,7 +602,7 @@ def _file_list_keeps_horizontal_scroll_position_and_displays_clicked_file(
     def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
         return contents[filepath]
 
-    monkeypatch.setattr(branchdiff_module, "get_file_diff", get_file_diff)
+    monkeypatch.setattr(GitHelper, "get_file_diff", lambda self, *args: get_file_diff(*args))
     app = branchdiff_module.BranchDiffApp(files, repo_path, "main")
 
     async def run_smoke() -> None:
@@ -637,7 +639,7 @@ def _file_list_keeps_horizontal_scroll_position(
     def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
         return contents[filepath]
 
-    monkeypatch.setattr(branchdiff_module, "get_file_diff", get_file_diff)
+    monkeypatch.setattr(GitHelper, "get_file_diff", lambda self, *args: get_file_diff(*args))
     app = branchdiff_module.BranchDiffApp(files, repo_path, "main")
 
     async def run_smoke() -> None:

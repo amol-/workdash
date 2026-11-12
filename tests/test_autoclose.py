@@ -66,15 +66,18 @@ class Supervision:
             autoclose_module.launcher.zellij, "press_zellij_pane_enter", self._press_enter
         )
         monkeypatch.setattr(autoclose_module.launcher.zellij, "close_zellij_pane", self._close)
-        monkeypatch.setattr(autoclose_module, "has_unpublished_work", unpublished)
         self._answer_work_state = autoclose_module.work_pull_request
         monkeypatch.setattr(autoclose_module, "work_pull_request", self._work_state)
 
         monkeypatch.setattr(
             control_module.launcher.zellij, "load_zellij_panes", lambda _session: list(self.panes)
         )
-        monkeypatch.setattr(control_module, "existing_worktree_path", lambda _wd, _item: None)
-        monkeypatch.setattr(control_module, "ensure_worktree", lambda *_args: str(self.worktree))
+        monkeypatch.setattr(
+            control_module, "existing_worktree_path", lambda _wd, _item, **kwargs: None
+        )
+        monkeypatch.setattr(
+            control_module, "ensure_worktree", lambda *_args, **kwargs: str(self.worktree)
+        )
         monkeypatch.setattr(
             control_module,
             "GithubHelper",
@@ -84,10 +87,12 @@ class Supervision:
             control_module,
             "GitHelper",
             lambda: SimpleNamespace(
-                branch_tracks_repository=lambda *_: True, find_worktree_for_branch=lambda *_: None
+                branch_tracks_repository=lambda *_: True,
+                find_worktree_for_branch=lambda *_: None,
+                has_unpublished_work=unpublished,
             ),
         )
-        monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
+        monkeypatch.setattr(control_module, "get_merge_base", lambda _path, **kwargs: None)
         monkeypatch.setattr(
             control_module, "prepare_launch_agent_prompt", lambda *args, **kwargs: "PROMPT"
         )
@@ -207,7 +212,7 @@ def test_awaiting_launch_gets_publishing_rules_when_ci_fails(monkeypatch, tmp_pa
 
 def test_the_worker_waits_a_minute_between_checks(monkeypatch) -> None:
     supervisor = autoclose_module.AutocloseSupervisor(
-        config=WorkdashConfig(), lock=threading.RLock()
+        config=WorkdashConfig(), lock=threading.RLock(), git=MagicMock()
     )
     waits: list[float] = []
     checks: list[bool] = []
@@ -254,6 +259,20 @@ def test_a_known_pull_request_is_only_asked_for_its_state_on_each_check(
     supervision.github.operations.clear()
     supervision.poll(5)
     assert supervision.github.operations == ["PullRequestStates"] * 5
+
+
+def test_replacing_session_git_changes_the_unpublished_work_check(monkeypatch, tmp_path) -> None:
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.launch(autoclose=True)
+    replacement = MagicMock()
+    replacement.has_unpublished_work.return_value = True
+    supervision.session.git = replacement
+    assert supervision.session.__dict__["_git"] is replacement
+
+    supervision.poll(15)
+
+    replacement.has_unpublished_work.assert_called_once_with(str(supervision.worktree), HEAD_SHA)
+    assert supervision.closed == []
 
 
 def test_an_idle_pane_resolves_its_work_state_every_fifth_check(monkeypatch, tmp_path) -> None:
