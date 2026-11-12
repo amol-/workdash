@@ -1176,6 +1176,28 @@ class GitHubClient:
             for (repo, number), node in zip(pull_requests, nodes, strict=True)
         ]
 
+    def linked_open_pull_request(self, item: WorkItem) -> tuple[str, int] | None:
+        """Find an issue's linked open pull request without evaluating readiness."""
+        owner, name = item.repo.split("/", 1)
+        subject = f"{item.repo}#{item.number}"
+        after = "null"
+        while True:
+            query = (
+                f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+                f"{{ issue(number: {item.number}) {{ closedByPullRequestsReferences(first: 100, after: {after}) "
+                "{ nodes { number state repository { nameWithOwner } } "
+                "pageInfo { hasNextPage endCursor } } } } }"
+            )
+            data = self._graphql(query, subject)
+            with _github_payload(subject):
+                connection = data["repository"]["issue"]["closedByPullRequestsReferences"]
+                for node in connection["nodes"]:
+                    if node["state"] == "OPEN":
+                        return node["repository"]["nameWithOwner"], node["number"]
+                if not connection["pageInfo"]["hasNextPage"]:
+                    return None
+                after = json.dumps(connection["pageInfo"]["endCursor"])
+
     def work_pull_request(
         self, item: WorkItem, *, github_username: str, todo_repository: str
     ) -> PullRequestWorkState | None:
