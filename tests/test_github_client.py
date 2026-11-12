@@ -2079,3 +2079,93 @@ def test_summary_error_does_not_hide_another_search_error_or_other_issue_failure
     )
     with pytest.raises(RuntimeError, match="unexpected failure"):
         GitHubClient().list_recent_tracked_items("repo:owner/repo")
+
+
+def test_linked_open_pull_request_paginates_and_returns_cross_repository_pr(monkeypatch):
+    from datetime import UTC, datetime
+
+    from workdash.models import WorkItem
+
+    item = WorkItem(
+        kind=WorkItemKind.ASSIGNED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=42,
+        title="Issue",
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+        url="https://github.com/owner/repo/issues/42",
+    )
+    queries = []
+
+    def run(command, **kwargs):
+        query = command[-1]
+        queries.append(query)
+        if len(queries) == 1:
+            assert 'repository(owner: "owner", name: "repo")' in query
+            assert "issue(number: 42)" in query
+            assert "after: null" in query
+            nodes = [
+                {"state": "MERGED", "number": 3, "repository": {"nameWithOwner": "owner/repo"}}
+            ]
+            page = {"hasNextPage": True, "endCursor": 'cursor"1'}
+        else:
+            assert 'after: "cursor\\"1"' in query
+            nodes = [{"state": "OPEN", "number": 9, "repository": {"nameWithOwner": "other/fork"}}]
+            page = {"hasNextPage": True, "endCursor": "unused"}
+        data = {
+            "repository": {
+                "issue": {"closedByPullRequestsReferences": {"nodes": nodes, "pageInfo": page}}
+            }
+        }
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"data": data}), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert GitHubClient().linked_open_pull_request(item) == ("other/fork", 9)
+    assert len(queries) == 2
+
+
+def test_linked_open_pull_request_none_and_replaceable(monkeypatch):
+    from datetime import UTC, datetime
+
+    from workdash.models import WorkItem
+
+    item = WorkItem(
+        kind=WorkItemKind.ASSIGNED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=42,
+        title="Issue",
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+        url="https://github.com/owner/repo/issues/42",
+    )
+    data = {
+        "repository": {
+            "issue": {
+                "closedByPullRequestsReferences": {
+                    "nodes": [
+                        {
+                            "state": "CLOSED",
+                            "number": 1,
+                            "repository": {"nameWithOwner": "owner/repo"},
+                        }
+                    ],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps({"data": data}), stderr=""
+        ),
+    )
+    client = GitHubClient()
+    assert client.linked_open_pull_request(item) is None
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("unexpected gh"))
+    client.linked_open_pull_request = MagicMock(return_value=("fork/repo", 7))
+    assert client.linked_open_pull_request(item) == ("fork/repo", 7)
+    client.linked_open_pull_request.assert_called_once_with(item)

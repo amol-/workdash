@@ -16,6 +16,7 @@ from pytest_bdd import given, parsers, then, when
 from webob import Request
 
 import workdash.control as control_module
+import workdash.github_client as github_client_module
 from workdash.analysis_cache import AnalysisCache
 from workdash.backend import compute_suggestion_markers
 from workdash.control import _make_turbogears_app, _source_filtered_wsgi_app, format_work_item_id
@@ -67,7 +68,7 @@ def _install_fake_ensure_worktree(
 ) -> None:
     """Record worktree preparation and answer with the directory Workdash names for the item."""
 
-    def ensure_worktree(workdir: str, item: WorkItem, **kwargs) -> str:
+    def ensure_worktree(workdir: str, item: WorkItem, **_kwargs) -> str:
         scenario_state.setdefault("ensure_calls", []).append((workdir, item))
         repo = item.todo_target or item.repo
         todo = item.todo_target is not None
@@ -79,8 +80,8 @@ def _install_fake_ensure_worktree(
 def _install_code_fakes(scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
     _install_fake_ensure_worktree(scenario_state, monkeypatch)
     monkeypatch.setattr(
-        "workdash.control.GithubHelper",
-        lambda: SimpleNamespace(fetch_worktree_head=lambda item: ("pr-branch", item.repo)),
+        "workdash.github_client.GitHubClient.fetch_worktree_head",
+        lambda self, item: ("pr-branch", item.repo),
     )
     monkeypatch.setattr(
         "workdash.control.GitHelper",
@@ -196,8 +197,8 @@ def _user_starts_workdash_with_server(
             exec_calls.append((file, args))
             raise SystemExit(0)
 
-        monkeypatch.setattr(workdash_module.shutil, "which", fake_which)
-        monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
+        monkeypatch.setattr(github_client_module.shutil, "which", fake_which)
+        monkeypatch.setattr(github_client_module.subprocess, "run", lambda *args, **kwargs: None)
         monkeypatch.setattr(
             workdash_module, "load_config", lambda: api_config(Path("/tmp/workdash-bdd"))
         )
@@ -254,7 +255,7 @@ def _user_starts_workdash_with_server(
             scenario_state["tui_started"] = True
 
     monkeypatch.setenv("ZELLIJ", "0")
-    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
     monkeypatch.setattr(
         workdash_module, "load_config", lambda: api_config(Path("/tmp/workdash-bdd"))
     )
@@ -965,7 +966,7 @@ def _unlisted_source_requests_todo(
     }
     scenario_state["todo_gh_commands"] = []
     create_todo = MagicMock(side_effect=AssertionError("denied request executed a todo"))
-    monkeypatch.setattr("workdash.control.create_todo", create_todo)
+    monkeypatch.setattr("workdash.github_client.GitHubClient.create_todo", create_todo)
     _call_api(scenario_state, work_items, tmp_path, "todo", {"text": "Forbidden todo"})
     create_todo.assert_not_called()
 
@@ -1049,8 +1050,8 @@ def _start_two_server_dashboards(scenario_state, monkeypatch, tmp_path, request)
     ports = []
 
     class Backend:
-        def __init__(self, config):
-            pass
+        def __init__(self, config, github_client):
+            self.github_client = github_client
 
         def load_items(self, progress_callback=None):
             return [], {}
@@ -1062,7 +1063,7 @@ def _start_two_server_dashboards(scenario_state, monkeypatch, tmp_path, request)
         def run(self, *, mouse):
             stopped.wait()
 
-    monkeypatch.setattr(cli, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(cli.GitHubClient, "check_authentication", lambda self: None)
     monkeypatch.setattr(cli, "load_config", lambda: api_config(tmp_path))
     monkeypatch.setattr(cli, "WorkdashBackend", Backend)
     monkeypatch.setattr(cli, "WorkdashApp", App)

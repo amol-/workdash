@@ -4,16 +4,176 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
+import shutil
 import subprocess
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import datetime
-from typing import NotRequired, TypedDict, cast
+import urllib.parse
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, NotRequired, TypedDict, cast
 from urllib.parse import urlsplit
 
+from .git import is_todo_target
 from .models import WorkItem, WorkItemKind, WorkItemType
-from .todo import TODO_LABEL, is_missing_repository_error, todo_target_from_body
+from .work_state import (
+    IssueWorkState,
+    PullRequestWorkState,
+    ReadyWork,
+    _actionable_feedback,
+    parse_github_datetime,
+    select_ready_work,
+)
+
+# GitHub computes mergeability in the background after it is first asked for,
+# so an UNKNOWN answer is asked once more after this delay.
+_MERGEABILITY_RETRY_DELAY_SECONDS = 3.0
+# Keeps one aliased pull request query well within GitHub's 10 second query timeout:
+# a pull request with a hundred checks takes about half a second.
+_PULL_REQUESTS_PER_QUERY = 10
+_PUSH_PERMISSIONS = {"WRITE", "MAINTAIN", "ADMIN"}
+_FAILED_RESULTS = {
+    "FAILURE",
+    "ERROR",
+    "TIMED_OUT",
+    "CANCELLED",
+    "ACTION_REQUIRED",
+    "STARTUP_FAILURE",
+}
+_PENDING_RESULTS = {"PENDING", "EXPECTED"}
+_SUCCESSFUL_RESULTS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+_PAGE_INFO = "pageInfo { hasNextPage endCursor }"
+# Nobody closes an issue with more than a handful of pull requests.
+_ISSUE_FRAGMENT = """
+fragment ReadyIssue on Issue {
+    number title url createdAt updatedAt state body
+    repository { nameWithOwner }
+    subIssuesSummary { total }
+    issueDependenciesSummary { blockedBy }
+    closedByPullRequestsReferences(first: 10) {
+        nodes { number state repository { nameWithOwner } }
+    }
+}
+"""
+_ACTOR = "author { __typename login }"
+_CHECK_CONTEXTS = f"""
+    {_PAGE_INFO}
+    nodes {{
+        __typename
+        ... on CheckRun {{
+            name status conclusion startedAt
+            checkSuite {{ app {{ slug }} workflowRun {{ workflow {{ databaseId }} }} }}
+        }}
+        ... on StatusContext {{ context state }}
+    }}
+"""
+# Per pull request feedback lists stop at GitHub's page size of 100, keeping the
+# newest entries: only feedback after the latest push can be actionable.
+_PULL_REQUEST_FRAGMENT = f"""
+fragment ReadyPullRequest on PullRequest {{
+    number title url createdAt updatedAt state
+    {_ACTOR}
+    repository {{ nameWithOwner }}
+    headRefOid mergedAt maintainerCanModify
+    headRef {{ refUpdateRule {{ viewerCanPush }} }}
+    headRepository {{ viewerPermission }}
+    baseRepository {{ viewerPermission }}
+    baseRefName baseRef {{ target {{ oid }} }} mergeable reviewDecision
+    closingIssuesReferences(first: 10) {{
+        nodes {{ number title url createdAt updatedAt body repository {{ nameWithOwner }} }}
+    }}
+    commits(last: 1) {{
+        nodes {{ commit {{
+            oid committedDate
+            statusCheckRollup {{ contexts(first: 100) {{ {_CHECK_CONTEXTS} }} }}
+        }} }}
+    }}
+    timelineItems(last: 1, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) {{
+        nodes {{ ... on HeadRefForcePushedEvent {{ createdAt afterCommit {{ oid }} }} }}
+    }}
+    latestOpinionatedReviews(first: 100) {{
+        nodes {{ state url submittedAt isMinimized commit {{ oid }} {_ACTOR} }}
+    }}
+    reviews(last: 100) {{ nodes {{ state body url submittedAt isMinimized {_ACTOR} }} }}
+    reviewThreads(last: 100) {{
+        nodes {{ isResolved isOutdated
+            comments(last: 10) {{ nodes {{ url publishedAt isMinimized {_ACTOR} }} }}
+        }}
+    }}
+    comments(last: 100) {{ nodes {{ url createdAt isMinimized {_ACTOR} }} }}
+}}
+"""
+
+
+_LAUNCH_ISSUE_CONTEXT_JSON_FIELDS = (
+    "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,comments"
+)
+_LAUNCH_PR_CONTEXT_JSON_FIELDS = (
+    "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,"
+    "isDraft,reviewDecision,additions,deletions,changedFiles,headRefName,baseRefName,"
+    "comments,reviews"
+)
+_ANALYSIS_ISSUE_CONTEXT_JSON_FIELDS = (
+    "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,comments"
+)
+_ANALYSIS_PR_CONTEXT_JSON_FIELDS = (
+    "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,"
+    "isDraft,reviewDecision,additions,deletions,changedFiles,headRefName,baseRefName,"
+    "comments,reviews"
+)
+_HEAD_METADATA_JSON_FIELDS = "headRefName,headRepository,headRepositoryOwner"
+_BASE_METADATA_JSON_FIELDS = "baseRefName,headRepository,headRepositoryOwner"
+
+
+TODO_LABEL = "workdash-todo"
+
+_TODO_METADATA_VERSION = 1
+_METADATA_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+_ISSUE_NUMBER_RE = re.compile(r"/issues/(\d+)$")
+
+
+def todo_target_from_body(body: object) -> str | None:
+    """Read the todo target recorded in a todo issue body.
+
+    Absent, unparseable, or unexpected metadata means the todo has no target;
+    a hand-edited issue body must never break a dashboard refresh.
+    """
+
+    if not isinstance(body, str):
+        return None
+    match = _METADATA_BLOCK_RE.search(body)
+    if match is None:
+        return None
+    try:
+        metadata = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    target = metadata.get("target")
+    if isinstance(target, str) and is_todo_target(target):
+        return target
+    return None
+
+
+def is_missing_repository_error(gh_message: str) -> bool:
+    """Report whether a gh failure message says the repository does not exist.
+
+    The todo repository is allowed to not exist until the first capture, so
+    callers need to tell this failure apart from every other gh failure. gh
+    names the same missing repository differently per endpoint: GraphQL-backed
+    issue commands fail to resolve it, while REST calls such as label creation
+    report an HTTP 404. Only those two shapes count, so an unrelated failure
+    that merely mentions 404 or a not-found reference, and authentication or
+    permission failures, are not mistaken for a missing repository.
+    """
+
+    message = gh_message.lower()
+    return any(marker in message for marker in ("could not resolve to a repository", "http 404"))
+
 
 _GITHUB_HOSTS = {"github.com", "www.github.com"}
 _ITEM_SEGMENT_TYPES = {"pull": WorkItemType.PR, "issues": WorkItemType.ISSUE}
@@ -454,18 +614,6 @@ class TodoIssue(TypedDict):
     sub_issue_total: NotRequired[int | None]
 
 
-def parse_github_datetime(timestamp: str) -> datetime:
-    """Parse a GitHub ISO-8601 timestamp into a timezone-aware datetime."""
-
-    try:
-        parsed_timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise RuntimeError(f"Invalid GitHub timestamp {timestamp!r}: {error}") from error
-    if parsed_timestamp.tzinfo is None:
-        raise RuntimeError(f"Invalid GitHub timestamp {timestamp!r}: timezone offset is required.")
-    return parsed_timestamp
-
-
 def normalize_authored_pull_request(item: AuthoredPullRequest) -> WorkItem:
     """Convert one raw authored PR payload into the internal WorkItem model."""
 
@@ -623,89 +771,591 @@ def merge_normalized_work_items(
 
 
 class GitHubClient:
-    """Thin wrapper around the ``gh`` CLI for work item discovery.
+    """All GitHub interactions must go through this object."""
 
-    Each method shells out to ``gh search`` or ``gh pr view`` and normalizes
-    the JSON payload into TypedDict records for downstream conversion.
-    """
+    def create_todo(
+        self, *, todo_repository: str, text: str, target: str | None = None, body: str | None = None
+    ) -> WorkItem:
+        """Create a labeled, self-assigned todo issue and return it as a dashboard item.
 
-    @staticmethod
-    def _parse_open_pull_request_payload(
-        payload: object,
-        *,
-        context: str,
-    ) -> list[AuthoredPullRequest]:
-        if not isinstance(payload, list):
-            raise RuntimeError(f"Invalid gh {context} PR payload: expected a JSON array.")
+        :param str todo_repository: Repository that hosts todos, as ``owner/repo``.
+        :param str text: Todo text, used as the issue title.
+        :param str | None target: Optional repository the todo is about.
+        :param str | None body: Optional content appended after the metadata block.
+        """
 
-        pull_requests: list[AuthoredPullRequest] = []
-        for index, entry in enumerate(payload):
-            if not isinstance(entry, dict):
-                raise RuntimeError(
-                    f"Invalid gh {context} PR payload: entry {index} is not an object."
-                )
-            repository = entry.get("repository")
-            if not isinstance(repository, dict):
-                raise RuntimeError(
-                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid repository."
-                )
-            repository_name_with_owner = repository.get("nameWithOwner")
-            if not isinstance(repository_name_with_owner, str) or not repository_name_with_owner:
-                raise RuntimeError(
-                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid repository.nameWithOwner."
-                )
-            pr_id = entry.get("id")
-            if not isinstance(pr_id, (str, int)):
-                raise RuntimeError(
-                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid id."
-                )
-            number = entry.get("number")
-            if not isinstance(number, int):
-                raise RuntimeError(
-                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid number."
-                )
-            title = entry.get("title")
-            if not isinstance(title, str):
-                raise RuntimeError(
-                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid title."
-                )
-            url = entry.get("url")
-            if not isinstance(url, str):
-                raise RuntimeError(
-                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid url."
-                )
-            created_at = entry.get("createdAt")
-            if not isinstance(created_at, str):
-                raise RuntimeError(
-                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid createdAt."
-                )
-            updated_at = entry.get("updatedAt")
-            if not isinstance(updated_at, str):
-                raise RuntimeError(
-                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid updatedAt."
-                )
-            is_draft = entry.get("isDraft")
-            if not isinstance(is_draft, bool):
-                raise RuntimeError(
-                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid isDraft."
-                )
-            pull_requests.append(
-                AuthoredPullRequest(
-                    id=pr_id,
-                    repo=repository_name_with_owner,
-                    number=number,
-                    title=title,
-                    url=url,
-                    created_at=created_at,
-                    updated_at=updated_at,
-                    is_draft=is_draft,
-                    ci_state=_extract_ci_state(entry),
-                    review_decision=entry.get("reviewDecision"),
-                    review_requested=_extract_pending_review_request(entry),
-                    has_unresolved_comments=_extract_unresolved_comments(entry),
-                )
+        # gh exits non-zero when the label is already there, which is the steady
+        # state after the first capture and not a failure for us.
+        _run_gh(
+            [
+                "gh",
+                "label",
+                "create",
+                TODO_LABEL,
+                "--repo",
+                todo_repository,
+                "--description",
+                "Captured with workdash",
+            ],
+            operation=f"create the {TODO_LABEL} label in {todo_repository}",
+            todo_repository=todo_repository,
+            tolerate_stderr="already exists",
+        )
+        output = _run_gh(
+            [
+                "gh",
+                "issue",
+                "create",
+                "--repo",
+                todo_repository,
+                "--title",
+                text,
+                "--body",
+                _encode_todo_metadata(target) + ("\n" + body if body is not None else ""),
+                "--assignee",
+                "@me",
+                "--label",
+                TODO_LABEL,
+            ],
+            operation=f"create the todo issue in {todo_repository}",
+            todo_repository=todo_repository,
+        )
+        url = output.strip().splitlines()[-1].strip() if output.strip() else ""
+        match = _ISSUE_NUMBER_RE.search(url)
+        if match is None:
+            raise RuntimeError(
+                f"Failed to read the new todo issue URL from gh output: {output.strip()!r}"
             )
-        return pull_requests
+        captured_at = datetime.now(UTC)
+        # A todo is assigned to the user, so it joins the dashboard in the same work
+        # category as any other assigned issue; only its target sets it apart.
+        return WorkItem(
+            kind=WorkItemKind.ASSIGNED_ISSUE,
+            item_type=WorkItemType.ISSUE,
+            repo=todo_repository,
+            number=int(match.group(1)),
+            title=text,
+            created_at=captured_at,
+            updated_at=captured_at,
+            url=url,
+            todo_target=target,
+        )
+
+    def branch_pull_request(self, repo: str, branch: str) -> _PullRequestInfo | None:
+        """Return the pull request for ``branch``, whatever its state, or ``None`` if there is none."""
+        command = ["gh", "pr", "view", branch, "--repo", repo, "--json", "number,title,url,state"]
+        try:
+            completed = subprocess.run(command, check=True, capture_output=True, text=True)
+        except FileNotFoundError as error:
+            raise RuntimeError("gh CLI is not installed or not on PATH.") from error
+        except subprocess.CalledProcessError as error:
+            stderr = (error.stderr or "").strip()
+            if "no pull requests found" in stderr.lower():
+                return None
+            raise RuntimeError(
+                f"Failed to look up the pull request for branch {branch!r}: "
+                f"{stderr or f'gh exited with code {error.returncode}'}"
+            ) from error
+        payload = _parse_json_object(completed.stdout, context="pull request lookup")
+        number, title, url, state = (
+            payload.get("number"),
+            payload.get("title"),
+            payload.get("url"),
+            payload.get("state"),
+        )
+        if (
+            not isinstance(number, int)
+            or not isinstance(title, str)
+            or not isinstance(url, str)
+            or not isinstance(state, str)
+        ):
+            raise RuntimeError(
+                "Invalid gh pull request payload: missing number, title, url, or state."
+            )
+        return _PullRequestInfo(number=number, title=title, url=url, state=state)
+
+    def branch_ci_and_closing_issues(
+        self, repo: str, number: int
+    ) -> tuple[str | None, str | None, bool, list[tuple[str, int]]]:
+        """Return CI state, review decision, pending review request, and closing issues."""
+        owner, _, name = repo.partition("/")
+        query = (
+            f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+            f"{{ pullRequest(number: {number}) "
+            f"{{ {_AUTHORED_CI_SELECTION} {_CLOSING_ISSUES_SELECTION} }} }} }}"
+        )
+        command = ["gh", "api", "graphql", "-f", f"query={query}"]
+        try:
+            completed = subprocess.run(command, check=True, capture_output=True, text=True)
+        except FileNotFoundError as error:
+            raise RuntimeError("gh CLI is not installed or not on PATH.") from error
+        except subprocess.CalledProcessError as error:
+            stderr = (error.stderr or "").strip()
+            raise RuntimeError(
+                f"Failed to fetch CI status and closing issues for {repo}#{number}: "
+                f"{stderr or f'gh exited with code {error.returncode}'}"
+            ) from error
+        payload = _parse_json_object(
+            completed.stdout, context="CI status and closing issues lookup"
+        )
+        data = payload.get("data")
+        repository = data.get("repository") if isinstance(data, dict) else None
+        pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
+        if not isinstance(pull_request, dict):
+            raise RuntimeError(
+                f"Invalid gh GraphQL payload for {repo}#{number}: missing pullRequest."
+            )
+        return (
+            _extract_ci_state(pull_request),
+            pull_request.get("reviewDecision"),
+            _extract_pending_review_request(pull_request),
+            _closing_issues(pull_request),
+        )
+
+    def branch_issue(self, repo: str, number: int) -> _IssueInfo:
+        """Return the title and url of one issue."""
+        command = ["gh", "issue", "view", str(number), "--repo", repo, "--json", "title,url,state"]
+        try:
+            completed = subprocess.run(command, check=True, capture_output=True, text=True)
+        except FileNotFoundError as error:
+            raise RuntimeError("gh CLI is not installed or not on PATH.") from error
+        except subprocess.CalledProcessError as error:
+            stderr = (error.stderr or "").strip()
+            raise RuntimeError(
+                f"Failed to look up issue {repo}#{number}: "
+                f"{stderr or f'gh exited with code {error.returncode}'}"
+            ) from error
+        payload = _parse_json_object(completed.stdout, context=f"issue lookup for {repo}#{number}")
+        title, url, state = payload.get("title"), payload.get("url"), payload.get("state")
+        if not isinstance(title, str) or not isinstance(url, str) or not isinstance(state, str):
+            raise RuntimeError(
+                f"Invalid gh issue payload for {repo}#{number}: missing title, url, or state."
+            )
+        return _IssueInfo(title=title, url=url, state=state)
+
+    def check_authentication(self) -> str | None:
+        gh = shutil.which("gh")
+        if gh is None:
+            return (
+                "gh CLI is not installed or not configured. Run 'workdash --configure' "
+                "to install a local copy, or install gh globally from https://cli.github.com/."
+            )
+        try:
+            subprocess.run(
+                [gh, "auth", "status"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError:
+            auth_command = shlex.join([gh, "auth", "login"])
+            return (
+                "gh CLI is not authenticated.\n"
+                "Run this command to authenticate the GitHub CLI used by workdash:\n"
+                f"  {auth_command}"
+            )
+        except OSError as error:
+            return f"failed to run gh auth status: {error}"
+        return None
+
+    def download_release(self, url: str, *, urlopen_fn: Callable[[str], object]) -> bytes:
+        try:
+            with urlopen_fn(url) as response:
+                return response.read()
+        except OSError as error:
+            raise RuntimeError(f"Failed to download {url}: {error}") from error
+
+    def release_asset_url(
+        self, url: str, archive_suffix: str, *, urlopen_fn: Callable[[str], object]
+    ) -> str:
+        release_bytes = self.download_release(url, urlopen_fn=urlopen_fn)
+        try:
+            release = json.loads(release_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"Failed to parse GitHub CLI release metadata: {error}") from error
+        assets = release.get("assets") if isinstance(release, dict) else None
+        if not isinstance(assets, list):
+            raise RuntimeError("GitHub CLI release metadata did not contain an assets list.")
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            name = asset.get("name")
+            download_url = asset.get("browser_download_url")
+            if (
+                isinstance(name, str)
+                and name.endswith(archive_suffix)
+                and isinstance(download_url, str)
+            ):
+                return download_url
+        raise RuntimeError(
+            f"GitHub CLI latest release did not contain an asset ending with {archive_suffix!r}."
+        )
+
+    def find_ready_work(
+        self,
+        *,
+        repositories: Sequence[str] = (),
+        issue: tuple[str, int] | None = None,
+        github_username: str,
+        todo_repository: str,
+        include_shared_pr_issues: bool = False,
+    ) -> list[ReadyWork]:
+        """Return ready issues, actionable pull request work first, oldest first in each group.
+
+        :param Sequence repositories: ``owner/repo`` or ``owner/*`` selectors.
+        :param tuple issue: ``(repo, number)`` of the scope issue, instead of repositories.
+        """
+
+        states: dict[tuple[str, int], PullRequestWorkState] = {}
+        if issue is not None:
+            issues = self.resolve_issue_scope(*issue, todo_repository=todo_repository)
+        else:
+            names: dict[str, str] = {}
+            for selector in repositories:
+                owner, _, name = selector.partition("/")
+                for repo in self._owner_repositories(owner) if name == "*" else [selector]:
+                    names.setdefault(repo.lower(), repo)
+            issues = []
+            for repo in names.values():
+                try:
+                    issues += self._repository_issues(repo, todo_repository)
+                except RuntimeError as error:
+                    if repo.lower() != todo_repository.lower() or not is_missing_repository_error(
+                        str(error)
+                    ):
+                        raise
+            issue_states: dict[tuple[str, int], IssueWorkState] = {}
+            repository_prs = []
+            for repo in names.values():
+                try:
+                    owner, _, name = repo.partition("/")
+                    nodes = self._all_nodes(
+                        repo,
+                        lambda after, owner=owner, name=name: (
+                            f"""query ReadyRepositoryPullRequests {{
+                                repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{
+                                    pullRequests(states: OPEN, first: 100, after: {after}) {{
+                                        {_PAGE_INFO}
+                                        nodes {{ number }}
+                                    }}
+                                }}
+                            }}"""
+                        ),
+                        ("repository", "pullRequests"),
+                    )
+                    repository_prs.extend((repo, node["number"]) for node in nodes)
+                except RuntimeError as error:
+                    if repo.lower() != todo_repository.lower() or not is_missing_repository_error(
+                        str(error)
+                    ):
+                        raise
+            for state in self.evaluate_pull_requests(
+                repository_prs, github_username=github_username, todo_repository=todo_repository
+            ):
+                states[(state.item.repo.lower(), state.item.number)] = state
+                if state.ready and state.author and state.author.lower() == github_username.lower():
+                    for linked in state.linked_issues:
+                        if linked.repo.lower() not in names:
+                            issues.append(
+                                self.resolve_issue_scope(
+                                    linked.repo,
+                                    linked.number,
+                                    todo_repository=todo_repository,
+                                    _states=issue_states,
+                                )[0]
+                            )
+            issues = [
+                self.resolve_issue_scope(
+                    entry.item.repo,
+                    entry.item.number,
+                    todo_repository=todo_repository,
+                    _states=issue_states,
+                )[0]
+                if entry.has_sub_issues
+                else entry
+                for entry in issues
+            ]
+
+        issues = list(
+            {(entry.item.repo.lower(), entry.item.number): entry for entry in issues}.values()
+        )
+        pull_requests = {
+            (repo.lower(), number): (repo, number)
+            for entry in issues
+            if entry.is_open and not entry.has_open_descendants and not entry.blocked
+            for repo, number in entry.open_pull_requests
+        }
+        states.update(
+            {
+                (state.item.repo.lower(), state.item.number): state
+                for state in self.evaluate_pull_requests(
+                    [ref for key, ref in pull_requests.items() if key not in states],
+                    github_username=github_username,
+                    todo_repository=todo_repository,
+                )
+            }
+        )
+        return select_ready_work(issues, states, github_username, include_shared_pr_issues)
+
+    def resolve_issue_scope(
+        self,
+        repo: str,
+        number: int,
+        *,
+        todo_repository: str,
+        _states: dict[tuple[str, int], IssueWorkState] | None = None,
+    ) -> list[IssueWorkState]:
+        """Return the issue and its native descendants with open-descendant eligibility."""
+
+        with _github_payload(f"{repo}#{number}"):
+            if _states is not None and (repo.lower(), number) in _states:
+                return [_states[(repo.lower(), number)]]
+            root = self._issue_tree(repo, number)
+            issues = []
+
+            def visit(node: dict) -> bool:
+                state = self._issue_state(node, todo_repository)
+                index = len(issues)
+                issues.append(state)
+                open_descendants = False
+                for child in node["subIssues"]["nodes"]:
+                    child_state = self._issue_state(child, todo_repository)
+                    key = (child_state.item.repo.lower(), child_state.item.number)
+                    if _states is not None and key in _states:
+                        child_state = _states[key]
+                        issues.append(child_state)
+                        descendant_open = child_state.has_open_descendants
+                    elif child_state.has_sub_issues:
+                        descendant_open = visit(
+                            self._issue_tree(child_state.item.repo, child_state.item.number)
+                        )
+                    else:
+                        issues.append(child_state)
+                        descendant_open = False
+                    open_descendants |= child_state.is_open or descendant_open
+                issues[index] = replace(state, has_open_descendants=open_descendants)
+                if _states is not None:
+                    _states[(state.item.repo.lower(), state.item.number)] = issues[index]
+                return open_descendants
+
+            visit(root)
+            return issues
+
+    def evaluate_pull_requests(
+        self,
+        pull_requests: Sequence[tuple[str, int]],
+        *,
+        github_username: str,
+        todo_repository: str,
+    ) -> list[PullRequestWorkState]:
+        """Return the work state of each ``(repo, number)`` pull request, in the same order.
+
+        :param str github_username: The user whose pull requests are their own work.
+        :param str todo_repository: Repository whose issues are todos, so a linked
+            issue's target is read from its body.
+        """
+
+        nodes = self._fetch_pull_requests(pull_requests)
+        # GitHub computes mergeability lazily, but reports UNKNOWN for a head it no longer
+        # recomputes, so asking a merged or closed one again only costs a call.
+        recomputing = [
+            index
+            for index, node in enumerate(nodes)
+            if node["state"] == "OPEN" and node.get("mergeable") == "UNKNOWN"
+        ]
+        if recomputing:
+            time.sleep(_MERGEABILITY_RETRY_DELAY_SECONDS)
+            refreshed = self._fetch_pull_requests([pull_requests[index] for index in recomputing])
+            for index, node in zip(recomputing, refreshed, strict=True):
+                nodes[index] = node
+        required_checks: dict[tuple[str, str], frozenset[str] | None] = {}
+        return [
+            self._pull_request_state(
+                node, required_checks, github_username, todo_repository, subject=f"{repo}#{number}"
+            )
+            for (repo, number), node in zip(pull_requests, nodes, strict=True)
+        ]
+
+    def linked_open_pull_request(self, item: WorkItem) -> tuple[str, int] | None:
+        """Find an issue's linked open pull request without evaluating readiness."""
+        owner, name = item.repo.split("/", 1)
+        subject = f"{item.repo}#{item.number}"
+        after = "null"
+        while True:
+            query = (
+                f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+                f"{{ issue(number: {item.number}) {{ closedByPullRequestsReferences(first: 100, after: {after}) "
+                "{ nodes { number state repository { nameWithOwner } } "
+                "pageInfo { hasNextPage endCursor } } } } }"
+            )
+            data = self._graphql(query, subject)
+            with _github_payload(subject):
+                connection = data["repository"]["issue"]["closedByPullRequestsReferences"]
+                for node in connection["nodes"]:
+                    if node["state"] == "OPEN":
+                        return node["repository"]["nameWithOwner"], node["number"]
+                if not connection["pageInfo"]["hasNextPage"]:
+                    return None
+                after = json.dumps(connection["pageInfo"]["endCursor"])
+
+    def work_pull_request(
+        self, item: WorkItem, *, github_username: str, todo_repository: str
+    ) -> PullRequestWorkState | None:
+        """Return the pull request whose state carries an item's work, ``None`` when it has none.
+
+        That is the item's own pull request, or the user's closing pull request of the
+        issue: the open one when there is one, otherwise one that merged before it was
+        looked for.
+        """
+
+        candidates: list[tuple[str, int]] = []
+        if item.item_type == WorkItemType.PR:
+            candidates = [(item.repo, item.number)]
+        else:
+            with _github_payload(f"{item.repo}#{item.number}"):
+                entry = self._issue_state(self._issue_tree(item.repo, item.number), todo_repository)
+                candidates = [*entry.open_pull_requests, *entry.merged_pull_requests]
+        if not candidates:
+            return None
+        states = self.evaluate_pull_requests(
+            candidates, github_username=github_username, todo_repository=todo_repository
+        )
+        if item.item_type == WorkItemType.PR:
+            return states[0]
+        # Prefer the same actionable pull request that readiness selects for this issue.
+        authored = [state for state in states if state.item.kind is WorkItemKind.AUTHORED_PR]
+        actionable = [state for state in authored if state.ready]
+        if actionable:
+            return min(
+                actionable,
+                key=lambda state: (
+                    state.item.created_at,
+                    state.item.repo.lower(),
+                    state.item.number,
+                ),
+            )
+        return authored[0] if authored else None
+
+    def pull_request_states(
+        self, pull_requests: Sequence[tuple[str, int]]
+    ) -> dict[tuple[str, int], str]:
+        """Return each pull request's state: ``OPEN``, ``MERGED``, or ``CLOSED``.
+
+        Repeated checks of pull requests that are already tracked only need their state,
+        so this reads one metadata query instead of a whole work state evaluation.
+        """
+
+        states: dict[tuple[str, int], str] = {}
+        for start in range(0, len(pull_requests), _PULL_REQUESTS_PER_QUERY):
+            batch = pull_requests[start : start + _PULL_REQUESTS_PER_QUERY]
+            subject = ", ".join(f"{repo}#{number}" for repo, number in batch)
+            data = self._graphql(
+                f"query PullRequestStates {{ {_pull_request_aliases(batch, 'state')} }}", subject
+            )
+            with _github_payload(subject):
+                for index, pull_request in enumerate(batch):
+                    states[pull_request] = data[f"p{index}"]["pullRequest"]["state"]
+        return states
+
+    def fetch_launch_context(self, item: WorkItem) -> dict[str, Any]:
+        context = self._fetch_item_context(
+            item,
+            issue_fields=_LAUNCH_ISSUE_CONTEXT_JSON_FIELDS,
+            pr_fields=_LAUNCH_PR_CONTEXT_JSON_FIELDS,
+            context_label="launch context",
+        )
+        if item.item_type == WorkItemType.PR:
+            context.update(self._fetch_pr_discussion(item))
+        return context
+
+    def fetch_analysis_context(self, item: WorkItem) -> dict[str, Any]:
+        return self._fetch_item_context(
+            item,
+            issue_fields=_ANALYSIS_ISSUE_CONTEXT_JSON_FIELDS,
+            pr_fields=_ANALYSIS_PR_CONTEXT_JSON_FIELDS,
+            context_label="gh context",
+        )
+
+    def fetch_diff(self, item: WorkItem) -> str:
+        command = ["gh", "pr", "diff", str(item.number), "--repo", item.repo]
+        try:
+            completed = subprocess.run(command, check=True, capture_output=True, text=True)
+        except FileNotFoundError as error:
+            raise RuntimeError(
+                "Failed to gather GitHub diff context with gh: "
+                "gh CLI is not installed or not on PATH."
+            ) from error
+        except subprocess.CalledProcessError as error:
+            stderr = (error.stderr or "").strip()
+            raise RuntimeError(
+                f"Failed to gather gh diff context for {item.item_type.value} "
+                f"{item.repo}#{item.number}: "
+                f"{stderr or f'process exited with code {error.returncode}'}"
+            ) from error
+        return completed.stdout
+
+    def fetch_worktree_head(self, item: WorkItem) -> tuple[str, str]:
+        payload = self._run_json_command(
+            item=item,
+            command=[
+                "gh",
+                "pr",
+                "view",
+                str(item.number),
+                "--repo",
+                item.repo,
+                "--json",
+                _HEAD_METADATA_JSON_FIELDS,
+            ],
+            context_label="PR head info",
+        )
+        head_ref = payload.get("headRefName")
+        if not isinstance(head_ref, str):
+            raise RuntimeError(
+                f"Missing or invalid headRefName in gh output for {item.repo}#{item.number}"
+            )
+        return head_ref, self._head_repo_from_payload(payload, item.repo)
+
+    def fetch_branchdiff_base(self, item: WorkItem) -> tuple[str, str]:
+        payload = self._run_json_command(
+            item=item,
+            command=[
+                "gh",
+                "pr",
+                "view",
+                str(item.number),
+                "--repo",
+                item.repo,
+                "--json",
+                _BASE_METADATA_JSON_FIELDS,
+            ],
+            context_label="branchdiff base branch",
+        )
+        base_ref_name = payload.get("baseRefName")
+        if not isinstance(base_ref_name, str) or not base_ref_name.strip():
+            raise RuntimeError(
+                f"Invalid branchdiff base branch payload for {item.item_type.value} "
+                f"{item.repo}#{item.number}: expected a non-empty baseRefName."
+            )
+        return base_ref_name.strip(), self._head_repo_from_payload(payload, item.repo)
+
+    def clone_repository(self, repo: str, target: Path) -> None:
+        try:
+            subprocess.run(
+                ["gh", "repo", "clone", repo, str(target)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "Failed to clone repository: gh CLI is not installed or not on PATH."
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            raise RuntimeError(
+                f"Failed to clone {repo}: {stderr or f'exit code {exc.returncode}'}"
+            ) from exc
 
     def list_open_authored_prs(
         self,
@@ -1089,50 +1739,6 @@ class GitHubClient:
         nodes = issues.get("nodes") if isinstance(issues, dict) else None
         return self._parse_todo_issue_payload(nodes, todo_repository=todo_repository)
 
-    @staticmethod
-    def _parse_todo_issue_payload(
-        payload: object,
-        *,
-        todo_repository: str,
-    ) -> list[TodoIssue]:
-        context = f"Invalid gh todo issue payload for {todo_repository}"
-        if not isinstance(payload, list):
-            raise RuntimeError(f"{context}: expected a JSON array.")
-        issues: list[TodoIssue] = []
-        for index, entry in enumerate(payload):
-            if not isinstance(entry, dict):
-                raise RuntimeError(f"{context}: entry {index} is not an object.")
-            values: dict[str, object] = {}
-            for key, expected_types in (
-                ("id", (str, int)),
-                ("number", (int,)),
-                ("title", (str,)),
-                ("url", (str,)),
-                ("createdAt", (str,)),
-                ("updatedAt", (str,)),
-            ):
-                value = entry.get(key)
-                if not isinstance(value, expected_types):
-                    raise RuntimeError(f"{context}: entry {index} has missing or invalid {key}.")
-                values[key] = value
-            total = _sub_issue_total(
-                entry, RuntimeError(f"{context}: entry {index} has invalid subIssuesSummary.total.")
-            )
-            issues.append(
-                TodoIssue(
-                    id=cast(str | int, values["id"]),
-                    repo=todo_repository,
-                    number=cast(int, values["number"]),
-                    title=cast(str, values["title"]),
-                    url=cast(str, values["url"]),
-                    created_at=cast(str, values["createdAt"]),
-                    updated_at=cast(str, values["updatedAt"]),
-                    target=todo_target_from_body(entry.get("body")),
-                    sub_issue_total=total,
-                )
-            )
-        return issues
-
     def list_recent_tracked_items(
         self,
         search_scope: str,
@@ -1229,71 +1835,6 @@ class GitHubClient:
             repositories=[search_scope],
         )
 
-    @staticmethod
-    def _parse_recent_tracked_item_payload(
-        payload: object,
-        *,
-        repositories: list[str],
-    ) -> list[RecentTrackedItem]:
-        context = f"Invalid gh recent tracked item payload for repository batch {repositories!r}"
-        if not isinstance(payload, list):
-            raise RuntimeError(f"{context}: expected a JSON array.")
-
-        required_fields = (
-            ("id", (str, int)),
-            ("number", (int,)),
-            ("title", (str,)),
-            ("url", (str,)),
-            ("createdAt", (str,)),
-            ("updatedAt", (str,)),
-            ("state", (str,)),
-            ("isPullRequest", (bool,)),
-        )
-        items: list[RecentTrackedItem] = []
-        for index, entry in enumerate(payload):
-            if not isinstance(entry, dict):
-                raise RuntimeError(f"{context}: entry {index} is not an object.")
-
-            values: dict[str, object] = {}
-            for key, expected_types in required_fields:
-                value = entry.get(key)
-                if not isinstance(value, expected_types):
-                    raise RuntimeError(f"{context}: entry {index} has missing or invalid {key}.")
-                values[key] = value
-
-            repository = entry.get("repository")
-            if not isinstance(repository, dict):
-                raise RuntimeError(f"{context}: entry {index} has missing or invalid repository.")
-            repository_name_with_owner = repository.get("nameWithOwner")
-            if not isinstance(repository_name_with_owner, str) or not repository_name_with_owner:
-                raise RuntimeError(
-                    f"{context}: entry {index} has missing or invalid repository.nameWithOwner."
-                )
-            if cast(str, values["state"]).upper() != "OPEN":
-                continue
-            if values["isPullRequest"]:
-                summary = entry.get("subIssuesSummary")
-                total = summary.get("total") if isinstance(summary, dict) else None
-            else:
-                total = _sub_issue_total(
-                    entry,
-                    RuntimeError(f"{context}: entry {index} has invalid subIssuesSummary.total."),
-                )
-            item = RecentTrackedItem(
-                id=cast(str | int, values["id"]),
-                repo=repository_name_with_owner,
-                number=cast(int, values["number"]),
-                title=cast(str, values["title"]),
-                url=cast(str, values["url"]),
-                created_at=cast(str, values["createdAt"]),
-                updated_at=cast(str, values["updatedAt"]),
-                is_pull_request=cast(bool, values["isPullRequest"]),
-            )
-            if total is not None:
-                item["sub_issue_total"] = total
-            items.append(item)
-        return items
-
     def fetch_linked_issues(
         self,
         pull_requests: list[tuple[str, int]],
@@ -1389,35 +1930,6 @@ class GitHubClient:
             if closing_issues:
                 linked_issues[(repo, number)] = closing_issues
         return linked_issues
-
-    @staticmethod
-    def _closing_issues(repository_node: object, *, subject: str) -> list[tuple[str, int]]:
-        """Collect the ``(repo, number)`` issues one pull request closes.
-
-        :param object repository_node: One aliased ``repository`` GraphQL node.
-        :param str subject: ``owner/repo#number`` used in error messages.
-        """
-
-        context = f"Invalid gh linked issue payload for {subject}"
-        pull_request = (
-            repository_node.get("pullRequest") if isinstance(repository_node, dict) else None
-        )
-        if not isinstance(pull_request, dict):
-            raise RuntimeError(f"{context}: expected an object.")
-        references = pull_request.get("closingIssuesReferences")
-        nodes = references.get("nodes") if isinstance(references, dict) else None
-        if not isinstance(nodes, list):
-            raise RuntimeError(f"{context}: missing or invalid closingIssuesReferences.")
-        issues: list[tuple[str, int]] = []
-        for node in nodes:
-            node_fields = node if isinstance(node, dict) else {}
-            number = node_fields.get("number")
-            repository = node_fields.get("repository")
-            repo = repository.get("nameWithOwner") if isinstance(repository, dict) else None
-            if not isinstance(number, int) or not isinstance(repo, str) or not repo:
-                raise RuntimeError(f"{context}: missing or invalid closing issue reference.")
-            issues.append((repo, number))
-        return issues
 
     def fetch_item(
         self, repo: str, number: int, *, github_username: str, todo_repository: str
@@ -1743,3 +2255,762 @@ class GitHubClient:
             url=url,
             included=True,
         )
+
+    def _issue_tree(self, repo: str, number: int) -> dict:
+        owner, _, name = repo.partition("/")
+        # GitHub allows at most 100 sub-issues per issue.
+        data = self._graphql(
+            f"query ReadyIssueTree {{ repository(owner: {json.dumps(owner)}, "
+            f"name: {json.dumps(name)}) {{ issue(number: {number}) {{ ...ReadyIssue "
+            f"subIssues(first: 100) {{ nodes {{ ...ReadyIssue }} }} }} }} }} {_ISSUE_FRAGMENT}",
+            f"{repo}#{number}",
+        )
+        return data["repository"]["issue"]
+
+    def _owner_repositories(self, owner: str) -> list[str]:
+        nodes = self._all_nodes(
+            f"{owner}/*",
+            lambda after: (
+                f"query ReadyOwnerRepositories {{ repositoryOwner(login: {json.dumps(owner)}) "
+                f"{{ repositories(first: 100, after: {after}, isArchived: false, "
+                f"ownerAffiliations: OWNER) {{ {_PAGE_INFO} nodes {{ nameWithOwner "
+                "issues(states: OPEN) { totalCount } pullRequests(states: OPEN) { totalCount } "
+                "} } } }"
+            ),
+            ("repositoryOwner", "repositories"),
+        )
+        # Most repositories of an owner have no open work; skipping them saves two lookups each.
+        with _github_payload(f"{owner}/*"):
+            return [
+                node["nameWithOwner"]
+                for node in nodes
+                if node["issues"]["totalCount"] or node["pullRequests"]["totalCount"]
+            ]
+
+    def _repository_issues(self, repo: str, todo_repository: str) -> list[IssueWorkState]:
+        owner, _, name = repo.partition("/")
+        nodes = self._all_nodes(
+            repo,
+            lambda after: (
+                f"""query ReadyRepositoryIssues {{
+                    repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{
+                        issues(states: OPEN, first: 100, after: {after}) {{
+                            {_PAGE_INFO}
+                            nodes {{ ...ReadyIssue }}
+                        }}
+                    }}
+                }}
+                {_ISSUE_FRAGMENT}"""
+            ),
+            ("repository", "issues"),
+        )
+        with _github_payload(repo):
+            return [self._issue_state(node, todo_repository) for node in nodes]
+
+    def _fetch_pull_requests(self, pull_requests: Sequence[tuple[str, int]]) -> list[dict]:
+        nodes = []
+        for start in range(0, len(pull_requests), _PULL_REQUESTS_PER_QUERY):
+            batch = pull_requests[start : start + _PULL_REQUESTS_PER_QUERY]
+            subject = ", ".join(f"{repo}#{number}" for repo, number in batch)
+            data = self._graphql(
+                f"query ReadyPullRequests {{ {_pull_request_aliases(batch, '...ReadyPullRequest')} }} "
+                f"{_PULL_REQUEST_FRAGMENT}",
+                subject,
+            )
+            with _github_payload(subject):
+                nodes += [data[f"p{index}"]["pullRequest"] for index in range(len(batch))]
+        return nodes
+
+    def _issue_state(self, node: dict, todo_repository: str) -> IssueWorkState:
+        return IssueWorkState(
+            item=self._issue_item(node, todo_repository),
+            is_open=node["state"] == "OPEN",
+            has_sub_issues=node["subIssuesSummary"]["total"] > 0,
+            has_open_descendants=node["subIssuesSummary"]["total"] > 0,
+            blocked=node["issueDependenciesSummary"]["blockedBy"] > 0,
+            open_pull_requests=tuple(
+                (pr["repository"]["nameWithOwner"], pr["number"])
+                for pr in node["closedByPullRequestsReferences"]["nodes"]
+                if pr["state"] == "OPEN"
+            ),
+            merged_pull_requests=tuple(
+                (pr["repository"]["nameWithOwner"], pr["number"])
+                for pr in node["closedByPullRequestsReferences"]["nodes"]
+                if pr["state"] == "MERGED"
+            ),
+        )
+
+    def _issue_item(self, node: dict, todo_repository: str) -> WorkItem:
+        repo = node["repository"]["nameWithOwner"]
+        return WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE,
+            item_type=WorkItemType.ISSUE,
+            repo=repo,
+            number=node["number"],
+            title=node["title"],
+            created_at=parse_github_datetime(node["createdAt"]),
+            updated_at=parse_github_datetime(node["updatedAt"]),
+            url=node["url"],
+            todo_target=todo_target_from_body(node["body"])
+            if repo.lower() == todo_repository.lower()
+            else None,
+        )
+
+    def _pull_request_state(
+        self,
+        node: dict,
+        required_checks: dict[tuple[str, str], frozenset[str] | None],
+        github_username: str,
+        todo_repository: str,
+        *,
+        subject: str,
+    ) -> PullRequestWorkState:
+        with _github_payload(subject):
+            repo = node["repository"]["nameWithOwner"]
+            author = (node["author"] or {}).get("login")
+            linked_issues = tuple(
+                self._issue_item(issue, todo_repository)
+                for issue in node["closingIssuesReferences"]["nodes"]
+            )
+            head_sha = node["headRefOid"]
+            head_repository = node["headRepository"]
+            commit = node["commits"]["nodes"][0]["commit"]
+            base_key = (repo, node["baseRefName"])
+            if base_key not in required_checks:
+                required_checks[base_key] = self._required_checks(*base_key)
+            ci_status, failing_checks = self._ci_status(
+                repo, commit, head_sha, required_checks[base_key]
+            )
+            pushes = [
+                event["createdAt"]
+                for event in node["timelineItems"]["nodes"]
+                if (event.get("afterCommit") or {}).get("oid") == head_sha
+            ]
+            return PullRequestWorkState(
+                item=WorkItem(
+                    kind=WorkItemKind.AUTHORED_PR
+                    if author and author.lower() == github_username.strip().lower()
+                    else WorkItemKind.TRACKED_PR,
+                    item_type=WorkItemType.PR,
+                    repo=repo,
+                    number=node["number"],
+                    title=node["title"],
+                    created_at=parse_github_datetime(node["createdAt"]),
+                    updated_at=parse_github_datetime(node["updatedAt"]),
+                    url=node["url"],
+                    # Only an issue of the pull request's own repository can name its worktree.
+                    closing_issue_numbers=tuple(
+                        sorted(issue.number for issue in linked_issues if issue.repo == repo)
+                    ),
+                ),
+                state=node["state"],
+                author=author,
+                linked_issues=linked_issues,
+                head_sha=head_sha,
+                head_writable=head_repository is not None
+                and node["headRef"] is not None
+                # A protected head branch can refuse pushes even from a writer.
+                and (node["headRef"]["refUpdateRule"] or {}).get("viewerCanPush", True)
+                and (
+                    head_repository["viewerPermission"] in _PUSH_PERMISSIONS
+                    or (
+                        node["maintainerCanModify"]
+                        and node["baseRepository"]["viewerPermission"] in _PUSH_PERMISSIONS
+                    )
+                ),
+                base_ref=node["baseRefName"],
+                base_head_sha=node["baseRef"]["target"]["oid"] if node["baseRef"] else None,
+                mergeability={"MERGEABLE": "mergeable", "CONFLICTING": "conflicting"}.get(
+                    node["mergeable"], "unknown"
+                ),
+                review_decision=node["reviewDecision"],
+                ci_status=ci_status,
+                failing_checks=failing_checks,
+                feedback=_actionable_feedback(
+                    node,
+                    head_sha,
+                    author,
+                    github_username,
+                    parse_github_datetime(pushes[-1] if pushes else commit["committedDate"]),
+                ),
+                merged_at=parse_github_datetime(node["mergedAt"]) if node["mergedAt"] else None,
+            )
+
+    def _ci_status(
+        self, repo: str, commit: dict, head_sha: str, required: frozenset[str] | None
+    ) -> tuple[str, tuple[str, ...]]:
+        """Classify the latest run of each check of the current head.
+
+        Incomplete metadata fails closed. Checks beyond the first page are read by
+        the head commit, so a push between pages cannot mix two heads.
+
+        :param frozenset required: Checks the base branch requires, ``None`` when unreadable.
+        """
+
+        if commit["oid"] != head_sha:
+            return "unknown", ()
+        rollup = commit["statusCheckRollup"]
+        contexts = rollup["contexts"]["nodes"] if rollup else []
+        if rollup and rollup["contexts"]["pageInfo"]["hasNextPage"]:
+            owner, _, name = repo.partition("/")
+            contexts = self._all_nodes(
+                f"{repo}@{head_sha}",
+                lambda after: (
+                    f"""query ReadyCommitChecks {{
+                        repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{
+                            object(oid: {json.dumps(head_sha)}) {{
+                                ... on Commit {{
+                                    statusCheckRollup {{
+                                        contexts(first: 100, after: {after}) {{ {_CHECK_CONTEXTS} }}
+                                    }}
+                                }}
+                            }}
+                        }}
+                    }}"""
+                ),
+                ("repository", "object", "statusCheckRollup", "contexts"),
+            )
+        # Re-runs keep their earlier attempts on the head; a run not started yet is the latest.
+        # Workflows and apps may share a check name, so each keeps its own latest attempt.
+        results: dict[tuple[str | None, int | None, str], str] = {}
+        for context in sorted(
+            contexts,
+            key=lambda context: (context.get("startedAt") is None, context.get("startedAt")),
+        ):
+            if context["__typename"] == "CheckRun":
+                suite = context["checkSuite"]
+                run = suite["workflowRun"]
+                key = (
+                    suite["app"] and suite["app"]["slug"],
+                    run and run["workflow"]["databaseId"],
+                    context["name"],
+                )
+                results[key] = (
+                    context["conclusion"] if context["status"] == "COMPLETED" else "PENDING"
+                )
+            else:
+                results[(None, None, context["context"])] = context["state"]
+        failing = dict.fromkeys(
+            key[-1] for key, result in results.items() if result in _FAILED_RESULTS
+        )
+        if failing:
+            return "failing", tuple(failing)
+        if any(result in _PENDING_RESULTS for result in results.values()):
+            return "pending", ()
+        if required is None:
+            return "unknown", ()
+        if not results and not required:
+            return "no_checks", ()
+        if required - {key[-1] for key in results} or any(
+            result not in _SUCCESSFUL_RESULTS for result in results.values()
+        ):
+            return "unknown", ()
+        return "passing", ()
+
+    def _required_checks(self, repo: str, branch: str) -> frozenset[str] | None:
+        """Return the checks rulesets and branch protection require, ``None`` when unreadable."""
+
+        def rest(path: str) -> object:
+            completed = _run_gh_command_with_retry(
+                ["gh", "api", path],
+                not_found_message="Failed to run gh required checks lookup: "
+                "gh CLI is not installed or not on PATH.",
+                failure_message_prefix=f"Failed to read the required checks of {repo}:{branch} via gh",
+            )
+            return json.loads(completed.stdout)
+
+        quoted_branch = urllib.parse.quote(branch, safe="")
+        try:
+            # A branch has far fewer than 100 rules.
+            rules = rest(f"repos/{repo}/rules/branches/{quoted_branch}?per_page=100")
+            required = {
+                check["context"]
+                for rule in rules
+                if rule["type"] == "required_status_checks"
+                for check in rule["parameters"]["required_status_checks"]
+            }
+            # The branch summary shows branch protection to every reader, unlike the
+            # admin-only protection endpoints.
+            branch_summary = rest(f"repos/{repo}/branches/{quoted_branch}")
+            if branch_summary["protected"]:
+                protection = branch_summary["protection"]["required_status_checks"]
+                required |= set(protection["contexts"])
+                required |= {check["context"] for check in protection["checks"]}
+            return frozenset(required)
+        except (RuntimeError, ValueError, KeyError, TypeError):
+            # Checks that may be required are never mistaken for none being required.
+            return None
+
+    def _all_nodes(
+        self, subject: str, query: Callable[[str], str], connection_path: Sequence[str]
+    ) -> list[dict]:
+        """Collect every node of a paginated GraphQL connection.
+
+        :param Callable query: Builds the query for an ``after`` cursor literal.
+        """
+
+        nodes: list[dict] = []
+        after = "null"
+        while True:
+            connection = self._graphql(query(after), subject)
+            with _github_payload(subject):
+                for key in connection_path:
+                    connection = connection[key]
+                nodes += connection["nodes"]
+                if not connection["pageInfo"]["hasNextPage"]:
+                    return nodes
+                after = json.dumps(connection["pageInfo"]["endCursor"])
+
+    def _graphql(self, query: str, subject: str) -> dict:
+        # gh exits non-zero on any GraphQL error, so a partial answer fails the lookup.
+        completed = _run_gh_command_with_retry(
+            ["gh", "api", "graphql", "-f", f"query={query}"],
+            not_found_message="Failed to run gh work state lookup: "
+            "gh CLI is not installed or not on PATH.",
+            failure_message_prefix=f"Failed to look up {subject} via gh",
+        )
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"Failed to parse gh JSON for {subject}: {error.msg}") from error
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Invalid gh payload for {subject}: missing data.")
+        return data
+
+    def _fetch_item_context(
+        self,
+        item: WorkItem,
+        *,
+        issue_fields: str,
+        pr_fields: str,
+        context_label: str,
+    ) -> dict[str, Any]:
+        if item.item_type == WorkItemType.ISSUE:
+            command = [
+                "gh",
+                "issue",
+                "view",
+                str(item.number),
+                "--repo",
+                item.repo,
+                "--json",
+                issue_fields,
+            ]
+        else:
+            command = [
+                "gh",
+                "pr",
+                "view",
+                str(item.number),
+                "--repo",
+                item.repo,
+                "--json",
+                pr_fields,
+            ]
+        return self._run_json_command(item=item, command=command, context_label=context_label)
+
+    def _fetch_pr_discussion(self, item: WorkItem) -> dict[str, Any]:
+        owner, _, name = item.repo.partition("/")
+        # Lists are capped at 100 entries without pagination: more is not realistic.
+        comments = "comments(first: 100) { nodes { author { login } body createdAt isMinimized minimizedReason } }"
+        query = (
+            f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+            f"{{ pullRequest(number: {item.number}) {{ "
+            f"closingIssuesReferences(first: 100) {{ nodes {{ "
+            f"number title body author {{ login }} repository {{ nameWithOwner }} {comments} }} }} "
+            f"reviewThreads(first: 100) {{ nodes {{ isResolved path line {comments} }} }} "
+            "} } }"
+        )
+        payload = self._run_json_command(
+            item=item,
+            command=["gh", "api", "graphql", "-f", f"query={query}"],
+            context_label="linked issues and review threads",
+        )
+        pull_request = payload["data"]["repository"]["pullRequest"]
+        return {
+            "linkedIssues": [
+                {
+                    **issue,
+                    "repository": issue["repository"]["nameWithOwner"],
+                    "comments": issue["comments"]["nodes"],
+                }
+                for issue in pull_request["closingIssuesReferences"]["nodes"]
+            ],
+            "unresolvedReviewThreads": [
+                {
+                    "path": thread["path"],
+                    "line": thread["line"],
+                    "comments": thread["comments"]["nodes"],
+                }
+                for thread in pull_request["reviewThreads"]["nodes"]
+                if not thread["isResolved"]
+            ],
+        }
+
+    def _run_json_command(
+        self,
+        *,
+        item: WorkItem,
+        command: list[str],
+        context_label: str,
+    ) -> dict[str, Any]:
+        try:
+            completed = subprocess.run(command, check=True, capture_output=True, text=True)
+        except FileNotFoundError as error:
+            raise RuntimeError(
+                f"Failed to gather {context_label} with gh: gh CLI is not installed or not on PATH."
+            ) from error
+        except subprocess.CalledProcessError as error:
+            stderr = (error.stderr or "").strip()
+            raise RuntimeError(
+                f"Failed to gather {context_label} for {item.item_type.value} "
+                f"{item.repo}#{item.number}: "
+                f"{stderr or f'process exited with code {error.returncode}'}"
+            ) from error
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                f"Failed to parse {context_label} JSON for {item.item_type.value} "
+                f"{item.repo}#{item.number}: {error.msg}"
+            ) from error
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"Invalid {context_label} payload for {item.item_type.value} "
+                f"{item.repo}#{item.number}: expected a JSON object."
+            )
+        return payload
+
+    @staticmethod
+    def _head_repo_from_payload(payload: dict[str, Any], fallback_repo: str) -> str:
+        head_repo_owner = payload.get("headRepositoryOwner", {})
+        head_repo_info = payload.get("headRepository", {})
+        owner_login = head_repo_owner.get("login", "") if isinstance(head_repo_owner, dict) else ""
+        repo_name = head_repo_info.get("name", "") if isinstance(head_repo_info, dict) else ""
+        return f"{owner_login}/{repo_name}" if owner_login and repo_name else fallback_repo
+
+    @staticmethod
+    def _parse_open_pull_request_payload(
+        payload: object,
+        *,
+        context: str,
+    ) -> list[AuthoredPullRequest]:
+        if not isinstance(payload, list):
+            raise RuntimeError(f"Invalid gh {context} PR payload: expected a JSON array.")
+
+        pull_requests: list[AuthoredPullRequest] = []
+        for index, entry in enumerate(payload):
+            if not isinstance(entry, dict):
+                raise RuntimeError(
+                    f"Invalid gh {context} PR payload: entry {index} is not an object."
+                )
+            repository = entry.get("repository")
+            if not isinstance(repository, dict):
+                raise RuntimeError(
+                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid repository."
+                )
+            repository_name_with_owner = repository.get("nameWithOwner")
+            if not isinstance(repository_name_with_owner, str) or not repository_name_with_owner:
+                raise RuntimeError(
+                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid repository.nameWithOwner."
+                )
+            pr_id = entry.get("id")
+            if not isinstance(pr_id, (str, int)):
+                raise RuntimeError(
+                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid id."
+                )
+            number = entry.get("number")
+            if not isinstance(number, int):
+                raise RuntimeError(
+                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid number."
+                )
+            title = entry.get("title")
+            if not isinstance(title, str):
+                raise RuntimeError(
+                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid title."
+                )
+            url = entry.get("url")
+            if not isinstance(url, str):
+                raise RuntimeError(
+                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid url."
+                )
+            created_at = entry.get("createdAt")
+            if not isinstance(created_at, str):
+                raise RuntimeError(
+                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid createdAt."
+                )
+            updated_at = entry.get("updatedAt")
+            if not isinstance(updated_at, str):
+                raise RuntimeError(
+                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid updatedAt."
+                )
+            is_draft = entry.get("isDraft")
+            if not isinstance(is_draft, bool):
+                raise RuntimeError(
+                    f"Invalid gh {context} PR payload: entry {index} has missing or invalid isDraft."
+                )
+            pull_requests.append(
+                AuthoredPullRequest(
+                    id=pr_id,
+                    repo=repository_name_with_owner,
+                    number=number,
+                    title=title,
+                    url=url,
+                    created_at=created_at,
+                    updated_at=updated_at,
+                    is_draft=is_draft,
+                    ci_state=_extract_ci_state(entry),
+                    review_decision=entry.get("reviewDecision"),
+                    review_requested=_extract_pending_review_request(entry),
+                    has_unresolved_comments=_extract_unresolved_comments(entry),
+                )
+            )
+        return pull_requests
+
+    @staticmethod
+    def _parse_todo_issue_payload(
+        payload: object,
+        *,
+        todo_repository: str,
+    ) -> list[TodoIssue]:
+        context = f"Invalid gh todo issue payload for {todo_repository}"
+        if not isinstance(payload, list):
+            raise RuntimeError(f"{context}: expected a JSON array.")
+        issues: list[TodoIssue] = []
+        for index, entry in enumerate(payload):
+            if not isinstance(entry, dict):
+                raise RuntimeError(f"{context}: entry {index} is not an object.")
+            values: dict[str, object] = {}
+            for key, expected_types in (
+                ("id", (str, int)),
+                ("number", (int,)),
+                ("title", (str,)),
+                ("url", (str,)),
+                ("createdAt", (str,)),
+                ("updatedAt", (str,)),
+            ):
+                value = entry.get(key)
+                if not isinstance(value, expected_types):
+                    raise RuntimeError(f"{context}: entry {index} has missing or invalid {key}.")
+                values[key] = value
+            total = _sub_issue_total(
+                entry, RuntimeError(f"{context}: entry {index} has invalid subIssuesSummary.total.")
+            )
+            issues.append(
+                TodoIssue(
+                    id=cast(str | int, values["id"]),
+                    repo=todo_repository,
+                    number=cast(int, values["number"]),
+                    title=cast(str, values["title"]),
+                    url=cast(str, values["url"]),
+                    created_at=cast(str, values["createdAt"]),
+                    updated_at=cast(str, values["updatedAt"]),
+                    target=todo_target_from_body(entry.get("body")),
+                    sub_issue_total=total,
+                )
+            )
+        return issues
+
+    @staticmethod
+    def _parse_recent_tracked_item_payload(
+        payload: object,
+        *,
+        repositories: list[str],
+    ) -> list[RecentTrackedItem]:
+        context = f"Invalid gh recent tracked item payload for repository batch {repositories!r}"
+        if not isinstance(payload, list):
+            raise RuntimeError(f"{context}: expected a JSON array.")
+
+        required_fields = (
+            ("id", (str, int)),
+            ("number", (int,)),
+            ("title", (str,)),
+            ("url", (str,)),
+            ("createdAt", (str,)),
+            ("updatedAt", (str,)),
+            ("state", (str,)),
+            ("isPullRequest", (bool,)),
+        )
+        items: list[RecentTrackedItem] = []
+        for index, entry in enumerate(payload):
+            if not isinstance(entry, dict):
+                raise RuntimeError(f"{context}: entry {index} is not an object.")
+
+            values: dict[str, object] = {}
+            for key, expected_types in required_fields:
+                value = entry.get(key)
+                if not isinstance(value, expected_types):
+                    raise RuntimeError(f"{context}: entry {index} has missing or invalid {key}.")
+                values[key] = value
+
+            repository = entry.get("repository")
+            if not isinstance(repository, dict):
+                raise RuntimeError(f"{context}: entry {index} has missing or invalid repository.")
+            repository_name_with_owner = repository.get("nameWithOwner")
+            if not isinstance(repository_name_with_owner, str) or not repository_name_with_owner:
+                raise RuntimeError(
+                    f"{context}: entry {index} has missing or invalid repository.nameWithOwner."
+                )
+            if cast(str, values["state"]).upper() != "OPEN":
+                continue
+            if values["isPullRequest"]:
+                summary = entry.get("subIssuesSummary")
+                total = summary.get("total") if isinstance(summary, dict) else None
+            else:
+                total = _sub_issue_total(
+                    entry,
+                    RuntimeError(f"{context}: entry {index} has invalid subIssuesSummary.total."),
+                )
+            item = RecentTrackedItem(
+                id=cast(str | int, values["id"]),
+                repo=repository_name_with_owner,
+                number=cast(int, values["number"]),
+                title=cast(str, values["title"]),
+                url=cast(str, values["url"]),
+                created_at=cast(str, values["createdAt"]),
+                updated_at=cast(str, values["updatedAt"]),
+                is_pull_request=cast(bool, values["isPullRequest"]),
+            )
+            if total is not None:
+                item["sub_issue_total"] = total
+            items.append(item)
+        return items
+
+    @staticmethod
+    def _closing_issues(repository_node: object, *, subject: str) -> list[tuple[str, int]]:
+        """Collect the ``(repo, number)`` issues one pull request closes.
+
+        :param object repository_node: One aliased ``repository`` GraphQL node.
+        :param str subject: ``owner/repo#number`` used in error messages.
+        """
+
+        context = f"Invalid gh linked issue payload for {subject}"
+        pull_request = (
+            repository_node.get("pullRequest") if isinstance(repository_node, dict) else None
+        )
+        if not isinstance(pull_request, dict):
+            raise RuntimeError(f"{context}: expected an object.")
+        references = pull_request.get("closingIssuesReferences")
+        nodes = references.get("nodes") if isinstance(references, dict) else None
+        if not isinstance(nodes, list):
+            raise RuntimeError(f"{context}: missing or invalid closingIssuesReferences.")
+        issues: list[tuple[str, int]] = []
+        for node in nodes:
+            node_fields = node if isinstance(node, dict) else {}
+            number = node_fields.get("number")
+            repository = node_fields.get("repository")
+            repo = repository.get("nameWithOwner") if isinstance(repository, dict) else None
+            if not isinstance(number, int) or not isinstance(repo, str) or not repo:
+                raise RuntimeError(f"{context}: missing or invalid closing issue reference.")
+            issues.append((repo, number))
+        return issues
+
+
+@dataclass(frozen=True, slots=True)
+class _PullRequestInfo:
+    """The pull request resolved for the current branch."""
+
+    number: int
+    title: str
+    url: str
+    state: str
+
+
+@dataclass(frozen=True, slots=True)
+class _IssueInfo:
+    """An issue a pull request closes."""
+
+    title: str
+    url: str
+    state: str
+
+
+def _closing_issues(pull_request: dict[str, Any]) -> list[tuple[str, int]]:
+    """Collect the ``(repo, number)`` issues one pull request closes."""
+    references = pull_request.get("closingIssuesReferences")
+    nodes = references.get("nodes") if isinstance(references, dict) else None
+    if not isinstance(nodes, list):
+        raise RuntimeError("Invalid gh GraphQL payload: missing closingIssuesReferences.")
+    issues: list[tuple[str, int]] = []
+    for node in nodes:
+        node_fields = node if isinstance(node, dict) else {}
+        number = node_fields.get("number")
+        repository = node_fields.get("repository")
+        repo = repository.get("nameWithOwner") if isinstance(repository, dict) else None
+        if not isinstance(number, int) or not isinstance(repo, str) or not repo:
+            raise RuntimeError("Invalid gh GraphQL payload: missing closing issue reference.")
+        issues.append((repo, number))
+    return issues
+
+
+def _parse_json_object(raw: str, *, context: str) -> dict[str, Any]:
+    """Parse ``raw`` as a gh JSON object, translating malformed output into ``RuntimeError``."""
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"Failed to parse gh {context} JSON: {error.msg}") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Invalid gh {context} payload: expected a JSON object.")
+    return payload
+
+
+@contextmanager
+def _github_payload(subject: str) -> Iterator[None]:
+    """Report a GitHub answer lacking an expected field as a failed lookup."""
+
+    try:
+        yield
+    except (KeyError, TypeError, AttributeError, IndexError) as error:
+        raise RuntimeError(
+            f"Invalid gh payload for {subject}: missing or invalid {error}."
+        ) from error
+
+
+def _pull_request_aliases(batch: Sequence[tuple[str, int]], fields: str) -> str:
+    """Name each pull request of a batch by one alias, selecting ``fields`` of it."""
+
+    return " ".join(
+        f"p{index}: repository(owner: {json.dumps(repo.partition('/')[0])}, "
+        f"name: {json.dumps(repo.partition('/')[2])}) "
+        f"{{ pullRequest(number: {number}) {{ {fields} }} }}"
+        for index, (repo, number) in enumerate(batch)
+    )
+
+
+def _encode_todo_metadata(target: str | None) -> str:
+    metadata: dict[str, object] = {"workdash_todo_version": _TODO_METADATA_VERSION}
+    if target is not None:
+        metadata["target"] = target
+    return f"```json\n{json.dumps(metadata, indent=2, ensure_ascii=True)}\n```\n"
+
+
+def _run_gh(
+    command: list[str],
+    *,
+    operation: str,
+    todo_repository: str,
+    tolerate_stderr: str | None = None,
+) -> str:
+    """Run a gh command, translating its failures into user-facing advice.
+
+    :param str | None tolerate_stderr: Marker that makes a gh failure a success.
+    """
+
+    try:
+        return subprocess.run(command, check=True, capture_output=True, text=True).stdout
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"Failed to {operation}: gh CLI is not installed or not on PATH."
+        ) from error
+    except subprocess.CalledProcessError as error:
+        stderr = (error.stderr or "").strip()
+        if tolerate_stderr is not None and tolerate_stderr in stderr.lower():
+            return ""
+        message = f"Failed to {operation}: {stderr or f'exit code {error.returncode}'}"
+        if is_missing_repository_error(stderr):
+            message = (
+                f"{message.rstrip('.')}. Create the todo repository {todo_repository} "
+                "on GitHub if it does not exist yet."
+            )
+        raise RuntimeError(message) from error

@@ -1,6 +1,6 @@
 import pytest
 
-from workdash import github
+from workdash import github_client
 from workdash.agent_context import render_github_context
 from workdash.models import WorkItemType
 
@@ -41,10 +41,10 @@ _STRUCTURED_VALUES = {
 @pytest.mark.parametrize(
     "fields",
     [
-        github._LAUNCH_ISSUE_CONTEXT_JSON_FIELDS,
-        github._LAUNCH_PR_CONTEXT_JSON_FIELDS,
-        github._ANALYSIS_ISSUE_CONTEXT_JSON_FIELDS,
-        github._ANALYSIS_PR_CONTEXT_JSON_FIELDS,
+        github_client._LAUNCH_ISSUE_CONTEXT_JSON_FIELDS,
+        github_client._LAUNCH_PR_CONTEXT_JSON_FIELDS,
+        github_client._ANALYSIS_ISSUE_CONTEXT_JSON_FIELDS,
+        github_client._ANALYSIS_PR_CONTEXT_JSON_FIELDS,
     ],
 )
 def test_render_accepts_every_field_requested_from_gh(fields: str) -> None:
@@ -162,8 +162,8 @@ def test_render_marks_comments_by_the_author_of_the_item_they_belong_to() -> Non
     ("item_type", "fields", "pr_flags", "issue_flags"),
     [
         # item comment and linked issue are flagged by item type; the thread is always a PR thread
-        (WorkItemType.ISSUE, github._LAUNCH_ISSUE_CONTEXT_JSON_FIELDS, 1, 2),
-        (WorkItemType.PR, github._LAUNCH_PR_CONTEXT_JSON_FIELDS, 2, 1),
+        (WorkItemType.ISSUE, github_client._LAUNCH_ISSUE_CONTEXT_JSON_FIELDS, 1, 2),
+        (WorkItemType.PR, github_client._LAUNCH_PR_CONTEXT_JSON_FIELDS, 2, 1),
     ],
 )
 def test_render_names_the_author_flag_after_the_item_type(

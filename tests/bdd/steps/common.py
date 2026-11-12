@@ -709,15 +709,13 @@ def _command_exits_zero(scenario_state: dict[str, Any]) -> None:
 def install_valid_env(monkeypatch: pytest.MonkeyPatch, *, which_succeeds: bool = True) -> None:
     """Patch the workdash module so preflight passes (or fails on gh)."""
 
-    import workdash.workdash as workdash_module
-
     monkeypatch.setattr(
-        workdash_module.shutil,
+        github_client_module.shutil,
         "which",
         lambda cmd: "/usr/bin/gh" if which_succeeds and cmd == "gh" else None,
     )
     if which_succeeds:
-        monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
+        monkeypatch.setattr(github_client_module.subprocess, "run", lambda *args, **kwargs: None)
 
 
 def mock_backend(monkeypatch: pytest.MonkeyPatch, *, items: list[WorkItem]) -> None:

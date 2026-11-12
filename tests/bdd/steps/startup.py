@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from pytest_bdd import given, then, when
 
+import workdash.github_client as github_client_module
 import workdash.launcher as launcher_module
 import workdash.workdash as workdash_module
 from workdash.config import AgentConfig, WorkdashConfig
@@ -118,7 +119,7 @@ def _run_system(
         lambda file, args: exec_calls.append((file, args)),
     )
     if scenario_state.get("_gh_missing"):
-        monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: None)
+        monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: None)
         monkeypatch.setattr(
             workdash_module,
             "load_config",
@@ -136,12 +137,12 @@ def _run_system(
             ),
         )
     elif scenario_state.get("_gh_unauthenticated"):
-        monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+        monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
         monkeypatch.setattr(
-            workdash_module.subprocess,
+            github_client_module.subprocess,
             "run",
             lambda *args, **kwargs: (_ for _ in ()).throw(
-                workdash_module.subprocess.CalledProcessError(1, ["gh", "auth", "status"])
+                github_client_module.subprocess.CalledProcessError(1, ["gh", "auth", "status"])
             ),
         )
         monkeypatch.setattr(
@@ -161,8 +162,8 @@ def _run_system(
             ),
         )
     elif "_incomplete_config" in scenario_state or "_malformed_config" in scenario_state:
-        monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
-        monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
+        monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+        monkeypatch.setattr(github_client_module.subprocess, "run", lambda *args, **kwargs: None)
         config = scenario_state.get("_incomplete_config") or scenario_state["_malformed_config"]
         monkeypatch.setattr(workdash_module, "load_config", lambda: config)
         if "_malformed_config" in scenario_state:
@@ -246,7 +247,7 @@ def _install_startup_which(
             return "/usr/bin/zellij"
         return None
 
-    monkeypatch.setattr(workdash_module.shutil, "which", fake_which)
+    monkeypatch.setattr(github_client_module.shutil, "which", fake_which)
 
 
 def _start_interactive_dashboard(
@@ -262,7 +263,7 @@ def _start_interactive_dashboard(
         raise SystemExit(0)
 
     _install_direct_start_fakes(scenario_state, monkeypatch)
-    monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(github_client_module.subprocess, "run", lambda *args, **kwargs: None)
     _install_startup_which(
         monkeypatch,
         zellij=bool(scenario_state.get("_zellij_installed")),
@@ -300,9 +301,9 @@ def _user_starts_interactive_dashboard_direct(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _install_direct_start_fakes(scenario_state, monkeypatch)
-    monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(github_client_module.subprocess, "run", lambda *args, **kwargs: None)
     _install_startup_which(monkeypatch, zellij=False)
-    monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(github_client_module.subprocess, "run", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         workdash_module.os,
         "execvp",
@@ -338,9 +339,9 @@ def _user_starts_server_backed_client_command(
     monkeypatch.delenv("ZELLIJ", raising=False)
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
     monkeypatch.setattr(
-        workdash_module,
-        "_check_gh_preflight",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected GitHub preflight")),
+        workdash_module.GitHubClient,
+        "check_authentication",
+        lambda self: (_ for _ in ()).throw(AssertionError("unexpected GitHub preflight")),
     )
     monkeypatch.setattr(
         workdash_module.launcher.zellij,
@@ -372,7 +373,7 @@ def _user_starts_list_command(
             return [], {}
 
     _install_startup_which(monkeypatch, zellij=False)
-    monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(github_client_module.subprocess, "run", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         workdash_module,
         "load_config",

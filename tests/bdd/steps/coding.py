@@ -15,7 +15,6 @@ from textual.widgets import Static
 from gh_work_state_fake import HEAD_SHA, check_run, failure, install_fake_github
 from workdash.analysis_cache import AnalysisCache
 from workdash.control import WorkdashSession, format_work_item_id
-from workdash.github import GithubHelper
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import CodeDialog
 
@@ -306,7 +305,7 @@ def run_code_dialog_scenario(
     """
 
     import workdash.control as control_module
-    import workdash.launcher as launcher_module
+    from workdash.github_client import GitHubClient
 
     worktree_calls: list[WorkItem] = []
     launch_calls: list[tuple[WorkItem, str]] = []
@@ -315,7 +314,7 @@ def run_code_dialog_scenario(
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir(parents=True, exist_ok=True)
 
-    def ensure_worktree(_workdir: str, item: WorkItem, **kwargs) -> str:
+    def ensure_worktree(_workdir: str, item: WorkItem, **_kwargs) -> str:
         if scenario_state.get("worktree_fails"):
             raise RuntimeError("worktree failed")
         worktree_calls.append(item)
@@ -350,19 +349,19 @@ def run_code_dialog_scenario(
 
         with monkeypatch.context() as patch:
             patch.setattr(subprocess, "run", fake_gh)
-            return GithubHelper().fetch_launch_context(item)
+            return GitHubClient().fetch_launch_context(item)
 
     selected = work_items[0]
     if selected.kind == WorkItemKind.AUTHORED_PR:
         github = install_fake_github(monkeypatch)
         github.add_pull_request(f"{selected.repo}#{selected.number}")
 
-    monkeypatch.setattr(launcher_module, "collect_launch_github_context", fake_collect)
+    github_client = GitHubClient()
+    monkeypatch.setattr(github_client, "fetch_launch_context", fake_collect)
     monkeypatch.setattr(control_module, "ensure_worktree", ensure_worktree)
     monkeypatch.setattr(
-        control_module,
-        "GithubHelper",
-        lambda: SimpleNamespace(fetch_worktree_head=lambda item: ("pr-branch", item.repo)),
+        "workdash.github_client.GitHubClient.fetch_worktree_head",
+        lambda self, item: ("pr-branch", item.repo),
     )
     monkeypatch.setattr(
         control_module,
@@ -386,7 +385,9 @@ def run_code_dialog_scenario(
     config = make_valid_config(scenario_state.get("agents"))
     session = WorkdashSession(
         config=config,
-        backend=SimpleNamespace(analysis_cache=scenario_state.get("cache")),  # type: ignore[arg-type]
+        backend=SimpleNamespace(
+            analysis_cache=scenario_state.get("cache"), github_client=github_client
+        ),  # type: ignore[arg-type]
         work_items=list(work_items),
         suggestion_markers={},
         zellij_session="workdash-main",

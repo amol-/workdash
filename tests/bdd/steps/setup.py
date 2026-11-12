@@ -230,8 +230,9 @@ def _run_configure_with_fakes(
     monkeypatch.setattr(
         workdash_module,
         "configure",
-        lambda: config_module.configure(
+        lambda github_client: config_module.configure(
             config_path,
+            github_client=github_client,
             input_fn=input_fn,
             which_fn=which_fn,
             install_zellij_fn=install_zellij_fn,

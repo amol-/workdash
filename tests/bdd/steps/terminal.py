@@ -156,7 +156,7 @@ def run_terminal_scenario(
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir(exist_ok=True)
 
-    def ensure_worktree(_workdir: str, item: WorkItem, **kwargs) -> str:
+    def ensure_worktree(_workdir: str, item: WorkItem, **_kwargs) -> str:
         if scenario_state.get("worktree_fails"):
             raise RuntimeError("worktree failed")
         worktree_calls.append(item)
@@ -178,7 +178,7 @@ def run_terminal_scenario(
     monkeypatch.setattr(subprocess, "run", fake_run)
     session = WorkdashSession(
         config=make_valid_config(),
-        backend=SimpleNamespace(analysis_cache=None),  # type: ignore[arg-type]
+        backend=SimpleNamespace(analysis_cache=None, github_client=None),  # type: ignore[arg-type]
         work_items=list(work_items),
         suggestion_markers={},
         zellij_session=zellij_session,

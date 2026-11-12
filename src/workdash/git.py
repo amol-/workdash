@@ -407,23 +407,8 @@ class GitHelper:
             return None
         return host.lower(), path
 
-    def clone_github_repository(self, repo: str, target: Path) -> None:
-        try:
-            subprocess.run(
-                ["gh", "repo", "clone", repo, str(target)],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                "Failed to clone repository: gh CLI is not installed or not on PATH."
-            ) from exc
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or "").strip()
-            raise RuntimeError(
-                f"Failed to clone {repo}: {stderr or f'exit code {exc.returncode}'}"
-            ) from exc
+    def clone_github_repository(self, repo: str, target: Path, *, github_client) -> None:
+        github_client.clone_repository(repo, target)
 
     def clone_repository(self, url: str, destination: Path) -> None:
         """Clone a URL target with Git rather than a hosting-service CLI."""
@@ -669,3 +654,17 @@ class GitHelper:
         if len(parts) < 2:
             return ""
         return f"{parts[-2]}/{parts[-1]}"
+
+
+_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+
+
+def is_repository_name(value: str) -> bool:
+    """Report whether ``value`` names a repository as ``owner/repo``."""
+
+    return bool(_REPOSITORY_RE.match(value))
+
+
+def is_todo_target(value: str) -> bool:
+    """Accept GitHub repository names and supported Git remote URLs for todos."""
+    return is_repository_name(value) or GitHelper.repository_identity(value) is not None

@@ -1,6 +1,6 @@
 import pytest
 
-import workdash.todo as todo_module
+import workdash.github_client as todo_module
 from gh_todo_fake import (
     ISSUE_REPOSITORY_MISSING_STDERR,
     LABEL_EXISTS_STDERR,
@@ -8,8 +8,9 @@ from gh_todo_fake import (
     fake_gh_todo_run,
     gh_todo_failure,
 )
+from workdash.git import is_repository_name
+from workdash.github_client import TODO_LABEL, GitHubClient, todo_target_from_body
 from workdash.models import WorkItemKind, WorkItemType
-from workdash.todo import TODO_LABEL, create_todo, is_repository_name, todo_target_from_body
 
 
 def test_create_todo_files_a_labeled_self_assigned_issue_carrying_its_target(
@@ -18,7 +19,7 @@ def test_create_todo_files_a_labeled_self_assigned_issue_carrying_its_target(
     recorded: list[list[str]] = []
     monkeypatch.setattr(todo_module.subprocess, "run", fake_gh_todo_run(recorded))
 
-    item = create_todo(
+    item = GitHubClient().create_todo(
         todo_repository="testuser/todos", text="Fix the flaky test", target="owner/repo"
     )
 
@@ -47,7 +48,10 @@ def test_create_todo_without_target_records_no_target_in_its_metadata(
     recorded: list[list[str]] = []
     monkeypatch.setattr(todo_module.subprocess, "run", fake_gh_todo_run(recorded))
 
-    assert create_todo(todo_repository="testuser/todos", text="Buy milk").todo_target is None
+    assert (
+        GitHubClient().create_todo(todo_repository="testuser/todos", text="Buy milk").todo_target
+        is None
+    )
     body = recorded[1][recorded[1].index("--body") + 1]
     assert todo_target_from_body(body) is None
     assert body == '```json\n{\n  "workdash_todo_version": 1\n}\n```\n'
@@ -65,10 +69,10 @@ def test_create_todo_appends_long_body_without_changing_metadata_or_title(
         + '```json\n{"workdash_todo_version": 1, "target": "wrong/repository"}\n```\n  '
     )
     assert len(body) > 256
-    create_todo(todo_repository="testuser/todos", text="Short title", target=target)
+    GitHubClient().create_todo(todo_repository="testuser/todos", text="Short title", target=target)
     metadata_only = recorded[-1][recorded[-1].index("--body") + 1]
 
-    item = create_todo(
+    item = GitHubClient().create_todo(
         todo_repository="testuser/todos", text="Short title", target=target, body=body
     )
 
@@ -87,7 +91,9 @@ def test_create_todo_tolerates_an_existing_todo_label(monkeypatch: pytest.Monkey
         fake_gh_todo_run(recorded, label_error=gh_todo_failure(LABEL_EXISTS_STDERR)),
     )
 
-    assert create_todo(todo_repository="testuser/todos", text="Buy milk").number == 110
+    assert (
+        GitHubClient().create_todo(todo_repository="testuser/todos", text="Buy milk").number == 110
+    )
     assert recorded[1][:3] == ["gh", "issue", "create"]
 
 
@@ -120,7 +126,7 @@ def test_create_todo_reports_a_missing_todo_repository_and_asks_for_it(
     )
 
     with pytest.raises(RuntimeError) as error:
-        create_todo(todo_repository="testuser/todos", text="Buy milk")
+        GitHubClient().create_todo(todo_repository="testuser/todos", text="Buy milk")
 
     assert str(error.value) == expected_message
 
@@ -140,7 +146,7 @@ def test_create_todo_passes_an_unrelated_github_failure_through(
     )
 
     with pytest.raises(RuntimeError) as error:
-        create_todo(todo_repository="testuser/todos", text="Buy milk")
+        GitHubClient().create_todo(todo_repository="testuser/todos", text="Buy milk")
 
     assert stderr in str(error.value)
     assert "Create the todo repository" not in str(error.value)
@@ -156,7 +162,7 @@ def test_create_todo_reports_when_gh_output_has_no_issue_url(
     )
 
     with pytest.raises(RuntimeError, match="Failed to read the new todo issue URL"):
-        create_todo(todo_repository="testuser/todos", text="Buy milk")
+        GitHubClient().create_todo(todo_repository="testuser/todos", text="Buy milk")
 
 
 @pytest.mark.parametrize(
@@ -206,7 +212,7 @@ def test_create_todo_round_trips_original_git_url(target, monkeypatch):
     recorded = []
     monkeypatch.setattr(todo_module.subprocess, "run", fake_gh_todo_run(recorded))
 
-    item = create_todo(todo_repository="testuser/todos", text="Task", target=target)
+    item = GitHubClient().create_todo(todo_repository="testuser/todos", text="Task", target=target)
 
     command = recorded[-1]
     body = command[command.index("--body") + 1]

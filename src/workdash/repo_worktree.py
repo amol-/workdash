@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 from .git import GitHelper
-from .github import GithubHelper
+from .github_client import GitHubClient
 from .models import WorkItem, WorkItemType, accepted_worktree_numbers, worktree_item_number
 
 _ISSUE_BRANCH_RE = re.compile(r"^issue-(\d+)$")
@@ -76,7 +76,9 @@ def existing_worktree_path(
     return None
 
 
-def ensure_worktree(workdir: str, item: WorkItem, *, git: GitHelper | None = None) -> str:
+def ensure_worktree(
+    workdir: str, item: WorkItem, *, git: GitHelper | None = None, github_client=None
+) -> str:
     """Ensure a worktree exists for the given work item and return its path.
 
     Clones the repository if it does not exist locally, fetches the latest
@@ -86,6 +88,7 @@ def ensure_worktree(workdir: str, item: WorkItem, *, git: GitHelper | None = Non
     :param WorkItem item: The work item to prepare a worktree for.
     """
     git = git if git is not None else GitHelper()
+    github = github_client if github_client is not None else GitHubClient()
     existing = existing_worktree_path(workdir, item, git=git)
     if existing is not None:
         # Local divergence or missing upstream shouldn't block the user.
@@ -105,7 +108,7 @@ def ensure_worktree(workdir: str, item: WorkItem, *, git: GitHelper | None = Non
         head_ref = ""
         branch = f"wt-{item.number}"
     elif item.item_type == WorkItemType.PR:
-        head_ref, head_repo = GithubHelper().fetch_worktree_head(item)
+        head_ref, head_repo = github.fetch_worktree_head(item)
         repo = head_repo
         branch = head_ref
     else:
@@ -133,7 +136,7 @@ def ensure_worktree(workdir: str, item: WorkItem, *, git: GitHelper | None = Non
         if todo_target is not None and ":" in repo:
             git.clone_repository(repo, main)
         else:
-            git.clone_github_repository(repo, main)
+            git.clone_github_repository(repo, main, github_client=github)
     git.fetch_remote(main, "origin")
     git.fast_forward_default_branch(main)
     if item.item_type == WorkItemType.PR:

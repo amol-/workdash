@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from workdash.git import GitHelper
-from workdash.github import GithubHelper
+from workdash.github_client import GitHubClient, todo_target_from_body
 from workdash.models import WorkItem, WorkItemKind, WorkItemType, display_repo
 from workdash.repo_worktree import (
     ensure_worktree,
@@ -19,7 +19,6 @@ from workdash.repo_worktree import (
     main_repo_path,
     worktree_path,
 )
-from workdash.todo import create_todo, todo_target_from_body
 
 _SAME_REPO_HEAD_INFO = json.dumps(
     {
@@ -1174,7 +1173,7 @@ def test_ensure_worktree_clone_failure_raises(
 
 
 def test_fetch_worktree_head_missing_gh_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When gh CLI is not installed, GithubHelper raises RuntimeError."""
+    """When gh CLI is not installed, GitHubClient raises RuntimeError."""
 
     def fake_run(*args, **kwargs):
         raise FileNotFoundError("gh")
@@ -1182,7 +1181,7 @@ def test_fetch_worktree_head_missing_gh_raises(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="gh CLI"):
-        GithubHelper().fetch_worktree_head(make_pr())
+        GitHubClient().fetch_worktree_head(make_pr())
 
 
 def test_ensure_worktree_creates_workdir_if_missing(
@@ -1423,7 +1422,7 @@ def test_same_repo_pr_reused_with_differently_cased_directory(tmp_path, monkeypa
         GitHelper, "fetch_remote", lambda self, path, remote: fetches.append((path, remote))
     )
     monkeypatch.setattr(
-        GithubHelper, "fetch_worktree_head", lambda *args: pytest.fail("unexpected lookup")
+        GitHubClient, "fetch_worktree_head", lambda *args: pytest.fail("unexpected lookup")
     )
 
     assert ensure_worktree(str(tmp_path), make_pr(repo="Owner/Repo")) == str(path)
@@ -1447,7 +1446,7 @@ def test_fork_worktree_reused_with_differently_cased_upstream(tmp_path, monkeypa
         GitHelper, "fetch_remote", lambda self, path, remote: fetches.append((path, remote))
     )
     monkeypatch.setattr(
-        GithubHelper, "fetch_worktree_head", lambda *args: pytest.fail("unexpected lookup")
+        GitHubClient, "fetch_worktree_head", lambda *args: pytest.fail("unexpected lookup")
     )
 
     assert ensure_worktree(str(tmp_path), make_pr(repo="owner/repo")) == str(path)
@@ -1462,7 +1461,9 @@ def test_github_issue_reuses_worktree_with_mixed_casing(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(GitHelper, "pull_ff_only", lambda self, path: None)
     monkeypatch.setattr(
-        GitHelper, "clone_github_repository", lambda *args: pytest.fail("unexpected clone")
+        GitHelper,
+        "clone_github_repository",
+        lambda *args, **kwargs: pytest.fail("unexpected clone"),
     )
     assert ensure_worktree(str(tmp_path), make_issue(repo="OWNER/REPO")) == str(path)
 
@@ -1611,7 +1612,9 @@ def test_url_target_clone_worktree_reuse_and_missing_default_head(tmp_path, monk
         return real_run(command, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", run)
-    item = create_todo(todo_repository="testuser/todos", text="Test todo", target=target)
+    item = GitHubClient().create_todo(
+        todo_repository="testuser/todos", text="Test todo", target=target
+    )
     item.todo_target = todo_target_from_body(issue_bodies[0])
     assert item.todo_target == target
     assert display_repo(item) == "owner/repo"
@@ -1713,7 +1716,7 @@ def test_same_repo_pr_head_casing_does_not_configure_fork_upstream(
     )
     branch_worktree = tmp_path / "other-worktree"
     monkeypatch.setattr(
-        GithubHelper, "fetch_worktree_head", lambda self, item: ("feature", "owner/repo")
+        GitHubClient, "fetch_worktree_head", lambda self, item: ("feature", "owner/repo")
     )
     monkeypatch.setattr(
         GitHelper,
@@ -1747,7 +1750,7 @@ def test_same_repo_pr_head_casing_does_not_configure_fork_upstream(
 def test_fake_git_prepares_and_reuses_review_worktree_with_merge_base(monkeypatch, tmp_path):
     from webob import Request
 
-    from workdash import control, launcher, repo_worktree
+    from workdash import control, launcher
     from workdash.config import AgentConfig, WorkdashConfig
 
     class FakeGit:
@@ -1766,7 +1769,7 @@ def test_fake_git_prepares_and_reuses_review_worktree_with_merge_base(monkeypatc
         def find_worktree_for_branch(self, main, branch):
             return next((path for path, ref in self.worktrees.items() if ref == branch), None)
 
-        def clone_github_repository(self, repo, path):
+        def clone_github_repository(self, repo, path, *, github_client):
             self.clones.append((repo, path))
             path.mkdir()
 
@@ -1798,7 +1801,7 @@ def test_fake_git_prepares_and_reuses_review_worktree_with_merge_base(monkeypatc
     git = FakeGit()
     github = MagicMock()
     github.fetch_worktree_head.return_value = ("feature", "fork/repo")
-    monkeypatch.setattr(repo_worktree, "GithubHelper", lambda: github)
+    github.fetch_launch_context.return_value = {}
     git_factory = MagicMock(return_value=git)
     monkeypatch.setattr(control, "GitHelper", git_factory)
     monkeypatch.setattr(launcher, "collect_launch_github_context", lambda item: {})
@@ -1809,6 +1812,7 @@ def test_fake_git_prepares_and_reuses_review_worktree_with_merge_base(monkeypatc
     analysis_file = tmp_path / "analysis.md"
     analysis_file.write_text("Analysis findings")
     backend = MagicMock()
+    backend.github_client = github
     backend.analyze_item.return_value = str(analysis_file)
     session = control.WorkdashSession(
         config=WorkdashConfig(workdir=str(tmp_path), agents={"pi": AgentConfig(analyze="pi")}),

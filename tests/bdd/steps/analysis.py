@@ -411,7 +411,7 @@ def _run_generate_fresh(
         zellij_session=None,
     )
     monkeypatch.setattr(
-        "workdash.control.ensure_worktree", lambda workdir, item, **kwargs: worktree_callback(item)
+        "workdash.control.ensure_worktree", lambda workdir, item, **_kwargs: worktree_callback(item)
     )
 
     def analyze_callback(item: WorkItem, tool: str = "codex") -> str | None:

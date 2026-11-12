@@ -1,6 +1,6 @@
 """Step definitions for todo capture and targeted todo work actions.
 
-Real behavior under test lives in ``workdash.todo``, ``workdash.control``,
+Real behavior under test lives in ``workdash.github_client``, ``workdash.control``,
 ``workdash.github_client`` and ``workdash.repo_worktree``; only the ``gh``
 and ``git`` subprocess boundaries are faked.
 """
@@ -31,11 +31,10 @@ from workdash.backend import WorkdashBackend
 from workdash.config import load_config
 from workdash.control import format_work_item_id
 from workdash.git import GitHelper
-from workdash.github_client import GitHubClient
+from workdash.github_client import TODO_LABEL, GitHubClient, todo_target_from_body
 from workdash.included_items import IncludedItemsStore
 from workdash.models import WorkItem, WorkItemKind, WorkItemType, display_repo
 from workdash.repo_worktree import ensure_worktree
-from workdash.todo import TODO_LABEL, todo_target_from_body
 from workdash.tui import TodoDialog
 
 from .api import _api_result, _call_api
@@ -70,7 +69,7 @@ def _install_gh_todo_fake(
         or ``None`` when the label is created successfully.
     """
 
-    import workdash.todo as todo_module
+    import workdash.github_client as todo_module
 
     commands: list[list[str]] = []
     failures: list[list[str]] = []
@@ -544,7 +543,6 @@ def _user_launches_coding_session_for_item(
     scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import workdash.control as control_module
-    import workdash.launcher as launcher_module
 
     session = scenario_state["api_session"]
     item = scenario_state["todo_item"]
@@ -557,8 +555,8 @@ def _user_launches_coding_session_for_item(
 
     scenario_state["todo_github_body"] = "body-from-gh: what the todo issue says"
     monkeypatch.setattr(
-        launcher_module,
-        "collect_launch_github_context",
+        session.backend.github_client,
+        "fetch_launch_context",
         lambda launched_item: {
             "number": launched_item.number,
             "title": launched_item.title,

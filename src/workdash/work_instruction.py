@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .github_client import GitHubClient
 from .models import REVIEW_KINDS, WorkItem, WorkItemType
-from .work_state import PullRequestWorkState, work_pull_request
+from .work_state import PullRequestWorkState
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _ALSO = {
@@ -40,6 +41,7 @@ def autostart_briefing(
     *,
     github_username: str,
     todo_repository: str,
+    github_client=None,
 ) -> tuple[WorkItem, str]:
     """Return the item an autostarted agent works on and the text closing its briefing.
 
@@ -53,7 +55,8 @@ def autostart_briefing(
     if item.kind in REVIEW_KINDS:
         return item, _load("autostart_review.txt")
 
-    state = work_pull_request(
+    github = github_client if github_client is not None else GitHubClient()
+    state = github.work_pull_request(
         item, github_username=github_username, todo_repository=todo_repository
     )
     if item.item_type == WorkItemType.ISSUE:

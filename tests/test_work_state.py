@@ -17,18 +17,14 @@ from gh_work_state_fake import (
     status_context,
     thread,
 )
+from workdash.github_client import _PULL_REQUESTS_PER_QUERY, GitHubClient
 from workdash.models import WorkItemKind
-from workdash.work_state import (
-    _PULL_REQUESTS_PER_QUERY,
-    evaluate_pull_requests,
-    find_ready_work,
-)
 
 PR = "owner/repo#51"
 
 
 def _evaluate(*refs: str):
-    return evaluate_pull_requests(
+    return GitHubClient().evaluate_pull_requests(
         [(ref.partition("#")[0], int(ref.partition("#")[2])) for ref in refs or (PR,)],
         github_username="TestUser",
         todo_repository="testuser/todos",
@@ -537,7 +533,7 @@ def test_repository_scope_reads_every_page(monkeypatch) -> None:
             f"team/b#{number}", checks={HEAD_SHA: [check_run("tests", "FAILURE")]}
         )
 
-    ready = find_ready_work(
+    ready = GitHubClient().find_ready_work(
         repositories=["team/*", "team/a"],
         github_username="testuser",
         todo_repository="testuser/todos",
@@ -565,7 +561,7 @@ def test_actionable_issues_are_ordered_by_pull_request_age(monkeypatch) -> None:
         mergeable="CONFLICTING",
     )
 
-    ready = find_ready_work(
+    ready = GitHubClient().find_ready_work(
         repositories=["owner/repo"], github_username="testuser", todo_repository="testuser/todos"
     )
 
@@ -577,7 +573,7 @@ def test_items_created_together_are_ordered_by_number(monkeypatch) -> None:
     github.add_issue("owner/repo#2")
     github.add_issue("owner/repo#1")
 
-    ready = find_ready_work(
+    ready = GitHubClient().find_ready_work(
         repositories=["owner/repo"], github_username="testuser", todo_repository="testuser/todos"
     )
 
@@ -590,7 +586,7 @@ def test_owner_repositories_without_open_work_are_never_queried(monkeypatch) -> 
     github.add_issue("team/a#1")
     github.add_issue("team/empty#1", state="CLOSED")
 
-    ready = find_ready_work(
+    ready = GitHubClient().find_ready_work(
         repositories=["team/*"], github_username="testuser", todo_repository="testuser/todos"
     )
 
@@ -609,7 +605,7 @@ def test_only_a_missing_todo_repository_counts_as_empty(monkeypatch) -> None:
     )
 
     def ready(repo: str):
-        return find_ready_work(
+        return GitHubClient().find_ready_work(
             repositories=[repo], github_username="testuser", todo_repository="testuser/todos"
         )
 
@@ -632,7 +628,7 @@ def test_issue_scope_follows_sub_issues_across_repositories(monkeypatch) -> None
     github.add_pull_request("other/lib#9", closes=("other/lib#1", "other/lib#4"), checks=failed_ci)
     github.add_pull_request("owner/repo#10", closes=("owner/repo#6",), checks=failed_ci)
 
-    ready = find_ready_work(
+    ready = GitHubClient().find_ready_work(
         issue=("owner/repo", 1), github_username="testuser", todo_repository="testuser/todos"
     )
 
@@ -651,7 +647,7 @@ def test_a_ready_pull_request_is_listed_once_for_eligible_issues_in_scope(monkey
         PR, closes=("other/lib#1", "owner/repo#42"), checks={HEAD_SHA: [check_run("t", "FAILURE")]}
     )
 
-    works = find_ready_work(
+    works = GitHubClient().find_ready_work(
         repositories=["owner/repo", "other/lib"],
         github_username="testuser",
         todo_repository="testuser/todos",
@@ -660,16 +656,16 @@ def test_a_ready_pull_request_is_listed_once_for_eligible_issues_in_scope(monkey
     assert [
         (work.item.repo, work.item.number, work.pull_request.item.number) for work in works
     ] == [("other/lib", 1, 51)]
-    repository = find_ready_work(
+    repository = GitHubClient().find_ready_work(
         repositories=["owner/repo"], github_username="testuser", todo_repository="testuser/todos"
     )
     assert [(work.item.repo, work.item.number) for work in repository] == [("other/lib", 1)]
 
-    scoped = find_ready_work(
+    scoped = GitHubClient().find_ready_work(
         issue=("owner/repo", 100), github_username="testuser", todo_repository="testuser/todos"
     )
     assert [(work.item.repo, work.item.number) for work in scoped] == [("other/lib", 1)]
-    leaf = find_ready_work(
+    leaf = GitHubClient().find_ready_work(
         issue=("owner/repo", 42), github_username="testuser", todo_repository="testuser/todos"
     )
     assert [(work.item.repo, work.item.number) for work in leaf] == [("owner/repo", 42)]
@@ -682,7 +678,7 @@ def test_repository_scope_fetches_nested_subtrees_once(monkeypatch) -> None:
     github.add_issue("owner/repo#1")
     github.add_issue("owner/repo#4", parent="owner/repo#3")
 
-    ready = find_ready_work(
+    ready = GitHubClient().find_ready_work(
         repositories=["owner/repo"], github_username="testuser", todo_repository="testuser/todos"
     )
 
@@ -695,7 +691,7 @@ def test_issue_scope_of_a_parent_with_only_closed_sub_issues_is_ready(monkeypatc
     github.add_issue("owner/repo#1")
     github.add_issue("owner/repo#2", parent="owner/repo#1", state="CLOSED")
 
-    ready = find_ready_work(
+    ready = GitHubClient().find_ready_work(
         issue=("owner/repo", 1), github_username="testuser", todo_repository="testuser/todos"
     )
 
@@ -713,7 +709,7 @@ def test_a_partial_graphql_answer_fails_the_lookup(monkeypatch) -> None:
     )
 
     with pytest.raises(RuntimeError, match=message):
-        find_ready_work(
+        GitHubClient().find_ready_work(
             repositories=["owner/repo"],
             github_username="testuser",
             todo_repository="testuser/todos",
@@ -773,7 +769,7 @@ def test_ready_returns_issues_with_actionable_authored_prs_and_completed_parents
     github.add_pull_request("owner/repo#53", checks={HEAD_SHA: [check_run("t", "FAILURE")]})
 
     def ready():
-        return find_ready_work(
+        return GitHubClient().find_ready_work(
             repositories=["owner/repo"],
             github_username="testuser",
             todo_repository="testuser/todos",
@@ -788,3 +784,47 @@ def test_ready_returns_issues_with_actionable_authored_prs_and_completed_parents
         (1, "implement"),
         (6, "implement"),
     ]
+
+
+def test_client_owns_work_state_github_access(monkeypatch):
+    from gh_work_state_fake import FakeGitHub
+    from workdash.github_client import GitHubClient
+
+    fake = FakeGitHub(subprocess.run)
+    fake.page_size = 1
+    fake.add_issue("owner/repo#42")
+    fake.add_pull_request(
+        PR,
+        closes=("owner/repo#42",),
+        mergeable="CONFLICTING",
+        checks={HEAD_SHA: [check_run("build"), check_run("test", "FAILURE")]},
+    )
+    calls = []
+
+    class Client(GitHubClient):
+        def _graphql(self, query, subject):
+            calls.append(subject)
+            return json.loads(fake.run(["gh", "api", "graphql", "-f", f"query={query}"]).stdout)[
+                "data"
+            ]
+
+        def _required_checks(self, repo, branch):
+            calls.append((repo, branch))
+            return frozenset()
+
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("unexpected gh"))
+    client = Client()
+    [work] = client.find_ready_work(
+        issue=("owner/repo", 42), github_username="testuser", todo_repository="testuser/todos"
+    )
+    assert work.reasons == ("fix_merge_conflicts", "fix_ci")
+    assert work.pull_request.failing_checks == ("test",)
+    assert f"owner/repo@{HEAD_SHA}" in calls
+    assert (
+        client.work_pull_request(
+            work.item, github_username="testuser", todo_repository="testuser/todos"
+        ).item.number
+        == 51
+    )
+    assert client.pull_request_states([("owner/repo", 51)]) == {("owner/repo", 51): "OPEN"}
+    assert ("owner/repo", "main") in calls

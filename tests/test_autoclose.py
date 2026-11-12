@@ -25,6 +25,7 @@ from gh_work_state_fake import (
 )
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession
+from workdash.github_client import GitHubClient
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 
 
@@ -66,8 +67,7 @@ class Supervision:
             autoclose_module.launcher.zellij, "press_zellij_pane_enter", self._press_enter
         )
         monkeypatch.setattr(autoclose_module.launcher.zellij, "close_zellij_pane", self._close)
-        self._answer_work_state = autoclose_module.work_pull_request
-        monkeypatch.setattr(autoclose_module, "work_pull_request", self._work_state)
+        self._answer_work_state = GitHubClient().work_pull_request
 
         monkeypatch.setattr(
             control_module.launcher.zellij, "load_zellij_panes", lambda _session: list(self.panes)
@@ -76,12 +76,11 @@ class Supervision:
             control_module, "existing_worktree_path", lambda _wd, _item, **kwargs: None
         )
         monkeypatch.setattr(
-            control_module, "ensure_worktree", lambda *_args, **kwargs: str(self.worktree)
+            control_module, "ensure_worktree", lambda *_args, **_kwargs: str(self.worktree)
         )
         monkeypatch.setattr(
-            control_module,
-            "GithubHelper",
-            lambda: SimpleNamespace(fetch_worktree_head=lambda item: ("pr-branch", item.repo)),
+            "workdash.github_client.GitHubClient.fetch_worktree_head",
+            lambda self, item: ("pr-branch", item.repo),
         )
         monkeypatch.setattr(
             control_module,
@@ -106,13 +105,17 @@ class Supervision:
                 workdir=str(tmp_path),
                 todo_repository="testuser/todos",
             ),
-            backend=MagicMock(),
+            backend=MagicMock(github_client=GitHubClient()),
             work_items=[
                 _item(WorkItemKind.ASSIGNED_ISSUE, WorkItemType.ISSUE, 42),
                 _item(WorkItemKind.TRACKED_PR, WorkItemType.PR, 52),
             ],
             suggestion_markers={},
             zellij_session="workdash-main",
+        )
+
+        monkeypatch.setattr(
+            self.session.backend.github_client, "work_pull_request", self._work_state
         )
 
     def launch(self, target: str = "owner/repo#ISSUE-42", **flags: bool) -> dict[str, object]:

@@ -6,9 +6,6 @@ import argparse
 import json
 import logging
 import os
-import shlex
-import shutil
-import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -26,6 +23,7 @@ from .control import (
     server_address,
     show_config_payload,
 )
+from .github_client import GitHubClient
 from .launcher import (
     inject_workdash_local_bin_into_path,
     open_in_browser,
@@ -44,7 +42,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         logging.basicConfig(level=logging.DEBUG)
 
     if options.configure:
-        configure()
+        configure(github_client=GitHubClient())
         return 0
 
     commands = WorkdashCommands(host=options.host)
@@ -75,7 +73,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.command == "show-config":
         return commands.show_config(json_output=options.json_output)
 
-    gh_error = _check_gh_preflight()
+    commands._github_client = GitHubClient()
+    inject_workdash_local_bin_into_path()
+    gh_error = commands._github_client.check_authentication()
     if gh_error:
         print(f"Error: {gh_error}", file=sys.stderr, flush=True)
         return 1
@@ -125,6 +125,7 @@ class WorkdashCommands:
     def __init__(self, *, host: str = "127.0.0.1") -> None:
         self._config: WorkdashConfig | None = None
         self._backend: WorkdashBackend | None = None
+        self._github_client: GitHubClient | None = None
         self._client = WorkdashControlClient(host)
 
     def list_items(self, *, json_output: bool, refresh: bool = False) -> int:
@@ -414,7 +415,9 @@ class WorkdashCommands:
                 session.list_items(refresh=True)
                 and (session.work_items, session.suggestion_markers)
             ),
-            worktree_callback=lambda item: ensure_worktree(config.workdir, item, git=session.git),
+            worktree_callback=lambda item: ensure_worktree(
+                config.workdir, item, git=session.git, github_client=backend.github_client
+            ),
             analyze_callback=lambda item, tool: session.analyze(
                 target=format_work_item_id(item), agent=tool, prefer_cache=(tool == "cached")
             )["path"],
@@ -475,7 +478,7 @@ class WorkdashCommands:
             return None
         config = self._config
         assert config is not None
-        backend = WorkdashBackend(config=config)
+        backend = WorkdashBackend(config=config, github_client=self._github_client)
         self._backend = backend
         return config, backend
 
@@ -1106,30 +1109,3 @@ def _select_workdash_session(requested_session: str | None) -> str:
             "starting `workdash --server`: " + ", ".join(sessions)
         )
     return sessions[0]
-
-
-def _check_gh_preflight() -> str | None:
-    inject_workdash_local_bin_into_path()
-    gh = shutil.which("gh")
-    if gh is None:
-        return (
-            "gh CLI is not installed or not configured. Run 'workdash --configure' "
-            "to install a local copy, or install gh globally from https://cli.github.com/."
-        )
-    try:
-        subprocess.run(
-            [gh, "auth", "status"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError:
-        auth_command = shlex.join([gh, "auth", "login"])
-        return (
-            "gh CLI is not authenticated.\n"
-            "Run this command to authenticate the GitHub CLI used by workdash:\n"
-            f"  {auth_command}"
-        )
-    except OSError as error:
-        return f"failed to run gh auth status: {error}"
-    return None

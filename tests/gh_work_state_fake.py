@@ -17,7 +17,6 @@ import urllib.parse
 import pytest
 
 import workdash.github_client as github_client_module
-import workdash.work_state as work_state_module
 
 BEFORE_PUSH = "2026-02-20T00:00:00Z"
 PUSHED_AT = "2026-03-01T00:00:00Z"
@@ -454,7 +453,7 @@ def install_fake_github(monkeypatch: pytest.MonkeyPatch) -> FakeGitHub:
     github = FakeGitHub(subprocess.run)
     monkeypatch.setattr(subprocess, "run", github.run)
     monkeypatch.setattr(github_client_module, "_TRANSIENT_RETRY_DELAY_SECONDS", 0)
-    monkeypatch.setattr(work_state_module, "_MERGEABILITY_RETRY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(github_client_module, "_MERGEABILITY_RETRY_DELAY_SECONDS", 0)
     return github
 
 

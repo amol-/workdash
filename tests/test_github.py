@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from workdash.github import GithubHelper
+from workdash.github_client import GitHubClient
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 
 
@@ -63,7 +63,7 @@ def test_fetch_launch_context_for_pr_adds_linked_issues_and_unresolved_threads(
     )
     monkeypatch.setattr(subprocess, "run", fake_gh(calls, graphql_stdout=graphql_stdout))
 
-    context = GithubHelper().fetch_launch_context(make_work_item(WorkItemType.PR))
+    context = GitHubClient().fetch_launch_context(make_work_item(WorkItemType.PR))
 
     assert context == {
         "state": "OPEN",
@@ -101,7 +101,7 @@ def test_fetch_launch_context_for_issue_makes_no_graphql_call(
     calls: list[list[str]] = []
     monkeypatch.setattr(subprocess, "run", fake_gh(calls, graphql_stdout=graphql_payload()))
 
-    context = GithubHelper().fetch_launch_context(make_work_item(WorkItemType.ISSUE))
+    context = GitHubClient().fetch_launch_context(make_work_item(WorkItemType.ISSUE))
 
     assert context == {"state": "OPEN"}
     assert [command[1] for command in calls] == ["issue"]
@@ -118,7 +118,7 @@ def test_fetch_analysis_context_for_issue_includes_discussion(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    GithubHelper().fetch_analysis_context(make_work_item(WorkItemType.ISSUE))
+    GitHubClient().fetch_analysis_context(make_work_item(WorkItemType.ISSUE))
 
     assert captured == [
         "number,title,body,author,assignees,labels,url,state,createdAt,updatedAt,comments"
@@ -132,7 +132,7 @@ def test_fetch_launch_context_rejects_non_object_json(monkeypatch: pytest.Monkey
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="expected a JSON object"):
-        GithubHelper().fetch_launch_context(make_work_item(WorkItemType.PR))
+        GitHubClient().fetch_launch_context(make_work_item(WorkItemType.PR))
 
 
 def test_fetch_diff_reports_missing_gh(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,4 +142,4 @@ def test_fetch_diff_reports_missing_gh(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="gh CLI is not installed or not on PATH"):
-        GithubHelper().fetch_diff(make_work_item(WorkItemType.PR))
+        GitHubClient().fetch_diff(make_work_item(WorkItemType.PR))

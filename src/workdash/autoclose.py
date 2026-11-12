@@ -19,13 +19,14 @@ from datetime import UTC, datetime
 from . import launcher
 from .config import WorkdashConfig
 from .git import GitHelper
+from .github_client import GitHubClient
 from .launcher import (
     _format_zellij_pane_id,
     is_live_zellij_pane,
 )
 from .models import REVIEW_KINDS, WorkItem, WorkItemType
 from .work_instruction import render_autonomous_work_instruction
-from .work_state import PullRequestWorkState, pull_request_states, work_pull_request
+from .work_state import PullRequestWorkState
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +54,13 @@ class AutocloseSupervisor:
     has shown no new output and received no Workdash message for fifteen minutes.
     """
 
-    def __init__(self, *, config: WorkdashConfig, lock: threading.RLock, git: GitHelper) -> None:
+    def __init__(
+        self, *, config: WorkdashConfig, lock: threading.RLock, git: GitHelper, github_client=None
+    ) -> None:
         """
         :param threading.RLock lock: The session lock pane operations share with code launches.
         """
+        self._github_client = github_client if github_client is not None else GitHubClient()
         self._config = config
         self._lock = lock
         self.git = git
@@ -192,7 +196,7 @@ class AutocloseSupervisor:
     def _work_state(self, entry: _SupervisedPane) -> PullRequestWorkState | None:
         """The pull request carrying the pane's work, by the same resolution as the briefing."""
 
-        return work_pull_request(
+        return self._github_client.work_pull_request(
             entry.item,
             github_username=self._config.github_username,
             todo_repository=self._config.todo_repository,
@@ -220,7 +224,7 @@ class AutocloseSupervisor:
             entry.pull_request = pull_request
         else:
             return None
-        return pull_request_states([pull_request])[pull_request]
+        return self._github_client.pull_request_states([pull_request])[pull_request]
 
     def _send(self, entry: _SupervisedPane, instruction: str, fingerprint: str) -> None:
         """Send an instruction to an idle pane, revalidating the pane and its last screen."""
