@@ -34,6 +34,10 @@ class _AutodispatchSession:
         self.ended: float | None = None
         self.status = self.Status.RUNNING
         self.current_item: str | None = None
+        self.selected_group: str | None = group
+        self.stage = "checking"
+        self.launch_reason: str | None = None
+        self.iteration = 0
         self.error: str | None = None
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
@@ -49,6 +53,10 @@ class _AutodispatchSession:
                 "started_at": self.started_at,
                 "elapsed_seconds": int((self.ended or time.monotonic()) - self.started),
                 "current_item": self.current_item,
+                "selected_group": self.selected_group,
+                "stage": self.stage,
+                "launch_reason": self.launch_reason,
+                "iteration": self.iteration,
                 "status": str(self.status),
                 "error": self.error,
             }
@@ -76,6 +84,11 @@ class _AutodispatchSession:
                     raise RuntimeError(f"Issue {item_id} selected 10 consecutive times.")
 
             while not self.stop_event.is_set():
+                with self.lock:
+                    self.iteration += 1
+                    self.stage = "checking"
+                    self.current_item = None
+                    self.launch_reason = None
                 result = self.owner.dispatch_once(
                     scope=self.scope, group=self.group, agent=selected, before_launch=check_limit
                 )
@@ -88,6 +101,9 @@ class _AutodispatchSession:
                         self.ended = time.monotonic()
                         return
                     self.current_item = str(result["item_id"])
+                    self.selected_group = result.get("tab_name") or result.get("group")
+                    self.launch_reason = result.get("launch_reason")
+                    self.stage = "developing"
                     consecutive = consecutive + 1 if self.current_item == previous else 1
                     previous = self.current_item
                 while not self.stop_event.wait(_AUTODISPATCH_POLL_SECONDS):
@@ -99,6 +115,9 @@ class _AutodispatchSession:
                     ):
                         break
                 if not self.stop_event.is_set():
+                    with self.lock:
+                        self.stage = "reviewing"
+                        self.launch_reason = None
                     review = self.owner.review(
                         target=str(result.get("pr_id", result["item_id"])), agent=selected
                     )

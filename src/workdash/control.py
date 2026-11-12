@@ -410,6 +410,7 @@ class WorkdashSession:
         group: str | None = None,
         autoclose: bool = False,
         before_launch: Callable[[], None] | None = None,
+        include_launch_reason: bool = False,
     ) -> dict[str, object]:
         """Launch a coding agent for an explicit target unless one already works in its worktree.
 
@@ -502,7 +503,7 @@ class WorkdashSession:
                 item = state.item
         if autostart:
             try:
-                item, autostart_text = autostart_briefing(
+                item, autostart_text, launch_reason = autostart_briefing(
                     item,
                     github_client=self.backend.github_client,
                     github_username=self.config.github_username,
@@ -635,6 +636,8 @@ class WorkdashSession:
                 "pane_id": pane_id,
                 "tab_name": running[0].get("tab_name"),
             }
+            if autostart and include_launch_reason:
+                launched["launch_reason"] = launch_reason
             if autoclose:
                 # Only this confirmed pane is supervised; an existing one never is.
                 self.autoclose.supervise(
@@ -863,6 +866,7 @@ class WorkdashSession:
                 group=selected_group,
                 autostart=True,
                 autoclose=True,
+                include_launch_reason=True,
                 **(
                     {"before_launch": partial(before_launch, candidate_id)} if before_launch else {}
                 ),

@@ -230,12 +230,22 @@ def repository_groups(scenario_state):
     launches = scenario_state["auto_launches"]
     session = scenario_state["api_session"]
     try:
-        wait_for(lambda: len(launches) == 1)
+        wait_for(
+            lambda: (
+                bool(launches)
+                and session.autodispatch_sessions()[0]["selected_group"] == launches[0]["group"]
+            )
+        )
         target = launches[0]["target"]
         issue = scenario_state["github"].issues[target.replace("#ISSUE-", "#")]
         issue["state"] = "CLOSED"
         scenario_state["auto_panes"].clear()
-        wait_for(lambda: len(launches) == 2)
+        wait_for(
+            lambda: (
+                len(launches) == 2
+                and session.autodispatch_sessions()[0]["selected_group"] == launches[1]["group"]
+            )
+        )
         assert {launch["target"]: launch["group"] for launch in launches} == {
             "owner/first#ISSUE-2": "first",
             "owner/second#ISSUE-3": "implementation",
@@ -243,3 +253,60 @@ def repository_groups(scenario_state):
         assert session.autodispatch_sessions()[0]["group"] is None
     finally:
         session.stop_autodispatch_sessions()
+
+
+@given("an autodispatch session for a targeted todo issue URL in group `project`")
+def progress_session(autodispatch_state, monkeypatch):
+    session = autodispatch_state["session"]
+    session.config.todo_repository = "owner/todos"
+    release = threading.Event()
+    autodispatch_state["release"] = release
+
+    def dispatch(**kwargs):
+        release.wait(2)
+        return {
+            "status": "launched",
+            "item_id": "owner/target#ISSUE-WT42",
+            "pane_id": "terminal_1",
+            "session": "workdash",
+            "group": "project",
+            "launch_reason": "fix_ci",
+        }
+
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    autodispatch_state["panes"].append({"id": 1})
+    session.start_autodispatch(
+        scope="http://github.com/owner/todos/issues/42/comments?x=1#note", group="project"
+    )
+
+
+@when("the user views its progress while checking and developing")
+def view_progress(autodispatch_state):
+    import asyncio
+
+    from workdash.tui import WorkdashApp
+
+    session = autodispatch_state["session"]
+    app = WorkdashApp(work_items=[], session=session)
+
+    async def view():
+        async with app.run_test(size=(120, 30)):
+            checking = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+            autodispatch_state["release"].set()
+            wait_for(lambda: session.autodispatch_sessions()[0]["stage"] == "developing")
+            app._update_autodispatch_progress()
+            return checking, "\n".join(
+                strip.text for strip in app.screen._compositor.render_strips()
+            )
+
+    autodispatch_state["visible_progress"] = asyncio.run(view())
+
+
+@then(
+    "the dashboard shows the group, stage, iteration and launch reason without repeating the issue"
+)
+def visible_progress(autodispatch_state):
+    checking, developing = autodispatch_state["visible_progress"]
+    assert "project  owner/todos#42  checking  1/" in checking
+    assert "project  owner/todos#42  developing (fix ci)  1/" in developing
+    assert "owner/target#ISSUE-WT42" not in developing
