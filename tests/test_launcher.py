@@ -8,15 +8,11 @@ import workdash.launcher as launcher_module
 from workdash.agent_execution import executor
 from workdash.launcher import (
     build_launch_agent_prompt,
-    exec_zellij_wrapped_workdash,
     launch_branchdiff_context,
     launch_terminal_context,
-    list_workdash_sessions,
-    load_zellij_panes,
     open_in_browser,
     open_markdown,
     prepare_launch_agent_prompt,
-    zellij_fullscreen_pane,
 )
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 
@@ -265,7 +261,7 @@ def test_list_workdash_sessions_ignores_exited_resurrectable_sessions(
     )
     monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
 
-    assert list_workdash_sessions() == ["workdash-live", "workdash-current"]
+    assert launcher_module.zellij.list_workdash_sessions() == ["workdash-live", "workdash-current"]
     assert run_args == [["/usr/bin/zellij", "list-sessions", "--no-formatting"]]
 
 
@@ -286,7 +282,7 @@ def test_list_workdash_sessions_treats_no_zellij_sessions_as_empty(
     )
     monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
 
-    assert list_workdash_sessions() == []
+    assert launcher_module.zellij.list_workdash_sessions() == []
 
 
 def test_load_zellij_panes_returns_dict_panes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -307,7 +303,9 @@ def test_load_zellij_panes_returns_dict_panes(monkeypatch: pytest.MonkeyPatch) -
     )
     monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
 
-    assert load_zellij_panes("workdash-main") == [{"id": 1, "title": "code_owner_repo_1"}]
+    assert launcher_module.zellij.load_zellij_panes("workdash-main") == [
+        {"id": 1, "title": "code_owner_repo_1"}
+    ]
     assert run_args == [
         [
             "/usr/bin/zellij",
@@ -349,7 +347,7 @@ def test_zellij_fullscreen_pane_fills_and_restores_the_calling_pane(
     )
     monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
 
-    with zellij_fullscreen_pane():
+    with launcher_module.zellij.zellij_fullscreen_pane():
         assert pane["is_fullscreen"] is True
 
     assert pane["is_fullscreen"] is False
@@ -388,7 +386,7 @@ def test_zellij_fullscreen_pane_leaves_a_pane_the_user_tiled_alone(
     )
     monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
 
-    with zellij_fullscreen_pane():
+    with launcher_module.zellij.zellij_fullscreen_pane():
         pane["is_fullscreen"] = False
 
     assert [args for args in run_args if "toggle-fullscreen" in args] == [
@@ -426,7 +424,7 @@ def test_zellij_fullscreen_pane_ignores_plugin_panes_sharing_its_id(
     )
     monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
 
-    with zellij_fullscreen_pane():
+    with launcher_module.zellij.zellij_fullscreen_pane():
         assert terminal_fullscreen is True
 
     assert terminal_fullscreen is False
@@ -455,7 +453,7 @@ def test_zellij_fullscreen_pane_leaves_a_fullscreen_pane_alone(
     )
     monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
 
-    with zellij_fullscreen_pane():
+    with launcher_module.zellij.zellij_fullscreen_pane():
         pass
 
     assert [args for args in run_args if "toggle-fullscreen" in args] == []
@@ -486,11 +484,11 @@ def test_zellij_fullscreen_pane_skips_missing_pane_states(
         lambda name: "/usr/bin/zellij" if name == "zellij" else None,
     )
     monkeypatch.setattr(launcher_module.subprocess, "run", failing_run)
-    with zellij_fullscreen_pane():
+    with launcher_module.zellij.zellij_fullscreen_pane():
         pass
 
     monkeypatch.setattr(launcher_module.subprocess, "run", other_pane_run)
-    with zellij_fullscreen_pane():
+    with launcher_module.zellij.zellij_fullscreen_pane():
         pass
 
     assert [args for args in run_args if "toggle-fullscreen" in args] == []
@@ -521,7 +519,7 @@ def test_zellij_fullscreen_pane_does_not_restore_when_filling_fails(
     )
     monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
 
-    with zellij_fullscreen_pane():
+    with launcher_module.zellij.zellij_fullscreen_pane():
         block_ran = True
 
     assert block_ran is True
@@ -545,7 +543,7 @@ def test_zellij_fullscreen_pane_does_nothing_outside_zellij(
         lambda name: "/usr/bin/zellij" if name == "zellij" else None,
     )
 
-    with zellij_fullscreen_pane():
+    with launcher_module.zellij.zellij_fullscreen_pane():
         pass
 
 
@@ -565,7 +563,9 @@ def test_send_zellij_pane_input_separates_text_from_options(
     )
     monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
 
-    launcher_module.send_zellij_pane_input("workdash-main", "terminal_23", "--literal", raw=True)
+    launcher_module.zellij.send_zellij_pane_input(
+        "workdash-main", "terminal_23", "--literal", raw=True
+    )
 
     assert run_args == [
         [
@@ -598,7 +598,9 @@ def test_send_zellij_pane_input_adds_enter_when_not_raw(
     )
     monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
 
-    launcher_module.send_zellij_pane_input("workdash-main", "terminal_23", "--literal", raw=False)
+    launcher_module.zellij.send_zellij_pane_input(
+        "workdash-main", "terminal_23", "--literal", raw=False
+    )
 
     assert run_args == [
         [
@@ -1017,7 +1019,7 @@ def test_exec_zellij_wrapped_workdash_replaces_process_with_layout(
     monkeypatch.setenv("SHELL", "/opt/homebrew/bin/nu")
 
     with pytest.raises(SystemExit):
-        exec_zellij_wrapped_workdash(["--refresh"])
+        launcher_module.zellij.exec_zellij_wrapped_workdash(["--refresh"])
 
     assert exec_calls == [
         (
@@ -1070,7 +1072,7 @@ def test_exec_zellij_wrapped_workdash_preserves_module_invocation(
     monkeypatch.setattr(launcher_module.sys, "executable", "/usr/bin/python3.12")
 
     with pytest.raises(SystemExit):
-        exec_zellij_wrapped_workdash(["--refresh"])
+        launcher_module.zellij.exec_zellij_wrapped_workdash(["--refresh"])
 
     with open(exec_calls[0][1][2], encoding="utf-8") as layout_file:
         layout = layout_file.read()
@@ -1105,7 +1107,7 @@ def test_exec_zellij_wrapped_workdash_preserves_workdash_module_invocation(
     monkeypatch.setenv("SHELL", "/bin/bash")
 
     with pytest.raises(SystemExit):
-        exec_zellij_wrapped_workdash(["--refresh"])
+        launcher_module.zellij.exec_zellij_wrapped_workdash(["--refresh"])
 
     with open(exec_calls[0][1][2], encoding="utf-8") as layout_file:
         layout = layout_file.read()
@@ -1128,7 +1130,7 @@ def test_exec_zellij_wrapped_workdash_reports_exec_failure(
     )
 
     with pytest.raises(RuntimeError, match="failed to start zellij: permission denied"):
-        exec_zellij_wrapped_workdash([])
+        launcher_module.zellij.exec_zellij_wrapped_workdash([])
 
 
 def test_exec_zellij_wrapped_workdash_reports_missing_zellij(
@@ -1137,7 +1139,7 @@ def test_exec_zellij_wrapped_workdash_reports_missing_zellij(
     monkeypatch.setattr(shutil, "which", lambda cmd: None)
 
     with pytest.raises(RuntimeError, match="zellij is not installed or not configured"):
-        exec_zellij_wrapped_workdash([])
+        launcher_module.zellij.exec_zellij_wrapped_workdash([])
 
 
 def test_build_launch_agent_prompt_includes_required_metadata_and_non_start_instruction() -> None:
@@ -1429,3 +1431,58 @@ def test_launch_vscode_context_rejects_empty_repo_path() -> None:
 def test_launch_vscode_context_rejects_empty_prompt() -> None:
     with pytest.raises(ValueError, match="Prompt must be a non-empty string"):
         executor.launch_vscode("/tmp/repo", "  ")
+
+
+def test_independent_zellij_uses_its_own_operations(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    instance = launcher_module.Zellij()
+    instance.press_zellij_pane_enter = MagicMock()
+    instance.load_zellij_panes = MagicMock(
+        side_effect=[[], [{"id": 1, "tab_name": "group", "tab_id": 2}], [{"id": 3}]]
+    )
+    instance._toggle_zellij_pane_fullscreen = MagicMock()
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="terminal_3", stderr=""),
+    )
+
+    instance.send_zellij_pane_input("session", "terminal_3", "hello")
+    instance.press_zellij_pane_enter.assert_called_once_with("session", "terminal_3")
+
+    result = instance.launch_pane(
+        "/tmp",
+        ["echo", "hello"],
+        context="test",
+        work_action="code",
+        zellij_session="session",
+        group="group",
+    )
+    assert instance.load_zellij_panes.call_count == 3
+    assert result.pane_id == "terminal_3"
+
+    instance.open_viewer("session", ["viewer"])
+    instance._toggle_zellij_pane_fullscreen.assert_called_once_with("session", "terminal_3")
+
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "session")
+    monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
+    instance.load_zellij_panes.side_effect = [
+        [{"id": 3, "is_fullscreen": False}],
+        [{"id": 3, "is_fullscreen": True}],
+    ]
+    instance._toggle_zellij_pane_fullscreen.reset_mock()
+    with instance.zellij_fullscreen_pane():
+        pass
+    assert instance._toggle_zellij_pane_fullscreen.call_count == 2
+
+
+def test_terminal_launch_uses_public_zellij_operation(monkeypatch):
+    from unittest.mock import MagicMock
+
+    fake = MagicMock(spec=["launch_pane"])
+    monkeypatch.setattr(launcher_module, "zellij", fake)
+    result = launch_terminal_context("/tmp/repo", zellij_session="workdash-main")
+    assert result is fake.launch_pane.return_value
+    fake.launch_pane.assert_called_once()

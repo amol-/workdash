@@ -70,17 +70,7 @@ def _run_browser_open(
                 f"Failed to open {kind} via {command_name}: viewer requires an active Zellij session."
             )
         try:
-            zellij = _resolve_zellij_binary()
-            completed = subprocess.run(
-                [zellij, "--session", session, "action", "new-pane", "--", *command_tokens, target],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            pane_id = completed.stdout.strip()
-            if not pane_id.startswith("terminal_"):
-                raise RuntimeError("Zellij did not return the viewer pane ID.")
-            _toggle_zellij_pane_fullscreen(session, pane_id)
+            zellij.open_viewer(session, [*command_tokens, target])
         except subprocess.CalledProcessError as error:
             details = (error.stderr or "").strip() or (error.stdout or "").strip()
             raise RuntimeError(
@@ -206,82 +196,6 @@ def _resolve_zellij_binary() -> str:
     return zellij
 
 
-def exec_zellij_wrapped_workdash(argv: Sequence[str] | None) -> NoReturn:
-    zellij = _resolve_zellij_binary()
-
-    original_args = list(argv) if argv is not None else sys.argv[1:]
-    session_name = f"workdash-{secrets.token_hex(4)}"
-    workdash_command = _build_direct_workdash_command(original_args)
-    layout_path = _write_zellij_startup_layout(workdash_command, session_name=session_name)
-    command = [zellij, "--layout", layout_path]
-    try:
-        os.execvp(zellij, command)
-    except OSError as error:
-        raise RuntimeError(f"failed to start zellij: {error}") from error
-    raise AssertionError("os.execvp returned unexpectedly")
-
-
-def list_workdash_sessions() -> list[str]:
-    zellij = _resolve_zellij_binary()
-    try:
-        completed = subprocess.run(
-            [zellij, "list-sessions", "--no-formatting"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as error:
-        details = (error.stderr or "").strip() or (error.stdout or "").strip()
-        if "no active zellij sessions found" in details.lower():
-            return []
-        raise RuntimeError(
-            f"Failed to list Zellij sessions: {details or error.returncode}"
-        ) from error
-
-    sessions = []
-    for line in completed.stdout.splitlines():
-        if "(EXITED" in line:
-            continue
-        session_name = line.split(" [Created ", maxsplit=1)[0].strip()
-        if session_name.startswith("workdash"):
-            sessions.append(session_name)
-    return sessions
-
-
-def load_zellij_panes(session: str) -> list[dict[str, object]]:
-    zellij = _resolve_zellij_binary()
-    try:
-        completed = subprocess.run(
-            [
-                zellij,
-                "--session",
-                session,
-                "action",
-                "list-panes",
-                "--json",
-                "--all",
-                "--command",
-                "--state",
-                "--tab",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as error:
-        details = (error.stderr or "").strip() or (error.stdout or "").strip()
-        raise RuntimeError(
-            f"Failed to list Zellij panes for {session}: {details or error.returncode}"
-        ) from error
-    try:
-        panes = json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
-        raise RuntimeError(f"Failed to parse Zellij pane JSON: {error.msg}") from error
-    if not isinstance(panes, list):
-        raise RuntimeError("Zellij pane JSON must be a list.")
-    return [pane for pane in panes if isinstance(pane, dict)]
-
-
 def is_live_zellij_pane(pane: dict[str, object]) -> bool:
     """Whether a listed pane is a running, visible terminal pane rather than a plugin or exit."""
 
@@ -290,140 +204,6 @@ def is_live_zellij_pane(pane: dict[str, object]) -> bool:
         and pane.get("exited") is not True
         and pane.get("is_held") is not True
     )
-
-
-@contextmanager
-def zellij_fullscreen_pane() -> Iterator[None]:
-    """Fill the surrounding Zellij pane while the block runs and restore its size afterwards.
-
-    Restores the pane only while it still fills the tab, so a pane the user sized
-    back during the block is left alone. Leaves the pane untouched when the caller
-    is not inside a Zellij pane, is already fullscreen, cannot have its pane state
-    read, or when filling the pane fails.
-    """
-    session = os.environ.get("ZELLIJ_SESSION_NAME", "").strip()
-    pane_id = os.environ.get("ZELLIJ_PANE_ID", "").strip()
-    pane = _find_zellij_pane(session, pane_id) if session and pane_id else None
-    if pane is None or pane.get("is_fullscreen"):
-        yield
-        return
-
-    try:
-        _toggle_zellij_pane_fullscreen(session, pane_id)
-    except RuntimeError:
-        yield
-        return
-
-    try:
-        yield
-    finally:
-        with suppress(RuntimeError):
-            pane = _find_zellij_pane(session, pane_id)
-            if pane is not None and pane.get("is_fullscreen"):
-                _toggle_zellij_pane_fullscreen(session, pane_id)
-
-
-def _find_zellij_pane(session: str, pane_id: str) -> dict[str, object] | None:
-    """Return the identified pane's state, or None when it cannot be read."""
-
-    try:
-        panes = load_zellij_panes(session)
-    except RuntimeError:
-        return None
-    return next(
-        (
-            pane
-            for pane in panes
-            if pane.get("is_plugin") is not True and str(pane.get("id")) == pane_id
-        ),
-        None,
-    )
-
-
-def _toggle_zellij_pane_fullscreen(session: str, pane_id: str) -> None:
-    """Toggle fullscreen for a Zellij pane by its ID."""
-
-    zellij = _resolve_zellij_binary()
-    try:
-        subprocess.run(
-            [zellij, "--session", session, "action", "toggle-fullscreen", "-p", pane_id],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as error:
-        details = (error.stderr or "").strip() or (error.stdout or "").strip()
-        raise RuntimeError(
-            f"Failed to toggle fullscreen for Zellij pane {pane_id} in {session}: "
-            f"{details or error.returncode}"
-        ) from error
-
-
-def dump_zellij_pane(session: str, pane_id: str, *, full: bool = False) -> str:
-    """Dump a Zellij pane viewport or scrollback."""
-
-    zellij = _resolve_zellij_binary()
-    command = [zellij, "--session", session, "action", "dump-screen", "--pane-id", pane_id]
-    if full:
-        command.append("--full")
-    try:
-        completed = subprocess.run(command, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as error:
-        details = (error.stderr or "").strip() or (error.stdout or "").strip()
-        raise RuntimeError(
-            f"Failed to dump Zellij pane {pane_id} in {session}: {details or error.returncode}"
-        ) from error
-    return completed.stdout
-
-
-def send_zellij_pane_input(session: str, pane_id: str, data: str, *, raw: bool = False) -> None:
-    """Send characters to a Zellij pane, optionally followed by Enter."""
-
-    zellij = _resolve_zellij_binary()
-    try:
-        subprocess.run(
-            [
-                zellij,
-                "--session",
-                session,
-                "action",
-                "write-chars",
-                "--pane-id",
-                pane_id,
-                "--",
-                data,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        if not raw:
-            press_zellij_pane_enter(session, pane_id)
-    except subprocess.CalledProcessError as error:
-        raise _pane_input_error(session, pane_id, error) from error
-
-
-def press_zellij_pane_enter(session: str, pane_id: str) -> None:
-    """Submit whatever the pane's input line already holds."""
-
-    try:
-        subprocess.run(
-            [
-                _resolve_zellij_binary(),
-                "--session",
-                session,
-                "action",
-                "send-keys",
-                "--pane-id",
-                pane_id,
-                "Enter",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as error:
-        raise _pane_input_error(session, pane_id, error) from error
 
 
 def _pane_input_error(
@@ -495,93 +275,6 @@ def _write_zellij_startup_layout(workdash_command: Sequence[str], *, session_nam
     ) as layout_file:
         layout_file.write(layout)
         return layout_file.name
-
-
-def _launch_zellij_command(
-    repo_path: str,
-    command: list[str],
-    *,
-    context: str,
-    work_action: str,
-    zellij_session: str | None = None,
-    group: str | None = None,
-) -> ZellijPaneLaunch:
-    target_session = (zellij_session or "").strip()
-    if not target_session and not os.getenv("ZELLIJ", "").strip():
-        raise RuntimeError(
-            f"{context}: terminal-backed work actions require an active Zellij session. "
-            "Start workdash normally, or run it inside Zellij."
-        )
-    zellij = _resolve_zellij_binary()
-    pane_title = _zellij_pane_name_for_work_action(work_action, repo_path)
-    before_panes = (
-        {_zellij_pane_identity(pane) for pane in load_zellij_panes(target_session)}
-        if target_session
-        else set()
-    )
-    tab_id = None
-    if group is not None:
-        if not target_session:
-            raise RuntimeError(f"{context}: grouping requires a selected Zellij session.")
-        panes = load_zellij_panes(target_session)
-        tab_id = next((pane.get("tab_id") for pane in panes if pane.get("tab_name") == group), None)
-        if tab_id is None:
-            try:
-                result = subprocess.run(
-                    [
-                        zellij,
-                        "--session",
-                        target_session,
-                        "action",
-                        "new-tab",
-                        f"--name={group}",
-                        "--no-focus",
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            except subprocess.CalledProcessError as error:
-                raise RuntimeError(
-                    f"{context}: {error.stderr.strip() or error.stdout.strip()}"
-                ) from error
-            tab_id = result.stdout.strip()
-            if not tab_id.isdigit():
-                raise RuntimeError(f"{context}: Zellij did not report the new tab ID.")
-    _run_launch_command(
-        _build_zellij_new_pane_command(
-            zellij,
-            repo_path,
-            command,
-            work_action=work_action,
-            zellij_session=target_session or None,
-            tab_id=tab_id,
-        ),
-        context=context,
-    )
-    pane_id = None
-    if target_session:
-        new_panes = [
-            pane
-            for pane in load_zellij_panes(target_session)
-            if pane.get("is_plugin") is not True and _zellij_pane_identity(pane) not in before_panes
-        ]
-        matching_panes = [
-            pane
-            for pane in new_panes
-            if pane.get("title") == pane_title
-            and isinstance(pane.get("pane_cwd"), str)
-            and os.path.realpath(str(pane.get("pane_cwd"))) == os.path.realpath(repo_path)
-        ]
-        candidates = matching_panes or new_panes
-        if len(candidates) == 1:
-            pane_id = _format_zellij_pane_id(candidates[0].get("id"))
-    return ZellijPaneLaunch(
-        session=target_session or None,
-        pane_id=pane_id,
-        pane_title=pane_title,
-        cwd=repo_path,
-    )
 
 
 def _build_zellij_new_pane_command(
@@ -725,7 +418,7 @@ def launch_terminal_context(
         raise ValueError("Repository path must be a non-empty string.")
     user_shell = os.environ.get("SHELL", "/bin/sh")
     shell_command = [user_shell, "-i"]
-    return _launch_zellij_command(
+    return zellij.launch_pane(
         repo_path,
         shell_command,
         context="Failed to launch terminal in zellij",
@@ -750,7 +443,7 @@ def launch_branchdiff_context(repo_path: str, item: WorkItem | None = None) -> Z
 
     user_shell = os.environ.get("SHELL", "/bin/sh")
     command = [user_shell, "-ic", shlex.join(branchdiff_command)]
-    return _launch_zellij_command(
+    return zellij.launch_pane(
         repo_path,
         command,
         context="Failed to launch branchdiff in zellij",
@@ -764,60 +457,378 @@ def _resolve_branchdiff_pr_base_ref(item: WorkItem) -> str:
     return f"{remote}/{base_ref_name}"
 
 
-def focus_zellij_pane(session: str, pane_id: str) -> None:
-    """Focus a Zellij pane by its ID using zellij action focus-pane-id.
+class Zellij:
+    """All Zellij interactions must go through this object."""
 
-    :param session: Zellij session name
-    :param pane_id: Pane ID to focus
-    :raises RuntimeError: If the focus command fails
-    """
-    zellij = _resolve_zellij_binary()
-    try:
-        subprocess.run(
-            [
-                zellij,
-                "--session",
-                session,
-                "action",
-                "focus-pane-id",
-                pane_id,
-            ],
+    def open_viewer(self, session: str, command: list[str]) -> None:
+        completed = subprocess.run(
+            [_resolve_zellij_binary(), "--session", session, "action", "new-pane", "--", *command],
             check=True,
             capture_output=True,
             text=True,
         )
-    except subprocess.CalledProcessError as error:
-        details = (error.stderr or "").strip() or (error.stdout or "").strip()
-        raise RuntimeError(
-            f"Failed to focus Zellij pane {pane_id} in {session}: {details or error.returncode}"
-        ) from error
+        pane_id = completed.stdout.strip()
+        if not pane_id.startswith("terminal_"):
+            raise RuntimeError("Zellij did not return the viewer pane ID.")
+        self._toggle_zellij_pane_fullscreen(session, pane_id)
 
+    @staticmethod
+    def exec_zellij_wrapped_workdash(argv: Sequence[str] | None) -> NoReturn:
+        zellij = _resolve_zellij_binary()
 
-def close_zellij_pane(session: str, pane_id: str) -> None:
-    """Close a Zellij pane by its ID using zellij action close-pane.
+        original_args = list(argv) if argv is not None else sys.argv[1:]
+        session_name = f"workdash-{secrets.token_hex(4)}"
+        workdash_command = _build_direct_workdash_command(original_args)
+        layout_path = _write_zellij_startup_layout(workdash_command, session_name=session_name)
+        command = [zellij, "--layout", layout_path]
+        try:
+            os.execvp(zellij, command)
+        except OSError as error:
+            raise RuntimeError(f"failed to start zellij: {error}") from error
+        raise AssertionError("os.execvp returned unexpectedly")
 
-    :param session: Zellij session name
-    :param pane_id: Pane ID to close
-    :raises RuntimeError: If the close command fails
-    """
-    zellij = _resolve_zellij_binary()
-    try:
-        subprocess.run(
-            [
-                zellij,
-                "--session",
-                session,
-                "action",
-                "close-pane",
-                "-p",
-                pane_id,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
+    @staticmethod
+    def list_workdash_sessions() -> list[str]:
+        zellij = _resolve_zellij_binary()
+        try:
+            completed = subprocess.run(
+                [zellij, "list-sessions", "--no-formatting"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as error:
+            details = (error.stderr or "").strip() or (error.stdout or "").strip()
+            if "no active zellij sessions found" in details.lower():
+                return []
+            raise RuntimeError(
+                f"Failed to list Zellij sessions: {details or error.returncode}"
+            ) from error
+
+        sessions = []
+        for line in completed.stdout.splitlines():
+            if "(EXITED" in line:
+                continue
+            session_name = line.split(" [Created ", maxsplit=1)[0].strip()
+            if session_name.startswith("workdash"):
+                sessions.append(session_name)
+        return sessions
+
+    @staticmethod
+    def load_zellij_panes(session: str) -> list[dict[str, object]]:
+        zellij = _resolve_zellij_binary()
+        try:
+            completed = subprocess.run(
+                [
+                    zellij,
+                    "--session",
+                    session,
+                    "action",
+                    "list-panes",
+                    "--json",
+                    "--all",
+                    "--command",
+                    "--state",
+                    "--tab",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as error:
+            details = (error.stderr or "").strip() or (error.stdout or "").strip()
+            raise RuntimeError(
+                f"Failed to list Zellij panes for {session}: {details or error.returncode}"
+            ) from error
+        try:
+            panes = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"Failed to parse Zellij pane JSON: {error.msg}") from error
+        if not isinstance(panes, list):
+            raise RuntimeError("Zellij pane JSON must be a list.")
+        return [pane for pane in panes if isinstance(pane, dict)]
+
+    @contextmanager
+    def zellij_fullscreen_pane(self) -> Iterator[None]:
+        """Fill the surrounding Zellij pane while the block runs and restore its size afterwards.
+
+        Restores the pane only while it still fills the tab, so a pane the user sized
+        back during the block is left alone. Leaves the pane untouched when the caller
+        is not inside a Zellij pane, is already fullscreen, cannot have its pane state
+        read, or when filling the pane fails.
+        """
+        session = os.environ.get("ZELLIJ_SESSION_NAME", "").strip()
+        pane_id = os.environ.get("ZELLIJ_PANE_ID", "").strip()
+        pane = self._find_zellij_pane(session, pane_id) if session and pane_id else None
+        if pane is None or pane.get("is_fullscreen"):
+            yield
+            return
+
+        try:
+            self._toggle_zellij_pane_fullscreen(session, pane_id)
+        except RuntimeError:
+            yield
+            return
+
+        try:
+            yield
+        finally:
+            with suppress(RuntimeError):
+                pane = self._find_zellij_pane(session, pane_id)
+                if pane is not None and pane.get("is_fullscreen"):
+                    self._toggle_zellij_pane_fullscreen(session, pane_id)
+
+    @staticmethod
+    def dump_zellij_pane(session: str, pane_id: str, *, full: bool = False) -> str:
+        """Dump a Zellij pane viewport or scrollback."""
+
+        zellij = _resolve_zellij_binary()
+        command = [zellij, "--session", session, "action", "dump-screen", "--pane-id", pane_id]
+        if full:
+            command.append("--full")
+        try:
+            completed = subprocess.run(command, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as error:
+            details = (error.stderr or "").strip() or (error.stdout or "").strip()
+            raise RuntimeError(
+                f"Failed to dump Zellij pane {pane_id} in {session}: {details or error.returncode}"
+            ) from error
+        return completed.stdout
+
+    def send_zellij_pane_input(
+        self, session: str, pane_id: str, data: str, *, raw: bool = False
+    ) -> None:
+        """Send characters to a Zellij pane, optionally followed by Enter."""
+
+        zellij = _resolve_zellij_binary()
+        try:
+            subprocess.run(
+                [
+                    zellij,
+                    "--session",
+                    session,
+                    "action",
+                    "write-chars",
+                    "--pane-id",
+                    pane_id,
+                    "--",
+                    data,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            if not raw:
+                self.press_zellij_pane_enter(session, pane_id)
+        except subprocess.CalledProcessError as error:
+            raise _pane_input_error(session, pane_id, error) from error
+
+    @staticmethod
+    def press_zellij_pane_enter(session: str, pane_id: str) -> None:
+        """Submit whatever the pane's input line already holds."""
+
+        try:
+            subprocess.run(
+                [
+                    _resolve_zellij_binary(),
+                    "--session",
+                    session,
+                    "action",
+                    "send-keys",
+                    "--pane-id",
+                    pane_id,
+                    "Enter",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as error:
+            raise _pane_input_error(session, pane_id, error) from error
+
+    def launch_pane(
+        self,
+        repo_path: str,
+        command: list[str],
+        *,
+        context: str,
+        work_action: str,
+        zellij_session: str | None = None,
+        group: str | None = None,
+    ) -> ZellijPaneLaunch:
+        target_session = (zellij_session or "").strip()
+        if not target_session and not os.getenv("ZELLIJ", "").strip():
+            raise RuntimeError(
+                f"{context}: terminal-backed work actions require an active Zellij session. "
+                "Start workdash normally, or run it inside Zellij."
+            )
+        zellij = _resolve_zellij_binary()
+        pane_title = _zellij_pane_name_for_work_action(work_action, repo_path)
+        before_panes = (
+            {_zellij_pane_identity(pane) for pane in self.load_zellij_panes(target_session)}
+            if target_session
+            else set()
         )
-    except subprocess.CalledProcessError as error:
-        details = (error.stderr or "").strip() or (error.stdout or "").strip()
-        raise RuntimeError(
-            f"Failed to close Zellij pane {pane_id} in {session}: {details or error.returncode}"
-        ) from error
+        tab_id = None
+        if group is not None:
+            if not target_session:
+                raise RuntimeError(f"{context}: grouping requires a selected Zellij session.")
+            panes = self.load_zellij_panes(target_session)
+            tab_id = next(
+                (pane.get("tab_id") for pane in panes if pane.get("tab_name") == group), None
+            )
+            if tab_id is None:
+                try:
+                    result = subprocess.run(
+                        [
+                            zellij,
+                            "--session",
+                            target_session,
+                            "action",
+                            "new-tab",
+                            f"--name={group}",
+                            "--no-focus",
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                except subprocess.CalledProcessError as error:
+                    raise RuntimeError(
+                        f"{context}: {error.stderr.strip() or error.stdout.strip()}"
+                    ) from error
+                tab_id = result.stdout.strip()
+                if not tab_id.isdigit():
+                    raise RuntimeError(f"{context}: Zellij did not report the new tab ID.")
+        _run_launch_command(
+            _build_zellij_new_pane_command(
+                zellij,
+                repo_path,
+                command,
+                work_action=work_action,
+                zellij_session=target_session or None,
+                tab_id=tab_id,
+            ),
+            context=context,
+        )
+        pane_id = None
+        if target_session:
+            new_panes = [
+                pane
+                for pane in self.load_zellij_panes(target_session)
+                if pane.get("is_plugin") is not True
+                and _zellij_pane_identity(pane) not in before_panes
+            ]
+            matching_panes = [
+                pane
+                for pane in new_panes
+                if pane.get("title") == pane_title
+                and isinstance(pane.get("pane_cwd"), str)
+                and os.path.realpath(str(pane.get("pane_cwd"))) == os.path.realpath(repo_path)
+            ]
+            candidates = matching_panes or new_panes
+            if len(candidates) == 1:
+                pane_id = _format_zellij_pane_id(candidates[0].get("id"))
+        return ZellijPaneLaunch(
+            session=target_session or None,
+            pane_id=pane_id,
+            pane_title=pane_title,
+            cwd=repo_path,
+        )
+
+    @staticmethod
+    def focus_zellij_pane(session: str, pane_id: str) -> None:
+        """Focus a Zellij pane by its ID using zellij action focus-pane-id.
+
+        :param session: Zellij session name
+        :param pane_id: Pane ID to focus
+        :raises RuntimeError: If the focus command fails
+        """
+        zellij = _resolve_zellij_binary()
+        try:
+            subprocess.run(
+                [
+                    zellij,
+                    "--session",
+                    session,
+                    "action",
+                    "focus-pane-id",
+                    pane_id,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as error:
+            details = (error.stderr or "").strip() or (error.stdout or "").strip()
+            raise RuntimeError(
+                f"Failed to focus Zellij pane {pane_id} in {session}: {details or error.returncode}"
+            ) from error
+
+    @staticmethod
+    def close_zellij_pane(session: str, pane_id: str) -> None:
+        """Close a Zellij pane by its ID using zellij action close-pane.
+
+        :param session: Zellij session name
+        :param pane_id: Pane ID to close
+        :raises RuntimeError: If the close command fails
+        """
+        zellij = _resolve_zellij_binary()
+        try:
+            subprocess.run(
+                [
+                    zellij,
+                    "--session",
+                    session,
+                    "action",
+                    "close-pane",
+                    "-p",
+                    pane_id,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as error:
+            details = (error.stderr or "").strip() or (error.stdout or "").strip()
+            raise RuntimeError(
+                f"Failed to close Zellij pane {pane_id} in {session}: {details or error.returncode}"
+            ) from error
+
+    def _find_zellij_pane(self, session: str, pane_id: str) -> dict[str, object] | None:
+        """Return the identified pane's state, or None when it cannot be read."""
+
+        try:
+            panes = self.load_zellij_panes(session)
+        except RuntimeError:
+            return None
+        return next(
+            (
+                pane
+                for pane in panes
+                if pane.get("is_plugin") is not True and str(pane.get("id")) == pane_id
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _toggle_zellij_pane_fullscreen(session: str, pane_id: str) -> None:
+        """Toggle fullscreen for a Zellij pane by its ID."""
+
+        zellij = _resolve_zellij_binary()
+        try:
+            subprocess.run(
+                [zellij, "--session", session, "action", "toggle-fullscreen", "-p", pane_id],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as error:
+            details = (error.stderr or "").strip() or (error.stdout or "").strip()
+            raise RuntimeError(
+                f"Failed to toggle fullscreen for Zellij pane {pane_id} in {session}: "
+                f"{details or error.returncode}"
+            ) from error
+
+
+zellij = Zellij()

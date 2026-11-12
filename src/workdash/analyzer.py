@@ -25,6 +25,13 @@ def _load_prompt_template(name: str) -> str:
 class Analyzer:
     """Generate analysis by collecting GitHub context and invoking a coding agent."""
 
+    def _run_analysis_command(
+        self, *, item: WorkItem, prompt: str, command_tokens: list[str], cwd: str | None
+    ) -> str:
+        return agent_execution.executor.analyze(
+            item=item, prompt=prompt, command_tokens=command_tokens, cwd=cwd
+        )
+
     def _collect_github_context(self, item: WorkItem) -> dict[str, Any]:
         return GithubHelper().fetch_analysis_context(item)
 

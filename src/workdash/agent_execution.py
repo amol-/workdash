@@ -31,7 +31,7 @@ class AgentExecution:
             raise ValueError("Agent command tokens must be a non-empty list of non-empty strings.")
         user_shell = os.environ.get("SHELL", "/bin/sh")
         agent_command = [user_shell, "-ic", shlex.join([*agent_command_tokens, prompt])]
-        return launcher._launch_zellij_command(
+        return launcher.zellij.launch_pane(
             repo_path,
             agent_command,
             context="Failed to launch coding agent in zellij",

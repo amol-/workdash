@@ -47,7 +47,6 @@ def _run_workdash(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     import workdash.control as control_module
-    import workdash.launcher as launcher_module
     import workdash.workdash as workdash_module
 
     workdir = scenario_state.get("workdir", "/tmp/workdash-bdd")
@@ -189,11 +188,6 @@ def _run_workdash(
 
         monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
         install_zellij_agent_fakes(scenario_state, monkeypatch)
-        monkeypatch.setattr(
-            launcher_module,
-            "load_zellij_panes",
-            lambda _session: list(scenario_state.get("panes", [])),
-        )
         if "known_worktree_path" in scenario_state:
             monkeypatch.setattr(
                 control_module,
@@ -222,7 +216,7 @@ def _run_workdash(
             ),
         )
         monkeypatch.setattr(
-            control_module,
+            control_module.launcher.zellij,
             "dump_zellij_pane",
             lambda session, pane_id, *, full=False: (
                 scenario_state.setdefault("pane_content_calls", []).append((session, pane_id, full))
@@ -236,8 +230,12 @@ def _run_workdash(
         def fake_close_zellij_pane(session, pane_id):
             scenario_state.setdefault("pane_close_calls", []).append((session, pane_id))
 
-        monkeypatch.setattr(control_module, "send_zellij_pane_input", fake_send_zellij_pane_input)
-        monkeypatch.setattr(control_module, "close_zellij_pane", fake_close_zellij_pane)
+        monkeypatch.setattr(
+            control_module.launcher.zellij, "send_zellij_pane_input", fake_send_zellij_pane_input
+        )
+        monkeypatch.setattr(
+            control_module.launcher.zellij, "close_zellij_pane", fake_close_zellij_pane
+        )
 
     monkeypatch.setattr(workdash_module.subprocess, "run", fake_run)
     if scenario_state.get("client_missing_tools"):
@@ -303,7 +301,7 @@ def _run_workdash(
         ),
     )
     monkeypatch.setattr(
-        workdash_module,
+        workdash_module.launcher.zellij,
         "list_workdash_sessions",
         lambda: list(scenario_state.get("sessions", [])),
     )

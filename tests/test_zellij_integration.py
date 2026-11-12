@@ -164,7 +164,7 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
 @pytest.mark.parametrize("tab_name", ["epic", "-foo"])
 def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, tab_name):
     from workdash.agent_execution import executor
-    from workdash.launcher import load_zellij_panes
+    from workdash.launcher import zellij as zellij_client
 
     zellij = shutil.which("zellij")
     name = f"workdash-group-test-{uuid.uuid4().hex}"
@@ -181,7 +181,7 @@ def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, 
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             try:
-                if load_zellij_panes(name):
+                if zellij_client.load_zellij_panes(name):
                     break
             except RuntimeError:
                 pass
@@ -194,7 +194,7 @@ def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, 
             launch = executor.launch(
                 str(path), "hello", ["/bin/sh", "-c", "sleep 120"], zellij_session=name, group=group
             )
-            panes = load_zellij_panes(name)
+            panes = zellij_client.load_zellij_panes(name)
             pane = next(
                 p
                 for p in panes

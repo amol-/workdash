@@ -166,7 +166,7 @@ def test_agent_panes_map_an_authored_pr_to_the_worktree_of_the_issue_it_closes(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(
-        control_module,
+        control_module.launcher.zellij,
         "load_zellij_panes",
         lambda _session: [
             {
@@ -318,7 +318,7 @@ def _post_ready(session: WorkdashSession, payload: dict[str, object]):
 def test_ready_api_reports_ready_work(monkeypatch, tmp_path) -> None:
     github = install_fake_github(monkeypatch)
     github.add_issue("testuser/todos#3")
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: [])
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _session: [])
 
     status, body = _post_ready(_ready_session(tmp_path), {"scope": "todo"})
 
@@ -338,7 +338,7 @@ def test_ready_api_reports_ready_work(monkeypatch, tmp_path) -> None:
 def test_ready_api_reports_a_scope_error(payload, status, code, monkeypatch, tmp_path) -> None:
     github = install_fake_github(monkeypatch)
     github.failures["ReadyRepositoryIssues"] = failure("GraphQL: Something went wrong")
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: [])
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _session: [])
 
     status_code, body = _post_ready(_ready_session(tmp_path), payload)
 
@@ -355,7 +355,7 @@ def test_ready_ids_resolve_to_the_same_items_code_acts_on(monkeypatch, tmp_path)
         closes=("owner/repo#42",),
         checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
     )
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: [])
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _session: [])
     session = _ready_session(tmp_path, repositories=("owner/repo",))
 
     ready = session.ready(scope="any")["items"]
@@ -391,7 +391,9 @@ def test_ready_leaves_out_the_pull_request_of_a_targeted_todo_an_agent_works_on(
         checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
     )
     panes: list[dict[str, object]] = []
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(panes))
+    monkeypatch.setattr(
+        control_module.launcher.zellij, "load_zellij_panes", lambda _session: list(panes)
+    )
     session = _ready_session(tmp_path)
 
     assert [item["id"] for item in session.ready(scope="owner/other")["items"]] == [
@@ -440,7 +442,7 @@ def test_ready_reads_github_outside_the_session_lock_and_panes_inside_it(
         return []
 
     monkeypatch.setattr(subprocess, "run", gh)
-    monkeypatch.setattr(control_module, "load_zellij_panes", load_panes)
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", load_panes)
 
     assert [item["id"] for item in session.ready(scope="owner/repo")["items"]] == [
         "owner/repo#ISSUE-1"
@@ -562,7 +564,9 @@ def _coding_session(
             or SimpleNamespace(session=None, pane_id=None, pane_title="code_owner_repo_1", cwd=repo)
         )
     )
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(panes))
+    monkeypatch.setattr(
+        control_module.launcher.zellij, "load_zellij_panes", lambda _session: list(panes)
+    )
     monkeypatch.setattr(control_module, "existing_worktree_path", lambda _wd, _item: worktree)
     monkeypatch.setattr(control_module, "ensure_worktree", ensure_worktree)
     monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
@@ -726,7 +730,9 @@ def test_code_waits_for_a_launched_agent_pane_that_zellij_lists_late(monkeypatch
     late_pane = {"id": 8, "title": "code_owner_repo_1", "pane_cwd": str(worktree)}
     # Listings: before launch, first check after launch, second check after launch.
     monkeypatch.setattr(
-        control_module, "load_zellij_panes", MagicMock(side_effect=[[], [], [late_pane]])
+        control_module.launcher.zellij,
+        "load_zellij_panes",
+        MagicMock(side_effect=[[], [], [late_pane]]),
     )
 
     result = session.code(target="owner/repo#ISSUE-1", agent="pi")
@@ -2240,7 +2246,7 @@ def test_dispatch_revalidates_and_retries_claimed_candidate(monkeypatch, tmp_pat
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
     github.add_issue("owner/repo#2")
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: [])
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _session: [])
     session = _ready_session(tmp_path)
     calls = []
 
@@ -2912,7 +2918,7 @@ def test_dispatch_rechecks_conflict_before_launch(monkeypatch, tmp_path):
     github.add_issue("owner/repo#1")
     pr = github.add_pull_request("owner/repo#51", closes=("owner/repo#1",), mergeable="CONFLICTING")
     session = _ready_session(tmp_path)
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _: [])
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: [])
     original = control_module.find_ready_work
 
     def find_then_resolve(**kwargs):
@@ -2937,7 +2943,7 @@ def test_dispatch_uses_cross_repo_pr_for_default_group(monkeypatch, tmp_path):
     github.add_pull_request(
         "owner/implementation#51", closes=("owner/parent#1",), mergeable="CONFLICTING"
     )
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _: [])
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: [])
     session = _ready_session(tmp_path)
     launch = MagicMock(return_value={"status": "launched", "pane_id": "terminal_1"})
     monkeypatch.setattr(session, "code", launch)
@@ -3174,7 +3180,9 @@ def test_dispatch_resumes_pushed_targeted_todo_branch(monkeypatch, tmp_path, cas
     monkeypatch.setattr(control_module, "GitHelper", repo_worktree.GitHelper)
     monkeypatch.setattr(repo_worktree, "GithubHelper", lambda: helper)
     panes = []
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(panes))
+    monkeypatch.setattr(
+        control_module.launcher.zellij, "load_zellij_panes", lambda _session: list(panes)
+    )
     launch.side_effect = lambda repo, *_args, **_kwargs: (
         panes.append({"id": 30, "title": "code_owner_other_todo_7", "pane_cwd": repo})
         or SimpleNamespace(
@@ -3324,18 +3332,22 @@ def test_session_analyzes_and_launches_coding_agent_with_real_executor(
     monkeypatch.setattr(control_module, "ensure_worktree", lambda *_: str(worktree))
     monkeypatch.setattr(control_module, "existing_worktree_path", lambda *_: worktree)
     monkeypatch.setattr(control_module, "get_merge_base", lambda *_: None)
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _: list(panes))
-    monkeypatch.setattr(launcher_module, "load_zellij_panes", lambda _: list(panes))
-    monkeypatch.setattr(launcher_module, "_resolve_zellij_binary", lambda: "zellij")
     monkeypatch.setattr("workdash.github.GithubHelper.fetch_analysis_context", lambda *_: {})
     monkeypatch.setattr("workdash.github.GithubHelper.fetch_launch_context", lambda *_: {})
     monkeypatch.setattr("workdash.agent_execution.subprocess.run", process)
 
-    def launch(command, *, context):
-        launches.append(command)
-        panes.append({"id": 30, "title": "code_owner_repo_1", "pane_cwd": str(worktree)})
+    fake_zellij = MagicMock()
+    fake_zellij.load_zellij_panes.side_effect = lambda _: list(panes)
 
-    monkeypatch.setattr(launcher_module, "_run_launch_command", launch)
+    def launch(repo, command, **kwargs):
+        launches.append((repo, command, kwargs))
+        panes.append({"id": 30, "title": "code_owner_repo_1", "pane_cwd": str(worktree)})
+        return launcher_module.ZellijPaneLaunch(
+            "workdash-main", "terminal_30", "code_owner_repo_1", repo
+        )
+
+    fake_zellij.launch_pane.side_effect = launch
+    monkeypatch.setattr(launcher_module, "zellij", fake_zellij)
 
     analysis = session.analyze(target="owner/repo#ISSUE-1", agent="pi")
     assert analysis["status"] == "generated"
@@ -3347,13 +3359,21 @@ def test_session_analyzes_and_launches_coding_agent_with_real_executor(
     assert "Implement the issue" in shlex.split(args[0][2])[2]
     assert kwargs["cwd"] == str(worktree)
 
-    coding = session.code(target="owner/repo#ISSUE-1", agent="pi")
+    coding = session.code(target="owner/repo#ISSUE-1", agent="pi", group="team")
     assert coding["status"] == "launched"
     assert coding["pane_id"] == "terminal_30"
     assert coding["cwd"] == str(worktree)
     assert len(launches) == 1
-    command = launches[0]
-    shell_command = shlex.split(command[command.index("-ic") + 1])
+    repo, command, kwargs = launches[0]
+    assert repo == str(worktree)
+    assert kwargs == {
+        "context": "Failed to launch coding agent in zellij",
+        "work_action": "code",
+        "zellij_session": "workdash-main",
+        "group": "team",
+    }
+    assert command[:2] == ["/bin/sh", "-ic"]
+    shell_command = shlex.split(command[2])
     assert shell_command[0] == "pi"
     assert "Implement the issue" in shell_command[1]
     assert analysis["url"] in shell_command[1]
@@ -3406,3 +3426,68 @@ def test_shared_agent_execution_can_simulate_analysis_and_coding(monkeypatch, tm
         ("code", str(worktree), "PROMPT", ["pi"], "workdash-main"),
         ("vscode", str(worktree), "PROMPT"),
     ]
+
+
+def test_zellij_replacement_tracks_terminal_lifecycle(monkeypatch, tmp_path):
+    class FakeZellij:
+        def __init__(self):
+            self.panes = {}
+            self.content = {}
+
+        def launch_pane(
+            self, repo_path, command, *, context, work_action, zellij_session, group=None
+        ):
+            pane_id = "terminal_1"
+            title = f"{work_action}_{Path(repo_path).name}"
+            self.panes[pane_id] = {"id": 1, "title": title, "pane_cwd": repo_path}
+            self.content[pane_id] = ""
+            return launcher_module.ZellijPaneLaunch(zellij_session, pane_id, title, repo_path)
+
+        def load_zellij_panes(self, session):
+            assert session == "workdash-test"
+            return list(self.panes.values())
+
+        def send_zellij_pane_input(self, session, pane_id, data, *, raw=False):
+            self.content[pane_id] += data + ("" if raw else "\n")
+
+        def dump_zellij_pane(self, session, pane_id, *, full=False):
+            return self.content[pane_id]
+
+        def close_zellij_pane(self, session, pane_id):
+            del self.panes[pane_id]
+
+    fake = FakeZellij()
+    monkeypatch.setattr(launcher_module, "zellij", fake)
+    monkeypatch.setattr(control_module, "ensure_worktree", lambda *args: str(tmp_path))
+    item = _work_item(number=1, title="Task")
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="workdash-test",
+    )
+    launch = session.terminal(target="owner/repo#ISSUE-1")
+    pane_id = launch["pane_id"]
+    assert [pane["pane_id"] for pane in session.info()["panes"]] == [pane_id]
+    session.pane_send(pane_id=pane_id, data="hello")
+    assert session.pane_content(pane_id=pane_id)["content"] == "hello\n"
+    session.pane_close(pane_id=pane_id)
+    assert session.info()["panes"] == []
+
+
+def test_review_compatibility_delegates_raw_output_to_current_executor(monkeypatch):
+    from workdash import agent_execution
+    from workdash.analyzer import Analyzer
+
+    item = _work_item(number=1, title="Task")
+    fake = MagicMock()
+    fake.analyze.return_value = "  raw output\n"
+    monkeypatch.setattr(agent_execution, "executor", fake)
+    result = Analyzer()._run_analysis_command(
+        item=item, prompt="review prompt", command_tokens=["agent", "-p"], cwd="/tmp"
+    )
+    assert result == "  raw output\n"
+    fake.analyze.assert_called_once_with(
+        item=item, prompt="review prompt", command_tokens=["agent", "-p"], cwd="/tmp"
+    )
