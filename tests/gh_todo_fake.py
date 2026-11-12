@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import subprocess
 
-from workdash.todo import TODO_LABEL
+from workdash.github_client import TODO_LABEL
 
 TODO_REPOSITORY = "testuser/todos"
 TODO_ISSUE_NUMBER = 110

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from workdash import branchinfo
+from workdash.github_client import GitHubClient
 from workdash.models import ci_status_symbol
 
 
@@ -74,7 +75,7 @@ def test_fetch_pull_request_returns_none_when_gh_reports_no_pull_request(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    assert branchinfo._fetch_pull_request("owner/repo", "feature") is None
+    assert GitHubClient().branch_pull_request("owner/repo", "feature") is None
 
 
 @pytest.mark.parametrize("state", ["OPEN", "MERGED", "CLOSED"])
@@ -89,7 +90,7 @@ def test_fetch_pull_request_reports_the_branch_pull_request_whatever_its_state(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    pull_request = branchinfo._fetch_pull_request("owner/repo", "feature")
+    pull_request = GitHubClient().branch_pull_request("owner/repo", "feature")
 
     assert pull_request is not None
     assert pull_request.number == 1
@@ -105,7 +106,7 @@ def test_fetch_pull_request_raises_on_a_genuine_gh_failure(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="authentication required"):
-        branchinfo._fetch_pull_request("owner/repo", "feature")
+        GitHubClient().branch_pull_request("owner/repo", "feature")
 
 
 def test_fetch_ci_and_closing_issues_combines_both_selections_in_one_gh_call(
@@ -137,7 +138,7 @@ def test_fetch_ci_and_closing_issues_combines_both_selections_in_one_gh_call(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     ci_state, review_decision, review_requested, closing_issues = (
-        branchinfo._fetch_ci_and_closing_issues("owner/repo", 5)
+        GitHubClient().branch_ci_and_closing_issues("owner/repo", 5)
     )
 
     assert len(calls) == 1
@@ -156,7 +157,7 @@ def test_fetch_ci_and_closing_issues_raises_on_a_genuine_gh_failure(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="authentication required"):
-        branchinfo._fetch_ci_and_closing_issues("owner/repo", 5)
+        GitHubClient().branch_ci_and_closing_issues("owner/repo", 5)
 
 
 def test_fetch_ci_and_closing_issues_raises_on_malformed_json(
@@ -168,7 +169,7 @@ def test_fetch_ci_and_closing_issues_raises_on_malformed_json(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="Failed to parse gh"):
-        branchinfo._fetch_ci_and_closing_issues("owner/repo", 5)
+        GitHubClient().branch_ci_and_closing_issues("owner/repo", 5)
 
 
 def test_fetch_ci_and_closing_issues_guards_against_a_response_missing_pull_request(
@@ -183,7 +184,7 @@ def test_fetch_ci_and_closing_issues_guards_against_a_response_missing_pull_requ
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="missing pullRequest"):
-        branchinfo._fetch_ci_and_closing_issues("owner/repo", 5)
+        GitHubClient().branch_ci_and_closing_issues("owner/repo", 5)
 
 
 def test_fetch_ci_and_closing_issues_guards_against_malformed_closing_issues_references(
@@ -207,7 +208,7 @@ def test_fetch_ci_and_closing_issues_guards_against_malformed_closing_issues_ref
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="missing closingIssuesReferences"):
-        branchinfo._fetch_ci_and_closing_issues("owner/repo", 5)
+        GitHubClient().branch_ci_and_closing_issues("owner/repo", 5)
 
 
 def test_linked_issues_keeps_every_same_repo_issue_lowest_number_first() -> None:
@@ -246,7 +247,7 @@ def test_fetch_issue_reads_title_url_and_state(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    issue = branchinfo._fetch_issue("owner/repo", 4)
+    issue = GitHubClient().branch_issue("owner/repo", 4)
 
     assert issue.title == "Bug"
     assert issue.url == "https://github.com/owner/repo/issues/4"

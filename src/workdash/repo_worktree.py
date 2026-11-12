@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 from .git import GitHelper
-from .github import GithubHelper
+from .github_client import GitHubClient
 from .models import WorkItem, WorkItemType, accepted_worktree_numbers, worktree_item_number
 
 _ISSUE_BRANCH_RE = re.compile(r"^issue-(\d+)$")
@@ -72,7 +72,7 @@ def existing_worktree_path(
     return None
 
 
-def ensure_worktree(workdir: str, item: WorkItem) -> str:
+def ensure_worktree(workdir: str, item: WorkItem, *, github_client=None) -> str:
     """Ensure a worktree exists for the given work item and return its path.
 
     Clones the repository if it does not exist locally, fetches the latest
@@ -82,6 +82,7 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
     :param WorkItem item: The work item to prepare a worktree for.
     """
     git = GitHelper()
+    github = github_client if github_client is not None else GitHubClient()
     existing = existing_worktree_path(workdir, item)
     if existing is not None:
         # Local divergence or missing upstream shouldn't block the user.
@@ -101,7 +102,7 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
         head_ref = ""
         branch = f"wt-{item.number}"
     elif item.item_type == WorkItemType.PR:
-        head_ref, head_repo = GithubHelper().fetch_worktree_head(item)
+        head_ref, head_repo = github.fetch_worktree_head(item)
         repo = head_repo
         branch = head_ref
     else:
@@ -129,7 +130,7 @@ def ensure_worktree(workdir: str, item: WorkItem) -> str:
         if todo_target is not None and ":" in repo:
             git.clone_repository(repo, main)
         else:
-            GithubHelper().clone_repository(repo, main)
+            github.clone_repository(repo, main)
     git.fetch_remote(main, "origin")
     git.fast_forward_default_branch(main)
     if item.item_type == WorkItemType.PR:

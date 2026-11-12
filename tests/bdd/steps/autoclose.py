@@ -42,11 +42,10 @@ def _install_supervision(
     worktree = tmp_path / "owner_repo_42"
     worktree.mkdir(parents=True, exist_ok=True)
     existing = scenario_state.get("existing_worktree")
-    monkeypatch.setattr(control_module, "ensure_worktree", lambda *_: str(worktree))
+    monkeypatch.setattr(control_module, "ensure_worktree", lambda *_, **_kwargs: str(worktree))
     monkeypatch.setattr(
-        control_module,
-        "GithubHelper",
-        lambda: SimpleNamespace(fetch_worktree_head=lambda item: ("pr-branch", item.repo)),
+        "workdash.github_client.GitHubClient.fetch_worktree_head",
+        lambda self, item: ("pr-branch", item.repo),
     )
     monkeypatch.setattr(
         control_module,

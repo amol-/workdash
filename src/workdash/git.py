@@ -489,3 +489,17 @@ class GitHelper:
         if len(parts) < 2:
             return ""
         return f"{parts[-2]}/{parts[-1]}"
+
+
+_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+
+
+def is_repository_name(value: str) -> bool:
+    """Report whether ``value`` names a repository as ``owner/repo``."""
+
+    return bool(_REPOSITORY_RE.match(value))
+
+
+def is_todo_target(value: str) -> bool:
+    """Accept GitHub repository names and supported Git remote URLs for todos."""
+    return is_repository_name(value) or GitHelper.repository_identity(value) is not None

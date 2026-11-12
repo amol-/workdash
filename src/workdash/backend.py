@@ -87,7 +87,7 @@ class WorkdashBackend:
         self.analysis_cache = (
             analysis_cache if analysis_cache is not None else AnalysisCache(cache_root)
         )
-        self.analyzer = analyzer if analyzer is not None else Analyzer()
+        self.analyzer = analyzer if analyzer is not None else Analyzer(self.github_client)
         self.config = config if config is not None else WorkdashConfig()
         self.included_items_store = (
             included_items_store

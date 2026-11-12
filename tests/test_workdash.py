@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import workdash.control as control_module
+import workdash.github_client as github_client_module
 import workdash.workdash as workdash_module
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
@@ -31,7 +32,7 @@ _VALID_CONFIG = WorkdashConfig(
 
 
 def _auth_status_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(workdash_module.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(github_client_module.subprocess, "run", lambda *args, **kwargs: None)
 
 
 def _git_origin_proves(monkeypatch: pytest.MonkeyPatch, worktree: object, repo: str) -> None:
@@ -49,7 +50,7 @@ def _git_origin_proves(monkeypatch: pytest.MonkeyPatch, worktree: object, repo: 
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
         raise AssertionError(f"Unexpected command: {cmd}")
 
-    monkeypatch.setattr(workdash_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(github_client_module.subprocess, "run", fake_run)
 
 
 def _issue(repo: str = "owner/repo", number: int = 1) -> WorkItem:
@@ -95,7 +96,7 @@ def test_main_prints_loading_message_before_tui_start(
             calls["run"] = True
             calls["mouse"] = mouse
 
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
@@ -133,7 +134,7 @@ def test_main_bare_interactive_uses_own_zellij_session_from_environment(
         def run(self, *, mouse: bool) -> None:
             pass
 
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
@@ -208,7 +209,7 @@ def test_main_server_refresh_before_tui_run_updates_session_and_repaints_when_ru
             session.list_items(refresh=True)
             captured["app_ran"] = True
 
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
@@ -276,7 +277,7 @@ def test_main_server_refresh_callback_reraises_unrelated_runtime_errors(
             session = captured["app_session"]
             session.items_changed_callback()
 
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
@@ -328,7 +329,7 @@ def test_main_passes_configured_agent_choices_and_shared_viewer_to_tui(
         def run(self, *, mouse: bool) -> None:
             return None
 
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
     _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: config)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
@@ -380,7 +381,7 @@ def test_main_tui_analyze_callback_uses_worktree_and_backend(
 
     class FakeBackend:
         def __init__(self, config=None, **kwargs) -> None:
-            pass
+            self.github_client = object()
 
         def load_items(self, progress_callback=None):
             assert progress_callback is not None
@@ -401,11 +402,11 @@ def test_main_tui_analyze_callback_uses_worktree_and_backend(
         def run(self, *, mouse: bool) -> None:
             return None
 
-    def fake_ensure_worktree(workdir, item):
+    def fake_ensure_worktree(workdir, item, **_kwargs):
         ensure_calls.append((workdir, item))
         return "/tmp/worktree"
 
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
@@ -472,7 +473,7 @@ def test_print_server_backed_list_uses_display_type_without_changing_id(
 def test_main_exits_with_error_when_gh_is_not_installed(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setenv("ZELLIJ", "0")
 
@@ -486,7 +487,7 @@ def test_main_exits_with_error_when_gh_is_not_installed(
 def test_main_exits_with_error_when_config_incomplete(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: WorkdashConfig())
     monkeypatch.setenv("ZELLIJ", "0")
@@ -505,7 +506,7 @@ def test_main_rejects_missing_or_malformed_viewer_before_zellij_wrapping(
 ) -> None:
     config = replace(_VALID_CONFIG, open_command=command)
 
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: config)
     monkeypatch.setattr(
@@ -553,7 +554,7 @@ def test_main_exits_with_config_guidance_when_startup_config_command_is_malforme
         def __init__(self, config=None, **kwargs) -> None:  # pragma: no cover - should not run
             raise AssertionError("backend should not load invalid runtime config")
 
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: config)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
@@ -732,9 +733,9 @@ def test_main_server_backed_commands_are_pure_http_clients(
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
     monkeypatch.setattr(
-        workdash_module,
-        "_check_gh_preflight",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected GitHub preflight")),
+        workdash_module.GitHubClient,
+        "check_authentication",
+        lambda self: (_ for _ in ()).throw(AssertionError("unexpected GitHub preflight")),
     )
     monkeypatch.setattr(
         workdash_module,
@@ -1334,16 +1335,16 @@ def test_main_configure_runs_setup_and_exits(
 ) -> None:
     configure_called = False
 
-    def fake_configure():
+    def fake_configure(*, github_client):
         nonlocal configure_called
         configure_called = True
         return _VALID_CONFIG
 
     monkeypatch.setattr(workdash_module, "configure", fake_configure)
     monkeypatch.setattr(
-        workdash_module,
-        "_check_gh_preflight",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected gh preflight")),
+        workdash_module.GitHubClient,
+        "check_authentication",
+        lambda self: (_ for _ in ()).throw(AssertionError("unexpected gh preflight")),
     )
 
     exit_code = workdash_module.main(["--configure"])
@@ -1357,9 +1358,9 @@ def test_main_help_and_version_exit_without_gh_preflight(
     monkeypatch: pytest.MonkeyPatch, argv: list[str]
 ) -> None:
     monkeypatch.setattr(
-        workdash_module,
-        "_check_gh_preflight",
-        lambda: (_ for _ in ()).throw(AssertionError("unexpected gh preflight")),
+        workdash_module.GitHubClient,
+        "check_authentication",
+        lambda self: (_ for _ in ()).throw(AssertionError("unexpected gh preflight")),
     )
 
     with pytest.raises(SystemExit) as error:
@@ -1378,7 +1379,7 @@ def test_main_outside_zellij_replaces_process_with_zellij(
         raise SystemExit(0)
 
     monkeypatch.delenv("ZELLIJ", raising=False)
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "exec_zellij_wrapped_workdash", fake_wrapper)
@@ -1393,7 +1394,7 @@ def test_main_direct_mode_bypasses_zellij_wrapper(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.delenv("ZELLIJ", raising=False)
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(
         workdash_module.os,
@@ -1411,10 +1412,10 @@ def test_main_exits_with_error_when_gh_is_not_authenticated(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     def fake_run(*args, **kwargs):
-        raise workdash_module.subprocess.CalledProcessError(1, ["gh", "auth", "status"])
+        raise github_client_module.subprocess.CalledProcessError(1, ["gh", "auth", "status"])
 
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
-    monkeypatch.setattr(workdash_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    monkeypatch.setattr(github_client_module.subprocess, "run", fake_run)
     monkeypatch.setenv("ZELLIJ", "0")
 
     exit_code = workdash_module.main([])
@@ -1435,7 +1436,7 @@ def test_main_outside_zellij_checks_gh_before_replacing_process(
     wrapper_calls: list[object] = []
 
     monkeypatch.delenv("ZELLIJ", raising=False)
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: None)
     monkeypatch.setattr(workdash_module, "exec_zellij_wrapped_workdash", wrapper_calls.append)
 
     exit_code = workdash_module.main([])
@@ -1450,7 +1451,7 @@ def test_main_outside_zellij_reports_missing_zellij(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.delenv("ZELLIJ", raising=False)
-    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr("workdash.launcher.shutil.which", lambda cmd: None)
 
@@ -1489,6 +1490,9 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
 
     class FakeBackend:
         def __init__(self, config=None, **kwargs) -> None:
+            from workdash.github_client import GitHubClient
+
+            self.github_client = GitHubClient()
             self.analysis_cache = type(
                 "_C", (), {"build_analysis_path": staticmethod(lambda _i: "/x")}
             )()
@@ -1509,7 +1513,7 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
         def run(self, *, mouse: bool) -> None:
             return None
 
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
     from gh_work_state_fake import install_fake_github
 
@@ -1518,7 +1522,7 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
-    monkeypatch.setattr(control_module, "ensure_worktree", lambda _wd, _item: "/tmp/wt")
+    monkeypatch.setattr(control_module, "ensure_worktree", lambda _wd, _item, **_kwargs: "/tmp/wt")
     monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
     monkeypatch.setattr(
         control_module,
@@ -1586,6 +1590,9 @@ def test_main_launch_callback_raises_on_unknown_tool(
 
     class FakeBackend:
         def __init__(self, config=None, **kwargs) -> None:
+            from workdash.github_client import GitHubClient
+
+            self.github_client = GitHubClient()
             self.analysis_cache = type(
                 "_C", (), {"build_analysis_path": staticmethod(lambda _i: "/x")}
             )()
@@ -1606,12 +1613,12 @@ def test_main_launch_callback_raises_on_unknown_tool(
         def run(self, *, mouse: bool) -> None:
             return None
 
-    monkeypatch.setattr(workdash_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
-    monkeypatch.setattr(control_module, "ensure_worktree", lambda _wd, _item: "/tmp/wt")
+    monkeypatch.setattr(control_module, "ensure_worktree", lambda _wd, _item, **_kwargs: "/tmp/wt")
     monkeypatch.setenv("ZELLIJ", "0")
 
     assert workdash_module.main([]) == 0
@@ -1711,7 +1718,9 @@ def test_main_rejects_invalid_listeners_before_loading_local_state(
     def unexpected_preflight():
         raise AssertionError("invalid CLI reached GitHub preflight")
 
-    monkeypatch.setattr(workdash_module, "_check_gh_preflight", unexpected_preflight)
+    monkeypatch.setattr(
+        workdash_module.GitHubClient, "check_authentication", lambda self: unexpected_preflight()
+    )
     with pytest.raises(SystemExit) as error:
         workdash_module.main(argv)
     assert error.value.code == 2
@@ -1721,7 +1730,7 @@ def test_main_rejects_invalid_listeners_before_loading_local_state(
 def test_server_listener_flags_reach_the_zellij_dashboard(monkeypatch, tmp_path) -> None:
     import workdash.launcher as launcher_module
 
-    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(launcher_module, "_resolve_zellij_binary", lambda: "/usr/bin/zellij")
     monkeypatch.delenv("ZELLIJ", raising=False)
@@ -1841,7 +1850,7 @@ def test_server_inside_zellij_requires_current_session_name(monkeypatch, capsys)
 
     backend = MagicMock()
     backend.load_items.return_value = ([], {})
-    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", lambda **kwargs: backend)
     monkeypatch.setattr(
@@ -1861,7 +1870,7 @@ def test_server_outside_zellij_selects_single_existing_workdash_session(monkeypa
     backend = MagicMock()
     backend.load_items.return_value = ([], {})
     sessions = []
-    monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", lambda **kwargs: backend)
     monkeypatch.setattr(workdash_module, "list_workdash_sessions", lambda: ["workdash-existing"])
@@ -1880,7 +1889,9 @@ def test_server_outside_zellij_selects_single_existing_workdash_session(monkeypa
 def test_version_writes_to_stdout_without_preflight(monkeypatch, capsys):
     monkeypatch.setenv("WORKDASH_HOST", "invalid:port")
     monkeypatch.setattr(
-        workdash_module, "_check_gh_preflight", lambda: pytest.fail("unexpected preflight")
+        workdash_module.GitHubClient,
+        "check_authentication",
+        lambda self: pytest.fail("unexpected preflight"),
     )
     with pytest.raises(SystemExit) as error:
         workdash_module.main(["--version"])

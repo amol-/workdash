@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_context import render_github_context
-from .github import GithubHelper
+from .github_client import GitHubClient
 from .models import WorkItem, WorkItemType
 
 logger = logging.getLogger(__name__)
@@ -26,13 +26,16 @@ def _load_prompt_template(name: str) -> str:
 class Analyzer:
     """Generate analysis by collecting GitHub context and invoking a coding agent."""
 
+    def __init__(self, github_client: GitHubClient | None = None) -> None:
+        self.github_client = github_client if github_client is not None else GitHubClient()
+
     def _collect_github_context(self, item: WorkItem) -> dict[str, Any]:
-        return GithubHelper().fetch_analysis_context(item)
+        return self.github_client.fetch_analysis_context(item)
 
     def _fetch_pr_diff(self, item: WorkItem) -> str:
         """Fetch the unified diff for a pull request via ``gh pr diff``."""
 
-        return GithubHelper().fetch_diff(item)
+        return self.github_client.fetch_diff(item)
 
     def _build_agent_prompt(
         self,

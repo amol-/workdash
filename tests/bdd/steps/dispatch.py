@@ -10,8 +10,8 @@ from threading import Barrier
 from pytest_bdd import given, parsers, then, when
 
 from gh_work_state_fake import AFTER_PUSH, HEAD_SHA, check_run, comment, failure
+from workdash.github_client import GitHubClient
 from workdash.work_instruction import render_work_instruction
-from workdash.work_state import evaluate_pull_requests
 
 from .cli_orchestration import _run_workdash
 
@@ -136,16 +136,14 @@ def _conflict(scenario_state):
 
 @given("the conflict is resolved after ready selection but before dispatch launch")
 def _resolve(scenario_state, monkeypatch):
-    import workdash.control as control
+    find = GitHubClient.find_ready_work
 
-    find = control.find_ready_work
-
-    def resolve(**kwargs):
-        result = find(**kwargs)
+    def resolve(self, **kwargs):
+        result = find(self, **kwargs)
         scenario_state["github"].pull_requests["owner/repo#51"]["mergeable"] = "MERGEABLE"
         return result
 
-    monkeypatch.setattr(control, "find_ready_work", resolve)
+    monkeypatch.setattr(GitHubClient, "find_ready_work", resolve)
 
 
 @given("the conflict is resolved after eligibility is rechecked but before coding reads GitHub")
@@ -244,7 +242,7 @@ def _pr_launch(scenario_state):
 @then("the agent is told to fix the failing checks using the same instruction as autoclose")
 def _fix_ci(scenario_state):
     session = scenario_state["api_session"]
-    [state] = evaluate_pull_requests(
+    [state] = GitHubClient().evaluate_pull_requests(
         [("owner/repo", 51)],
         github_username=session.config.github_username,
         todo_repository=session.config.todo_repository,
@@ -370,7 +368,9 @@ def _concurrent(scenario_state, monkeypatch, tmp_path):
         return directory
 
     monkeypatch.setattr(control, "existing_worktree_path", path)
-    monkeypatch.setattr(control, "ensure_worktree", lambda workdir, item: str(path(workdir, item)))
+    monkeypatch.setattr(
+        control, "ensure_worktree", lambda workdir, item, **_kwargs: str(path(workdir, item))
+    )
     monkeypatch.setattr(control, "get_merge_base", lambda _: None)
     monkeypatch.setattr(control, "prepare_launch_agent_prompt", lambda *a, **kw: "PROMPT")
     ready = session._ready

@@ -24,8 +24,7 @@ from .autoclose import AutocloseSupervisor
 from .autodispatch import _AutodispatchSession, _format_pane_id
 from .backend import IncludeResult, SuggestionMarkers, WorkdashBackend, compute_suggestion_markers
 from .config import WorkdashConfig
-from .git import GitHelper
-from .github import GithubHelper
+from .git import GitHelper, is_repository_name, is_todo_target
 from .github_client import parse_github_item_url
 from .launcher import (
     _zellij_pane_name_for_work_action,
@@ -49,9 +48,8 @@ from .models import (
 )
 from .repo_resolver import validate_repository_selectors
 from .repo_worktree import ensure_worktree, existing_worktree_path, get_merge_base, main_repo_path
-from .todo import create_todo, is_repository_name, is_todo_target
 from .work_instruction import autostart_briefing
-from .work_state import ReadyWork, find_ready_work, work_pull_request
+from .work_state import ReadyWork
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8765
@@ -122,7 +120,9 @@ class WorkdashSession:
         self._lock = threading.RLock()
         # Normalized worktree path -> monotonic deadline of an unconfirmed agent launch.
         self._unconfirmed_launches: dict[str, float] = {}
-        self.autoclose = AutocloseSupervisor(config=config, lock=self._lock)
+        self.autoclose = AutocloseSupervisor(
+            config=config, lock=self._lock, github_client=getattr(backend, "github_client", None)
+        )
         self._autodispatch_lock = threading.RLock()
         self._autodispatch: dict[str, _AutodispatchSession] = {}
 
@@ -212,7 +212,7 @@ class WorkdashSession:
                 f"The todo target {target!r} must be a GitHub owner/repo or a supported git URL.",
                 status=HTTPStatus.BAD_REQUEST,
             )
-        item = create_todo(
+        item = self.backend.github_client.create_todo(
             todo_repository=self.config.todo_repository, text=todo_text, target=target, body=body
         )
         with self._lock:
@@ -344,7 +344,7 @@ class WorkdashSession:
         )
         if item.kind == WorkItemKind.AUTHORED_PR:
             try:
-                state = work_pull_request(
+                state = self.backend.github_client.work_pull_request(
                     item,
                     github_username=self.config.github_username,
                     todo_repository=self.config.todo_repository,
@@ -368,7 +368,7 @@ class WorkdashSession:
             and existing_worktree_path(self.config.workdir, item) is None
         ):
             try:
-                state = work_pull_request(
+                state = self.backend.github_client.work_pull_request(
                     item,
                     github_username=self.config.github_username,
                     todo_repository=self.config.todo_repository,
@@ -385,6 +385,7 @@ class WorkdashSession:
             try:
                 item, autostart_text = autostart_briefing(
                     item,
+                    github_client=self.backend.github_client,
                     github_username=self.config.github_username,
                     todo_repository=self.config.todo_repository,
                 )
@@ -396,7 +397,7 @@ class WorkdashSession:
                 ) from error
         selected_head = None
         if item.kind == WorkItemKind.AUTHORED_PR:
-            selected_head = GithubHelper().fetch_worktree_head(item)
+            selected_head = self.backend.github_client.fetch_worktree_head(item)
 
         def verify_selected_head(path: str | Path) -> None:
             if selected_head is not None:
@@ -430,7 +431,9 @@ class WorkdashSession:
                     return claimed
             if repo_path is not None:
                 verify_selected_head(repo_path)
-            repo_path = ensure_worktree(self.config.workdir, item)
+            repo_path = ensure_worktree(
+                self.config.workdir, item, github_client=self.backend.github_client
+            )
             claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
             if claimed is not None:
                 return claimed
@@ -445,6 +448,7 @@ class WorkdashSession:
                     else None
                 ),
                 merge_base=get_merge_base(repo_path),
+                github_client=self.backend.github_client,
             )
             if autostart:
                 prompt = f"{prompt.rstrip()}\n\n{autostart_text}"
@@ -569,7 +573,9 @@ class WorkdashSession:
         item = self._require_item(target)
         with self._lock:
             item_id = format_work_item_id(item)
-            repo_path = ensure_worktree(self.config.workdir, item)
+            repo_path = ensure_worktree(
+                self.config.workdir, item, github_client=self.backend.github_client
+            )
             launch = launch_terminal_context(
                 repo_path,
                 zellij_session=self.zellij_session,
@@ -622,7 +628,7 @@ class WorkdashSession:
             item = self._require_item(scope)
             repositories, issue = [], (item.repo, item.number)
         try:
-            candidates = find_ready_work(
+            candidates = self.backend.github_client.find_ready_work(
                 repositories=repositories,
                 issue=issue,
                 github_username=self.config.github_username,
@@ -781,7 +787,11 @@ class WorkdashSession:
             cached_path = self.backend.analyze_item(item, tool="cached")
             if cached_path is not None:
                 return cached_path
-        cwd = ensure_worktree(self.config.workdir, item) if tool != "cached" else None
+        cwd = (
+            ensure_worktree(self.config.workdir, item, github_client=self.backend.github_client)
+            if tool != "cached"
+            else None
+        )
         return self.backend.analyze_item(item, tool=tool, cwd=cwd)
 
     def analysis_url(self, item: WorkItem) -> str:

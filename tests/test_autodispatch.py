@@ -112,7 +112,7 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
     panes = []
     launches = []
 
-    def worktree(_workdir, item):
+    def worktree(_workdir, item, **_kwargs):
         return str(tmp_path / f"owner_repo_{item.number}")
 
     def launch(repo, prompt, **kwargs):
@@ -127,7 +127,10 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
     monkeypatch.setattr("workdash.control.existing_worktree_path", worktree)
     monkeypatch.setattr("workdash.control.ensure_worktree", worktree)
     monkeypatch.setattr("workdash.control.get_merge_base", lambda _: None)
-    monkeypatch.setattr("workdash.launcher.collect_launch_github_context", lambda _: {})
+    from workdash.github_client import GitHubClient
+
+    github_client = GitHubClient()
+    monkeypatch.setattr(github_client, "fetch_launch_context", lambda _: {})
     polls = queue.Queue()
 
     def load_panes(_):
@@ -145,7 +148,7 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
             workdir=str(tmp_path),
             agents={"pi": AgentConfig(launch="pi")},
         ),
-        backend=MagicMock(),
+        backend=MagicMock(github_client=github_client),
         work_items=items,
         suggestion_markers={},
         zellij_session="workdash",

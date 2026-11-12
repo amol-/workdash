@@ -224,7 +224,7 @@ def test_implementation_instruction_proves_a_parent_goal_already_met_by_subissue
 @pytest.mark.parametrize("pr_state", ["OPEN", "MERGED"])
 def test_issue_pull_request_lookup_ignores_descendant_failures(monkeypatch, pr_state):
     from gh_work_state_fake import failure
-    from workdash.work_state import work_pull_request
+    from workdash.github_client import GitHubClient
 
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#7")
@@ -239,7 +239,7 @@ def test_issue_pull_request_lookup_ignores_descendant_failures(monkeypatch, pr_s
         return original(query)
 
     monkeypatch.setattr(github, "_ReadyIssueTree", tree)
-    state = work_pull_request(
+    state = GitHubClient().work_pull_request(
         _item(WorkItemType.ISSUE, 7), github_username="testuser", todo_repository="testuser/todos"
     )
     assert state is not None and state.item.number == 51
@@ -247,12 +247,12 @@ def test_issue_pull_request_lookup_ignores_descendant_failures(monkeypatch, pr_s
 
 def test_issue_pull_request_lookup_reports_target_failure(monkeypatch):
     from gh_work_state_fake import failure
-    from workdash.work_state import work_pull_request
+    from workdash.github_client import GitHubClient
 
     github = install_fake_github(monkeypatch)
     github.failures["ReadyIssueTree"] = failure("target unavailable")
     with pytest.raises(RuntimeError, match="owner/repo#7.*target unavailable"):
-        work_pull_request(
+        GitHubClient().work_pull_request(
             _item(WorkItemType.ISSUE, 7),
             github_username="testuser",
             todo_repository="testuser/todos",

@@ -5,6 +5,7 @@ import shutil
 import tarfile
 import zipfile
 from io import BytesIO
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -1082,6 +1083,37 @@ def test_configure_redownloads_gh_when_no_global_binary_exists(tmp_path):
     )
     assert install_calls == ["install"]
     assert config.repositories == ("specific/repo",)
+
+
+def test_installers_use_falsy_github_client(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("workdash.config.platform.machine", lambda: "arm64")
+    monkeypatch.setattr("workdash.config.platform.system", lambda: "Darwin")
+    monkeypatch.setattr(
+        "workdash.github_client.GitHubClient", MagicMock(side_effect=AssertionError)
+    )
+    tar_bytes = BytesIO()
+    with tarfile.open(fileobj=tar_bytes, mode="w:gz") as archive:
+        info = tarfile.TarInfo("zellij")
+        info.size = len(b"zellij binary")
+        archive.addfile(info, BytesIO(b"zellij binary"))
+    zip_bytes = BytesIO()
+    with zipfile.ZipFile(zip_bytes, mode="w") as archive:
+        archive.writestr("bin/gh", b"gh binary")
+
+    client = MagicMock()
+    client.__bool__.return_value = False
+    client.release_asset_url.return_value = "https://example.test/gh.zip"
+    client.download_release.side_effect = [tar_bytes.getvalue(), zip_bytes.getvalue()]
+    zellij, gh = tmp_path / "zellij", tmp_path / "gh"
+
+    install_zellij_binary(zellij, github_client=client)
+    install_gh_binary(gh, github_client=client)
+
+    assert zellij.read_bytes() == b"zellij binary"
+    assert gh.read_bytes() == b"gh binary"
+    assert client.release_asset_url.call_count == 1
+    assert client.download_release.call_count == 2
+    assert client.download_release.call_args.args[0] == "https://example.test/gh.zip"
 
 
 def test_install_zellij_binary_downloads_latest_platform_archive(

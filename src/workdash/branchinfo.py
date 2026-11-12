@@ -11,44 +11,16 @@ branchdiff`.
 
 from __future__ import annotations
 
-import json
-import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from .git import GitHelper, get_current_branch, get_repo_root
-from .github_client import (
-    _AUTHORED_CI_SELECTION,
-    _CLOSING_ISSUES_SELECTION,
-    _extract_ci_state,
-    _extract_pending_review_request,
-)
+from .github_client import GitHubClient
 from .models import ci_status_symbol
 from .repo_worktree import issue_branch_number
 
 
-@dataclass(frozen=True, slots=True)
-class _PullRequestInfo:
-    """The pull request resolved for the current branch."""
-
-    number: int
-    title: str
-    url: str
-    state: str
-
-
-@dataclass(frozen=True, slots=True)
-class _IssueInfo:
-    """An issue a pull request closes."""
-
-    title: str
-    url: str
-    state: str
-
-
-def run_branchinfo() -> int:
+def run_branchinfo(github_client=None) -> int:
     """Report the pull request and the issues it closes for the current branch."""
     try:
         repo_path = get_repo_root()
@@ -56,24 +28,25 @@ def run_branchinfo() -> int:
         print("Error: Not a git repository.", file=sys.stderr)
         return 1
 
+    github = github_client if github_client is not None else GitHubClient()
     try:
         repo = _current_repo(repo_path)
         branch = get_current_branch(repo_path)
-        pull_request = _fetch_pull_request(repo, branch)
+        pull_request = github.branch_pull_request(repo, branch)
         symbol: str | None = None
-        issues: list[_IssueInfo] = []
+        issues = []
         if pull_request is not None:
             ci_state, review_decision, review_requested, closing_issues = (
-                _fetch_ci_and_closing_issues(repo, pull_request.number)
+                github.branch_ci_and_closing_issues(repo, pull_request.number)
             )
             (ci_symbol, _ci_color), (review_symbol, _review_color) = ci_status_symbol(
                 ci_state, review_decision, review_requested
             )
             symbol = f"{ci_symbol}{review_symbol}"
-            issues = [_fetch_issue(*issue) for issue in _linked_issues(repo, closing_issues)]
+            issues = [github.branch_issue(*issue) for issue in _linked_issues(repo, closing_issues)]
         branch_issue = issue_branch_number(branch)
         if not issues and branch_issue is not None:
-            issues = [_fetch_issue(repo, branch_issue)]
+            issues = [github.branch_issue(repo, branch_issue)]
     except RuntimeError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
@@ -107,124 +80,6 @@ def _current_repo(repo_path: Path) -> str:
     return repo
 
 
-def _fetch_pull_request(repo: str, branch: str) -> _PullRequestInfo | None:
-    """Return the pull request for ``branch``, whatever its state, or ``None`` if there is none."""
-    command = ["gh", "pr", "view", branch, "--repo", repo, "--json", "number,title,url,state"]
-    try:
-        completed = subprocess.run(command, check=True, capture_output=True, text=True)
-    except FileNotFoundError as error:
-        raise RuntimeError("gh CLI is not installed or not on PATH.") from error
-    except subprocess.CalledProcessError as error:
-        stderr = (error.stderr or "").strip()
-        if "no pull requests found" in stderr.lower():
-            return None
-        raise RuntimeError(
-            f"Failed to look up the pull request for branch {branch!r}: "
-            f"{stderr or f'gh exited with code {error.returncode}'}"
-        ) from error
-    payload = _parse_json_object(completed.stdout, context="pull request lookup")
-    number, title, url, state = (
-        payload.get("number"),
-        payload.get("title"),
-        payload.get("url"),
-        payload.get("state"),
-    )
-    if (
-        not isinstance(number, int)
-        or not isinstance(title, str)
-        or not isinstance(url, str)
-        or not isinstance(state, str)
-    ):
-        raise RuntimeError("Invalid gh pull request payload: missing number, title, url, or state.")
-    return _PullRequestInfo(number=number, title=title, url=url, state=state)
-
-
-def _fetch_ci_and_closing_issues(
-    repo: str, number: int
-) -> tuple[str | None, str | None, bool, list[tuple[str, int]]]:
-    """Return CI state, review decision, pending review request, and closing issues."""
-    owner, _, name = repo.partition("/")
-    query = (
-        f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
-        f"{{ pullRequest(number: {number}) "
-        f"{{ {_AUTHORED_CI_SELECTION} {_CLOSING_ISSUES_SELECTION} }} }} }}"
-    )
-    command = ["gh", "api", "graphql", "-f", f"query={query}"]
-    try:
-        completed = subprocess.run(command, check=True, capture_output=True, text=True)
-    except FileNotFoundError as error:
-        raise RuntimeError("gh CLI is not installed or not on PATH.") from error
-    except subprocess.CalledProcessError as error:
-        stderr = (error.stderr or "").strip()
-        raise RuntimeError(
-            f"Failed to fetch CI status and closing issues for {repo}#{number}: "
-            f"{stderr or f'gh exited with code {error.returncode}'}"
-        ) from error
-    payload = _parse_json_object(completed.stdout, context="CI status and closing issues lookup")
-    data = payload.get("data")
-    repository = data.get("repository") if isinstance(data, dict) else None
-    pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
-    if not isinstance(pull_request, dict):
-        raise RuntimeError(f"Invalid gh GraphQL payload for {repo}#{number}: missing pullRequest.")
-    return (
-        _extract_ci_state(pull_request),
-        pull_request.get("reviewDecision"),
-        _extract_pending_review_request(pull_request),
-        _closing_issues(pull_request),
-    )
-
-
-def _closing_issues(pull_request: dict[str, Any]) -> list[tuple[str, int]]:
-    """Collect the ``(repo, number)`` issues one pull request closes."""
-    references = pull_request.get("closingIssuesReferences")
-    nodes = references.get("nodes") if isinstance(references, dict) else None
-    if not isinstance(nodes, list):
-        raise RuntimeError("Invalid gh GraphQL payload: missing closingIssuesReferences.")
-    issues: list[tuple[str, int]] = []
-    for node in nodes:
-        node_fields = node if isinstance(node, dict) else {}
-        number = node_fields.get("number")
-        repository = node_fields.get("repository")
-        repo = repository.get("nameWithOwner") if isinstance(repository, dict) else None
-        if not isinstance(number, int) or not isinstance(repo, str) or not repo:
-            raise RuntimeError("Invalid gh GraphQL payload: missing closing issue reference.")
-        issues.append((repo, number))
-    return issues
-
-
 def _linked_issues(repo: str, closing_issues: list[tuple[str, int]]) -> list[tuple[str, int]]:
     """Return every closing issue that lives in ``repo``, lowest number first."""
     return sorted(issue for issue in closing_issues if issue[0] == repo)
-
-
-def _fetch_issue(repo: str, number: int) -> _IssueInfo:
-    """Return the title and url of one issue."""
-    command = ["gh", "issue", "view", str(number), "--repo", repo, "--json", "title,url,state"]
-    try:
-        completed = subprocess.run(command, check=True, capture_output=True, text=True)
-    except FileNotFoundError as error:
-        raise RuntimeError("gh CLI is not installed or not on PATH.") from error
-    except subprocess.CalledProcessError as error:
-        stderr = (error.stderr or "").strip()
-        raise RuntimeError(
-            f"Failed to look up issue {repo}#{number}: "
-            f"{stderr or f'gh exited with code {error.returncode}'}"
-        ) from error
-    payload = _parse_json_object(completed.stdout, context=f"issue lookup for {repo}#{number}")
-    title, url, state = payload.get("title"), payload.get("url"), payload.get("state")
-    if not isinstance(title, str) or not isinstance(url, str) or not isinstance(state, str):
-        raise RuntimeError(
-            f"Invalid gh issue payload for {repo}#{number}: missing title, url, or state."
-        )
-    return _IssueInfo(title=title, url=url, state=state)
-
-
-def _parse_json_object(raw: str, *, context: str) -> dict[str, Any]:
-    """Parse ``raw`` as a gh JSON object, translating malformed output into ``RuntimeError``."""
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as error:
-        raise RuntimeError(f"Failed to parse gh {context} JSON: {error.msg}") from error
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"Invalid gh {context} payload: expected a JSON object.")
-    return payload

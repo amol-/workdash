@@ -17,8 +17,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from io import BytesIO
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .todo import is_repository_name
+from .git import is_repository_name
+
+if TYPE_CHECKING:
+    from .github_client import GitHubClient
 
 CONFIG_PATH = Path.home() / ".config" / "workdash" / "config.json"
 LOCAL_BIN_PATH = CONFIG_PATH.parent / "bin"
@@ -341,14 +345,6 @@ def _zellij_release_url() -> str:
     return f"https://github.com/zellij-org/zellij/releases/latest/download/zellij-{target}.tar.gz"
 
 
-def _download_bytes(url: str, *, urlopen_fn: Callable[[str], object]) -> bytes:
-    try:
-        with urlopen_fn(url) as response:
-            return response.read()
-    except OSError as error:
-        raise RuntimeError(f"Failed to download {url}: {error}") from error
-
-
 def _write_executable(destination: Path, binary: bytes) -> str:
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(binary)
@@ -361,6 +357,7 @@ def install_zellij_binary(
     destination: Path = ZELLIJ_INSTALL_PATH,
     *,
     urlopen_fn: Callable[[str], object] = urllib.request.urlopen,
+    github_client: GitHubClient | None = None,
 ) -> str:
     """Download and install the latest Zellij release binary.
 
@@ -368,9 +365,13 @@ def install_zellij_binary(
     :param urlopen_fn: Callable used to download the release archive.
     """
 
+    from .github_client import GitHubClient
+
     url = _zellij_release_url()
     print(f"Downloading Zellij from {url}")
-    archive_bytes = _download_bytes(url, urlopen_fn=urlopen_fn)
+    if github_client is None:
+        github_client = GitHubClient()
+    archive_bytes = github_client.download_release(url, urlopen_fn=urlopen_fn)
 
     try:
         with tarfile.open(fileobj=BytesIO(archive_bytes), mode="r:gz") as archive:
@@ -418,29 +419,15 @@ def _gh_release_asset_patterns() -> tuple[str, str]:
 def _gh_release_download_url(
     *,
     urlopen_fn: Callable[[str], object] = urllib.request.urlopen,
+    github_client: GitHubClient | None = None,
 ) -> str:
+    from .github_client import GitHubClient
+
     archive_suffix, _extension = _gh_release_asset_patterns()
-    release_bytes = _download_bytes(GH_LATEST_RELEASE_API_URL, urlopen_fn=urlopen_fn)
-    try:
-        release = json.loads(release_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"Failed to parse GitHub CLI release metadata: {error}") from error
-    assets = release.get("assets") if isinstance(release, dict) else None
-    if not isinstance(assets, list):
-        raise RuntimeError("GitHub CLI release metadata did not contain an assets list.")
-    for asset in assets:
-        if not isinstance(asset, dict):
-            continue
-        name = asset.get("name")
-        download_url = asset.get("browser_download_url")
-        if (
-            isinstance(name, str)
-            and name.endswith(archive_suffix)
-            and isinstance(download_url, str)
-        ):
-            return download_url
-    raise RuntimeError(
-        f"GitHub CLI latest release did not contain an asset ending with {archive_suffix!r}."
+    if github_client is None:
+        github_client = GitHubClient()
+    return github_client.release_asset_url(
+        GH_LATEST_RELEASE_API_URL, archive_suffix, urlopen_fn=urlopen_fn
     )
 
 
@@ -448,6 +435,7 @@ def install_gh_binary(
     destination: Path = GH_INSTALL_PATH,
     *,
     urlopen_fn: Callable[[str], object] = urllib.request.urlopen,
+    github_client: GitHubClient | None = None,
 ) -> str:
     """Download and install the latest GitHub CLI release binary.
 
@@ -455,9 +443,13 @@ def install_gh_binary(
     :param urlopen_fn: Callable used to download release metadata and archive bytes.
     """
 
-    download_url = _gh_release_download_url(urlopen_fn=urlopen_fn)
+    from .github_client import GitHubClient
+
+    if github_client is None:
+        github_client = GitHubClient()
+    download_url = _gh_release_download_url(urlopen_fn=urlopen_fn, github_client=github_client)
     print(f"Downloading GitHub CLI from {download_url}")
-    archive_bytes = _download_bytes(download_url, urlopen_fn=urlopen_fn)
+    archive_bytes = github_client.download_release(download_url, urlopen_fn=urlopen_fn)
     _archive_suffix, extension = _gh_release_asset_patterns()
 
     try:
@@ -503,6 +495,7 @@ def configure(
     which_fn: Callable[[str], str | None] = shutil.which,
     install_zellij_fn: Callable[[], str] | None = None,
     install_gh_fn: Callable[[], str] | None = None,
+    github_client: GitHubClient | None = None,
 ) -> WorkdashConfig:
     """Interactive configuration that fills in missing fields.
 
@@ -513,9 +506,11 @@ def configure(
 
     config = load_config(path)
     install_zellij = install_zellij_fn or (
-        lambda: install_zellij_binary(path.parent / "bin" / "zellij")
+        lambda: install_zellij_binary(path.parent / "bin" / "zellij", github_client=github_client)
     )
-    install_gh = install_gh_fn or (lambda: install_gh_binary(path.parent / "bin" / "gh"))
+    install_gh = install_gh_fn or (
+        lambda: install_gh_binary(path.parent / "bin" / "gh", github_client=github_client)
+    )
 
     detected_zellij = which_fn("zellij")
     if detected_zellij:

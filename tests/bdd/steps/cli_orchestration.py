@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from pytest_bdd import given, parsers, then, when
 
+import workdash.github_client as github_client_module
 from workdash.backend import compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashControlError
@@ -239,12 +240,12 @@ def _run_workdash(
         monkeypatch.setattr(control_module, "send_zellij_pane_input", fake_send_zellij_pane_input)
         monkeypatch.setattr(control_module, "close_zellij_pane", fake_close_zellij_pane)
 
-    monkeypatch.setattr(workdash_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(github_client_module.subprocess, "run", fake_run)
     if scenario_state.get("client_missing_tools"):
         monkeypatch.setattr(
-            workdash_module,
-            "_check_gh_preflight",
-            lambda: (_ for _ in ()).throw(AssertionError("unexpected GitHub preflight")),
+            workdash_module.GitHubClient,
+            "check_authentication",
+            lambda self: (_ for _ in ()).throw(AssertionError("unexpected GitHub preflight")),
         )
         monkeypatch.setattr(
             workdash_module,
@@ -252,13 +253,13 @@ def _run_workdash(
             lambda _session: (_ for _ in ()).throw(AssertionError("unexpected Zellij inspection")),
         )
     else:
-        monkeypatch.setattr(workdash_module, "_check_gh_preflight", lambda: None)
+        monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: config)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(
         workdash_module,
         "ensure_worktree",
-        lambda workdir, item: (
+        lambda workdir, item, **_kwargs: (
             scenario_state.setdefault("ensure_calls", []).append((workdir, item))
             or str(Path(workdir) / "owner_repo_1")
         ),
@@ -269,16 +270,15 @@ def _run_workdash(
     monkeypatch.setattr(
         repo_worktree_module,
         "ensure_worktree",
-        lambda workdir, item: (
+        lambda workdir, item, **_kwargs: (
             scenario_state.setdefault("ensure_calls", []).append((workdir, item))
             or str(Path(workdir) / "owner_repo_1")
         ),
     )
     # Mock control_module.ensure_worktree since control.py imports it
     monkeypatch.setattr(
-        control_module,
-        "GithubHelper",
-        lambda: SimpleNamespace(fetch_worktree_head=lambda item: ("pr-branch", item.repo)),
+        "workdash.github_client.GitHubClient.fetch_worktree_head",
+        lambda self, item: ("pr-branch", item.repo),
     )
     monkeypatch.setattr(
         control_module,
@@ -295,7 +295,7 @@ def _run_workdash(
     monkeypatch.setattr(
         control_module,
         "ensure_worktree",
-        lambda workdir, item: (
+        lambda workdir, item, **_kwargs: (
             scenario_state.setdefault("ensure_calls", []).append((workdir, item))
             or scenario_state.get("pr_worktrees", {}).get(
                 item.number, (str(Path(workdir) / "owner_repo_1"),)

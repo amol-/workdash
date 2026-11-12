@@ -18,7 +18,7 @@ import markdown
 
 from .agent_context import render_github_context
 from .config import LOCAL_BIN_PATH
-from .github import GithubHelper
+from .github_client import GitHubClient
 from .models import REVIEW_KINDS, WorkItem, WorkItemKind, WorkItemType, display_repo
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -632,7 +632,7 @@ def _format_zellij_pane_id(pane_id: object) -> str | None:
 def collect_launch_github_context(item: WorkItem) -> dict[str, Any]:
     """Collect key GitHub context for launching an interactive Codex session."""
 
-    return GithubHelper().fetch_launch_context(item)
+    return GitHubClient().fetch_launch_context(item)
 
 
 def build_launch_agent_prompt(
@@ -704,12 +704,17 @@ def prepare_launch_agent_prompt(
     repo_path: str,
     analysis_path: str | None = None,
     merge_base: str | None = None,
+    github_client=None,
 ) -> str:
     """Collect GitHub context and return the launch prompt text for a coding agent."""
 
     return build_launch_agent_prompt(
         item=item,
-        github_context=collect_launch_github_context(item),
+        github_context=(
+            github_client.fetch_launch_context(item)
+            if github_client is not None
+            else collect_launch_github_context(item)
+        ),
         repo_path=repo_path,
         analysis_path=analysis_path,
         merge_base=merge_base,
@@ -779,7 +784,9 @@ def launch_terminal_context(
     )
 
 
-def launch_branchdiff_context(repo_path: str, item: WorkItem | None = None) -> ZellijPaneLaunch:
+def launch_branchdiff_context(
+    repo_path: str, item: WorkItem | None = None, *, github_client=None
+) -> ZellijPaneLaunch:
     """Open branchdiff TUI in zellij rooted at the given repository path.
 
     This launches the `workdash branchdiff` command as a standalone subprocess
@@ -791,7 +798,9 @@ def launch_branchdiff_context(repo_path: str, item: WorkItem | None = None) -> Z
 
     branchdiff_command = ["workdash", "branchdiff"]
     if item is not None and item.item_type == WorkItemType.PR:
-        branchdiff_command.append(_resolve_branchdiff_pr_base_ref(item))
+        branchdiff_command.append(
+            _resolve_branchdiff_pr_base_ref(item, github_client=github_client)
+        )
 
     user_shell = os.environ.get("SHELL", "/bin/sh")
     command = [user_shell, "-ic", shlex.join(branchdiff_command)]
@@ -803,8 +812,10 @@ def launch_branchdiff_context(repo_path: str, item: WorkItem | None = None) -> Z
     )
 
 
-def _resolve_branchdiff_pr_base_ref(item: WorkItem) -> str:
-    base_ref_name, head_repo = GithubHelper().fetch_branchdiff_base(item)
+def _resolve_branchdiff_pr_base_ref(item: WorkItem, *, github_client=None) -> str:
+    base_ref_name, head_repo = (
+        github_client if github_client is not None else GitHubClient()
+    ).fetch_branchdiff_base(item)
     remote = "origin" if head_repo == item.repo else "upstream"
     return f"{remote}/{base_ref_name}"
 
