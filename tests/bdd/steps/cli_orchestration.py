@@ -198,9 +198,9 @@ def _run_workdash(
             monkeypatch.setattr(
                 control_module,
                 "existing_worktree_path",
-                lambda _workdir, _item: scenario_state["known_worktree_path"],
+                lambda _workdir, _item, **kwargs: scenario_state["known_worktree_path"],
             )
-        monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
+        monkeypatch.setattr(control_module, "get_merge_base", lambda _path, **kwargs: None)
         monkeypatch.setattr(
             control_module,
             "prepare_launch_agent_prompt",
@@ -258,7 +258,7 @@ def _run_workdash(
     monkeypatch.setattr(
         workdash_module,
         "ensure_worktree",
-        lambda workdir, item: (
+        lambda workdir, item, **kwargs: (
             scenario_state.setdefault("ensure_calls", []).append((workdir, item))
             or str(Path(workdir) / "owner_repo_1")
         ),
@@ -269,7 +269,7 @@ def _run_workdash(
     monkeypatch.setattr(
         repo_worktree_module,
         "ensure_worktree",
-        lambda workdir, item: (
+        lambda workdir, item, **kwargs: (
             scenario_state.setdefault("ensure_calls", []).append((workdir, item))
             or str(Path(workdir) / "owner_repo_1")
         ),
@@ -284,6 +284,9 @@ def _run_workdash(
         control_module,
         "GitHelper",
         lambda: SimpleNamespace(
+            worktree_proves_item=lambda path, item: (
+                scenario_state.get("git_origins", {}).get(str(path)) == item.repo
+            ),
             branch_tracks_repository=lambda path, branch, repo: (
                 (str(path), branch, repo) in scenario_state["pr_worktrees"].values()
                 if "pr_worktrees" in scenario_state
@@ -292,10 +295,12 @@ def _run_workdash(
             find_worktree_for_branch=lambda *_: None,
         ),
     )
+    if "api_session" in scenario_state:
+        scenario_state["api_session"].git = control_module.GitHelper()
     monkeypatch.setattr(
         control_module,
         "ensure_worktree",
-        lambda workdir, item: (
+        lambda workdir, item, **kwargs: (
             scenario_state.setdefault("ensure_calls", []).append((workdir, item))
             or scenario_state.get("pr_worktrees", {}).get(
                 item.number, (str(Path(workdir) / "owner_repo_1"),)

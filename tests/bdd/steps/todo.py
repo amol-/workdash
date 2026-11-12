@@ -567,7 +567,7 @@ def _user_launches_coding_session_for_item(
             "url": launched_item.url,
         },
     )
-    monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
+    monkeypatch.setattr(control_module, "get_merge_base", lambda _path, **kwargs: None)
     install_zellij_agent_fakes(scenario_state, monkeypatch)
 
     session.code(target=format_work_item_id(item), agent="codex")

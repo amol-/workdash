@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -29,167 +28,30 @@ from textual.style import Style
 from textual.widgets import DataTable, Footer, Static
 from textual_diff_view import DiffView
 
-from .git import get_repo_root
+from .git import GitHelper
 from .launcher import zellij_fullscreen_pane
 
 _SCROLL_DIFF_BINDING_GROUP = Binding.Group("Scroll diff", compact=True)
 
 
 def get_base_branch(repo_path: Path | None = None) -> str:
-    """Get the branch the current branch is compared against."""
-    if repo_path is None:
-        repo_path = Path.cwd()
-
-    original_cwd = Path.cwd()
-    try:
-        os.chdir(repo_path)
-
-        # The remote default branch, not this branch's upstream: once a branch is
-        # pushed its upstream is that same branch, which would diff it against
-        # itself. Prefer the remote-tracking ref so a stale local default branch
-        # cannot drag the merge base back and mix other people's commits in.
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            default_branch = result.stdout.strip()
-            if default_branch:
-                return default_branch
-        except subprocess.CalledProcessError:
-            pass
-
-        # Fallback: try main/master
-        for candidate in ["main", "master"]:
-            try:
-                subprocess.run(
-                    ["git", "show-ref", "--verify", f"refs/heads/{candidate}"],
-                    capture_output=True,
-                    check=True,
-                )
-                return candidate
-            except subprocess.CalledProcessError:
-                continue
-
-        raise ValueError("Cannot determine base branch")
-
-    finally:
-        os.chdir(original_cwd)
+    return GitHelper().get_base_branch(repo_path)
 
 
 def get_merge_base(base_branch: str, repo_path: Path | None = None) -> str:
-    """Get the merge base between HEAD and the base branch."""
-    if repo_path is None:
-        repo_path = Path.cwd()
-
-    original_cwd = Path.cwd()
-    try:
-        os.chdir(repo_path)
-        result = subprocess.run(
-            ["git", "merge-base", "HEAD", base_branch],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as error:
-        raise RuntimeError(f"Failed to get merge base: {error.stderr}") from error
-    finally:
-        os.chdir(original_cwd)
+    return GitHelper().get_merge_base(base_branch, repo_path)
 
 
-def get_changed_files(
-    base_branch: str | None,
-    repo_path: Path | None = None,
-) -> list[str]:
-    """Get list of committed, working-tree, and untracked changed files."""
-    if repo_path is None:
-        repo_path = Path.cwd()
-
-    if base_branch is None:
-        base_branch = get_base_branch(repo_path)
-
-    original_cwd = Path.cwd()
-    try:
-        os.chdir(repo_path)
-
-        # Get diff against merge base (only our changes, not upstream changes)
-        merge_base = get_merge_base(base_branch, repo_path)
-        try:
-            result = subprocess.run(
-                ["git", "diff", "--name-only", merge_base],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            files = result.stdout.strip().split("\n") if result.stdout.strip() else []
-        except subprocess.CalledProcessError as error:
-            raise RuntimeError(f"Failed to get diff: {error.stderr}") from error
-
-        # Include untracked files
-        try:
-            result = subprocess.run(
-                ["git", "ls-files", "--others", "--exclude-standard"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            untracked = result.stdout.strip().split("\n") if result.stdout.strip() else []
-            files.extend(untracked)
-        except subprocess.CalledProcessError:
-            pass
-
-        return [f for f in files if f and f.strip()]
-
-    finally:
-        os.chdir(original_cwd)
+def get_changed_files(base_branch: str | None, repo_path: Path | None = None) -> list[str]:
+    return GitHelper().get_changed_files(base_branch, repo_path)
 
 
 def get_file_content_at_ref(filepath: str, ref: str, repo_path: Path) -> str:
-    """Get file content at a specific git reference."""
-    original_cwd = Path.cwd()
-    try:
-        os.chdir(repo_path)
-
-        try:
-            result = subprocess.run(
-                ["git", "show", f"{ref}:{filepath}"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            return result.stdout
-        except subprocess.CalledProcessError:
-            return ""
-
-    finally:
-        os.chdir(original_cwd)
+    return GitHelper().get_file_content_at_ref(filepath, ref, repo_path)
 
 
 def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
-    """Get old and new content for a specific file."""
-    # Get merge base to compare against branching point, not upstream tip
-    merge_base = get_merge_base(base_branch, repo_path)
-    old_content = get_file_content_at_ref(filepath, merge_base, repo_path)
-
-    file_path = repo_path / filepath
-    try:
-        new_content = file_path.read_text(encoding="utf-8")
-    except (FileNotFoundError, UnicodeDecodeError):
-        try:
-            result = subprocess.run(
-                ["git", "show", f":{filepath}"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            new_content = result.stdout
-        except subprocess.CalledProcessError:
-            new_content = ""
-
-    return old_content, new_content
+    return GitHelper().get_file_diff(filepath, base_branch, repo_path)
 
 
 class WorkdashDiffView(DiffView):
@@ -494,7 +356,7 @@ class BranchDiffApp(App[None]):
 def run_branchdiff(target: str | None = None) -> int:
     """Run the branchdiff TUI for the current git repository."""
     try:
-        repo_path = get_repo_root()
+        repo_path = GitHelper().get_repo_root()
     except RuntimeError:
         print("Error: Not a git repository.", file=sys.stderr)
         return 1

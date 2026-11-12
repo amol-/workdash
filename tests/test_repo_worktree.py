@@ -6,6 +6,7 @@ import subprocess
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -1461,7 +1462,7 @@ def test_github_issue_reuses_worktree_with_mixed_casing(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(GitHelper, "pull_ff_only", lambda self, path: None)
     monkeypatch.setattr(
-        GithubHelper, "clone_repository", lambda *args: pytest.fail("unexpected clone")
+        GitHelper, "clone_github_repository", lambda *args: pytest.fail("unexpected clone")
     )
     assert ensure_worktree(str(tmp_path), make_issue(repo="OWNER/REPO")) == str(path)
 
@@ -1741,3 +1742,102 @@ def test_same_repo_pr_head_casing_does_not_configure_fork_upstream(
         assert result == str(tmp_path / "owner_repo_42")
         assert fetches == ["origin"]
         assert created == [(main, tmp_path / "owner_repo_42", "feature", "origin/feature")]
+
+
+def test_fake_git_prepares_and_reuses_review_worktree_with_merge_base(monkeypatch, tmp_path):
+    from webob import Request
+
+    from workdash import control, launcher, repo_worktree
+    from workdash.config import AgentConfig, WorkdashConfig
+
+    class FakeGit:
+        def __init__(self):
+            self.worktrees = {}
+            self.fetches = []
+            self.pulls = []
+            self.clones = []
+
+        def __bool__(self):
+            return False
+
+        def worktree_proves_item(self, candidate, item, *, directory=None):
+            return candidate in self.worktrees and item.number == 42
+
+        def find_worktree_for_branch(self, main, branch):
+            return next((path for path, ref in self.worktrees.items() if ref == branch), None)
+
+        def clone_github_repository(self, repo, path):
+            self.clones.append((repo, path))
+            path.mkdir()
+
+        def fetch_remote(self, main, remote):
+            self.fetches.append(remote)
+
+        def fast_forward_default_branch(self, main):
+            pass
+
+        def ensure_upstream_remote(self, main, repo):
+            assert repo == "owner/repo"
+
+        def create_worktree(self, main, path, branch, start):
+            assert branch == "feature"
+            assert start == "origin/feature"
+            path.mkdir()
+            self.worktrees[path] = branch
+
+        def pull_ff_only(self, path):
+            self.pulls.append(path)
+
+        def repository_matches(self, path, repo):
+            return repo == "fork/repo"
+
+        def merge_base_with_origin_default(self, path):
+            assert Path(path) in self.worktrees
+            return "base123"
+
+    git = FakeGit()
+    github = MagicMock()
+    github.fetch_worktree_head.return_value = ("feature", "fork/repo")
+    monkeypatch.setattr(repo_worktree, "GithubHelper", lambda: github)
+    git_factory = MagicMock(return_value=git)
+    monkeypatch.setattr(control, "GitHelper", git_factory)
+    monkeypatch.setattr(launcher, "collect_launch_github_context", lambda item: {})
+    launch = MagicMock()
+    monkeypatch.setattr(control, "launch_vscode_context", launch)
+    item = make_pr()
+    item.kind = WorkItemKind.TRACKED_PR
+    analysis_file = tmp_path / "analysis.md"
+    analysis_file.write_text("Analysis findings")
+    backend = MagicMock()
+    backend.analyze_item.return_value = str(analysis_file)
+    session = control.WorkdashSession(
+        config=WorkdashConfig(workdir=str(tmp_path), agents={"pi": AgentConfig(analyze="pi")}),
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    monkeypatch.setattr(
+        subprocess, "run", lambda *args, **kwargs: pytest.fail("unexpected process")
+    )
+    result = session.code(target="owner/repo#CHECK-42", agent="vscode", allow_vscode=True)
+    path = result["cwd"]
+    assert result["status"] == "launched"
+    assert git.clones == [("fork/repo", tmp_path / "fork_repo")]
+    assert "git diff base123..HEAD" in launch.call_args.args[1]
+    assert git.fetches == ["origin", "upstream"]
+    analysis = session.analyze(target="owner/repo#CHECK-42", agent="pi", prefer_cache=False)
+    assert analysis["status"] == "generated"
+    assert backend.analyze_item.call_args.kwargs == {"tool": "pi", "cwd": path}
+    assert git.pulls == [Path(path)]
+    assert git.fetches == ["origin", "upstream", "upstream"]
+    artifacts = Path(path) / ".workdash"
+    artifacts.mkdir()
+    (artifacts / "PR_REVIEW.md").write_text("Review findings")
+    app = control._make_turbogears_app(session)
+    response = Request.blank(
+        "/api/items/owner/repo%23CHECK-42/files/.workdash/PR_REVIEW.md"
+    ).get_response(app)
+    assert response.status_int == 200
+    assert response.text == "Review findings"
+    git_factory.assert_called_once_with()

@@ -562,9 +562,11 @@ def _coding_session(
         )
     )
     monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(panes))
-    monkeypatch.setattr(control_module, "existing_worktree_path", lambda _wd, _item: worktree)
+    monkeypatch.setattr(
+        control_module, "existing_worktree_path", lambda _wd, _item, **kwargs: worktree
+    )
     monkeypatch.setattr(control_module, "ensure_worktree", ensure_worktree)
-    monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
+    monkeypatch.setattr(control_module, "get_merge_base", lambda _path, **kwargs: None)
     monkeypatch.setattr(control_module, "prepare_launch_agent_prompt", lambda *a, **k: "PROMPT")
     monkeypatch.setattr(control_module, "launch_agent_context", launch_agent)
     monkeypatch.setattr(control_module, "_LAUNCH_VISIBILITY_INTERVAL_SECONDS", 0)
@@ -783,7 +785,7 @@ def _authored_session(monkeypatch, tmp_path, panes=None):
     monkeypatch.setattr(control_module, "GithubHelper", lambda: helper)
     git = MagicMock()
     git.branch_tracks_repository.return_value = True
-    monkeypatch.setattr(control_module, "GitHelper", lambda: git)
+    session.git = git
     return session, worktree, ensure, launch_agent, prepare
 
 
@@ -929,7 +931,7 @@ def test_autostart_does_not_launch_where_the_redirected_pull_requests_agent_live
     monkeypatch.setattr(
         control_module,
         "existing_worktree_path",
-        lambda _wd, item: pull_request_worktree if item.number == 51 else None,
+        lambda _wd, item, **kwargs: pull_request_worktree if item.number == 51 else None,
     )
 
     result = session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
@@ -1729,7 +1731,7 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
     monkeypatch.setattr(
         control_module,
         "existing_worktree_path",
-        lambda *args, pinned: _pin_test_worktree(pinned, worktree_path),
+        lambda *args, pinned, git: _pin_test_worktree(pinned, worktree_path),
     )
     app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
 
@@ -1769,12 +1771,12 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
     assert get(base, peer="192.0.2.7").status_int == 403
     session.backend.github_client.fetch_item.return_value = None
     assert get("/api/items/owner/repo%23ISSUE-2/files/").status_int == 404
-    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args, pinned: None)
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args, pinned, git: None)
     assert get(base).status_int == 404
     monkeypatch.setattr(
         control_module,
         "existing_worktree_path",
-        lambda *args, pinned: _pin_test_worktree(pinned, worktree),
+        lambda *args, pinned, git: _pin_test_worktree(pinned, worktree),
     )
     (artifacts / "review.md").unlink()
     (artifacts / "escape").unlink()
@@ -1817,7 +1819,7 @@ def test_item_files_reject_symlink_substitution(tmp_path, monkeypatch, component
     monkeypatch.setattr(
         control_module,
         "existing_worktree_path",
-        lambda *args, pinned: _pin_test_worktree(pinned, worktree),
+        lambda *args, pinned, git: _pin_test_worktree(pinned, worktree),
     )
     app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
 
@@ -1912,7 +1914,7 @@ def test_item_files_reject_worktree_symlink_substitution(tmp_path, monkeypatch, 
     monkeypatch.setattr(
         control_module,
         "existing_worktree_path",
-        lambda *args, pinned: _pin_test_worktree(pinned, worktree),
+        lambda *args, pinned, git: _pin_test_worktree(pinned, worktree),
     )
     monkeypatch.setattr(control_module.os, "open", open_with_replacement)
     app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
@@ -1943,7 +1945,7 @@ def test_item_files_listing_validates_pinned_entries_after_replacement(tmp_path,
     monkeypatch.setattr(
         control_module,
         "existing_worktree_path",
-        lambda *args, pinned: _pin_test_worktree(pinned, worktree),
+        lambda *args, pinned, git: _pin_test_worktree(pinned, worktree),
     )
     original_listdir = control_module.os.listdir
 
@@ -1982,7 +1984,7 @@ def test_item_files_listing_rejects_directory_substitution(tmp_path, monkeypatch
     monkeypatch.setattr(
         control_module,
         "existing_worktree_path",
-        lambda *args, pinned: _pin_test_worktree(pinned, worktree),
+        lambda *args, pinned, git: _pin_test_worktree(pinned, worktree),
     )
     original_open = control_module.os.open
     replaced = False
@@ -2228,7 +2230,7 @@ def test_plan_first_issue_resumes_authored_pr_branch_without_existing_worktree(
     github.add_issue("owner/repo#1")
     github.add_pull_request("owner/repo#51", closes=("owner/repo#1",))
     session, _worktree, _ensure, launch, prepare = _authored_session(monkeypatch, tmp_path)
-    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *_args: None)
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *_args, **kwargs: None)
     result = session.code(target="owner/repo#ISSUE-1", agent="pi")
     assert result["item_id"] == "owner/repo#ISSUE-1"
     assert prepare.call_args.args[0].number == 51
@@ -2648,7 +2650,8 @@ def test_dispatch_uses_newly_actionable_pr_before_launch(monkeypatch, tmp_path):
     git = MagicMock()
     git.find_worktree_for_branch.return_value = None
     monkeypatch.setattr(repo_worktree, "GitHelper", lambda: git)
-    monkeypatch.setattr(repo_worktree, "existing_worktree_path", lambda *_: None)
+    session.git = git
+    monkeypatch.setattr(repo_worktree, "existing_worktree_path", lambda *_, **kwargs: None)
     github_helper = MagicMock()
     github_helper.fetch_worktree_head.return_value = ("pr-52-branch", "owner/other")
     monkeypatch.setattr(repo_worktree, "GithubHelper", lambda: github_helper)
@@ -2821,7 +2824,7 @@ def test_issue_coding_verifies_selected_pr_in_real_worktree(
     helper = MagicMock()
     helper.fetch_worktree_head.return_value = ("selected-pr-branch", head_repo)
     monkeypatch.setattr(control_module, "GithubHelper", lambda: helper)
-    monkeypatch.setattr(control_module, "GitHelper", repo_worktree.GitHelper)
+    session.git = repo_worktree.GitHelper()
     monkeypatch.setattr(repo_worktree, "GithubHelper", lambda: helper)
     pull = MagicMock()
     monkeypatch.setattr(repo_worktree.GitHelper, "pull_ff_only", pull)
@@ -2889,7 +2892,8 @@ def test_dispatch_checks_out_pull_request_head_branch(monkeypatch, tmp_path):
     git = MagicMock()
     git.find_worktree_for_branch.return_value = None
     monkeypatch.setattr(repo_worktree, "GitHelper", lambda: git)
-    monkeypatch.setattr(repo_worktree, "existing_worktree_path", lambda *_: None)
+    session.git = git
+    monkeypatch.setattr(repo_worktree, "existing_worktree_path", lambda *_, **kwargs: None)
     github_helper = MagicMock()
     github_helper.fetch_worktree_head.return_value = ("existing-pr-branch", "owner/repo")
     monkeypatch.setattr(repo_worktree, "GithubHelper", lambda: github_helper)
@@ -2997,7 +3001,7 @@ def test_plan_first_authored_pr_and_issue_use_same_context_and_worktree(monkeypa
         monkeypatch.setattr(
             control_module,
             "existing_worktree_path",
-            lambda _wd, item: worktree if item.item_type == WorkItemType.ISSUE else None,
+            lambda _wd, item, **kwargs: worktree if item.item_type == WorkItemType.ISSUE else None,
         )
         result = session.code(target=target, agent="pi")
         results.append(
@@ -3069,7 +3073,7 @@ def test_dispatch_rejects_invalid_issue_branch_upstream(monkeypatch, tmp_path, c
     helper = MagicMock()
     helper.fetch_worktree_head.return_value = ("issue-1", "owner/repo")
     monkeypatch.setattr(control_module, "GithubHelper", lambda: helper)
-    monkeypatch.setattr(control_module, "GitHelper", repo_worktree.GitHelper)
+    session.git = repo_worktree.GitHelper()
     monkeypatch.setattr(repo_worktree, "GithubHelper", lambda: helper)
 
     config_before = subprocess.run(
@@ -3170,7 +3174,7 @@ def test_dispatch_resumes_pushed_targeted_todo_branch(monkeypatch, tmp_path, cas
     helper = MagicMock()
     helper.fetch_worktree_head.return_value = ("wt-7", "owner/other")
     monkeypatch.setattr(control_module, "GithubHelper", lambda: helper)
-    monkeypatch.setattr(control_module, "GitHelper", repo_worktree.GitHelper)
+    session.git = repo_worktree.GitHelper()
     monkeypatch.setattr(repo_worktree, "GithubHelper", lambda: helper)
     panes = []
     monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(panes))
@@ -3242,7 +3246,7 @@ def test_untracked_pr_branch_requires_upstream(monkeypatch, tmp_path, created_fr
     helper = MagicMock()
     helper.fetch_worktree_head.return_value = ("selected-pr-branch", "testuser/repo")
     monkeypatch.setattr(control_module, "GithubHelper", lambda: helper)
-    monkeypatch.setattr(control_module, "GitHelper", repo_worktree.GitHelper)
+    session.git = repo_worktree.GitHelper()
     with pytest.raises(RuntimeError, match="configure its upstream"):
         session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
     launch.assert_not_called()
@@ -3284,7 +3288,7 @@ def test_dispatch_rejects_unverified_branch_worktree_before_pull(monkeypatch, tm
     helper = MagicMock()
     helper.fetch_worktree_head.return_value = ("selected-pr-branch", "owner/repo")
     monkeypatch.setattr(control_module, "GithubHelper", lambda: helper)
-    monkeypatch.setattr(control_module, "GitHelper", repo_worktree.GitHelper)
+    session.git = repo_worktree.GitHelper()
     monkeypatch.setattr(repo_worktree, "GithubHelper", lambda: helper)
     monkeypatch.setattr(
         control_module, "existing_worktree_path", repo_worktree.existing_worktree_path
@@ -3297,3 +3301,63 @@ def test_dispatch_rejects_unverified_branch_worktree_before_pull(monkeypatch, tm
         session.dispatch_once(scope="owner/repo#1", agent="pi")
     pull.assert_not_called()
     launch.assert_not_called()
+
+
+def test_session_uses_its_git_to_identify_worktrees_for_ready_and_panes(monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    worktree = tmp_path / "owner_repo_1"
+    worktree.mkdir()
+    item = _work_item(number=1, title="Issue")
+    git = MagicMock()
+    git.worktree_proves_item.side_effect = lambda path, item: path == worktree
+    monkeypatch.setattr(control_module, "GitHelper", lambda: git)
+    panes = []
+    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _: panes)
+    session = WorkdashSession(
+        config=WorkdashConfig(workdir=str(tmp_path)),
+        backend=MagicMock(),
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+
+    assert len(session.ready(scope="owner/repo", fail_unconfirmed=True)["items"]) == 1
+    session._unconfirmed_launches[str(worktree)] = float("inf")
+    with pytest.raises(WorkdashControlError, match="still unconfirmed"):
+        session.ready(scope="owner/repo", fail_unconfirmed=True)
+    session._unconfirmed_launches.clear()
+    panes.append({"id": 1, "title": "code_owner_repo_1", "pane_cwd": str(worktree)})
+    assert session.ready(scope="owner/repo")["items"] == []
+    assert session.get_agent_panes_for_item(item)[0]["pane_id"] == "terminal_1"
+    assert session.info()["panes"][0]["item"] == "owner/repo#ISSUE-1"
+
+
+def test_terminal_prepares_worktree_with_session_git(monkeypatch, tmp_path) -> None:
+    item = _work_item(number=1, title="Issue")
+    session = WorkdashSession(
+        config=WorkdashConfig(workdir=str(tmp_path)),
+        backend=MagicMock(),
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+    git = MagicMock()
+    git.find_worktree_for_branch.return_value = None
+    session.git = git
+    monkeypatch.setattr(
+        control_module,
+        "launch_terminal_context",
+        lambda path, **kwargs: SimpleNamespace(
+            session=kwargs["zellij_session"], cwd=path, pane_title="terminal", pane_id="1"
+        ),
+    )
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("real subprocess"))
+
+    result = session.terminal(target="owner/repo#ISSUE-1")
+
+    worktree = tmp_path / "owner_repo_1"
+    assert result["cwd"] == str(worktree)
+    git.create_worktree.assert_called_once_with(
+        tmp_path / "owner_repo", worktree, "issue-1", "origin/HEAD"
+    )

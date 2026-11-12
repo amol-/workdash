@@ -416,7 +416,7 @@ class WorkdashCommands:
                 session.list_items(refresh=True)
                 and (session.work_items, session.suggestion_markers)
             ),
-            worktree_callback=lambda item: ensure_worktree(config.workdir, item),
+            worktree_callback=lambda item: ensure_worktree(config.workdir, item, git=session.git),
             analyze_callback=lambda item, tool: session.analyze(
                 target=format_work_item_id(item), agent=tool, prefer_cache=(tool == "cached")
             )["path"],

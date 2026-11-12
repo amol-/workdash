@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .git import GitHelper, get_current_branch, get_repo_root
+from .git import GitHelper
 from .github_client import (
     _AUTHORED_CI_SELECTION,
     _CLOSING_ISSUES_SELECTION,
@@ -51,14 +51,14 @@ class _IssueInfo:
 def run_branchinfo() -> int:
     """Report the pull request and the issues it closes for the current branch."""
     try:
-        repo_path = get_repo_root()
+        repo_path = GitHelper().get_repo_root()
     except RuntimeError:
         print("Error: Not a git repository.", file=sys.stderr)
         return 1
 
     try:
         repo = _current_repo(repo_path)
-        branch = get_current_branch(repo_path)
+        branch = GitHelper().get_current_branch(repo_path)
         pull_request = _fetch_pull_request(repo, branch)
         symbol: str | None = None
         issues: list[_IssueInfo] = []

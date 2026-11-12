@@ -155,7 +155,7 @@ def run_terminal_scenario(
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir(exist_ok=True)
 
-    def ensure_worktree(_workdir: str, item: WorkItem) -> str:
+    def ensure_worktree(_workdir: str, item: WorkItem, **kwargs) -> str:
         if scenario_state.get("worktree_fails"):
             raise RuntimeError("worktree failed")
         worktree_calls.append(item)
