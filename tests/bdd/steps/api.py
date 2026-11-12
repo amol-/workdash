@@ -261,7 +261,9 @@ def _user_starts_workdash_with_server(
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashControlServer", FakeControlServer)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
-    monkeypatch.setattr(workdash_module, "list_workdash_sessions", lambda: ["workdash-main"])
+    monkeypatch.setattr(
+        workdash_module.launcher.zellij, "list_workdash_sessions", lambda: ["workdash-main"]
+    )
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
 
     scenario_state["exit_code"] = workdash_module.main(["--server"])
@@ -302,7 +304,7 @@ def _client_requests_info_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "workdash.control.load_zellij_panes",
+        "workdash.control.launcher.zellij.load_zellij_panes",
         lambda _session: list(scenario_state.get("panes", [])),
     )
     monkeypatch.setattr(
@@ -483,7 +485,7 @@ def _client_requests_pane_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "workdash.control.dump_zellij_pane",
+        "workdash.control.launcher.zellij.dump_zellij_pane",
         lambda session, requested_pane_id, *, full=False: (
             scenario_state.setdefault("pane_content_calls", []).append(
                 (session, requested_pane_id, full)
@@ -503,7 +505,7 @@ def _client_requests_full_pane_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "workdash.control.dump_zellij_pane",
+        "workdash.control.launcher.zellij.dump_zellij_pane",
         lambda session, requested_pane_id, *, full=False: (
             scenario_state.setdefault("pane_content_calls", []).append(
                 (session, requested_pane_id, full)
@@ -526,7 +528,7 @@ def _client_sends_to_pane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "workdash.control.send_zellij_pane_input",
+        "workdash.control.launcher.zellij.send_zellij_pane_input",
         lambda session, requested_pane_id, sent_data, *, raw=False: scenario_state.setdefault(
             "pane_send_calls", []
         ).append((session, requested_pane_id, sent_data, raw)),
@@ -550,7 +552,7 @@ def _client_sends_raw_to_pane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "workdash.control.send_zellij_pane_input",
+        "workdash.control.launcher.zellij.send_zellij_pane_input",
         lambda session, requested_pane_id, sent_data, *, raw=False: scenario_state.setdefault(
             "pane_send_calls", []
         ).append((session, requested_pane_id, sent_data, raw)),
@@ -573,7 +575,7 @@ def _client_requests_pane_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "workdash.control.close_zellij_pane",
+        "workdash.control.launcher.zellij.close_zellij_pane",
         lambda session, requested_pane_id: scenario_state.setdefault("pane_close_calls", []).append(
             (session, requested_pane_id)
         ),
@@ -591,7 +593,7 @@ def _client_requests_rejected_pane_close(
     def zellij_rejects_close(_session, _pane_id):
         raise RuntimeError("Zellij rejected terminal_404")
 
-    monkeypatch.setattr("workdash.control.close_zellij_pane", zellij_rejects_close)
+    monkeypatch.setattr("workdash.control.launcher.zellij.close_zellij_pane", zellij_rejects_close)
     _call_api(scenario_state, work_items, tmp_path, "pane/close", {"pane_id": "terminal_404"})
 
 
@@ -605,7 +607,7 @@ def _client_requests_rejected_pane_action(
     def zellij_rejects(_session, _pane_id, *, full=False):
         raise RuntimeError("Zellij rejected terminal_404")
 
-    monkeypatch.setattr("workdash.control.dump_zellij_pane", zellij_rejects)
+    monkeypatch.setattr("workdash.control.launcher.zellij.dump_zellij_pane", zellij_rejects)
     _call_api(scenario_state, work_items, tmp_path, "pane/content", {"pane_id": "terminal_404"})
 
 
@@ -1029,7 +1031,7 @@ def _two_workdash_sessions(scenario_state, monkeypatch):
     import workdash.workdash as cli
 
     scenario_state["dashboard_sessions"] = ["workdash-one", "demo"]
-    monkeypatch.setattr(cli, "list_workdash_sessions", lambda: ["workdash-one"])
+    monkeypatch.setattr(cli.launcher.zellij, "list_workdash_sessions", lambda: ["workdash-one"])
     monkeypatch.setenv("ZELLIJ", "0")
 
 
@@ -1064,7 +1066,7 @@ def _start_two_server_dashboards(scenario_state, monkeypatch, tmp_path, request)
     monkeypatch.setattr(cli, "load_config", lambda: api_config(tmp_path))
     monkeypatch.setattr(cli, "WorkdashBackend", Backend)
     monkeypatch.setattr(cli, "WorkdashApp", App)
-    monkeypatch.setattr(control, "load_zellij_panes", lambda session: [])
+    monkeypatch.setattr(control.launcher.zellij, "load_zellij_panes", lambda session: [])
 
     def cleanup():
         stopped.set()

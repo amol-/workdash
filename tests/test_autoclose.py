@@ -56,16 +56,22 @@ class Supervision:
 
         monkeypatch.setattr(autoclose_module.time, "monotonic", lambda: self.now)
         monkeypatch.setattr(
-            autoclose_module, "load_zellij_panes", lambda _session: [dict(p) for p in self.panes]
+            autoclose_module.launcher.zellij,
+            "load_zellij_panes",
+            lambda _session: [dict(p) for p in self.panes],
         )
-        monkeypatch.setattr(autoclose_module, "dump_zellij_pane", self._dump)
-        monkeypatch.setattr(autoclose_module, "send_zellij_pane_input", self._type)
-        monkeypatch.setattr(autoclose_module, "press_zellij_pane_enter", self._press_enter)
-        monkeypatch.setattr(autoclose_module, "close_zellij_pane", self._close)
+        monkeypatch.setattr(autoclose_module.launcher.zellij, "dump_zellij_pane", self._dump)
+        monkeypatch.setattr(autoclose_module.launcher.zellij, "send_zellij_pane_input", self._type)
+        monkeypatch.setattr(
+            autoclose_module.launcher.zellij, "press_zellij_pane_enter", self._press_enter
+        )
+        monkeypatch.setattr(autoclose_module.launcher.zellij, "close_zellij_pane", self._close)
         self._answer_work_state = autoclose_module.work_pull_request
         monkeypatch.setattr(autoclose_module, "work_pull_request", self._work_state)
 
-        monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(self.panes))
+        monkeypatch.setattr(
+            control_module.launcher.zellij, "load_zellij_panes", lambda _session: list(self.panes)
+        )
         monkeypatch.setattr(
             control_module, "existing_worktree_path", lambda _wd, _item, **kwargs: None
         )

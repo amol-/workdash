@@ -16,16 +16,12 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from . import launcher
 from .config import WorkdashConfig
 from .git import GitHelper
 from .launcher import (
     _format_zellij_pane_id,
-    close_zellij_pane,
-    dump_zellij_pane,
     is_live_zellij_pane,
-    load_zellij_panes,
-    press_zellij_pane_enter,
-    send_zellij_pane_input,
 )
 from .models import REVIEW_KINDS, WorkItem, WorkItemType
 from .work_instruction import render_autonomous_work_instruction
@@ -147,7 +143,9 @@ class AutocloseSupervisor:
         with self._lock:
             if self._drop_unidentified(entry):
                 return
-            screen = _screen_signature(dump_zellij_pane(entry.session, entry.pane_id))
+            screen = _screen_signature(
+                launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
+            )
         now = time.monotonic()
         if not entry.screen_known:
             entry.screen, entry.screen_known = screen, True
@@ -230,19 +228,25 @@ class AutocloseSupervisor:
         with self._lock:
             if self._drop_unidentified(entry):
                 return
-            screen = _screen_signature(dump_zellij_pane(entry.session, entry.pane_id))
+            screen = _screen_signature(
+                launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
+            )
             if screen != entry.screen:
                 # The agent is working again, so let it finish rather than interrupt it.
                 entry.screen, entry.last_activity = screen, time.monotonic()
                 logger.info("Postponed the autoclose instruction for pane %s", entry.pane_id)
                 return
-            send_zellij_pane_input(entry.session, entry.pane_id, instruction, raw=True)
+            launcher.zellij.send_zellij_pane_input(
+                entry.session, entry.pane_id, instruction, raw=True
+            )
             # The text carries the instruction, so it counts as delivered before its Enter,
             # and the pane now shows it, which is what a retried Enter is compared against.
             entry.notified, entry.awaiting_enter = fingerprint, True
-            entry.screen = _screen_signature(dump_zellij_pane(entry.session, entry.pane_id))
+            entry.screen = _screen_signature(
+                launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
+            )
             entry.last_activity = time.monotonic()
-            press_zellij_pane_enter(entry.session, entry.pane_id)
+            launcher.zellij.press_zellij_pane_enter(entry.session, entry.pane_id)
             entry.awaiting_enter = False
 
     def _submit(self, entry: _SupervisedPane) -> None:
@@ -256,13 +260,15 @@ class AutocloseSupervisor:
         with self._lock:
             if self._drop_unidentified(entry):
                 return
-            screen = _screen_signature(dump_zellij_pane(entry.session, entry.pane_id))
+            screen = _screen_signature(
+                launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
+            )
             if screen != entry.screen:
                 entry.screen, entry.last_activity = screen, time.monotonic()
                 entry.awaiting_enter = False
                 logger.info("Dropped the autoclose instruction for pane %s", entry.pane_id)
                 return
-            press_zellij_pane_enter(entry.session, entry.pane_id)
+            launcher.zellij.press_zellij_pane_enter(entry.session, entry.pane_id)
             entry.awaiting_enter = False
             entry.last_activity = time.monotonic()
 
@@ -274,19 +280,21 @@ class AutocloseSupervisor:
                 return
             if after_idle:
                 # The decision needed an idle pane; only a screen that changed since postpones it.
-                screen = _screen_signature(dump_zellij_pane(entry.session, entry.pane_id))
+                screen = _screen_signature(
+                    launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
+                )
                 if screen != entry.screen:
                     entry.screen, entry.last_activity = screen, time.monotonic()
                     logger.info("Postponed closing the autoclosed pane %s", entry.pane_id)
                     return
-            close_zellij_pane(entry.session, entry.pane_id)
+            launcher.zellij.close_zellij_pane(entry.session, entry.pane_id)
             self._panes.pop((entry.session, entry.pane_id), None)
             logger.info("Closed the autoclosed pane %s", entry.pane_id)
 
     def _identified(self, entry: _SupervisedPane) -> bool:
         """Whether a live pane in this session still has the registered ID and launch title."""
 
-        panes = load_zellij_panes(entry.session)
+        panes = launcher.zellij.load_zellij_panes(entry.session)
         pane = next(
             (pane for pane in panes if _format_zellij_pane_id(pane.get("id")) == entry.pane_id),
             None,

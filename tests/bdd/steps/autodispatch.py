@@ -42,7 +42,7 @@ def autodispatch_state(monkeypatch):
         return list(panes)
 
     monkeypatch.setattr(session, "dispatch_once", dispatch)
-    monkeypatch.setattr("workdash.autodispatch.load_zellij_panes", load_panes)
+    monkeypatch.setattr("workdash.autodispatch.launcher.zellij.load_zellij_panes", load_panes)
     monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
     yield {"session": session, "calls": calls, "panes": panes, "polled": polled}
     session.stop_autodispatch_sessions()
@@ -192,8 +192,10 @@ def cross_repo_server(scenario_state, monkeypatch):
         }
 
     monkeypatch.setattr(session, "code", code)
-    monkeypatch.setattr("workdash.control.load_zellij_panes", lambda _: [])
-    monkeypatch.setattr("workdash.autodispatch.load_zellij_panes", lambda _: list(panes))
+    monkeypatch.setattr("workdash.control.launcher.zellij.load_zellij_panes", lambda _: [])
+    monkeypatch.setattr(
+        "workdash.autodispatch.launcher.zellij.load_zellij_panes", lambda _: list(panes)
+    )
     monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
     scenario_state.update(auto_launches=launches, auto_panes=panes)
 
