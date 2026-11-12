@@ -552,21 +552,21 @@ the HTTP API answers `bad_request` (400) to `{"autoclose": true}` without
 `already_running` never turns a pane started elsewhere into a supervised one, and
 the response reports `autoclose_enabled` only when a request asked for it.
 
-About once a minute the server compares the pane's screen with the previous
-check. New output postpones every decision. After 15 minutes without new output
+About every 30 seconds the server compares the pane's screen with the previous
+check. New output postpones every decision. After 5 minutes without new output
 and without a message from Workdash, the server asks GitHub what the work still
 needs, using the same classification `workdash ready` uses, and sends the same
 instruction the agent was briefed with: implement the issue, fix failing checks,
 resolve merge conflicts, or address review feedback. A new head, check result,
 review, base head, or mergeability is a new state; the same state is never
-messaged twice, and every message restarts the 15 minutes. A pull request that
+messaged twice, and every message restarts the 5 minutes. A pull request that
 merged closes its pane on the next check, even while the agent is still writing.
 A supervised session on somebody else's pull request is never messaged and closes
 only once that pull request merges.
 
 Only a known pull request's state is read on every check: finding the pull
 request an issue now has, and deciding what an idle pane needs, each cost a whole
-work state, so each runs at most every fifth check. That lookup also finds a pull
+work state, so each runs at most every five minutes. That lookup also finds a pull
 request that opened and merged since the previous one, so such work closes its
 pane at the next lookup, at most about five minutes late. An instruction whose
 text reached the pane is never typed again: a failed Enter keystroke is retried

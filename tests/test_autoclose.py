@@ -204,7 +204,7 @@ def test_awaiting_launch_gets_publishing_rules_when_ci_fails(monkeypatch, tmp_pa
     briefing = launch.call_args.args[1]
     assert "still without a final CI result" in briefing
     assert "AUTOSTART: IMPLEMENT, PUBLISH AND VERIFY" not in briefing
-    supervision.poll(15)
+    supervision.poll(5)
     assert not supervision.sent
 
     failing_head(supervision)
@@ -215,7 +215,7 @@ def test_awaiting_launch_gets_publishing_rules_when_ci_fails(monkeypatch, tmp_pa
     assert "--add-assignee" not in instruction
 
 
-def test_the_worker_waits_a_minute_between_checks(monkeypatch) -> None:
+def test_the_worker_waits_30_seconds_between_checks(monkeypatch) -> None:
     supervisor = autoclose_module.AutocloseSupervisor(
         config=WorkdashConfig(), lock=threading.RLock(), git=MagicMock()
     )
@@ -232,11 +232,11 @@ def test_the_worker_waits_a_minute_between_checks(monkeypatch) -> None:
 
     supervisor._run()
 
-    assert waits == [60.0, 60.0, 60.0]
+    assert waits == [30.0, 30.0, 30.0]
     assert checks == [True, True]
 
 
-def test_finding_the_pull_request_of_work_without_one_runs_every_fifth_check(
+def test_finding_the_pull_request_of_work_without_one_runs_every_five_minutes(
     monkeypatch, tmp_path
 ) -> None:
     supervision = Supervision(monkeypatch, tmp_path)
@@ -250,6 +250,23 @@ def test_finding_the_pull_request_of_work_without_one_runs_every_fifth_check(
     assert supervision.github.operations == []
 
     supervision.poll()
+    assert supervision.github.operations
+
+
+def test_discovery_remains_five_minutes_with_30_second_polls(monkeypatch, tmp_path) -> None:
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    supervision.writing = True
+    supervision.now = 30
+    supervision.session.autoclose.poll_once()
+    supervision.github.operations.clear()
+    for _ in range(9):
+        supervision.now += 30
+        supervision.session.autoclose.poll_once()
+    assert supervision.github.operations == []
+    supervision.now += 30
+    supervision.session.autoclose.poll_once()
     assert supervision.github.operations
 
 
@@ -274,20 +291,20 @@ def test_replacing_session_git_changes_the_unpublished_work_check(monkeypatch, t
     supervision.session.git = replacement
     assert supervision.session.__dict__["_git"] is replacement
 
-    supervision.poll(15)
+    supervision.poll(5)
 
     replacement.has_unpublished_work.assert_called_once_with(str(supervision.worktree), HEAD_SHA)
     assert supervision.closed == []
 
 
-def test_an_idle_pane_resolves_its_work_state_every_fifth_check(monkeypatch, tmp_path) -> None:
+def test_an_idle_pane_resolves_its_work_state_every_five_minutes(monkeypatch, tmp_path) -> None:
     supervision = Supervision(monkeypatch, tmp_path)
     supervision.local_work = True
     supervision.launch(autoclose=True)
 
-    # Finished work held open by unpublished files is decided again every fifth check, so
+    # Finished work held open by unpublished files is decided again every five minutes, so
     # the four checks between them only ask the known pull request for its state.
-    supervision.poll(15)
+    supervision.poll(5)
     # The worktree and the head GitHub reported are what the unpublished work is judged against.
     assert supervision.unpublished_checks == [(str(supervision.worktree), HEAD_SHA)]
     supervision.github.operations.clear()
@@ -311,7 +328,7 @@ def test_a_pull_request_that_merged_before_the_launch_does_not_close_the_pane(
     # A comment after the launch makes the pull request look newer, but it merged long before.
     supervision.github.pull_requests["owner/repo#51"]["updated"] = datetime.now(UTC).isoformat()
 
-    supervision.poll(15)
+    supervision.poll(5)
 
     assert (supervision.sent, supervision.closed) == ([], [])
     # The pane is still checked, so it is still supervised.
@@ -345,22 +362,22 @@ def test_a_message_resets_the_timer_and_unchanged_work_is_never_messaged_twice(
     supervision = Supervision(monkeypatch, tmp_path)
     failing_head(supervision)
     supervision.launch(autoclose=True)
-    supervision.poll(15)
+    supervision.poll(5)
     assert len(supervision.sent) == 1
 
     # A new head a minute later is new work, but the message restarted the wait: it is
-    # instructed only once fifteen quiet minutes have passed since that message.
+    # instructed only once five quiet minutes have passed since that message.
     failing_head(supervision, head=OLD_HEAD_SHA)
     supervision.poll()
     assert len(supervision.sent) == 1
-    supervision.poll(13)
+    supervision.poll(3)
     assert len(supervision.sent) == 1
     supervision.poll()
     assert len(supervision.sent) == 2
     assert OLD_HEAD_SHA in supervision.sent[1][1]
 
     # The same work is never messaged twice, however long the pane stays idle.
-    supervision.poll(15)
+    supervision.poll(5)
     assert len(supervision.sent) == 2
 
 
@@ -368,14 +385,14 @@ def test_a_new_failing_check_or_another_review_is_messaged_again(monkeypatch, tm
     supervision = Supervision(monkeypatch, tmp_path)
     failing_head(supervision)
     supervision.launch(autoclose=True)
-    supervision.poll(15)
+    supervision.poll(5)
     assert len(supervision.sent) == 1
 
     # A check that newly failed keeps the action at fix_ci but is a new state.
     supervision.github.pull_requests["owner/repo#51"]["checks"][HEAD_SHA].append(
         check_run("lint", "FAILURE")
     )
-    supervision.poll(15)
+    supervision.poll(5)
     assert len(supervision.sent) == 2
     assert "lint" in supervision.sent[1][1]
 
@@ -383,12 +400,12 @@ def test_a_new_failing_check_or_another_review_is_messaged_again(monkeypatch, tm
     supervision.github.pull_requests["owner/repo#51"]["reviews"].append(
         review("reviewer", "CHANGES_REQUESTED", created=AFTER_PUSH)
     )
-    supervision.poll(15)
+    supervision.poll(5)
     assert len(supervision.sent) == 3
     supervision.github.pull_requests["owner/repo#51"]["threads"].append(
         thread(comment("reviewer", created=AFTER_PUSH))
     )
-    supervision.poll(15)
+    supervision.poll(5)
     assert len(supervision.sent) == 4
 
 
@@ -398,7 +415,7 @@ def test_a_screen_that_changes_after_the_idle_check_cancels_the_message(
     supervision = Supervision(monkeypatch, tmp_path)
     failing_head(supervision)
     supervision.launch(autoclose=True)
-    supervision.poll(14)
+    supervision.poll(4)
 
     # The recheck immediately before sending sees the agent writing again.
     supervision.sequence = ["idle\n", "a new line\n"]
@@ -406,14 +423,14 @@ def test_a_screen_that_changes_after_the_idle_check_cancels_the_message(
     assert supervision.sent == []
 
     supervision.screen = "a new line\n"  # the agent goes quiet on what it printed
-    supervision.poll(15)
+    supervision.poll(5)
     assert len(supervision.sent) == 1
 
 
 def test_finished_work_is_not_closed_while_its_screen_changes(monkeypatch, tmp_path) -> None:
     supervision = Supervision(monkeypatch, tmp_path)
     supervision.launch(autoclose=True)
-    supervision.poll(14)
+    supervision.poll(4)
 
     # The recheck immediately before closing sees the agent writing again.
     supervision.sequence = ["idle\n", "still working\n"]
@@ -421,7 +438,7 @@ def test_finished_work_is_not_closed_while_its_screen_changes(monkeypatch, tmp_p
     assert supervision.closed == []
 
     supervision.screen = "still working\n"  # the agent goes quiet on what it printed
-    supervision.poll(15)
+    supervision.poll(5)
     assert supervision.closed == ["terminal_21"]
 
 
@@ -433,7 +450,7 @@ def test_an_instruction_is_not_typed_into_a_pane_that_left_before_the_action(
     supervision.launch(autoclose=True)
     supervision.pane_leaves_at_decision = True
 
-    supervision.poll(15)
+    supervision.poll(5)
 
     assert (supervision.sent, supervision.enters, supervision.closed) == ([], [], [])
 
@@ -445,7 +462,7 @@ def test_finished_work_is_not_closed_when_the_pane_left_before_the_action(
     supervision.launch(autoclose=True)
     supervision.pane_leaves_at_decision = True
 
-    supervision.poll(15)
+    supervision.poll(5)
 
     assert (supervision.sent, supervision.enters, supervision.closed) == ([], [], [])
 
@@ -456,7 +473,7 @@ def test_an_instruction_whose_enter_failed_is_not_typed_again(monkeypatch, tmp_p
     supervision.enter_fails = True
     supervision.launch(autoclose=True)
 
-    supervision.poll(15)
+    supervision.poll(5)
     assert len(supervision.sent) == 1
 
     # The text reached the pane, so the next check only submits it.
@@ -470,7 +487,7 @@ def test_a_submit_is_not_repeated_into_a_prompt_that_since_appeared(monkeypatch,
     failing_head(supervision)
     supervision.enter_fails = True
     supervision.launch(autoclose=True)
-    supervision.poll(15)
+    supervision.poll(5)
 
     # The agent answered on its own, so its Enter would land on whatever it now asks.
     supervision.enter_fails = False
@@ -479,7 +496,7 @@ def test_a_submit_is_not_repeated_into_a_prompt_that_since_appeared(monkeypatch,
     assert supervision.enters == ["terminal_21"]
 
     # The abandoned instruction is not typed again either.
-    supervision.poll(15)
+    supervision.poll(5)
     assert (len(supervision.sent), len(supervision.enters)) == (1, 1)
 
 
@@ -535,7 +552,7 @@ def test_a_stopped_supervisor_acts_on_no_pane(monkeypatch, tmp_path) -> None:
 
     # The control server stops the worker when it shuts down.
     supervision.session.autoclose.stop()
-    supervision.poll(15)
+    supervision.poll(5)
 
     assert (supervision.sent, supervision.closed) == ([], [])
 
@@ -552,7 +569,7 @@ def test_github_is_read_outside_the_session_lock(monkeypatch, tmp_path) -> None:
         return run_github(command, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", spy)
-    supervision.poll(15)
+    supervision.poll(5)
 
     assert lock_states and not any(lock_states)
 

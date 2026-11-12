@@ -31,15 +31,15 @@ from .work_state import PullRequestWorkState
 logger = logging.getLogger(__name__)
 
 # Every supervised pane is checked this often.
-POLL_SECONDS = 60.0
+POLL_SECONDS = 30.0
 # Unchanged output and no Workdash message for this long makes a pane a candidate.
-IDLE_SECONDS = 15 * 60.0
+IDLE_SECONDS = 5 * 60.0
 # Waits after successive failed checks, so an outage slows supervision instead of acting.
 RETRY_SECONDS = (120.0, 300.0, 900.0)
-# A pane's whole work state costs several queries, so it is resolved every fifth check:
+# A pane's whole work state costs several queries, so it is resolved every five minutes:
 # once to find the pull request an issue now has, and once to decide what an idle pane
 # needs. A known pull request is only asked for its state, which every check can afford.
-RESOLVE_SECONDS = 5 * POLL_SECONDS
+RESOLVE_SECONDS = 5 * 60.0
 # The only actions worth sending; every other action describes waiting for others.
 _WORK_ACTIONS = {"implement", "fix_ci", "fix_merge_conflicts", "address_review"}
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
@@ -49,9 +49,9 @@ _COMPLETED_ACTIONS = {"awaiting_review", "awaiting_merge"}
 class AutocloseSupervisor:
     """Nudge and close autoclosed coding panes from their output and GitHub state.
 
-    One worker checks every registered pane once a minute. A merged pull request
+    One worker checks every registered pane every 30 seconds. A merged pull request
     closes its pane on the next check; every other decision waits until the pane
-    has shown no new output and received no Workdash message for fifteen minutes.
+    has shown no new output and received no Workdash message for five minutes.
     """
 
     def __init__(
