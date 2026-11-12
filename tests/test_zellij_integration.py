@@ -163,7 +163,8 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
 @pytest.mark.parametrize("tab_name", ["epic", "-foo"])
 def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, tab_name):
-    from workdash.launcher import launch_agent_context, load_zellij_panes
+    from workdash.agent_execution import executor
+    from workdash.launcher import load_zellij_panes
 
     zellij = shutil.which("zellij")
     name = f"workdash-group-test-{uuid.uuid4().hex}"
@@ -190,7 +191,7 @@ def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, 
         for repo, group in [("first", tab_name), ("second", tab_name), ("third", None)]:
             path = tmp_path / repo
             path.mkdir()
-            launch = launch_agent_context(
+            launch = executor.launch(
                 str(path), "hello", ["/bin/sh", "-c", "sleep 120"], zellij_session=name, group=group
             )
             panes = load_zellij_panes(name)

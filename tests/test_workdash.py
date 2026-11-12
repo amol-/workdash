@@ -1538,12 +1538,14 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
             cwd=repo,
         )
 
-    monkeypatch.setattr(control_module, "launch_agent_context", fake_launch_agent_context)
+    monkeypatch.setattr(
+        control_module.agent_execution.executor, "launch", fake_launch_agent_context
+    )
     monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(panes))
     monkeypatch.setattr(control_module, "existing_worktree_path", lambda _wd, _item: None)
     monkeypatch.setattr(
-        control_module,
-        "launch_vscode_context",
+        control_module.agent_execution.executor,
+        "launch_vscode",
         lambda repo, prompt: vscode_calls.append((repo, prompt)),
     )
     monkeypatch.setenv("ZELLIJ", "0")

@@ -19,6 +19,7 @@ from pathlib import Path
 from socketserver import BaseServer
 from wsgiref.simple_server import make_server
 
+from . import agent_execution
 from .analysis_cache import AnalysisCache
 from .autoclose import AutocloseSupervisor
 from .autodispatch import _AutodispatchSession, _format_pane_id
@@ -32,9 +33,7 @@ from .launcher import (
     close_zellij_pane,
     dump_zellij_pane,
     is_live_zellij_pane,
-    launch_agent_context,
     launch_terminal_context,
-    launch_vscode_context,
     load_zellij_panes,
     prepare_launch_agent_prompt,
     send_zellij_pane_input,
@@ -450,7 +449,7 @@ class WorkdashSession:
                 prompt = f"{prompt.rstrip()}\n\n{autostart_text}"
             if selected_agent == "vscode":
                 # VSCode leaves no pane behind, so it never holds the claim.
-                launch_vscode_context(repo_path, prompt)
+                agent_execution.executor.launch_vscode(repo_path, prompt)
                 return {
                     "status": "launched",
                     "item_id": item_id,
@@ -464,7 +463,7 @@ class WorkdashSession:
             self._unconfirmed_launches[launch_key] = (
                 time.monotonic() + _UNCONFIRMED_LAUNCH_TTL_SECONDS
             )
-            launch = launch_agent_context(
+            launch = agent_execution.executor.launch(
                 repo_path,
                 prompt,
                 agent_command_tokens=command_tokens,

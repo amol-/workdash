@@ -5,13 +5,12 @@ from datetime import UTC, datetime
 import pytest
 
 import workdash.launcher as launcher_module
+from workdash.agent_execution import executor
 from workdash.launcher import (
     build_launch_agent_prompt,
     exec_zellij_wrapped_workdash,
-    launch_agent_context,
     launch_branchdiff_context,
     launch_terminal_context,
-    launch_vscode_context,
     list_workdash_sessions,
     load_zellij_panes,
     open_in_browser,
@@ -645,7 +644,7 @@ def test_launch_agent_context_uses_new_zellij_pane_when_in_zellij(
     )
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    launch = launch_agent_context(
+    launch = executor.launch(
         "/tmp/amol-_repoze.who_52", "review this change", agent_command_tokens=["codex"]
     )
 
@@ -697,7 +696,7 @@ def test_launch_agent_context_targets_selected_zellij_session_without_current_en
     )
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    launch = launch_agent_context(
+    launch = executor.launch(
         "/tmp/amol-_repoze.who_52",
         "review this change",
         agent_command_tokens=["codex"],
@@ -777,7 +776,7 @@ def test_launch_agent_context_captures_terminal_pane_when_plugin_id_overlaps(
     )
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    launch = launch_agent_context(
+    launch = executor.launch(
         "/tmp/amol-_repoze.who_52",
         "review this change",
         agent_command_tokens=["codex"],
@@ -806,7 +805,7 @@ def test_launch_agent_context_raises_clear_error_when_zellij_launch_fails(
     with pytest.raises(
         RuntimeError, match="Failed to launch coding agent in zellij: pane launch failed"
     ):
-        launch_agent_context("/tmp/repo", "review this change", agent_command_tokens=["codex"])
+        executor.launch("/tmp/repo", "review this change", agent_command_tokens=["codex"])
 
 
 def test_launch_terminal_context_uses_new_zellij_pane_when_in_zellij(
@@ -994,7 +993,7 @@ def test_launch_agent_context_requires_active_zellij_session(
     monkeypatch.delenv("ZELLIJ", raising=False)
 
     with pytest.raises(RuntimeError, match="require an active Zellij session"):
-        launch_agent_context("/tmp/repo", "review this change", agent_command_tokens=["codex"])
+        executor.launch("/tmp/repo", "review this change", agent_command_tokens=["codex"])
 
 
 def test_exec_zellij_wrapped_workdash_replaces_process_with_layout(
@@ -1375,7 +1374,7 @@ def test_launch_vscode_context_opens_folder_then_chat(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    launch_vscode_context("/tmp/repo", "explain this codebase")
+    executor.launch_vscode("/tmp/repo", "explain this codebase")
 
     assert len(calls) == 2
     assert calls[0]["command"] == ["code", "--new-window", "/tmp/repo"]
@@ -1397,7 +1396,7 @@ def test_launch_vscode_context_raises_when_code_not_on_path(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="Failed to open VSCode"):
-        launch_vscode_context("/tmp/repo", "explain this codebase")
+        executor.launch_vscode("/tmp/repo", "explain this codebase")
 
 
 def test_launch_vscode_context_raises_when_chat_command_fails(
@@ -1419,14 +1418,14 @@ def test_launch_vscode_context_raises_when_chat_command_fails(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="Failed to start Copilot chat"):
-        launch_vscode_context("/tmp/repo", "explain this codebase")
+        executor.launch_vscode("/tmp/repo", "explain this codebase")
 
 
 def test_launch_vscode_context_rejects_empty_repo_path() -> None:
     with pytest.raises(ValueError, match="Repository path must be a non-empty string"):
-        launch_vscode_context("  ", "explain this codebase")
+        executor.launch_vscode("  ", "explain this codebase")
 
 
 def test_launch_vscode_context_rejects_empty_prompt() -> None:
     with pytest.raises(ValueError, match="Prompt must be a non-empty string"):
-        launch_vscode_context("/tmp/repo", "  ")
+        executor.launch_vscode("/tmp/repo", "  ")

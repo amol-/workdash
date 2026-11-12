@@ -12,8 +12,9 @@ import pytest
 from pytest_bdd import given, parsers, then, when
 from textual.widgets import Static
 
+from workdash.agent_execution import executor
 from workdash.control import WorkdashSession, format_work_item_id
-from workdash.launcher import launch_agent_context, launch_terminal_context
+from workdash.launcher import launch_terminal_context
 from workdash.models import WorkItem
 
 from .common import make_valid_config, make_work_item, modal_screen_names, run_app
@@ -62,7 +63,7 @@ def _launch_named_terminal_backed_work_action(
 
     repo_path = scenario_state["pane_title_worktree_path"]
     if action == "code":
-        launch_agent_context(repo_path, "work on this item", agent_command_tokens=["claude"])
+        executor.launch(repo_path, "work on this item", agent_command_tokens=["claude"])
     elif action == "terminal":
         launch_terminal_context(repo_path)
     else:

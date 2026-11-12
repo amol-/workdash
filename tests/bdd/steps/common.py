@@ -507,7 +507,7 @@ def install_zellij_agent_fakes(
         )
 
     monkeypatch.setattr(control_module, "load_zellij_panes", load_panes)
-    monkeypatch.setattr(control_module, "launch_agent_context", launch_agent)
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch_agent)
     monkeypatch.setattr(control_module, "_LAUNCH_VISIBILITY_INTERVAL_SECONDS", 0)
 
 

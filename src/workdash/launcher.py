@@ -716,51 +716,6 @@ def prepare_launch_agent_prompt(
     )
 
 
-def launch_agent_context(
-    repo_path: str,
-    prompt: str,
-    agent_command_tokens: list[str],
-    *,
-    zellij_session: str | None = None,
-    group: str | None = None,
-) -> ZellijPaneLaunch:
-    if not isinstance(repo_path, str) or not repo_path.strip():
-        raise ValueError("Repository path must be a non-empty string.")
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise ValueError("Prompt must be a non-empty string.")
-
-    if not agent_command_tokens or any(
-        not isinstance(token, str) or not token.strip() for token in agent_command_tokens
-    ):
-        raise ValueError("Agent command tokens must be a non-empty list of non-empty strings.")
-    user_shell = os.environ.get("SHELL", "/bin/sh")
-    agent_command = [user_shell, "-ic", shlex.join([*agent_command_tokens, prompt])]
-    return _launch_zellij_command(
-        repo_path,
-        agent_command,
-        context="Failed to launch coding agent in zellij",
-        work_action="code",
-        zellij_session=zellij_session,
-        group=group,
-    )
-
-
-def launch_vscode_context(repo_path: str, prompt: str) -> None:
-    """Open VSCode on the repository and start a Copilot chat session."""
-    if not isinstance(repo_path, str) or not repo_path.strip():
-        raise ValueError("Repository path must be a non-empty string.")
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise ValueError("Prompt must be a non-empty string.")
-    _run_launch_command(
-        ["code", "--new-window", repo_path],
-        context="Failed to open VSCode",
-    )
-    _run_launch_command(
-        ["code", "chat", prompt, "--reuse-window"],
-        context="Failed to start Copilot chat",
-    )
-
-
 def launch_terminal_context(
     repo_path: str, *, zellij_session: str | None = None
 ) -> ZellijPaneLaunch:
