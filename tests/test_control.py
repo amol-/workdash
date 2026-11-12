@@ -3428,18 +3428,21 @@ def test_shared_agent_execution_can_simulate_analysis_and_coding(monkeypatch, tm
     ]
 
 
-def test_zellij_replacement_tracks_terminal_lifecycle(monkeypatch, tmp_path):
+def test_zellij_replacement_tracks_terminal_and_coding_lifecycle(monkeypatch, tmp_path):
     class FakeZellij:
         def __init__(self):
             self.panes = {}
             self.content = {}
+            self.launches = []
 
         def launch_pane(
             self, repo_path, command, *, context, work_action, zellij_session, group=None
         ):
-            pane_id = "terminal_1"
+            self.launches.append((repo_path, command, context, work_action, zellij_session, group))
+            pane_number = len(self.launches)
+            pane_id = f"terminal_{pane_number}"
             title = f"{work_action}_{Path(repo_path).name}"
-            self.panes[pane_id] = {"id": 1, "title": title, "pane_cwd": repo_path}
+            self.panes[pane_id] = {"id": pane_number, "title": title, "pane_cwd": repo_path}
             self.content[pane_id] = ""
             return launcher_module.ZellijPaneLaunch(zellij_session, pane_id, title, repo_path)
 
@@ -3459,9 +3462,15 @@ def test_zellij_replacement_tracks_terminal_lifecycle(monkeypatch, tmp_path):
     fake = FakeZellij()
     monkeypatch.setattr(launcher_module, "zellij", fake)
     monkeypatch.setattr(control_module, "ensure_worktree", lambda *args: str(tmp_path))
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args: tmp_path)
+    monkeypatch.setattr(control_module, "get_merge_base", lambda path: None)
+    monkeypatch.setattr(
+        control_module, "prepare_launch_agent_prompt", lambda *a, **k: "It's a task"
+    )
+    monkeypatch.setenv("SHELL", "/bin/sh")
     item = _work_item(number=1, title="Task")
     session = WorkdashSession(
-        config=WorkdashConfig(),
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi --model 'a b'")}),
         backend=MagicMock(),
         work_items=[item],
         suggestion_markers={},
@@ -3473,6 +3482,28 @@ def test_zellij_replacement_tracks_terminal_lifecycle(monkeypatch, tmp_path):
     session.pane_send(pane_id=pane_id, data="hello")
     assert session.pane_content(pane_id=pane_id)["content"] == "hello\n"
     session.pane_close(pane_id=pane_id)
+    assert session.info()["panes"] == []
+
+    coding = session.code(target="owner/repo#ISSUE-1", agent="pi", group="my group")
+    assert coding["status"] == "launched"
+    assert coding["session"] == "workdash-test"
+    assert coding["pane_id"] == "terminal_2"
+    assert coding["cwd"] == str(tmp_path)
+    repo_path, command, context, action, selected_session, group = fake.launches[-1]
+    assert (repo_path, context, action, selected_session, group) == (
+        str(tmp_path),
+        "Failed to launch coding agent in zellij",
+        "code",
+        "workdash-test",
+        "my group",
+    )
+    assert command[:2] == ["/bin/sh", "-ic"]
+    assert shlex.split(command[2]) == ["pi", "--model", "a b", "It's a task"]
+    assert session.code(target="owner/repo#ISSUE-1", agent="pi")["status"] == "already_running"
+    assert [pane["pane_id"] for pane in session.info()["panes"]] == ["terminal_2"]
+    session.pane_send(pane_id="terminal_2", data="continue")
+    assert session.pane_content(pane_id="terminal_2")["content"] == "continue\n"
+    session.pane_close(pane_id="terminal_2")
     assert session.info()["panes"] == []
 
 
