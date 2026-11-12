@@ -79,12 +79,14 @@ def _install_supervision(
         panes[:] = [pane for pane in panes if f"terminal_{pane['id']}" != pane_id]
 
     monkeypatch.setattr(
-        autoclose_module, "load_zellij_panes", lambda _session: [dict(p) for p in panes]
+        autoclose_module.launcher.zellij,
+        "load_zellij_panes",
+        lambda _session: [dict(p) for p in panes],
     )
-    monkeypatch.setattr(autoclose_module, "dump_zellij_pane", screen)
-    monkeypatch.setattr(autoclose_module, "send_zellij_pane_input", send)
-    monkeypatch.setattr(autoclose_module, "press_zellij_pane_enter", press_enter)
-    monkeypatch.setattr(autoclose_module, "close_zellij_pane", close)
+    monkeypatch.setattr(autoclose_module.launcher.zellij, "dump_zellij_pane", screen)
+    monkeypatch.setattr(autoclose_module.launcher.zellij, "send_zellij_pane_input", send)
+    monkeypatch.setattr(autoclose_module.launcher.zellij, "press_zellij_pane_enter", press_enter)
+    monkeypatch.setattr(autoclose_module.launcher.zellij, "close_zellij_pane", close)
     monkeypatch.setattr(
         autoclose_module,
         "has_unpublished_work",

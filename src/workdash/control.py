@@ -19,6 +19,7 @@ from pathlib import Path
 from socketserver import BaseServer
 from wsgiref.simple_server import make_server
 
+from . import launcher
 from .analysis_cache import AnalysisCache
 from .autoclose import AutocloseSupervisor
 from .autodispatch import _AutodispatchSession, _format_pane_id
@@ -28,15 +29,11 @@ from .git import GitHelper, is_repository_name, is_todo_target
 from .github_client import parse_github_item_url
 from .launcher import (
     _zellij_pane_name_for_work_action,
-    close_zellij_pane,
-    dump_zellij_pane,
     is_live_zellij_pane,
     launch_agent_context,
     launch_terminal_context,
     launch_vscode_context,
-    load_zellij_panes,
     prepare_launch_agent_prompt,
-    send_zellij_pane_input,
 )
 from .models import (
     REVIEW_KINDS,
@@ -751,7 +748,7 @@ class WorkdashSession:
                 "Pane content requires a known Workdash Zellij session.",
                 status=HTTPStatus.CONFLICT,
             )
-        content = dump_zellij_pane(self.zellij_session, pane_id, full=full)
+        content = launcher.zellij.dump_zellij_pane(self.zellij_session, pane_id, full=full)
         return {"pane_id": pane_id, "content": content, "full": full}
 
     def pane_send(self, *, pane_id: str, data: str, raw: bool = False) -> dict[str, object]:
@@ -763,7 +760,7 @@ class WorkdashSession:
                 "Pane input requires a known Workdash Zellij session.",
                 status=HTTPStatus.CONFLICT,
             )
-        send_zellij_pane_input(self.zellij_session, pane_id, data, raw=raw)
+        launcher.zellij.send_zellij_pane_input(self.zellij_session, pane_id, data, raw=raw)
         return {"pane_id": pane_id, "raw": raw, "accepted": True}
 
     def pane_close(self, *, pane_id: str) -> dict[str, object]:
@@ -775,7 +772,7 @@ class WorkdashSession:
                 "Pane close requires a known Workdash Zellij session.",
                 status=HTTPStatus.CONFLICT,
             )
-        close_zellij_pane(self.zellij_session, pane_id)
+        launcher.zellij.close_zellij_pane(self.zellij_session, pane_id)
         return {"pane_id": pane_id, "accepted": True}
 
     def _notify_items_changed(self) -> None:
@@ -879,7 +876,7 @@ class WorkdashSession:
                 status=HTTPStatus.CONFLICT,
             )
         try:
-            return load_zellij_panes(self.zellij_session)
+            return launcher.zellij.load_zellij_panes(self.zellij_session)
         except RuntimeError as error:
             raise WorkdashControlError(
                 "zellij_unavailable",
@@ -920,9 +917,7 @@ class WorkdashSession:
         """
         if not self.zellij_session:
             raise RuntimeError("No Zellij session available for focusing panes.")
-        from .launcher import focus_zellij_pane
-
-        focus_zellij_pane(self.zellij_session, pane_id)
+        launcher.zellij.focus_zellij_pane(self.zellij_session, pane_id)
 
 
 class WorkdashControlServer:
@@ -1145,7 +1140,7 @@ def _pane_info_payload(
             if item_path is not None:
                 item_by_cwd[_normalized_path(item_path)] = format_work_item_id(item)
     panes = []
-    for pane in load_zellij_panes(session):
+    for pane in launcher.zellij.load_zellij_panes(session):
         if _is_workdash_work_pane(pane):
             panes.append(
                 _pane_payload(selected_session=session, pane=pane, item_by_cwd=item_by_cwd)

@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from ipaddress import ip_address
 
-from . import __version__
+from . import __version__, launcher
 from .backend import SuggestionMarkers, WorkdashBackend
 from .config import WorkdashConfig, WorkdashConfigValidationError, configure, load_config
 from .control import (
@@ -25,9 +25,7 @@ from .control import (
 )
 from .github_client import GitHubClient
 from .launcher import (
-    exec_zellij_wrapped_workdash,
     inject_workdash_local_bin_into_path,
-    list_workdash_sessions,
     open_in_browser,
     open_markdown,
 )
@@ -87,7 +85,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if _should_wrap_interactive_start(options):
         try:
-            exec_zellij_wrapped_workdash(argv)
+            launcher.zellij.exec_zellij_wrapped_workdash(argv)
         except RuntimeError as error:
             print(f"Error: {error}", file=sys.stderr, flush=True)
             return 1
@@ -1095,7 +1093,7 @@ def _print_control_error(error: WorkdashControlError) -> None:
 
 
 def _select_workdash_session(requested_session: str | None) -> str:
-    sessions = list_workdash_sessions()
+    sessions = launcher.zellij.list_workdash_sessions()
     if requested_session is not None:
         if requested_session in sessions:
             return requested_session

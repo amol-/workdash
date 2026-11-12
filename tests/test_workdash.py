@@ -215,7 +215,9 @@ def test_main_server_refresh_before_tui_run_updates_session_and_repaints_when_ru
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashControlServer", FakeControlServer)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
-    monkeypatch.setattr(workdash_module, "list_workdash_sessions", lambda: ["workdash-main"])
+    monkeypatch.setattr(
+        workdash_module.launcher.zellij, "list_workdash_sessions", lambda: ["workdash-main"]
+    )
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
 
@@ -283,7 +285,9 @@ def test_main_server_refresh_callback_reraises_unrelated_runtime_errors(
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashControlServer", FakeControlServer)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
-    monkeypatch.setattr(workdash_module, "list_workdash_sessions", lambda: ["workdash-main"])
+    monkeypatch.setattr(
+        workdash_module.launcher.zellij, "list_workdash_sessions", lambda: ["workdash-main"]
+    )
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
 
@@ -517,7 +521,7 @@ def test_main_rejects_missing_or_malformed_viewer_before_zellij_wrapping(
         ),
     )
     monkeypatch.setattr(
-        workdash_module,
+        workdash_module.launcher.zellij,
         "exec_zellij_wrapped_workdash",
         lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
     )
@@ -559,7 +563,7 @@ def test_main_exits_with_config_guidance_when_startup_config_command_is_malforme
     monkeypatch.setattr(workdash_module, "load_config", lambda: config)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(
-        workdash_module,
+        workdash_module.launcher.zellij,
         "exec_zellij_wrapped_workdash",
         lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
     )
@@ -577,7 +581,7 @@ def test_main_exits_with_config_guidance_when_startup_config_command_is_malforme
 def test_select_workdash_session_treats_no_zellij_sessions_as_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(workdash_module, "list_workdash_sessions", lambda: [])
+    monkeypatch.setattr(workdash_module.launcher.zellij, "list_workdash_sessions", lambda: [])
 
     with pytest.raises(RuntimeError, match="active Workdash-owned Zellij session is required"):
         workdash_module._select_workdash_session(None)
@@ -755,7 +759,7 @@ def test_main_server_backed_commands_are_pure_http_clients(
         lambda _session: (_ for _ in ()).throw(AssertionError("unexpected Zellij inspection")),
     )
     monkeypatch.setattr(
-        workdash_module,
+        workdash_module.launcher.zellij,
         "exec_zellij_wrapped_workdash",
         lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
     )
@@ -1382,7 +1386,9 @@ def test_main_outside_zellij_replaces_process_with_zellij(
     monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
-    monkeypatch.setattr(workdash_module, "exec_zellij_wrapped_workdash", fake_wrapper)
+    monkeypatch.setattr(
+        workdash_module.launcher.zellij, "exec_zellij_wrapped_workdash", fake_wrapper
+    )
 
     with pytest.raises(SystemExit):
         workdash_module.main(["--refresh"])
@@ -1437,7 +1443,9 @@ def test_main_outside_zellij_checks_gh_before_replacing_process(
 
     monkeypatch.delenv("ZELLIJ", raising=False)
     monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: None)
-    monkeypatch.setattr(workdash_module, "exec_zellij_wrapped_workdash", wrapper_calls.append)
+    monkeypatch.setattr(
+        workdash_module.launcher.zellij, "exec_zellij_wrapped_workdash", wrapper_calls.append
+    )
 
     exit_code = workdash_module.main([])
 
@@ -1543,7 +1551,9 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
         )
 
     monkeypatch.setattr(control_module, "launch_agent_context", fake_launch_agent_context)
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(panes))
+    monkeypatch.setattr(
+        control_module.launcher.zellij, "load_zellij_panes", lambda _session: list(panes)
+    )
     monkeypatch.setattr(control_module, "existing_worktree_path", lambda _wd, _item: None)
     monkeypatch.setattr(
         control_module,
@@ -1854,7 +1864,7 @@ def test_server_inside_zellij_requires_current_session_name(monkeypatch, capsys)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", lambda **kwargs: backend)
     monkeypatch.setattr(
-        workdash_module,
+        workdash_module.launcher.zellij,
         "list_workdash_sessions",
         lambda: pytest.fail("must not select another session"),
     )
@@ -1873,7 +1883,9 @@ def test_server_outside_zellij_selects_single_existing_workdash_session(monkeypa
     monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", lambda **kwargs: backend)
-    monkeypatch.setattr(workdash_module, "list_workdash_sessions", lambda: ["workdash-existing"])
+    monkeypatch.setattr(
+        workdash_module.launcher.zellij, "list_workdash_sessions", lambda: ["workdash-existing"]
+    )
     monkeypatch.setattr(
         workdash_module,
         "WorkdashApp",
