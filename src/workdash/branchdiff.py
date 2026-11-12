@@ -34,26 +34,6 @@ from .launcher import zellij_fullscreen_pane
 _SCROLL_DIFF_BINDING_GROUP = Binding.Group("Scroll diff", compact=True)
 
 
-def get_base_branch(repo_path: Path | None = None) -> str:
-    return GitHelper().get_base_branch(repo_path)
-
-
-def get_merge_base(base_branch: str, repo_path: Path | None = None) -> str:
-    return GitHelper().get_merge_base(base_branch, repo_path)
-
-
-def get_changed_files(base_branch: str | None, repo_path: Path | None = None) -> list[str]:
-    return GitHelper().get_changed_files(base_branch, repo_path)
-
-
-def get_file_content_at_ref(filepath: str, ref: str, repo_path: Path) -> str:
-    return GitHelper().get_file_content_at_ref(filepath, ref, repo_path)
-
-
-def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
-    return GitHelper().get_file_diff(filepath, base_branch, repo_path)
-
-
 class WorkdashDiffView(DiffView):
     """DiffView with stronger added/removed line highlighting."""
 
@@ -154,11 +134,14 @@ class BranchDiffScreen(Screen[None]):
         ("enter", "view_file", "View file"),
     ]
 
-    def __init__(self, files: list[str], repo_path: Path, base_branch: str) -> None:
+    def __init__(
+        self, files: list[str], repo_path: Path, base_branch: str, git: GitHelper | None = None
+    ) -> None:
         super().__init__()
         self._files = files
         self._repo_path = repo_path
         self._base_branch = base_branch
+        self._git = git if git is not None else GitHelper()
         self._selected_index = 0
         self._cache: dict[str, tuple[str, str]] = {}
         self._replace_diff_view_lock = asyncio.Lock()
@@ -225,7 +208,7 @@ class BranchDiffScreen(Screen[None]):
 
     async def action_refresh_diff(self) -> None:
         previous_file = self._files[self._selected_index] if self._files else None
-        self._files = get_changed_files(self._base_branch, self._repo_path)
+        self._files = self._git.get_changed_files(self._base_branch, self._repo_path)
         self._cache.clear()
 
         file_list = self.query_one("#file-list", DataTable)
@@ -297,7 +280,9 @@ class BranchDiffScreen(Screen[None]):
 
     def _get_file_diff_cached(self, filepath: str) -> tuple[str, str]:
         if filepath not in self._cache:
-            self._cache[filepath] = get_file_diff(filepath, self._base_branch, self._repo_path)
+            self._cache[filepath] = self._git.get_file_diff(
+                filepath, self._base_branch, self._repo_path
+            )
         return self._cache[filepath]
 
     def _diff_view(self) -> DiffView | None:
@@ -342,35 +327,41 @@ class BranchDiffApp(App[None]):
 
     TITLE = "workdash branchdiff"
 
-    def __init__(self, files: list[str], repo_path: Path, base_branch: str) -> None:
+    def __init__(
+        self, files: list[str], repo_path: Path, base_branch: str, git: GitHelper | None = None
+    ) -> None:
         os.environ.setdefault("COLORTERM", "truecolor")
         super().__init__()
         self._files = files
         self._repo_path = repo_path
         self._base_branch = base_branch
+        self._git = git if git is not None else GitHelper()
 
     def on_mount(self) -> None:
-        self.push_screen(BranchDiffScreen(self._files, self._repo_path, self._base_branch))
+        self.push_screen(
+            BranchDiffScreen(self._files, self._repo_path, self._base_branch, self._git)
+        )
 
 
 def run_branchdiff(target: str | None = None) -> int:
     """Run the branchdiff TUI for the current git repository."""
+    git = GitHelper()
     try:
-        repo_path = GitHelper().get_repo_root()
+        repo_path = git.get_repo_root()
     except RuntimeError:
         print("Error: Not a git repository.", file=sys.stderr)
         return 1
 
     if target is None:
-        target = get_base_branch(repo_path)
+        target = git.get_base_branch(repo_path)
 
-    files = get_changed_files(target, repo_path)
+    files = git.get_changed_files(target, repo_path)
 
     if not files:
         print("No changes found.")
         return 0
 
-    app = BranchDiffApp(files, repo_path, target)
+    app = BranchDiffApp(files, repo_path, target, git)
     with zellij_fullscreen_pane():
         app.run()
     return 0

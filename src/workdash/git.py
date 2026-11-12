@@ -29,6 +29,17 @@ class GitHelper:
             raise RuntimeError("Not a git repository.") from error
         return Path(result.stdout.strip())
 
+    def get_git_path(self, path: str, repo_path: Path) -> Path:
+        """Resolve a Git administrative path for the given worktree."""
+        result = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-path", path],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return Path(result.stdout.strip())
+
     def get_current_branch(self, repo_path: Path) -> str:
         """Get the branch checked out at ``repo_path``."""
         result = subprocess.run(

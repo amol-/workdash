@@ -37,7 +37,7 @@ def test_changed_files_include_committed_modified_and_untracked_files(tmp_path: 
     (tmp_path / "modified.txt").write_text("working tree modified\n")
     (tmp_path / "untracked.txt").write_text("untracked\n")
 
-    assert set(branchdiff.get_changed_files("main", tmp_path)) == {
+    assert set(branchdiff.GitHelper().get_changed_files("main", tmp_path)) == {
         "committed.txt",
         "modified.txt",
         "untracked.txt",
@@ -64,11 +64,11 @@ def test_branchdiff_from_subdirectory_uses_repo_root_for_working_tree_files(
     captured: dict[str, object] = {}
 
     class FakeBranchDiffApp:
-        def __init__(self, files: list[str], repo_path: Path, base_branch: str) -> None:
+        def __init__(self, files: list[str], repo_path: Path, base_branch: str, git) -> None:
             captured["files"] = files
             captured["repo_path"] = repo_path
             captured["base_branch"] = base_branch
-            captured["diff"] = branchdiff.get_file_diff(files[0], base_branch, repo_path)
+            captured["diff"] = git.get_file_diff(files[0], base_branch, repo_path)
 
         def run(self) -> None:
             captured["ran"] = True
@@ -129,7 +129,9 @@ def test_branchdiff_left_and_right_arrows_scroll_wide_diff(
     def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
         return contents[filepath]
 
-    monkeypatch.setattr(branchdiff, "get_file_diff", get_file_diff)
+    monkeypatch.setattr(
+        branchdiff.GitHelper, "get_file_diff", lambda self, *args: get_file_diff(*args)
+    )
     app = branchdiff.BranchDiffApp(["wide.py"], tmp_path, "main")
 
     async def run_smoke() -> None:
@@ -167,7 +169,9 @@ def test_branchdiff_file_list_keeps_horizontal_scroll_when_clicking_files(
     def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
         return contents[filepath]
 
-    monkeypatch.setattr(branchdiff, "get_file_diff", get_file_diff)
+    monkeypatch.setattr(
+        branchdiff.GitHelper, "get_file_diff", lambda self, *args: get_file_diff(*args)
+    )
     app = branchdiff.BranchDiffApp([long_a, long_b], tmp_path, "main")
 
     async def run_smoke() -> None:
@@ -204,8 +208,12 @@ def test_branchdiff_refresh_keeps_one_diff_view_when_selected_file_is_replaced(
     def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
         return contents[filepath]
 
-    monkeypatch.setattr(branchdiff, "get_file_diff", get_file_diff)
-    monkeypatch.setattr(branchdiff, "get_changed_files", lambda base_branch, repo_path: files)
+    monkeypatch.setattr(
+        branchdiff.GitHelper, "get_file_diff", lambda self, *args: get_file_diff(*args)
+    )
+    monkeypatch.setattr(
+        branchdiff.GitHelper, "get_changed_files", lambda self, base_branch, repo_path: files
+    )
     app = branchdiff.BranchDiffApp(files, tmp_path, "main")
 
     async def run_smoke() -> None:
@@ -239,7 +247,9 @@ def test_branchdiff_file_list_keeps_horizontal_scroll_when_switching_files(
     def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
         return contents[filepath]
 
-    monkeypatch.setattr(branchdiff, "get_file_diff", get_file_diff)
+    monkeypatch.setattr(
+        branchdiff.GitHelper, "get_file_diff", lambda self, *args: get_file_diff(*args)
+    )
     app = branchdiff.BranchDiffApp([long_a, long_b], tmp_path, "main")
 
     async def run_smoke() -> None:
@@ -273,11 +283,13 @@ def test_branchdiff_app_mounts_and_navigates_between_files(monkeypatch, tmp_path
         return contents[filepath]
 
     changed_files = ["a.py", "b.py"]
-    monkeypatch.setattr(branchdiff, "get_file_diff", get_file_diff)
     monkeypatch.setattr(
-        branchdiff,
+        branchdiff.GitHelper, "get_file_diff", lambda self, *args: get_file_diff(*args)
+    )
+    monkeypatch.setattr(
+        branchdiff.GitHelper,
         "get_changed_files",
-        lambda base_branch, repo_path: list(changed_files),
+        lambda self, base_branch, repo_path: list(changed_files),
     )
     monkeypatch.delenv("COLORTERM", raising=False)
     app = branchdiff.BranchDiffApp(["a.py", "b.py"], tmp_path, "main")
@@ -373,7 +385,9 @@ def test_branchdiff_erases_the_display_when_the_pane_is_resized(
     def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
         return ("old\n", "new\n")
 
-    monkeypatch.setattr(branchdiff, "get_file_diff", get_file_diff)
+    monkeypatch.setattr(
+        branchdiff.GitHelper, "get_file_diff", lambda self, *args: get_file_diff(*args)
+    )
     app = branchdiff.BranchDiffApp(["a.py", "b.py"], tmp_path, "main")
 
     async def run_smoke() -> None:
@@ -388,3 +402,35 @@ def test_branchdiff_erases_the_display_when_the_pane_is_resized(
             assert "\x1b[2J" in written
 
     asyncio.run(run_smoke())
+
+
+def test_branchdiff_uses_one_replaceable_git_for_initial_display_and_refresh(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    git = MagicMock()
+    git.get_repo_root.return_value = tmp_path
+    git.get_base_branch.return_value = "main"
+    git.get_changed_files.return_value = ["a.py"]
+    git.get_file_diff.side_effect = [("old\n", "first\n"), ("old\n", "refreshed\n")]
+    factory = MagicMock(return_value=git)
+    monkeypatch.setattr(branchdiff, "GitHelper", factory)
+    monkeypatch.setattr(
+        subprocess, "run", lambda *args, **kwargs: pytest.fail("unexpected subprocess")
+    )
+
+    def run(app):
+        async def exercise():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert app.screen.query_one("#diff-view", DiffView).code_modified == "first\n"
+                await pilot.press("r")
+                await pilot.pause()
+                assert app.screen.query_one("#diff-view", DiffView).code_modified == "refreshed\n"
+
+        asyncio.run(exercise())
+
+    monkeypatch.setattr(branchdiff.BranchDiffApp, "run", run)
+    assert branchdiff.run_branchdiff() == 0
+    assert factory.call_count == 1
+    assert git.get_changed_files.call_count == 2
+    assert git.get_file_diff.call_count == 2
