@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from .launcher import load_zellij_panes
+from . import launcher
 
 if TYPE_CHECKING:
     from .control import WorkdashSession
@@ -76,7 +76,7 @@ class _AutodispatchSession:
                         return
                     self.current_item = str(result["item_id"])
                 while not self.stop_event.wait(_AUTODISPATCH_POLL_SECONDS):
-                    panes = load_zellij_panes(str(result["session"]))
+                    panes = launcher.zellij.load_zellij_panes(str(result["session"]))
                     if not any(
                         _format_pane_id(pane.get("id")) == result["pane_id"]
                         and pane.get("is_plugin") is not True

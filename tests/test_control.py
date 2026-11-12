@@ -1,5 +1,6 @@
 import base64
 import json
+import shlex
 import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -165,7 +166,7 @@ def test_agent_panes_map_an_authored_pr_to_the_worktree_of_the_issue_it_closes(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(
-        control_module,
+        control_module.launcher.zellij,
         "load_zellij_panes",
         lambda _session: [
             {
@@ -317,7 +318,7 @@ def _post_ready(session: WorkdashSession, payload: dict[str, object]):
 def test_ready_api_reports_ready_work(monkeypatch, tmp_path) -> None:
     github = install_fake_github(monkeypatch)
     github.add_issue("testuser/todos#3")
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: [])
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _session: [])
 
     status, body = _post_ready(_ready_session(tmp_path), {"scope": "todo"})
 
@@ -337,7 +338,7 @@ def test_ready_api_reports_ready_work(monkeypatch, tmp_path) -> None:
 def test_ready_api_reports_a_scope_error(payload, status, code, monkeypatch, tmp_path) -> None:
     github = install_fake_github(monkeypatch)
     github.failures["ReadyRepositoryIssues"] = failure("GraphQL: Something went wrong")
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: [])
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _session: [])
 
     status_code, body = _post_ready(_ready_session(tmp_path), payload)
 
@@ -354,7 +355,7 @@ def test_ready_ids_resolve_to_the_same_items_code_acts_on(monkeypatch, tmp_path)
         closes=("owner/repo#42",),
         checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
     )
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: [])
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _session: [])
     session = _ready_session(tmp_path, repositories=("owner/repo",))
 
     ready = session.ready(scope="any")["items"]
@@ -390,7 +391,9 @@ def test_ready_leaves_out_the_pull_request_of_a_targeted_todo_an_agent_works_on(
         checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
     )
     panes: list[dict[str, object]] = []
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(panes))
+    monkeypatch.setattr(
+        control_module.launcher.zellij, "load_zellij_panes", lambda _session: list(panes)
+    )
     session = _ready_session(tmp_path)
 
     assert [item["id"] for item in session.ready(scope="owner/other")["items"]] == [
@@ -439,7 +442,7 @@ def test_ready_reads_github_outside_the_session_lock_and_panes_inside_it(
         return []
 
     monkeypatch.setattr(subprocess, "run", gh)
-    monkeypatch.setattr(control_module, "load_zellij_panes", load_panes)
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", load_panes)
 
     assert [item["id"] for item in session.ready(scope="owner/repo")["items"]] == [
         "owner/repo#ISSUE-1"
@@ -561,7 +564,9 @@ def _coding_session(
             or SimpleNamespace(session=None, pane_id=None, pane_title="code_owner_repo_1", cwd=repo)
         )
     )
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(panes))
+    monkeypatch.setattr(
+        control_module.launcher.zellij, "load_zellij_panes", lambda _session: list(panes)
+    )
     monkeypatch.setattr(control_module, "existing_worktree_path", lambda _wd, _item: worktree)
     monkeypatch.setattr(control_module, "ensure_worktree", ensure_worktree)
     monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
@@ -725,7 +730,9 @@ def test_code_waits_for_a_launched_agent_pane_that_zellij_lists_late(monkeypatch
     late_pane = {"id": 8, "title": "code_owner_repo_1", "pane_cwd": str(worktree)}
     # Listings: before launch, first check after launch, second check after launch.
     monkeypatch.setattr(
-        control_module, "load_zellij_panes", MagicMock(side_effect=[[], [], [late_pane]])
+        control_module.launcher.zellij,
+        "load_zellij_panes",
+        MagicMock(side_effect=[[], [], [late_pane]]),
     )
 
     result = session.code(target="owner/repo#ISSUE-1", agent="pi")
@@ -2239,7 +2246,7 @@ def test_dispatch_revalidates_and_retries_claimed_candidate(monkeypatch, tmp_pat
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
     github.add_issue("owner/repo#2")
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: [])
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _session: [])
     session = _ready_session(tmp_path)
     calls = []
 
@@ -2911,7 +2918,7 @@ def test_dispatch_rechecks_conflict_before_launch(monkeypatch, tmp_path):
     github.add_issue("owner/repo#1")
     pr = github.add_pull_request("owner/repo#51", closes=("owner/repo#1",), mergeable="CONFLICTING")
     session = _ready_session(tmp_path)
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _: [])
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: [])
     original = control_module.find_ready_work
 
     def find_then_resolve(**kwargs):
@@ -2936,7 +2943,7 @@ def test_dispatch_uses_cross_repo_pr_for_default_group(monkeypatch, tmp_path):
     github.add_pull_request(
         "owner/implementation#51", closes=("owner/parent#1",), mergeable="CONFLICTING"
     )
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _: [])
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: [])
     session = _ready_session(tmp_path)
     launch = MagicMock(return_value={"status": "launched", "pane_id": "terminal_1"})
     monkeypatch.setattr(session, "code", launch)
@@ -3173,7 +3180,9 @@ def test_dispatch_resumes_pushed_targeted_todo_branch(monkeypatch, tmp_path, cas
     monkeypatch.setattr(control_module, "GitHelper", repo_worktree.GitHelper)
     monkeypatch.setattr(repo_worktree, "GithubHelper", lambda: helper)
     panes = []
-    monkeypatch.setattr(control_module, "load_zellij_panes", lambda _session: list(panes))
+    monkeypatch.setattr(
+        control_module.launcher.zellij, "load_zellij_panes", lambda _session: list(panes)
+    )
     launch.side_effect = lambda repo, *_args, **_kwargs: (
         panes.append({"id": 30, "title": "code_owner_other_todo_7", "pane_cwd": repo})
         or SimpleNamespace(
@@ -3297,3 +3306,82 @@ def test_dispatch_rejects_unverified_branch_worktree_before_pull(monkeypatch, tm
         session.dispatch_once(scope="owner/repo#1", agent="pi")
     pull.assert_not_called()
     launch.assert_not_called()
+
+
+def test_zellij_replacement_tracks_terminal_and_coding_lifecycle(monkeypatch, tmp_path):
+    class FakeZellij:
+        def __init__(self):
+            self.panes = {}
+            self.content = {}
+            self.launches = []
+
+        def launch_pane(
+            self, repo_path, command, *, context, work_action, zellij_session, group=None
+        ):
+            self.launches.append((repo_path, command, context, work_action, zellij_session, group))
+            pane_number = len(self.launches)
+            pane_id = f"terminal_{pane_number}"
+            title = f"{work_action}_{Path(repo_path).name}"
+            self.panes[pane_id] = {"id": pane_number, "title": title, "pane_cwd": repo_path}
+            self.content[pane_id] = ""
+            return launcher_module.ZellijPaneLaunch(zellij_session, pane_id, title, repo_path)
+
+        def load_zellij_panes(self, session):
+            assert session == "workdash-test"
+            return list(self.panes.values())
+
+        def send_zellij_pane_input(self, session, pane_id, data, *, raw=False):
+            self.content[pane_id] += data + ("" if raw else "\n")
+
+        def dump_zellij_pane(self, session, pane_id, *, full=False):
+            return self.content[pane_id]
+
+        def close_zellij_pane(self, session, pane_id):
+            del self.panes[pane_id]
+
+    fake = FakeZellij()
+    monkeypatch.setattr(launcher_module, "zellij", fake)
+    monkeypatch.setattr(control_module, "ensure_worktree", lambda *args: str(tmp_path))
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args: tmp_path)
+    monkeypatch.setattr(control_module, "get_merge_base", lambda path: None)
+    monkeypatch.setattr(
+        control_module, "prepare_launch_agent_prompt", lambda *a, **k: "It's a task"
+    )
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    item = _work_item(number=1, title="Task")
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi --model 'a b'")}),
+        backend=MagicMock(),
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="workdash-test",
+    )
+    launch = session.terminal(target="owner/repo#ISSUE-1")
+    pane_id = launch["pane_id"]
+    assert [pane["pane_id"] for pane in session.info()["panes"]] == [pane_id]
+    session.pane_send(pane_id=pane_id, data="hello")
+    assert session.pane_content(pane_id=pane_id)["content"] == "hello\n"
+    session.pane_close(pane_id=pane_id)
+    assert session.info()["panes"] == []
+
+    coding = session.code(target="owner/repo#ISSUE-1", agent="pi", group="my group")
+    assert coding["status"] == "launched"
+    assert coding["session"] == "workdash-test"
+    assert coding["pane_id"] == "terminal_2"
+    assert coding["cwd"] == str(tmp_path)
+    repo_path, command, context, action, selected_session, group = fake.launches[-1]
+    assert (repo_path, context, action, selected_session, group) == (
+        str(tmp_path),
+        "Failed to launch coding agent in zellij",
+        "code",
+        "workdash-test",
+        "my group",
+    )
+    assert command[:2] == ["/bin/sh", "-ic"]
+    assert shlex.split(command[2]) == ["pi", "--model", "a b", "It's a task"]
+    assert session.code(target="owner/repo#ISSUE-1", agent="pi")["status"] == "already_running"
+    assert [pane["pane_id"] for pane in session.info()["panes"]] == ["terminal_2"]
+    session.pane_send(pane_id="terminal_2", data="continue")
+    assert session.pane_content(pane_id="terminal_2")["content"] == "continue\n"
+    session.pane_close(pane_id="terminal_2")
+    assert session.info()["panes"] == []

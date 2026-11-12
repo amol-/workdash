@@ -46,10 +46,10 @@ def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
         },
     )
     panes = [{"id": 1, "title": "code_test", "exited": False}]
-    monkeypatch.setattr("workdash.autodispatch.load_zellij_panes", lambda _: panes)
-    monkeypatch.setattr("workdash.control.load_zellij_panes", lambda _: panes)
+    monkeypatch.setattr("workdash.autodispatch.launcher.zellij.load_zellij_panes", lambda _: panes)
+    monkeypatch.setattr("workdash.control.launcher.zellij.load_zellij_panes", lambda _: panes)
     close_pane = MagicMock()
-    monkeypatch.setattr("workdash.control.close_zellij_pane", close_pane)
+    monkeypatch.setattr("workdash.control.launcher.zellij.close_zellij_pane", close_pane)
     app = _make_turbogears_app(session)
 
     def request(endpoint, payload):
@@ -135,8 +135,8 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
             polls.put(None)
         return list(panes)
 
-    monkeypatch.setattr("workdash.control.load_zellij_panes", load_panes)
-    monkeypatch.setattr("workdash.autodispatch.load_zellij_panes", load_panes)
+    monkeypatch.setattr("workdash.control.launcher.zellij.load_zellij_panes", load_panes)
+    monkeypatch.setattr("workdash.autodispatch.launcher.zellij.load_zellij_panes", load_panes)
     monkeypatch.setattr("workdash.control.launch_agent_context", launch)
     monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
     session = WorkdashSession(
@@ -231,7 +231,7 @@ def test_failed_pane_lookup_fails_session_without_dispatching_again(monkeypatch)
     monkeypatch.setattr(session, "dispatch_once", dispatch)
     monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
     monkeypatch.setattr(
-        "workdash.autodispatch.load_zellij_panes",
+        "workdash.autodispatch.launcher.zellij.load_zellij_panes",
         MagicMock(side_effect=RuntimeError("unavailable")),
     )
     session.start_autodispatch(scope="owner/repo", group="team")
