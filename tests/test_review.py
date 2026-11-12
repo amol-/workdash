@@ -1,3 +1,4 @@
+import json
 import re
 import subprocess
 import sys
@@ -7,8 +8,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import workdash.agent_execution as agent_execution
 import workdash.control as control
-import workdash.review as review
+import workdash.github_client as github_client
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 
@@ -48,31 +50,12 @@ def setup_review(monkeypatch, tmp_path):
         suggestion_markers={},
         zellij_session=None,
     )
-    monkeypatch.setattr(control, "ensure_worktree", lambda *args: str(tmp_path))
-    monkeypatch.setattr(
-        control.GithubHelper,
-        "fetch_launch_context",
-        lambda *args: {"state": "OPEN", "author": {"login": "me"}},
-    )
-    monkeypatch.setattr(
-        review,
-        "_graphql",
-        lambda *args: {
-            "repository": {
-                "issue": {
-                    "closedByPullRequestsReferences": {
-                        "nodes": [
-                            {
-                                "number": 2,
-                                "state": "OPEN",
-                                "repository": {"nameWithOwner": "owner/repo"},
-                            }
-                        ]
-                    }
-                }
-            }
-        },
-    )
+    monkeypatch.setattr(control, "ensure_worktree", lambda *args, **kwargs: str(tmp_path))
+    backend.github_client.fetch_launch_context.return_value = {
+        "state": "OPEN",
+        "author": {"login": "me"},
+    }
+    backend.github_client.linked_open_pull_request.return_value = ("owner/repo", 2)
     return session, tmp_path
 
 
@@ -80,7 +63,7 @@ def test_issue_resolves_pr_and_retries_with_existing_threads(setup_review, monke
     session, tmp_path = setup_review
     prompts = []
 
-    def run(self, *, item, prompt, command_tokens, cwd):
+    def run(*, item, prompt, command_tokens, cwd):
         assert item.number == 2 and command_tokens == ["agent", "-p"] and cwd == str(tmp_path)
         prompts.append(prompt)
         if len(prompts) == 2:
@@ -89,7 +72,7 @@ def test_issue_resolves_pr_and_retries_with_existing_threads(setup_review, monke
             )
         return ""
 
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=run))
     result = session.review(target="owner/repo#1")
     assert result["status"] == "reviewed" and "comments: none" in result["content"]
     assert "authenticated GitHub identity" in prompts[0]
@@ -102,7 +85,8 @@ def test_issue_finds_open_pr_after_first_page(setup_review, monkeypatch):
     session, _ = setup_review
     queries = []
 
-    def graphql(query, subject):
+    def graphql(command, **kwargs):
+        query = command[-1].removeprefix("query=")
         queries.append(query)
         if len(queries) == 1:
             connection = {
@@ -120,17 +104,21 @@ def test_issue_finds_open_pr_after_first_page(setup_review, monkeypatch):
                 ],
                 "pageInfo": {"hasNextPage": False, "endCursor": None},
             }
-        return {"repository": {"issue": {"closedByPullRequestsReferences": connection}}}
+        data = {"repository": {"issue": {"closedByPullRequestsReferences": connection}}}
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"data": data}))
 
-    def run(self, *, item, prompt, command_tokens, cwd):
+    def run(*, item, prompt, command_tokens, cwd):
         assert item.number == 2
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
             "Outcome: approved\nInline comments: none"
         )
         return ""
 
-    monkeypatch.setattr(review, "_graphql", graphql)
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    monkeypatch.setattr(github_client, "_run_gh_command_with_retry", graphql)
+    session.backend.github_client.linked_open_pull_request.side_effect = (
+        github_client.GitHubClient().linked_open_pull_request
+    )
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=run))
     assert session.review(target="owner/repo#1")["item_id"] == "owner/repo#PR-2"
     assert len(queries) == 2
 
@@ -145,22 +133,15 @@ def test_review_runs_with_dirty_worktree_and_live_coding_pane(setup_review, monk
     monkeypatch.setattr(session, "_live_panes", pane_lookup)
     claim = MagicMock()
     monkeypatch.setattr(session, "_claimed_launch", claim)
-    check_output = subprocess.check_output
 
-    def git(command, **kwargs):
-        assert command[1:3] == ["rev-parse", "--git-path"]
-        return check_output(command, **kwargs)
-
-    monkeypatch.setattr(review.subprocess, "check_output", git)
-
-    def run(self, *, item, prompt, command_tokens, cwd):
+    def run(*, item, prompt, command_tokens, cwd):
         assert (Path(cwd) / "uncommitted.txt").read_text() == "local work"
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
             "Outcome: approved\nInline comments: none"
         )
         return ""
 
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=run))
     result = session.review(target="owner/repo#PR-2")
     assert result["status"] == "reviewed"
     assert result["content"] == "Outcome: approved\nInline comments: none"
@@ -174,14 +155,14 @@ def test_issue_resolves_pr_not_on_dashboard(setup_review, monkeypatch):
     session.work_items = [issue]
     session.backend.github_client.fetch_item.return_value = pr
 
-    def run(self, *, item, prompt, command_tokens, cwd):
+    def run(*, item, prompt, command_tokens, cwd):
         assert item is pr
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
             "Outcome: approved\nInline comments: none"
         )
         return ""
 
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=run))
     result = session.review(target="owner/repo#1")
     assert result["item_id"] == "owner/repo#PR-2"
     assert result["content"] == "Outcome: approved\nInline comments: none"
@@ -200,7 +181,7 @@ def test_missing_document_fails_after_one_retry(setup_review, monkeypatch):
     )
     (tmp_path / ".workdash/reviews/review-notes.md").write_text("user review notes")
     run = MagicMock(return_value="")
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=run))
     with pytest.raises(RuntimeError, match="missing or empty after retry"):
         session.review(target="owner/repo#PR-2")
     assert run.call_count == 2
@@ -214,12 +195,12 @@ def test_any_nonempty_document_succeeds(setup_review, monkeypatch, content):
     session, _ = setup_review
     attempts = []
 
-    def run(self, *, item, prompt, command_tokens, cwd):
+    def run(*, item, prompt, command_tokens, cwd):
         attempts.append(prompt)
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(content)
         return ""
 
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=run))
     assert session.review(target="owner/repo#PR-2")["content"] == content
     assert len(attempts) == 1
 
@@ -229,13 +210,13 @@ def test_empty_document_retries(setup_review, monkeypatch, eventually_succeeds):
     session, _ = setup_review
     attempts = []
 
-    def run(self, *, item, prompt, command_tokens, cwd):
+    def run(*, item, prompt, command_tokens, cwd):
         attempts.append(prompt)
         content = "reviewed" if eventually_succeeds and len(attempts) == 2 else ""
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(content)
         return ""
 
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=run))
     if eventually_succeeds:
         assert session.review(target="owner/repo#PR-2")["content"] == "reviewed"
     else:
@@ -249,43 +230,42 @@ def test_agent_failure_is_not_retried(setup_review, monkeypatch):
     session, _ = setup_review
     context_files = []
 
-    def run(self, *, item, prompt, command_tokens, cwd):
+    def run(*, item, prompt, command_tokens, cwd):
         context_files.append(Path(re.search(r"GitHub context file: (.+)", prompt).group(1)))
         assert context_files[0].is_file()
         raise RuntimeError("agent failed")
 
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=run))
     with pytest.raises(RuntimeError, match="agent failed"):
         session.review(target="owner/repo#PR-2")
     assert len(context_files) == 1 and not context_files[0].exists()
 
-    def succeed(self, *, item, prompt, command_tokens, cwd):
+    def succeed(*, item, prompt, command_tokens, cwd):
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
             "Outcome: approved\nInline comments: none"
         )
         return ""
 
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", succeed)
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=succeed))
     assert session.review(target="owner/repo#PR-2")["status"] == "reviewed"
 
 
 def test_other_authors_get_formal_verdict_instructions(setup_review, monkeypatch):
     session, _ = setup_review
-    monkeypatch.setattr(
-        control.GithubHelper,
-        "fetch_launch_context",
-        lambda *args: {"state": "OPEN", "author": {"login": "other"}},
-    )
+    session.backend.github_client.fetch_launch_context.return_value = {
+        "state": "OPEN",
+        "author": {"login": "other"},
+    }
     prompts = []
 
-    def run(self, *, item, prompt, command_tokens, cwd):
+    def run(*, item, prompt, command_tokens, cwd):
         prompts.append(prompt)
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
             "Outcome: approved\nInline comments: none"
         )
         return ""
 
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=run))
     session.review(target="owner/repo#PR-2")
     assert "changes-requested review" in prompts[0] and "approved review" in prompts[0]
 
@@ -321,37 +301,29 @@ def test_cli_reports_review_document_path(monkeypatch, capsys):
     assert "/server/worktree/.workdash/reviews/review-123.md" in capsys.readouterr().out
 
 
-def test_one_shot_command_gets_prompt_as_final_shell_argument(setup_review, monkeypatch):
-    import shlex
-    import subprocess
-
-    session, _ = setup_review
-    calls = []
-    real_run = subprocess.run
-
-    def run(command, **kwargs):
-        if command[0] == "git":
-            return real_run(command, **kwargs)
-        calls.append((command, kwargs))
-        arguments = shlex.split(command[2])
-        assert arguments[:2] == ["agent", "-p"]
-        prompt = arguments[-1]
-        Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-            "Outcome: comment-only review\nInline comments: none"
-        )
-        return subprocess.CompletedProcess(command, 0, stdout="done", stderr="")
-
-    monkeypatch.setattr(review.subprocess, "run", run)
+def test_one_shot_command_gets_prompt_as_final_shell_argument(setup_review):
+    session, worktree = setup_review
+    script = worktree / "agent with spaces"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import pathlib, re, sys\n"
+        "assert sys.argv[1] == '-p' and len(sys.argv) == 3\n"
+        "prompt = sys.argv[-1]\n"
+        "with pathlib.Path('agent-cwd').open('a') as f: f.write(str(pathlib.Path.cwd()) + '\\n')\n"
+        "path = pathlib.Path(re.search(r'completion document at (\\S+)', prompt).group(1))\n"
+        "path.write_text('Outcome: comment-only review\\nInline comments: none')\n"
+    )
+    script.chmod(0o755)
+    session.backend.resolve_analyze_command_tokens.return_value = [str(script), "-p"]
     result = session.review(target="owner/repo#PR-2")
     assert result["status"] == "reviewed"
-    assert len(calls) == 1
-    assert calls[0][1]["cwd"] == str(setup_review[1])
+    assert (worktree / "agent-cwd").read_text().splitlines() == [str(worktree)]
 
 
 def test_issue_without_pr_needs_no_agent(setup_review, monkeypatch):
     session, _ = setup_review
     session.config.agents.clear()
-    monkeypatch.setattr(control, "linked_open_pull_request", lambda item: None)
+    session.backend.github_client.linked_open_pull_request.return_value = None
     assert session.review(target="owner/repo#1")["status"] == "nothing_to_review"
 
 
@@ -364,25 +336,31 @@ def test_open_pr_still_requires_agent(setup_review):
 
 def test_issue_with_only_closed_pr_reports_nothing(setup_review, monkeypatch):
     session, _ = setup_review
-    monkeypatch.setattr(
-        review,
-        "_graphql",
-        lambda *args: {
-            "repository": {
-                "issue": {
-                    "closedByPullRequestsReferences": {
-                        "nodes": [
-                            {
-                                "number": 2,
-                                "state": "CLOSED",
-                                "repository": {"nameWithOwner": "owner/repo"},
-                            }
-                        ],
-                        "pageInfo": {"hasNextPage": False, "endCursor": None},
-                    }
+    data = {
+        "repository": {
+            "issue": {
+                "closedByPullRequestsReferences": {
+                    "nodes": [
+                        {
+                            "number": 2,
+                            "state": "CLOSED",
+                            "repository": {"nameWithOwner": "owner/repo"},
+                        }
+                    ],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
                 }
             }
-        },
+        }
+    }
+    monkeypatch.setattr(
+        github_client,
+        "_run_gh_command_with_retry",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps({"data": data})
+        ),
+    )
+    session.backend.github_client.linked_open_pull_request.side_effect = (
+        github_client.GitHubClient().linked_open_pull_request
     )
     assert session.review(target="owner/repo#1")["status"] == "nothing_to_review"
 
@@ -391,9 +369,7 @@ def test_issue_with_only_closed_pr_reports_nothing(setup_review, monkeypatch):
 def test_closed_pr_needs_no_worktree(setup_review, monkeypatch, state):
     session, _ = setup_review
     session.config.agents.clear()
-    monkeypatch.setattr(
-        control.GithubHelper, "fetch_launch_context", lambda *args: {"state": state}
-    )
+    session.backend.github_client.fetch_launch_context.return_value = {"state": state}
     worktree = MagicMock(side_effect=RuntimeError("head unavailable"))
     monkeypatch.setattr(control, "ensure_worktree", worktree)
     result = session.review(target="owner/repo#PR-2")
@@ -405,14 +381,14 @@ def test_review_prompt_instructs_agent_how_to_submit(setup_review, monkeypatch):
     session, _ = setup_review
     prompts = []
 
-    def run(self, *, item, prompt, command_tokens, cwd):
+    def run(*, item, prompt, command_tokens, cwd):
         prompts.append(prompt)
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
             "Outcome: approved\nInline comments: none"
         )
         return ""
 
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=run))
     session.review(target="owner/repo#PR-2")
     prompt = prompts[0]
     assert (
@@ -460,7 +436,7 @@ def test_review_documents_are_not_staged_in_linked_worktree(setup_review, monkey
     subprocess.run(
         ["git", "-C", str(repo), "worktree", "add", "-qb", "review", str(worktree)], check=True
     )
-    monkeypatch.setattr(control, "ensure_worktree", lambda *args: str(worktree))
+    monkeypatch.setattr(control, "ensure_worktree", lambda *args, **kwargs: str(worktree))
     (worktree / "real-change.txt").write_text("change")
     contents = [
         "Outcome: changes requested\nInline comments: fix the race",
@@ -468,13 +444,13 @@ def test_review_documents_are_not_staged_in_linked_worktree(setup_review, monkey
     ]
     paths = []
 
-    def run(self, *, item, prompt, command_tokens, cwd):
+    def run(*, item, prompt, command_tokens, cwd):
         path = Path(re.search(r"completion document at (\S+)", prompt).group(1))
         paths.append(path)
         path.write_text(contents[len(paths) - 1])
         return ""
 
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=run))
     results = [session.review(target="owner/repo#PR-2") for _ in range(2)]
     assert [result["content"] for result in results] == contents
     assert [result["document_path"] for result in results] == [str(path) for path in paths]
@@ -562,9 +538,7 @@ def test_selected_agent_runs_in_prepared_pr_worktree(setup_review, monkeypatch, 
         session.config.analyze_agent_command_tokens
     )
     monkeypatch.setattr(control, "ensure_worktree", ensure_worktree)
-    monkeypatch.setattr(
-        control.GithubHelper, "fetch_worktree_head", lambda *args: ("feature", "owner/repo")
-    )
+    session.backend.github_client.fetch_worktree_head.return_value = ("feature", "owner/repo")
 
     result = session.review(target="owner/repo#PR-2", agent="selected")
     cwd = Path(result["document_path"]).parent.parent.parent
@@ -598,11 +572,10 @@ def test_large_context_and_retry_output_reach_real_agent(setup_review, monkeypat
 
     session, _ = setup_review
     body = "context-marker-" + "x" * 200_000
-    monkeypatch.setattr(
-        control.GithubHelper,
-        "fetch_launch_context",
-        lambda *args: {"state": "OPEN", "body": body},
-    )
+    session.backend.github_client.fetch_launch_context.return_value = {
+        "state": "OPEN",
+        "body": body,
+    }
     script = tmp_path / "agent.py"
     script.write_text(
         """import re, sys
@@ -647,7 +620,7 @@ def test_concurrent_reviews_reuse_same_pr_but_allow_other_pr(setup_review, monke
     release = threading.Event()
     calls = []
 
-    def run(self, *, item, prompt, command_tokens, cwd):
+    def run(*, item, prompt, command_tokens, cwd):
         calls.append(item.number)
         if item.number == 2:
             started.set()
@@ -657,7 +630,7 @@ def test_concurrent_reviews_reuse_same_pr_but_allow_other_pr(setup_review, monke
         )
         return ""
 
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=run))
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(session.review, target="owner/repo#1")
         try:
@@ -692,7 +665,7 @@ def test_new_review_preserves_active_review_document(setup_review, monkeypatch):
     running, release = threading.Event(), threading.Event()
     paths = {}
 
-    def run(self, *, item, prompt, command_tokens, cwd):
+    def run(*, item, prompt, command_tokens, cwd):
         path = Path(re.search(r"completion document at (\S+)", prompt).group(1))
         paths[item.number] = path
         path.write_text(f"review {item.number}")
@@ -701,7 +674,7 @@ def test_new_review_preserves_active_review_document(setup_review, monkeypatch):
             assert release.wait(5)
         return ""
 
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=run))
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(session.review, target="owner/repo#PR-2")
         try:
@@ -773,7 +746,7 @@ def test_review_api_returns_while_agent_is_blocked(setup_review, monkeypatch):
     session, _ = setup_review
     started, release, completed = threading.Event(), threading.Event(), threading.Event()
 
-    def run(self, *, item, prompt, command_tokens, cwd):
+    def run(*, item, prompt, command_tokens, cwd):
         started.set()
         assert release.wait(5)
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
@@ -782,7 +755,7 @@ def test_review_api_returns_while_agent_is_blocked(setup_review, monkeypatch):
         completed.set()
         return ""
 
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=run))
     request = Request.blank(
         "/api/v0/review",
         method="POST",
@@ -849,7 +822,7 @@ def test_real_server_cli_returns_while_agent_is_blocked(setup_review, monkeypatc
         log_info(*args, **kwargs)
         finished.set()
 
-    def run(self, *, item, prompt, command_tokens, cwd):
+    def run(*, item, prompt, command_tokens, cwd):
         calls.append(item.number)
         running.set()
         assert release.wait(10)
@@ -859,7 +832,7 @@ def test_real_server_cli_returns_while_agent_is_blocked(setup_review, monkeypatc
         return ""
 
     monkeypatch.setattr(control.logger, "info", completed)
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    monkeypatch.setattr(agent_execution, "executor", MagicMock(analyze=run))
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]

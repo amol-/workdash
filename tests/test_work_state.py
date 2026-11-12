@@ -391,6 +391,28 @@ def test_repository_scope_reads_every_page(monkeypatch) -> None:
     ]
 
 
+def test_review_feedback_changes_readiness_for_the_same_pull_request(monkeypatch) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    pr = github.add_pull_request(PR, closes=("owner/repo#1",))
+    client = GitHubClient()
+
+    def ready():
+        return client.find_ready_work(
+            repositories=["owner/repo"],
+            github_username="testuser",
+            todo_repository="testuser/todos",
+        )
+
+    assert ready() == []
+    pr["threads"].append(thread(comment("reviewer", created=AFTER_PUSH)))
+    [work] = ready()
+    assert work.item.number == 1
+    assert "address_review" in work.reasons
+    pr["threads"][0]["isResolved"] = True
+    assert ready() == []
+
+
 def test_actionable_issues_are_ordered_by_pull_request_age(monkeypatch) -> None:
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1", created="2026-01-01T00:00:00Z")

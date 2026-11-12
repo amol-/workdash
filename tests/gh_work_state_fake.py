@@ -193,6 +193,21 @@ class FakeGitHub:
         if name in self.failures:
             raise self.failures[name]
         if name == "ItemLookup":
+            if "closedByPullRequestsReferences" in query and "issueOrPullRequest" not in query:
+                ref = (
+                    f"{_queried_repository(query)}#{re.search(r'issue\(number: (\d+)\)', query)[1]}"
+                )
+                connection = self._issue_node(ref)["closedByPullRequestsReferences"]
+                data = {
+                    "repository": {
+                        "issue": {
+                            "closedByPullRequestsReferences": self._page(query, connection["nodes"])
+                        }
+                    }
+                }
+                return subprocess.CompletedProcess(
+                    command, 0, stdout=json.dumps({"data": data}), stderr=""
+                )
             return self._item_lookup(command, query)
         data = getattr(self, f"_{name}")(query)
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"data": data}), stderr="")

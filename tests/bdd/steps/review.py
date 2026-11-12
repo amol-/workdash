@@ -9,8 +9,8 @@ from unittest.mock import MagicMock
 import pytest
 from pytest_bdd import given, then, when
 
+import workdash.agent_execution as agent_execution
 import workdash.control as control
-import workdash.review as review
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 
@@ -50,20 +50,19 @@ def review_state(monkeypatch, tmp_path):
         suggestion_markers={},
         zellij_session=None,
     )
-    monkeypatch.setattr(control, "ensure_worktree", lambda *args: str(tmp_path))
-    monkeypatch.setattr(
-        control.GithubHelper,
-        "fetch_launch_context",
-        lambda *args: {"state": "OPEN", "author": {"login": "someone"}},
-    )
+    monkeypatch.setattr(control, "ensure_worktree", lambda *args, **kwargs: str(tmp_path))
+    backend.github_client.fetch_launch_context.return_value = {
+        "state": "OPEN",
+        "author": {"login": "someone"},
+    }
 
-    def run(self, *, item, prompt, command_tokens, cwd):
+    def run(*, item, prompt, command_tokens, cwd):
         path = re.search(r"completion document at (\S+)", prompt).group(1)
         Path(path).write_text("Outcome: approved\nInline comments: none")
         return ""
 
-    original_run = review.Analyzer._run_analysis_command
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", run)
+    original_run = agent_execution.executor.analyze
+    monkeypatch.setattr(agent_execution.executor, "analyze", run)
     return {"session": session, "original_run": original_run, "tmp_path": tmp_path}
 
 
@@ -89,8 +88,8 @@ def review_started(review_state):
 
 
 @given("an issue has no linked open pull request")
-def no_pr(review_state, monkeypatch):
-    monkeypatch.setattr(control, "linked_open_pull_request", lambda item: None)
+def no_pr(review_state):
+    review_state["session"].backend.github_client.linked_open_pull_request.return_value = None
 
 
 @when("the reviewer requests an autonomous review of the issue")
@@ -129,7 +128,7 @@ def running_review(review_state, monkeypatch):
         str(release),
         str(posted),
     ]
-    monkeypatch.setattr(review.Analyzer, "_run_analysis_command", review_state["original_run"])
+    monkeypatch.setattr(agent_execution.executor, "analyze", review_state["original_run"])
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
