@@ -322,9 +322,15 @@ def _reviewer_requests_changes(ref: str, scenario_state: dict[str, Any]) -> None
 @when(parsers.re(r"(?:(?:another|one more|a) minute|(?P<minutes>\d+) minutes) pass(?:es)?"))
 def _minutes_pass(minutes: str | None, scenario_state: dict[str, Any]) -> None:
     clock = scenario_state.setdefault("clock", {"now": 0.0})
-    for _ in range(int(minutes or 1)):
-        clock["now"] += 60.0
+    for _ in range(int(minutes or 1) * 2):
+        clock["now"] += 30.0
         scenario_state["api_session"].autoclose.poll_once()
+
+
+@when("30 seconds pass")
+def _thirty_seconds_pass(scenario_state: dict[str, Any]) -> None:
+    scenario_state["clock"]["now"] += 30.0
+    scenario_state["api_session"].autoclose.poll_once()
 
 
 @when(
