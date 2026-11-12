@@ -91,7 +91,7 @@ class Supervision:
         monkeypatch.setattr(
             control_module, "prepare_launch_agent_prompt", lambda *args, **kwargs: "PROMPT"
         )
-        monkeypatch.setattr(control_module, "launch_agent_context", self._launch)
+        monkeypatch.setattr(control_module.agent_execution.executor, "launch", self._launch)
         monkeypatch.setattr(control_module, "_LAUNCH_VISIBILITY_INTERVAL_SECONDS", 0)
 
         self.session = WorkdashSession(
@@ -188,7 +188,7 @@ def test_awaiting_launch_gets_publishing_rules_when_ci_fails(monkeypatch, tmp_pa
         HEAD_SHA: [check_run("tests", None, status="IN_PROGRESS")]
     }
     launch = MagicMock(side_effect=supervision._launch)
-    monkeypatch.setattr(control_module, "launch_agent_context", launch)
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch)
 
     supervision.launch(autoclose=True)
     briefing = launch.call_args.args[1]

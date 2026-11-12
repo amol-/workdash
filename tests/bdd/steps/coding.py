@@ -376,8 +376,8 @@ def run_code_dialog_scenario(
     )
     monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
     monkeypatch.setattr(
-        control_module,
-        "launch_vscode_context",
+        control_module.agent_execution.executor,
+        "launch_vscode",
         lambda _repo_path, prompt: scenario_state.setdefault("agent_launches", []).append(
             (str(worktree_path), prompt, ["vscode"], None)
         ),
