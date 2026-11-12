@@ -1,11 +1,14 @@
 @feature:F-AUTODISPATCH
 Feature: Automatically dispatch ready work
 
-  A server-owned session dispatches one ready issue at a time. By default each
+  An autodispatch session dispatches one ready issue at a time. By default each
   task uses its implementation repository's group; an explicit group overrides it.
-  It checks about every 30 seconds for each launched pane to disappear before
-  dispatching again, and finishes when dispatch finds no ready work. Stopping
-  a session does not wait for the next check. It does not merge work.
+  After each agent pane disappears, the session reviews the pull request selected
+  for that dispatch if it remains open, or a currently linked open pull request
+  otherwise, before selecting more ready work. It finishes when no ready work remains. A user can stop a session without
+  closing its agent pane. Autodispatch does not merge work.
+  A tenth consecutive launch of the same issue fails without another launch;
+  work claimed by another agent is skipped rather than counted.
 
   @id:F-AUTODISPATCH-S001
   Scenario: An autodispatch session continues until no work is ready
@@ -13,7 +16,8 @@ Feature: Automatically dispatch ready work
     When the user starts autodispatch in group `project`
     Then the first issue is dispatched in group `project`
     When its agent pane disappears
-    Then the second issue is dispatched in group `project`
+    Then the first issue is reviewed before the next dispatch
+    And the second issue is dispatched in group `project`
     When its agent pane disappears
     Then the autodispatch session finishes after no ready work remains
 

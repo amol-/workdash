@@ -54,6 +54,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "autodispatch",
         "autodispatch-stop",
         "analyze",
+        "review",
         "code",
         "read",
         "write",
@@ -173,6 +174,24 @@ class WorkdashCommands:
             print(json.dumps(result, ensure_ascii=True, indent=2))
         else:
             _print_analysis_result(result)
+        return 0
+
+    def review_cli(self, *, target: str, agent: str | None, json_output: bool) -> int:
+        """Review a pull request through the local Workdash server."""
+        try:
+            result = self._client.request("review", {"target": target, "agent": agent})
+        except WorkdashControlError as error:
+            _print_control_error(error)
+            return 1
+        if json_output:
+            print(json.dumps(result, ensure_ascii=True, indent=2))
+        elif result["status"] == "nothing_to_review":
+            print("No open pull request to review.")
+        else:
+            print(
+                f"Review started: {result['item_id']}\nAgent: {result['agent']}"
+                f"\nDocument (on server): {result['document_path']}"
+            )
         return 0
 
     def code_cli(
@@ -514,6 +533,10 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             agent=options.agent,
             json_output=options.json_output,
         )
+    if options.command == "review":
+        return commands.review_cli(
+            target=options.target or "", agent=options.agent, json_output=options.json_output
+        )
     if options.command == "code":
         return commands.code_cli(
             target=options.target or "",
@@ -663,6 +686,16 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         help="Configured analysis agent to run when no fresh cache exists.",
     )
     analyze_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Emit machine-readable JSON.",
+    )
+    review_parser = subparsers.add_parser("review", help="Review an open pull request.")
+    review_parser.add_argument("target", metavar="ITEM", help="Pull request or linked issue.")
+    review_parser.add_argument("--agent", help="Configured analysis agent to run.")
+    review_parser.add_argument(
         "--json",
         dest="json_output",
         action="store_true",
@@ -829,6 +862,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         autodispatch_parser,
         autodispatch_stop_parser,
         analyze_parser,
+        review_parser,
         code_parser,
         terminal_parser,
         todo_parser,
@@ -874,6 +908,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         "autodispatch",
         "autodispatch-stop",
         "analyze",
+        "review",
         "code",
         "terminal",
         "todo",

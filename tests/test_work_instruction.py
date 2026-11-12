@@ -257,3 +257,15 @@ def test_issue_pull_request_lookup_reports_target_failure(monkeypatch):
             github_username="testuser",
             todo_repository="testuser/todos",
         )
+
+
+def test_review_instructions_require_fix_or_explanation_and_resolution() -> None:
+    text = render_work_instruction("address_review", _state(feedback=(REVIEW,)))
+    assert "Implement the valid changes" in text
+    assert "reply in the relevant GitHub review thread" in text
+    assert "resolve every inline review thread after fixing it or replying" in text
+    assert "full body of each changes-requested review" in text
+    assert (
+        "request re-review from each reviewer whose changes-requested review you addressed" in text
+    )
+    assert "If a re-review request fails, report the blocker" in text

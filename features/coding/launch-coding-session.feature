@@ -311,6 +311,15 @@ Feature: Launch a coding session
     And the agent is told to also resolve the merge conflicts
     And the agent is told to also fix the failing checks
 
+  @id:F-CODING-LAUNCH-S042
+  Scenario: An agent addressing requested changes is told to seek re-review
+    Given a server-backed Workdash session is ready to answer
+    And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51`
+    And pull request #51 has passing CI and a reviewer requested changes
+    When a client requests code with autostart `true` for `owner/repo#42` with agent `pi`
+    Then the agent is told to address the review body and resolve inline threads before requesting re-review from that reviewer
+    And the agent is told to report a blocker if re-review cannot be requested
+
   @id:F-CODING-LAUNCH-S033
   Scenario: Autostart on a pull request of somebody else stays a review
     Given a server-backed Workdash session is ready to answer

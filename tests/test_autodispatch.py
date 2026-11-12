@@ -1,6 +1,9 @@
 import asyncio
 import json
 import queue
+import re
+import socket
+import subprocess
 import threading
 import time
 from datetime import UTC, datetime
@@ -14,6 +17,7 @@ from webob import Request
 from gh_work_state_fake import install_fake_github
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession, _make_turbogears_app
+from workdash.github_client import GitHubClient
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import WorkdashApp
 
@@ -29,7 +33,7 @@ def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
 
     monkeypatch.setattr(threading.Event, "wait", observe_wait)
     session = WorkdashSession(
-        config=WorkdashConfig(),
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
         backend=MagicMock(),
         work_items=[],
         suggestion_markers={},
@@ -145,13 +149,14 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
         config=WorkdashConfig(
             github_username="testuser",
             workdir=str(tmp_path),
-            agents={"pi": AgentConfig(launch="pi")},
+            agents={"pi": AgentConfig(launch="pi", analyze="pi -p")},
         ),
         backend=MagicMock(github_client=github_client),
         work_items=items,
         suggestion_markers={},
         zellij_session="workdash",
     )
+    monkeypatch.setattr(session, "review", MagicMock(return_value={"status": "nothing_to_review"}))
     app = _make_turbogears_app(session)
     request = Request.blank(
         "/api/v0/autodispatch",
@@ -216,7 +221,7 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
 
 def test_failed_pane_lookup_fails_session_without_dispatching_again(monkeypatch):
     session = WorkdashSession(
-        config=WorkdashConfig(),
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
         backend=MagicMock(),
         work_items=[],
         suggestion_markers={},
@@ -351,3 +356,498 @@ def test_info_reports_automatic_group_without_none(capsys):
     )
     output = capsys.readouterr().out
     assert "group=automatic" in output and "None" not in output
+
+
+@pytest.mark.parametrize(
+    "items, expected_launches, expected_status",
+    [
+        (["1"] * 10, 9, "failed"),
+        (["1"] * 9 + ["2"] + ["1"] * 9, 19, "finished"),
+    ],
+)
+def test_autodispatch_reviews_before_reselecting_and_limits_consecutive_issues(
+    monkeypatch, items, expected_launches, expected_status
+):
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    remaining = iter(items)
+    events = []
+
+    def dispatch(**kwargs):
+        number = next(remaining, None)
+        if number is None:
+            return {"status": "no_ready_task"}
+        item = f"owner/repo#ISSUE-{number}"
+        kwargs["before_launch"](item)
+        events.append(("dispatch", item, kwargs["agent"]))
+        return {
+            "status": "launched",
+            "item_id": item,
+            "pane_id": "terminal_1",
+            "session": "workdash",
+        }
+
+    def review(**kwargs):
+        events.append(("review", kwargs["target"], kwargs["agent"]))
+        return {"status": "nothing_to_review"}
+
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    monkeypatch.setattr(session, "review", review)
+    monkeypatch.setattr("workdash.launcher.zellij", MagicMock(load_zellij_panes=lambda _: []))
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.001)
+    session.start_autodispatch(scope="owner/repo")
+    entry = next(iter(session._autodispatch.values()))
+    entry.thread.join(timeout=3)
+    assert not entry.thread.is_alive()
+    assert entry.status == expected_status
+    assert len(events) == 2 * expected_launches
+    for dispatch_event, review_event in zip(events[::2], events[1::2], strict=True):
+        assert dispatch_event[0] == "dispatch"
+        assert review_event == ("review", *dispatch_event[1:])
+
+
+def test_autodispatch_fails_on_review_error(monkeypatch):
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    dispatch = MagicMock(
+        return_value={
+            "status": "launched",
+            "item_id": "owner/repo#ISSUE-1",
+            "pane_id": "terminal_1",
+            "session": "workdash",
+        }
+    )
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    monkeypatch.setattr(session, "review", MagicMock(side_effect=RuntimeError("review failed")))
+    monkeypatch.setattr("workdash.launcher.zellij", MagicMock(load_zellij_panes=lambda _: []))
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.001)
+    session.start_autodispatch(scope="owner/repo")
+    entry = next(iter(session._autodispatch.values()))
+    entry.thread.join(timeout=3)
+    assert entry.status == "failed" and "review failed" in entry.error
+    assert dispatch.call_count == 1
+
+
+def test_autodispatch_rejects_agent_without_analysis(monkeypatch):
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    dispatch = MagicMock()
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    session.start_autodispatch(scope="owner/repo")
+    entry = next(iter(session._autodispatch.values()))
+    entry.thread.join(timeout=3)
+    assert entry.status == "failed" and "analysis command" in entry.error
+    dispatch.assert_not_called()
+
+
+def test_autodispatch_rejects_selected_agent_without_launch(monkeypatch):
+    session = WorkdashSession(
+        config=WorkdashConfig(
+            agents={
+                "coder": AgentConfig(launch="coder", analyze="coder -p"),
+                "analyst": AgentConfig(analyze="analyst -p"),
+            }
+        ),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    dispatch = MagicMock()
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    session.start_autodispatch(scope="owner/repo", agent="analyst")
+    entry = next(iter(session._autodispatch.values()))
+    entry.thread.join(timeout=3)
+    assert entry.status == "failed" and "launch command" in entry.error
+    dispatch.assert_not_called()
+
+
+def test_repeated_actual_selection_stops_before_tenth_launch(monkeypatch):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    session = WorkdashSession(
+        config=WorkdashConfig(
+            github_username="testuser",
+            agents={"pi": AgentConfig(launch="pi", analyze="pi -p")},
+        ),
+        backend=MagicMock(github_client=GitHubClient()),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+
+    def launch(**kwargs):
+        kwargs["before_launch"]()
+        return {
+            "status": "launched",
+            "item_id": "owner/repo#ISSUE-1",
+            "pane_id": "terminal_1",
+            "session": "workdash",
+        }
+
+    code = MagicMock(side_effect=launch)
+    monkeypatch.setattr(session, "code", code)
+    monkeypatch.setattr(session, "review", MagicMock(return_value={"status": "nothing_to_review"}))
+    monkeypatch.setattr("workdash.launcher.zellij", MagicMock(load_zellij_panes=lambda _: []))
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.001)
+    session.start_autodispatch(scope="owner/repo")
+    entry = next(iter(session._autodispatch.values()))
+    entry.thread.join(timeout=3)
+    assert not entry.thread.is_alive()
+    assert entry.status == "failed" and "10 consecutive" in entry.error
+    assert code.call_count == 10
+
+
+@pytest.mark.parametrize("selected_open", [True, False])
+def test_autodispatch_waits_for_selected_pull_request_review(monkeypatch, tmp_path, selected_open):
+    now = datetime.now(UTC)
+    items = [
+        WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE if n == 1 else WorkItemKind.AUTHORED_PR,
+            item_type=WorkItemType.ISSUE if n == 1 else WorkItemType.PR,
+            repo="owner/repo",
+            number=n,
+            title=str(n),
+            created_at=now,
+            updated_at=now,
+            url=f"https://github.com/owner/repo/{'issues' if n == 1 else 'pull'}/{n}",
+        )
+        for n in (1, 51, 52)
+    ]
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=items,
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    dispatch = MagicMock(
+        side_effect=[
+            {
+                "status": "launched",
+                "item_id": "owner/repo#ISSUE-1",
+                "pr_id": "owner/repo#PR-52",
+                "pane_id": "terminal_1",
+                "session": "workdash",
+            },
+            {"status": "no_ready_task"},
+        ]
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    entered, release = threading.Event(), threading.Event()
+    reviewed = []
+
+    def reviewer(*, item, prompt, command_tokens, cwd):
+        reviewed.append(item.number)
+        entered.set()
+        assert release.wait(3)
+        Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
+            "Outcome: approved\nInline comments: none"
+        )
+        return ""
+
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    session.backend.github_client.linked_open_pull_request.return_value = ("owner/repo", 51)
+    session.backend.github_client.fetch_launch_context.side_effect = lambda item: {
+        "state": "OPEN" if item.number == 51 or selected_open else "CLOSED"
+    }
+    session.backend.resolve_analyze_command_tokens.return_value = ["pi", "-p"]
+    monkeypatch.setattr("workdash.control.ensure_worktree", lambda *args, **kwargs: str(tmp_path))
+    monkeypatch.setattr("workdash.agent_execution.executor", MagicMock(analyze=reviewer))
+    monkeypatch.setattr("workdash.launcher.zellij", MagicMock(load_zellij_panes=lambda _: []))
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.001)
+    session.start_autodispatch(scope="owner/repo")
+    entry = next(iter(session._autodispatch.values()))
+    try:
+        assert entered.wait(3)
+        assert reviewed == [52 if selected_open else 51]
+        assert dispatch.call_count == 1
+    finally:
+        release.set()
+        entry.thread.join(timeout=3)
+    assert not entry.thread.is_alive()
+    assert entry.status == "finished"
+    assert dispatch.call_count == 2
+
+
+@pytest.mark.parametrize("has_pr", [False, True])
+def test_autodispatch_real_review_handles_no_pr_and_reviewer_failure(monkeypatch, tmp_path, has_pr):
+    now = datetime.now(UTC)
+    items = [
+        WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE if n == 1 else WorkItemKind.AUTHORED_PR,
+            item_type=WorkItemType.ISSUE if n == 1 else WorkItemType.PR,
+            repo="owner/repo",
+            number=n,
+            title=str(n),
+            created_at=now,
+            updated_at=now,
+            url=f"https://github.com/owner/repo/pull/{n}",
+        )
+        for n in (1, 51)
+    ]
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=items,
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    dispatch = MagicMock(
+        side_effect=[
+            {
+                "status": "launched",
+                "item_id": "owner/repo#ISSUE-1",
+                "pane_id": "terminal_1",
+                "session": "workdash",
+            },
+            {"status": "no_ready_task"},
+        ]
+    )
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    session.backend.github_client.linked_open_pull_request.return_value = (
+        ("owner/repo", 51) if has_pr else None
+    )
+    session.backend.github_client.fetch_launch_context.return_value = {"state": "OPEN"}
+    session.backend.resolve_analyze_command_tokens.return_value = ["pi", "-p"]
+    monkeypatch.setattr("workdash.control.ensure_worktree", lambda *args, **kwargs: str(tmp_path))
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    reviewer = MagicMock(side_effect=RuntimeError("review failed"))
+    monkeypatch.setattr("workdash.agent_execution.executor", MagicMock(analyze=reviewer))
+    monkeypatch.setattr("workdash.launcher.zellij", MagicMock(load_zellij_panes=lambda _: []))
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.001)
+    session.start_autodispatch(scope="owner/repo")
+    entry = next(iter(session._autodispatch.values()))
+    entry.thread.join(timeout=3)
+    assert not entry.thread.is_alive()
+    if has_pr:
+        assert entry.status == "failed" and "review failed" in entry.error
+        assert dispatch.call_count == 1
+        reviewer.assert_called_once()
+    else:
+        assert entry.status == "finished" and dispatch.call_count == 2
+        reviewer.assert_not_called()
+
+
+def test_autodispatch_review_feedback_cycle(monkeypatch, tmp_path):
+    from workdash.work_state import PullRequestWorkState, ReadyWork, ReviewFeedback
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("Unexpected process"))
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: pytest.fail("Unexpected network"))
+    now = datetime.now(UTC)
+    issue = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=1,
+        title="Issue",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/issues/1",
+    )
+    pr = WorkItem(
+        kind=WorkItemKind.AUTHORED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=51,
+        title="PR",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/pull/51",
+        closing_issue_numbers=(1,),
+    )
+    feedback = ReviewFeedback("thread", "reviewer", "https://github.com/comment/1", now)
+
+    class FakeGitHub:
+        opened = False
+        finding = False
+        resolved = False
+
+        def find_ready_work(self, **kwargs):
+            state = self.work_pull_request(issue)
+            if state is None:
+                return [ReadyWork(issue)]
+            return [ReadyWork(issue, state)] if state.ready else []
+
+        def work_pull_request(self, item, **kwargs):
+            if not self.opened:
+                return None
+            return PullRequestWorkState(
+                item=pr,
+                state="OPEN",
+                author="testuser",
+                linked_issues=(issue,),
+                head_sha="fixed-head" if self.resolved else "original-head",
+                head_writable=True,
+                base_ref="main",
+                base_head_sha="base",
+                mergeability="clean",
+                review_decision=None,
+                ci_status="passing",
+                failing_checks=(),
+                feedback=(feedback,) if self.finding and not self.resolved else (),
+            )
+
+        def linked_open_pull_request(self, item):
+            return (pr.repo, pr.number) if self.opened else None
+
+        def fetch_item(self, repo, number, **kwargs):
+            return {1: issue, 51: pr}.get(number)
+
+        def fetch_launch_context(self, item):
+            return {"state": "OPEN"}
+
+        def fetch_worktree_head(self, item):
+            return "branch", "owner/repo"
+
+    class FakeGit:
+        def worktree_proves_item(self, path, item):
+            return True
+
+        def pull_ff_only(self, path):
+            pass
+
+        def repository_matches(self, path, repo):
+            return True
+
+        def branch_tracks_repository(self, path, branch, repo):
+            return True
+
+        def merge_base_with_origin_default(self, path):
+            return None
+
+        def get_git_path(self, name, cwd):
+            return cwd / ".git" / name
+
+    class FakeZellij:
+        def __init__(self):
+            self.panes = []
+            self.polled = threading.Event()
+
+        def load_zellij_panes(self, session):
+            if threading.current_thread().name.startswith("autodispatch-") and self.panes:
+                self.polled.set()
+            return list(self.panes)
+
+    class FakeAgent:
+        def __init__(self):
+            self.launches = queue.Queue(maxsize=2)
+            self.reviews = queue.Queue(maxsize=2)
+            self.review_prompts = queue.Queue(maxsize=2)
+            self.release_review = threading.Event()
+
+        def launch(self, repo, prompt, **kwargs):
+            pane = {"id": 1, "title": f"code_{Path(repo).name}", "pane_cwd": str(repo)}
+            zellij.panes.append(pane)
+            self.launches.put(prompt)
+            return SimpleNamespace(
+                session="workdash", pane_id=None, pane_title=pane["title"], cwd=str(repo)
+            )
+
+        def finish_implementation(self):
+            if not github.opened:
+                github.opened = True
+            else:
+                github.resolved = True
+            zellij.panes.clear()
+
+        def analyze(self, *, item, prompt, command_tokens, cwd):
+            if not github.finding:
+                github.finding = True
+                outcome = "Major finding posted inline"
+            else:
+                outcome = "No major findings; no inline comments"
+            Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(outcome)
+            self.review_prompts.put(prompt)
+            self.reviews.put((item.url, outcome))
+            assert self.release_review.wait(3)
+            self.release_review.clear()
+            return ""
+
+    github = FakeGitHub()
+    zellij = FakeZellij()
+    agent = FakeAgent()
+    worktree = tmp_path / "owner_repo_1"
+    (worktree / ".git/info").mkdir(parents=True)
+    monkeypatch.setattr("workdash.launcher.zellij", zellij)
+    monkeypatch.setattr("workdash.agent_execution.executor", agent)
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
+    backend = MagicMock(github_client=github)
+    backend.resolve_analyze_command_tokens.return_value = ["fake", "-p"]
+    backend.analysis_cache.load_analysis.return_value = None
+    backend.analysis_cache.load_analysis_date.return_value = None
+    session = WorkdashSession(
+        config=WorkdashConfig(
+            github_username="testuser",
+            workdir=str(tmp_path),
+            agents={"fake": AgentConfig(launch="fake", analyze="fake -p")},
+        ),
+        backend=backend,
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    session.git = FakeGit()
+    try:
+        assert session.ready(scope="owner/repo")["items"][0]["action"] == "implement"
+        session.start_autodispatch(scope="owner/repo", agent="fake")
+        prompt = agent.launches.get(timeout=3)
+        assert "https://github.com/owner/repo/issues/1" in prompt
+        assert "AUTOSTART: IMPLEMENT" in prompt
+        assert "start implementing without asking" in prompt
+        assert zellij.polled.wait(3)
+        agent.finish_implementation()
+        assert agent.reviews.get(timeout=3) == (
+            "https://github.com/owner/repo/pull/51",
+            "Major finding posted inline",
+        )
+        review_prompt = agent.review_prompts.get(timeout=3)
+        assert (
+            "Report only major findings whose value outweighs the author's effort" in review_prompt
+        )
+        assert "Post findings as inline review comments on the pull request" in review_prompt
+        assert github.work_pull_request(issue).linked_issues == (issue,)
+        ready = session.ready(scope="owner/repo")["items"]
+        assert len(ready) == 1 and ready[0]["issue_id"] == "owner/repo#ISSUE-1"
+        assert ready[0]["action"] == "address_review"
+        assert github.finding and not github.resolved
+        zellij.polled.clear()
+        agent.release_review.set()
+        prompt = agent.launches.get(timeout=3)
+        assert "https://github.com/owner/repo/pull/51" in prompt
+        assert feedback.url in prompt
+        assert "review feedback" in prompt and "resolve every inline review thread" in prompt
+        assert zellij.polled.wait(3)
+        agent.finish_implementation()
+        assert agent.reviews.get(timeout=3) == (
+            "https://github.com/owner/repo/pull/51",
+            "No major findings; no inline comments",
+        )
+        assert github.work_pull_request(issue).head_sha == "fixed-head" and github.resolved
+        assert session.ready(scope="owner/repo")["items"] == []
+        agent.release_review.set()
+        entry = next(iter(session._autodispatch.values()))
+        entry.thread.join(timeout=3)
+        assert not entry.thread.is_alive()
+        assert entry.status == "finished", entry.error
+        assert agent.launches.empty() and agent.reviews.empty()
+    finally:
+        agent.release_review.set()
+        session.stop_autodispatch_sessions()
+        if session._autodispatch:
+            next(iter(session._autodispatch.values())).thread.join(timeout=3)

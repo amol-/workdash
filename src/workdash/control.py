@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import stat
@@ -12,11 +13,14 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Collection, Sequence
+from concurrent.futures import Future
 from contextlib import ExitStack
+from functools import partial
 from http import HTTPStatus
 from ipaddress import IPv4Address, ip_address
 from pathlib import Path
 from socketserver import BaseServer
+from uuid import uuid4
 from wsgiref.simple_server import make_server
 
 from . import agent_execution, launcher
@@ -43,8 +47,11 @@ from .models import (
 )
 from .repo_resolver import validate_repository_selectors
 from .repo_worktree import ensure_worktree, existing_worktree_path, get_merge_base, main_repo_path
+from .review import review_pull_request
 from .work_instruction import autostart_briefing
 from .work_state import ReadyWork
+
+logger = logging.getLogger(__name__)
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8765
@@ -122,6 +129,10 @@ class WorkdashSession:
             git=self._git,
             github_client=getattr(backend, "github_client", None),
         )
+        self._review_lock = threading.Lock()
+        self._active_reviews: dict[
+            tuple[str, int], tuple[dict[str, object], Future[dict[str, object]]]
+        ] = {}
         self._autodispatch_lock = threading.RLock()
         self._autodispatch: dict[str, _AutodispatchSession] = {}
 
@@ -292,6 +303,103 @@ class WorkdashSession:
                 "file_content": file_content,
             }
 
+    def review(
+        self, *, target: str, agent: str | None = None, background: bool = False
+    ) -> dict[str, object]:
+        """Review an open pull request using a configured one-shot agent."""
+        item = self._require_item(target)
+        if item.item_type == WorkItemType.ISSUE:
+            linked = self.backend.github_client.linked_open_pull_request(item)
+            if linked is None:
+                return {"status": "nothing_to_review", "item_id": format_work_item_id(item)}
+            item = self._require_item(f"{linked[0]}#PR-{linked[1]}")
+        key = (item.repo.lower(), item.number)
+        with self._review_lock:
+            active = self._active_reviews.get(key)
+            if active is None:
+                context = self.backend.github_client.fetch_launch_context(item)
+                if context.get("state", "").upper() != "OPEN":
+                    return {"status": "nothing_to_review", "item_id": format_work_item_id(item)}
+                agents = self.config.configured_analyze_agents()
+                if agent is not None and agent not in agents:
+                    raise self._unusable_agent_error(agent, "review", "analyze")
+                selected = agent or (agents[0] if agents else None)
+                if selected is None:
+                    raise WorkdashControlError(
+                        "no_agent", "No analysis agents are configured.", status=HTTPStatus.CONFLICT
+                    )
+                with self._lock:
+                    cwd = ensure_worktree(
+                        self.config.workdir,
+                        item,
+                        git=self.git,
+                        github_client=self.backend.github_client,
+                    )
+                tokens = self.backend.resolve_analyze_command_tokens(selected)
+                document = Path(cwd) / ".workdash" / "reviews" / f"review-{uuid4().hex}.md"
+                active_documents = {
+                    Path(started["document_path"]) for started, _ in self._active_reviews.values()
+                }
+                for old_document in document.parent.glob("review-*.md"):
+                    if (
+                        re.fullmatch(r"review-[0-9a-f]{32}\.md", old_document.name)
+                        and old_document not in active_documents
+                        and old_document.is_file()
+                    ):
+                        old_document.unlink()
+                started = {
+                    "status": "started",
+                    "item_id": f"{item.repo}#PR-{item.number}",
+                    "agent": selected,
+                    "document_path": str(document),
+                }
+                future: Future[dict[str, object]] = Future()
+                self._active_reviews[key] = (started, future)
+
+        if active is not None:
+            started, future = active
+            return started.copy() if background else future.result()
+
+        def run_review():
+            try:
+                result = review_pull_request(
+                    item, context=context, cwd=cwd, tokens=tokens, document=document, git=self.git
+                )
+                result["agent"] = selected
+            except BaseException as error:
+                with self._review_lock:
+                    del self._active_reviews[key]
+                    future.set_exception(error)
+                raise
+            with self._review_lock:
+                del self._active_reviews[key]
+                future.set_result(result)
+            return result
+
+        if not background:
+            return run_review()
+
+        def run_background():
+            try:
+                result = run_review()
+                logger.info(
+                    "Review completed for %s#%s: %s",
+                    item.repo,
+                    item.number,
+                    result["document_path"],
+                )
+            except Exception:
+                logger.exception("Review failed for %s#%s", item.repo, item.number)
+
+        try:
+            threading.Thread(target=run_background, name="workdash-review", daemon=True).start()
+        except BaseException as error:
+            with self._review_lock:
+                del self._active_reviews[key]
+                future.set_exception(error)
+            raise
+        return started.copy()
+
     def code(
         self,
         *,
@@ -301,6 +409,7 @@ class WorkdashSession:
         autostart: bool = False,
         group: str | None = None,
         autoclose: bool = False,
+        before_launch: Callable[[], None] | None = None,
     ) -> dict[str, object]:
         """Launch a coding agent for an explicit target unless one already works in its worktree.
 
@@ -448,6 +557,8 @@ class WorkdashSession:
             if claimed is not None:
                 return claimed
             verify_selected_head(repo_path)
+            if before_launch is not None:
+                before_launch()
             launch_key = _normalized_path(repo_path)
             prompt = prepare_launch_agent_prompt(
                 item,
@@ -720,7 +831,12 @@ class WorkdashSession:
                 entry.stop()
 
     def dispatch_once(
-        self, *, scope: str, agent: str | None = None, group: str | None = None
+        self,
+        *,
+        scope: str,
+        agent: str | None = None,
+        group: str | None = None,
+        before_launch: Callable[[str], None] | None = None,
     ) -> dict[str, object]:
         """Launch at most one currently ready issue, in ready order."""
         if group is not None and (not isinstance(group, str) or not group.strip()):
@@ -747,6 +863,9 @@ class WorkdashSession:
                 group=selected_group,
                 autostart=True,
                 autoclose=True,
+                **(
+                    {"before_launch": partial(before_launch, candidate_id)} if before_launch else {}
+                ),
             )
             if launch["status"] == "already_running":
                 continue
@@ -984,10 +1103,10 @@ class WorkdashControlServer:
         self._session.autoclose.start()
 
     def stop(self) -> None:
-        self._session.stop_autodispatch_sessions()
         self._session.autoclose.stop()
         for httpd in self._httpds[: len(self._threads)]:
             httpd.shutdown()
+        self._session.stop_autodispatch_sessions()
         for httpd in self._httpds:
             httpd.server_close()
         for thread in self._threads:
@@ -1249,6 +1368,18 @@ def _make_turbogears_app(session: WorkdashSession):
                 lambda payload: self._session.analyze(
                     target=_required_text(payload, "target"),
                     agent=_optional_text(payload, "agent"),
+                ),
+            )
+
+        @expose("json")
+        def review(self):
+            return _handle_json_request(
+                request,
+                response,
+                lambda payload: self._session.review(
+                    target=_required_text(payload, "target"),
+                    agent=_optional_text(payload, "agent"),
+                    background=True,
                 ),
             )
 

@@ -26,7 +26,7 @@ each variant more than once before concluding.
 
 ## Quick reminders
 
-- BDD scenarios describe user-visible, API-visible, or externally observable behavior only.
+- Feature files describe only the user experience and externally observable behavior, never how the software works internally.
 - Implementation details, corner cases, and internal mechanisms go in normal unit/integration tests.
 - Keep changes minimal and focused.
 - Match existing style; see `pyproject.toml` for lint/format config and run `ruff check` and `ruff format`.

@@ -22,6 +22,7 @@ from gh_work_state_fake import (
     comment,
     failure,
     install_fake_github,
+    thread,
     todo_body,
 )
 from workdash.backend import IncludeResult, WorkdashBackend
@@ -956,7 +957,7 @@ def test_autostart_does_not_launch_where_the_redirected_pull_requests_agent_live
     [
         {"checks": {HEAD_SHA: [check_run("tests", "FAILURE")]}},
         {"mergeable": "CONFLICTING"},
-        {"comments": [comment("reviewer", created=AFTER_PUSH)]},
+        {"threads": [thread(comment("reviewer", created=AFTER_PUSH))]},
     ],
     ids=["failing_ci", "merge_conflicts", "review_feedback"],
 )
@@ -1366,6 +1367,62 @@ def test_starting_the_server_starts_autoclose_and_stopping_it_ends_its_worker(mo
     assert not worker.is_alive()
 
 
+def test_shutdown_waits_for_inflight_autodispatch_start(monkeypatch) -> None:
+    import socket
+    import threading
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setattr(control_module, "SERVER_PORT", port)
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    entered, release = threading.Event(), threading.Event()
+    original = session.start_autodispatch
+
+    def delayed_start(**kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(**kwargs)
+
+    dispatch_release = threading.Event()
+
+    def dispatch(**kwargs):
+        assert dispatch_release.wait(5)
+        return {"status": "no_ready_task"}
+
+    monkeypatch.setattr(session, "start_autodispatch", delayed_start)
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    server = control_module.WorkdashControlServer(session)
+    server.start()
+    results = []
+    request = threading.Thread(
+        target=lambda: results.append(
+            control_module.WorkdashControlClient().request("autodispatch", {"scope": "owner/repo"})
+        )
+    )
+    request.start()
+    try:
+        assert entered.wait(5)
+        stop = threading.Thread(target=server.stop)
+        stop.start()
+        stop.join(1)
+        assert stop.is_alive(), "shutdown returned before the request completed"
+    finally:
+        release.set()
+        request.join(5)
+        stop.join(5)
+        dispatch_release.set()
+    assert not request.is_alive() and not stop.is_alive()
+    assert results[0]["id"] == session.autodispatch_sessions()[0]["id"]
+    assert session.autodispatch_sessions()[0]["status"] == "stopped"
+
+
 def test_listener_bind_failure_releases_all_earlier_sockets(monkeypatch) -> None:
     import errno
     import socket
@@ -1374,8 +1431,8 @@ def test_listener_bind_failure_releases_all_earlier_sockets(monkeypatch) -> None
     bound = []
     make_server = control_module.make_server
 
-    def record_server(host, port, app):
-        httpd = make_server(host, port, app)
+    def record_server(host, port, app, **kwargs):
+        httpd = make_server(host, port, app, **kwargs)
         bound.append(httpd)
         return httpd
 
@@ -2279,6 +2336,20 @@ def test_dispatch_revalidates_and_retries_claimed_candidate(monkeypatch, tmp_pat
     assert all(
         call["autostart"] and call["autoclose"] and call["group"] == "repo" for call in calls
     )
+
+
+def test_dispatch_skips_claim_before_checking_launch_limit(monkeypatch, tmp_path):
+    panes = [{"id": 5, "title": "code_owner_repo_1", "pane_cwd": str(tmp_path / "owner_repo_1")}]
+    session, _worktree, _ensure, launch = _coding_session(monkeypatch, tmp_path, panes)
+    candidate = SimpleNamespace(item=session.work_items[0], pull_request=None)
+    monkeypatch.setattr(session, "_ready", lambda *args, **kwargs: [candidate])
+    limit = MagicMock(side_effect=RuntimeError("limit reached"))
+
+    result = session.dispatch_once(scope="owner/repo", agent="pi", before_launch=limit)
+
+    assert result["status"] == "no_ready_task"
+    limit.assert_not_called()
+    launch.assert_not_called()
 
 
 def test_remote_dispatch_cli_through_http(monkeypatch, tmp_path, capsys):

@@ -224,125 +224,24 @@ def test_pull_requests_beyond_one_query_are_evaluated_like_the_first(monkeypatch
 @pytest.mark.parametrize(
     ("fields", "kinds"),
     [
-        ({"comments": [comment("reviewer", created=AFTER_PUSH)]}, ["comment"]),
-        ({"comments": [comment("reviewer", created=BEFORE_PUSH)]}, []),
-        ({"comments": [comment("renovate[bot]", created=AFTER_PUSH)]}, []),
+        ({"comments": [comment("reviewer", created=AFTER_PUSH)]}, []),
         (
             {
-                "comments": [
-                    comment("x", created=AFTER_PUSH)
-                    | {"author": {"__typename": "Bot", "login": "github-actions"}}
-                ]
+                "author": "other",
+                "reviews": [review("other", "CHANGES_REQUESTED", created=AFTER_PUSH)],
             },
-            [],
-        ),
-        (
-            {
-                "comments": [
-                    comment("x", created=AFTER_PUSH)
-                    | {"author": {"__typename": "User", "login": "deploy[bot]"}}
-                ]
-            },
-            [],
-        ),
-        ({"comments": [comment("reviewer", created=AFTER_PUSH) | {"isMinimized": True}]}, []),
-        (
-            {
-                "comments": [comment("reviewer", created=AFTER_PUSH)],
-                "reviews": [review("reviewer", "APPROVED", created="2026-03-03T00:00:00Z")],
-            },
-            [],
-        ),
-        (
-            {
-                "comments": [
-                    comment("reviewer", created=AFTER_PUSH),
-                    comment("testuser", created="2026-03-03T00:00:00Z"),
-                ]
-            },
-            [],
-        ),
-        (
-            {
-                "comments": [
-                    comment("testuser", created=AFTER_PUSH),
-                    comment("reviewer", created="2026-03-03T00:00:00Z"),
-                ]
-            },
-            ["comment"],
-        ),
-        (
-            {"threads": [thread(comment("reviewer", created=AFTER_PUSH) | {"isMinimized": True})]},
-            [],
+            ["changes_requested"],
         ),
         (
             {
                 "reviews": [
-                    review("reviewer", "CHANGES_REQUESTED", created=AFTER_PUSH, body="No")
-                    | {"isMinimized": True}
-                ]
-            },
-            [],
-        ),
-        ({"comments": [comment("testuser", created=AFTER_PUSH)]}, []),
-        (
-            {
-                "force_pushed_at": "2026-03-05T00:00:00Z",
-                "comments": [comment("reviewer", created=AFTER_PUSH)],
-            },
-            [],
-        ),
-        ({"reviews": [review("reviewer", "COMMENTED", created=AFTER_PUSH)]}, []),
-        (
-            {"reviews": [review("reviewer", "COMMENTED", created=AFTER_PUSH, body="Rename it")]},
-            ["review"],
-        ),
-        (
-            {
-                "reviews": [
-                    review(
-                        "reviewer", "COMMENTED", created=AFTER_PUSH, drafted=BEFORE_PUSH, body="Hm"
-                    )
-                ]
-            },
-            ["review"],
-        ),
-        (
-            {
-                "reviews": [
-                    review("reviewer", "COMMENTED", created=AFTER_PUSH, body="Hm")
-                    | {"submittedAt": None}
-                ]
-            },
-            [],
-        ),
-        (
-            {
-                "reviews": [
-                    review("reviewer", "COMMENTED", created=AFTER_PUSH, body="Rename it"),
+                    review("reviewer", "CHANGES_REQUESTED", created=AFTER_PUSH),
                     review("reviewer", "APPROVED", created="2026-03-03T00:00:00Z"),
                 ]
             },
             [],
         ),
-        (
-            {
-                "reviews": [
-                    review("reviewer", "COMMENTED", created=AFTER_PUSH, body="Rename it"),
-                    review("someone", "APPROVED", created="2026-03-03T00:00:00Z"),
-                ]
-            },
-            ["review"],
-        ),
-        (
-            {
-                "reviews": [
-                    review("reviewer", "APPROVED", created=AFTER_PUSH),
-                    review("reviewer", "COMMENTED", created="2026-03-03T00:00:00Z", body="Nit"),
-                ]
-            },
-            ["review"],
-        ),
+        ({"reviews": [review("reviewer", "COMMENTED", created=AFTER_PUSH, body="Feedback")]}, []),
         (
             {"reviews": [review("reviewer", "CHANGES_REQUESTED", created=BEFORE_PUSH)]},
             ["changes_requested"],
@@ -350,107 +249,55 @@ def test_pull_requests_beyond_one_query_are_evaluated_like_the_first(monkeypatch
         (
             {
                 "reviews": [
-                    review("reviewer", "CHANGES_REQUESTED", created=BEFORE_PUSH),
-                    review("reviewer", "APPROVED", created=AFTER_PUSH),
-                ]
-            },
-            [],
-        ),
-        (
-            {
-                "reviews": [
                     review("reviewer", "CHANGES_REQUESTED", created=AFTER_PUSH, commit=OLD_HEAD_SHA)
                 ]
             },
+            ["changes_requested"],
+        ),
+        (
+            {
+                "reviews": [review("reviewer", "CHANGES_REQUESTED", created=AFTER_PUSH)],
+                "review_requests": ["REVIEWER"],
+            },
             [],
         ),
-        ({"threads": [thread(comment("reviewer", created=AFTER_PUSH))]}, ["review_thread"]),
         (
-            {"threads": [thread(comment("reviewer", created=AFTER_PUSH, drafted=BEFORE_PUSH))]},
+            {
+                "reviews": [review("reviewer", "CHANGES_REQUESTED", created=AFTER_PUSH)],
+                "review_requests": ["another"],
+            },
+            ["changes_requested"],
+        ),
+        (
+            {
+                "reviews": [review("reviewer", "CHANGES_REQUESTED", created=AFTER_PUSH)],
+                "review_requests": ["reviewer"],
+                "threads": [thread(comment("reviewer", created=AFTER_PUSH))],
+            },
             ["review_thread"],
         ),
-        ({"threads": [thread(comment("reviewer", created=BEFORE_PUSH))]}, []),
+        ({"threads": [thread(comment("reviewer", created=AFTER_PUSH), resolved=True)]}, []),
         (
             {
                 "threads": [
                     thread(
-                        comment("reviewer", created=AFTER_PUSH),
-                        comment("testuser", created="2026-03-03T00:00:00Z"),
-                    )
-                ]
-            },
-            [],
-        ),
-        (
-            {
-                "threads": [
-                    thread(
-                        comment("reviewer", created=AFTER_PUSH),
-                        comment("testuser", created="2026-03-03T00:00:00Z"),
-                        comment("renovate[bot]", created="2026-03-04T00:00:00Z"),
-                    )
-                ]
-            },
-            [],
-        ),
-        (
-            {
-                "threads": [
-                    thread(
-                        comment("reviewer", created=AFTER_PUSH),
-                        comment("renovate[bot]", created="2026-03-03T00:00:00Z"),
+                        comment("reviewer", created=BEFORE_PUSH),
+                        comment("testuser", created=AFTER_PUSH),
                     )
                 ]
             },
             ["review_thread"],
         ),
-        # The server's GitHub identity answers feedback like the pull request author.
         (
-            {"author": "contributor", "comments": [comment("testuser", created=AFTER_PUSH)]},
-            [],
-        ),
-        (
-            {
-                "author": "contributor",
-                "comments": [
-                    comment("reviewer", created=AFTER_PUSH),
-                    comment("testuser", created="2026-03-03T00:00:00Z"),
-                ],
-            },
-            [],
-        ),
-        (
-            {
-                "author": "contributor",
-                "threads": [
-                    thread(
-                        comment("reviewer", created=AFTER_PUSH),
-                        comment("testuser", created="2026-03-03T00:00:00Z"),
-                    )
-                ],
-            },
-            [],
-        ),
-        (
-            {
-                "author": "contributor",
-                "threads": [
-                    thread(
-                        comment("reviewer", created=AFTER_PUSH),
-                        comment("testuser", created="2026-03-03T00:00:00Z") | {"publishedAt": None},
-                    )
-                ],
-            },
+            {"threads": [thread(comment("renovate[bot]", created=BEFORE_PUSH), outdated=True)]},
             ["review_thread"],
         ),
     ],
 )
-def test_only_new_human_feedback_from_others_is_actionable(monkeypatch, fields, kinds) -> None:
+def test_actionable_feedback(monkeypatch, fields, kinds) -> None:
     github = install_fake_github(monkeypatch)
     github.add_pull_request(PR, **fields)
-
     [state] = _evaluate()
-
     assert [feedback.kind for feedback in state.feedback] == kinds
     assert ("address_review" in state.reasons) == bool(kinds)
 
@@ -542,6 +389,28 @@ def test_repository_scope_reads_every_page(monkeypatch) -> None:
     assert [(work.item.repo, work.item.number) for work in ready] == [
         *((repo, number) for repo in ("team/a", "team/b", "team/c") for number in (1, 2, 3)),
     ]
+
+
+def test_review_feedback_changes_readiness_for_the_same_pull_request(monkeypatch) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    pr = github.add_pull_request(PR, closes=("owner/repo#1",))
+    client = GitHubClient()
+
+    def ready():
+        return client.find_ready_work(
+            repositories=["owner/repo"],
+            github_username="testuser",
+            todo_repository="testuser/todos",
+        )
+
+    assert ready() == []
+    pr["threads"].append(thread(comment("reviewer", created=AFTER_PUSH)))
+    [work] = ready()
+    assert work.item.number == 1
+    assert "address_review" in work.reasons
+    pr["threads"][0]["isResolved"] = True
+    assert ready() == []
 
 
 def test_actionable_issues_are_ordered_by_pull_request_age(monkeypatch) -> None:

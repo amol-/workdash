@@ -751,6 +751,22 @@ def _agent_told_to_address_review_first(scenario_state: dict[str, Any]) -> None:
     assert prompt.index("has actionable review feedback") < prompt.index("Also resolve")
 
 
+@then(
+    "the agent is told to address the review body and resolve inline threads before requesting re-review from that reviewer"
+)
+def _agent_told_to_request_rereview(scenario_state: dict[str, Any]) -> None:
+    prompt = _launched_prompt(scenario_state)
+    assert "full body of each changes-requested review" in prompt
+    assert prompt.index("resolve every inline review thread") < prompt.index(
+        "request re-review from each reviewer whose changes-requested review you addressed"
+    )
+
+
+@then("the agent is told to report a blocker if re-review cannot be requested")
+def _agent_told_to_report_rereview_blocker(scenario_state: dict[str, Any]) -> None:
+    _assert_told(scenario_state, "If a re-review request fails, report the blocker")
+
+
 @then("the agent is told to also resolve the merge conflicts")
 def _agent_told_to_also_resolve_conflicts(scenario_state: dict[str, Any]) -> None:
     prompt = _launched_prompt(scenario_state)

@@ -19,10 +19,17 @@ def autodispatch_state(monkeypatch):
         suggestion_markers={},
         zellij_session="workdash",
     )
+    session.config.configured_code_agents.return_value = ["pi"]
+    session.config.configured_analyze_agents.return_value = ["pi"]
+    events = []
+    monkeypatch.setattr(
+        session, "review", lambda **kwargs: events.append(("review", kwargs["target"]))
+    )
     calls = []
     panes = []
 
-    def dispatch(*, scope, agent, group):
+    def dispatch(*, scope, agent, group, before_launch):
+        events.append(("dispatch", scope))
         calls.append((scope, group))
         if scope == "owner/empty":
             return {"status": "no_ready_task"}
@@ -44,7 +51,7 @@ def autodispatch_state(monkeypatch):
     monkeypatch.setattr(session, "dispatch_once", dispatch)
     monkeypatch.setattr("workdash.autodispatch.launcher.zellij.load_zellij_panes", load_panes)
     monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
-    yield {"session": session, "calls": calls, "panes": panes, "polled": polled}
+    yield {"session": session, "calls": calls, "panes": panes, "polled": polled, "events": events}
     session.stop_autodispatch_sessions()
 
 
@@ -86,6 +93,16 @@ def first(autodispatch_state):
 def pane_disappears(autodispatch_state):
     wait_for(lambda: autodispatch_state["panes"])
     autodispatch_state["panes"].clear()
+
+
+@then("the first issue is reviewed before the next dispatch")
+def first_reviewed(autodispatch_state):
+    wait_for(lambda: len(autodispatch_state["events"]) >= 3)
+    assert autodispatch_state["events"][:3] == [
+        ("dispatch", "owner/repo"),
+        ("review", "owner/repo#ISSUE-1"),
+        ("dispatch", "owner/repo"),
+    ]
 
 
 @then("the second issue is dispatched in group `project`")
@@ -159,7 +176,7 @@ def remains(autodispatch_state):
 @given("an autodispatch server with ready issues in different implementation repositories")
 def cross_repo_server(scenario_state, monkeypatch):
     from gh_work_state_fake import install_fake_github
-    from workdash.config import WorkdashConfig
+    from workdash.config import AgentConfig, WorkdashConfig
     from workdash.github_client import GitHubClient
 
     github = install_fake_github(monkeypatch)
@@ -171,7 +188,9 @@ def cross_repo_server(scenario_state, monkeypatch):
         "owner/implementation#51", closes=("owner/second#3",), mergeable="CONFLICTING"
     )
     session = WorkdashSession(
-        config=WorkdashConfig(github_username="testuser"),
+        config=WorkdashConfig(
+            github_username="testuser", agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}
+        ),
         backend=MagicMock(github_client=GitHubClient()),
         work_items=[],
         suggestion_markers={},
@@ -192,6 +211,7 @@ def cross_repo_server(scenario_state, monkeypatch):
         }
 
     monkeypatch.setattr(session, "code", code)
+    monkeypatch.setattr(session, "review", MagicMock(return_value={"status": "nothing_to_review"}))
     monkeypatch.setattr("workdash.control.launcher.zellij.load_zellij_panes", lambda _: [])
     monkeypatch.setattr(
         "workdash.autodispatch.launcher.zellij.load_zellij_panes", lambda _: list(panes)

@@ -48,6 +48,7 @@ from .steps import (
 from .steps import (
     ready as _ready,
 )
+from .steps import review as _review
 from .steps import (
     setup as _setup,
 )
@@ -89,11 +90,13 @@ for _step_module in (
     _todo,
     _branchinfo,
     _ready,
+    _review,
     _dispatch,
 ):
     for _name in dir(_step_module):
         if _name.startswith("pytestbdd_stepdef_") or _name in {
             "scenario_state",
+            "review_state",
             "work_items",
             "valid_config",
             "autodispatch_state",

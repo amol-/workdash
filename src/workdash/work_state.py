@@ -180,82 +180,40 @@ def parse_github_datetime(timestamp: str) -> datetime:
     return parsed_timestamp
 
 
-def _actionable_feedback(
-    node: dict, head_sha: str, author: str | None, github_username: str, pushed_at: datetime
-) -> tuple[ReviewFeedback, ...]:
-    """Collect the human feedback the current head has not addressed yet.
-
-    That is a changes-requested verdict on the current head, and review bodies,
-    unresolved current threads, and comments posted after the head was pushed,
-    from anyone but bots, the pull request author, and the server's GitHub
-    identity. Minimized entries, review bodies and comments their author
-    approved the current head after, comments the author or the server identity
-    replied to later, and threads whose latest human comment is theirs are left out.
-
-    :param str github_username: The server's GitHub identity, answering feedback
-        like the pull request author.
-    """
-
+def _actionable_feedback(node: dict) -> tuple[ReviewFeedback, ...]:
+    """Collect changes-requested verdicts and unresolved inline threads."""
     feedback: dict[str, ReviewFeedback] = {}
-    own = {login.lower() for login in (author, github_username.strip()) if login}
-
-    def is_bot(entry: dict) -> bool:
-        actor = entry["author"] or {}
-        return actor.get("__typename") == "Bot" or (actor.get("login") or "").endswith("[bot]")
-
-    def add(kind: str, entry: dict, posted_key: str, *, after: datetime | None = pushed_at) -> None:
-        login = (entry["author"] or {}).get("login") or ""
-        if (
-            not login
-            or not entry[posted_key]  # A draft nobody else can see yet.
-            or entry["isMinimized"]
-            or is_bot(entry)
-            or login.lower() in own
-        ):
-            return
-        created_at = parse_github_datetime(entry[posted_key])
-        if after is None or created_at > after:
-            feedback.setdefault(entry["url"], ReviewFeedback(kind, login, entry["url"], created_at))
-
-    approved_at: dict[str, datetime] = {}
+    requested = {
+        reviewer["login"].lower()
+        for request in node["reviewRequests"]["nodes"]
+        if (reviewer := request["requestedReviewer"]) and reviewer.get("__typename") == "User"
+    }
     for review in node["latestOpinionatedReviews"]["nodes"]:
-        if (review["commit"] or {}).get("oid") != head_sha:
-            continue
-        if review["state"] == "CHANGES_REQUESTED":
-            add("changes_requested", review, "submittedAt", after=None)
-        elif review["state"] == "APPROVED" and review["author"]:
-            approved_at[review["author"]["login"].lower()] = parse_github_datetime(
-                review["submittedAt"]
+        actor = review["author"] or {}
+        login = actor.get("login") or ""
+        if (
+            review["state"] == "CHANGES_REQUESTED"
+            and login
+            and login.lower() not in requested
+            and review["submittedAt"]
+        ):
+            feedback[review["url"]] = ReviewFeedback(
+                "changes_requested",
+                login,
+                review["url"],
+                parse_github_datetime(review["submittedAt"]),
             )
-
-    def approval_after_push(entry: dict) -> datetime:
-        # Approving the current head settles the reviewer's earlier review bodies and comments.
-        login = ((entry["author"] or {}).get("login") or "").lower()
-        return max(pushed_at, approved_at.get(login, pushed_at))
-
-    for review in node["reviews"]["nodes"]:
-        if review["state"] in {"COMMENTED", "CHANGES_REQUESTED"} and review["body"].strip():
-            add("review", review, "submittedAt", after=approval_after_push(review))
     for thread in node["reviewThreads"]["nodes"]:
-        latest = next(
-            (
-                comment
-                for comment in reversed(thread["comments"]["nodes"])
-                if comment["publishedAt"] and not is_bot(comment)
-            ),
-            None,
-        )
-        if not thread["isResolved"] and not thread["isOutdated"] and latest:
-            add("review_thread", latest, "publishedAt")
-    # The latest own reply answers the conversation comments before it.
-    replied_at = max(
-        (
-            parse_github_datetime(comment["createdAt"])
-            for comment in node["comments"]["nodes"]
-            if ((comment["author"] or {}).get("login") or "").lower() in own
-        ),
-        default=pushed_at,
-    )
-    for comment in node["comments"]["nodes"]:
-        add("comment", comment, "createdAt", after=max(replied_at, approval_after_push(comment)))
+        if thread["isResolved"]:
+            continue
+        for comment in reversed(thread["comments"]["nodes"]):
+            if comment["publishedAt"]:
+                login = (comment["author"] or {}).get("login") or "unknown"
+                feedback[comment["url"]] = ReviewFeedback(
+                    "review_thread",
+                    login,
+                    comment["url"],
+                    parse_github_datetime(comment["publishedAt"]),
+                )
+                break
     return tuple(feedback.values())
