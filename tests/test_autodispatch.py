@@ -126,7 +126,7 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
 
     monkeypatch.setattr("workdash.control.existing_worktree_path", worktree)
     monkeypatch.setattr("workdash.control.ensure_worktree", worktree)
-    monkeypatch.setattr("workdash.control.get_merge_base", lambda _: None)
+    monkeypatch.setattr("workdash.control.get_merge_base", lambda _, **kwargs: None)
     from workdash.github_client import GitHubClient
 
     github_client = GitHubClient()
@@ -139,8 +139,7 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
         return list(panes)
 
     monkeypatch.setattr("workdash.control.launcher.zellij.load_zellij_panes", load_panes)
-    monkeypatch.setattr("workdash.autodispatch.launcher.zellij.load_zellij_panes", load_panes)
-    monkeypatch.setattr("workdash.control.launch_agent_context", launch)
+    monkeypatch.setattr("workdash.agent_execution.executor.launch", launch)
     monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
     session = WorkdashSession(
         config=WorkdashConfig(

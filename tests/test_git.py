@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from workdash.git import GitHelper, get_current_branch, get_repo_root, has_unpublished_work
+from workdash.git import GitHelper
 
 
 def commit_everything(tmp_path: Path, message: str = "initial") -> str:
@@ -26,7 +26,7 @@ def commit_everything(tmp_path: Path, message: str = "initial") -> str:
 def test_unpublished_work_is_absent_when_the_worktree_is_what_github_has(tmp_path: Path) -> None:
     head_sha = commit_everything(tmp_path)
 
-    assert has_unpublished_work(str(tmp_path), head_sha) is False
+    assert GitHelper().has_unpublished_work(str(tmp_path), head_sha) is False
 
 
 def test_unpublished_work_includes_an_uncommitted_change(tmp_path: Path) -> None:
@@ -34,21 +34,21 @@ def test_unpublished_work_includes_an_uncommitted_change(tmp_path: Path) -> None
     head_sha = commit_everything(tmp_path)
     (tmp_path / "notes.md").write_text("work in progress\n")
 
-    assert has_unpublished_work(str(tmp_path), head_sha) is True
+    assert GitHelper().has_unpublished_work(str(tmp_path), head_sha) is True
 
 
 def test_unpublished_work_includes_a_commit_github_does_not_have(tmp_path: Path) -> None:
     pushed_sha = commit_everything(tmp_path)
     commit_everything(tmp_path, "local only")
 
-    assert has_unpublished_work(str(tmp_path), pushed_sha) is True
+    assert GitHelper().has_unpublished_work(str(tmp_path), pushed_sha) is True
 
 
 def test_unpublished_work_includes_an_unadded_file(tmp_path: Path) -> None:
     head_sha = commit_everything(tmp_path)
     (tmp_path / "parser.py").write_text("def parse(tokens):\n    return tokens\n")
 
-    assert has_unpublished_work(str(tmp_path), head_sha) is True
+    assert GitHelper().has_unpublished_work(str(tmp_path), head_sha) is True
 
 
 def test_unpublished_work_ignores_workdash_artifacts(tmp_path: Path) -> None:
@@ -56,7 +56,7 @@ def test_unpublished_work_ignores_workdash_artifacts(tmp_path: Path) -> None:
     (tmp_path / ".workdash").mkdir()
     (tmp_path / ".workdash" / "PR_REVIEW.md").write_text("review\n")
 
-    assert has_unpublished_work(str(tmp_path), head_sha) is False
+    assert GitHelper().has_unpublished_work(str(tmp_path), head_sha) is False
 
 
 def test_worktree_name_preserves_owner_repo_number_shape() -> None:
@@ -68,12 +68,12 @@ def test_get_repo_root_resolves_from_a_subdirectory(tmp_path: Path) -> None:
     nested_dir = tmp_path / "pkg" / "module"
     nested_dir.mkdir(parents=True)
 
-    assert get_repo_root(nested_dir) == tmp_path.resolve()
+    assert GitHelper().get_repo_root(nested_dir) == tmp_path.resolve()
 
 
 def test_get_repo_root_rejects_a_non_git_directory(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="Not a git repository."):
-        get_repo_root(tmp_path)
+        GitHelper().get_repo_root(tmp_path)
 
 
 def test_get_current_branch_returns_the_checked_out_branch(tmp_path: Path) -> None:
@@ -84,12 +84,12 @@ def test_get_current_branch_returns_the_checked_out_branch(tmp_path: Path) -> No
         ["git", "commit", "-q", "--allow-empty", "-m", "initial"], cwd=tmp_path, check=True
     )
 
-    assert get_current_branch(tmp_path) == "feature"
+    assert GitHelper().get_current_branch(tmp_path) == "feature"
 
 
 def test_get_current_branch_raises_when_git_fails(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="Failed to determine the current branch."):
-        get_current_branch(tmp_path)
+        GitHelper().get_current_branch(tmp_path)
 
 
 def test_repo_from_remote_url_accepts_https_and_ssh_forms() -> None:
@@ -183,3 +183,41 @@ def test_branch_tracking_verifies_repository_identity(tmp_path, remote_url, head
         capture_output=True,
     )
     assert GitHelper().branch_tracks_repository(tmp_path, "pr-branch", head_repo) is matches
+
+
+def test_git_path_uses_worktree_and_relative_git_path_without_git(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    worktree = tmp_path / "linked" / "nested"
+    exclude = tmp_path / "repo" / ".git" / "info" / "exclude"
+
+    def fake_run(args, **kwargs):
+        assert args == ["git", "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]
+        assert kwargs == {"cwd": worktree, "capture_output": True, "text": True, "check": True}
+        return subprocess.CompletedProcess(args, 0, stdout=f"{exclude}\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert GitHelper().get_git_path("info/exclude", worktree) == exclude
+
+
+def test_git_path_resolves_common_exclude_from_linked_worktree(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    commit_everything(repo)
+    worktree = tmp_path / "linked"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "feature", str(worktree)], cwd=repo, check=True
+    )
+    nested = worktree / "nested"
+    nested.mkdir()
+
+    git = GitHelper()
+    exclude = git.get_git_path("info/exclude", nested)
+    assert exclude == repo / ".git" / "info" / "exclude"
+    assert git.get_git_path("info/exclude", repo) == exclude
+    with exclude.open("a") as file:
+        file.write(".workdash/PR_REVIEW.md\n")
+    subprocess.run(
+        ["git", "check-ignore", "-q", ".workdash/PR_REVIEW.md"], cwd=worktree, check=True
+    )

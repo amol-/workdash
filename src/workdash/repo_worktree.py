@@ -40,13 +40,17 @@ def worktree_path(workdir: str, repo: str, number: int, *, todo: bool = False) -
 
 
 def existing_worktree_path(
-    workdir: str, item: WorkItem, *, pinned: contextlib.ExitStack | None = None
+    workdir: str,
+    item: WorkItem,
+    *,
+    pinned: contextlib.ExitStack | None = None,
+    git: GitHelper | None = None,
 ) -> Path | tuple[Path, int] | None:
     """Find a locally proven worktree without creating, fetching, or querying GitHub."""
     base = Path(workdir).expanduser()
     if not base.is_dir():
         return None
-    git = GitHelper()
+    git = git if git is not None else GitHelper()
     matches = []
     for candidate in _worktree_candidates(base, item):
         if pinned is None:
@@ -72,7 +76,9 @@ def existing_worktree_path(
     return None
 
 
-def ensure_worktree(workdir: str, item: WorkItem, *, github_client=None) -> str:
+def ensure_worktree(
+    workdir: str, item: WorkItem, *, git: GitHelper | None = None, github_client=None
+) -> str:
     """Ensure a worktree exists for the given work item and return its path.
 
     Clones the repository if it does not exist locally, fetches the latest
@@ -81,9 +87,9 @@ def ensure_worktree(workdir: str, item: WorkItem, *, github_client=None) -> str:
     :param str workdir: Base working directory (may use ~ for home).
     :param WorkItem item: The work item to prepare a worktree for.
     """
-    git = GitHelper()
+    git = git if git is not None else GitHelper()
     github = github_client if github_client is not None else GitHubClient()
-    existing = existing_worktree_path(workdir, item)
+    existing = existing_worktree_path(workdir, item, git=git)
     if existing is not None:
         # Local divergence or missing upstream shouldn't block the user.
         with contextlib.suppress(subprocess.CalledProcessError, OSError):
@@ -112,12 +118,12 @@ def ensure_worktree(workdir: str, item: WorkItem, *, github_client=None) -> str:
 
     wt = worktree_path(workdir, repo, worktree_item_number(item), todo=todo_target is not None)
     main = main_repo_path(workdir, repo)
-    _require_repository_paths(repo, main, wt)
+    _require_repository_paths(repo, main, wt, git=git)
 
     # Check if git already tracks a worktree for this branch before creating another one.
     git_existing = git.find_worktree_for_branch(main, branch)
     if git_existing is not None:
-        _require_repository_paths(repo, git_existing)
+        _require_repository_paths(repo, git_existing, git=git)
         with contextlib.suppress(subprocess.CalledProcessError, OSError):
             git.pull_ff_only(git_existing)
         if item.item_type == WorkItemType.PR and head_repo.lower() != item.repo.lower():
@@ -130,7 +136,7 @@ def ensure_worktree(workdir: str, item: WorkItem, *, github_client=None) -> str:
         if todo_target is not None and ":" in repo:
             git.clone_repository(repo, main)
         else:
-            github.clone_repository(repo, main)
+            git.clone_github_repository(repo, main, github_client=github)
     git.fetch_remote(main, "origin")
     git.fast_forward_default_branch(main)
     if item.item_type == WorkItemType.PR:
@@ -143,12 +149,12 @@ def ensure_worktree(workdir: str, item: WorkItem, *, github_client=None) -> str:
     return str(wt)
 
 
-def get_merge_base(worktree: str) -> str | None:
+def get_merge_base(worktree: str, *, git: GitHelper | None = None) -> str | None:
     """Return the merge-base commit between HEAD and origin's default branch.
 
     Returns None if the merge-base cannot be determined (e.g. shallow clone).
     """
-    return GitHelper().merge_base_with_origin_default(worktree)
+    return (git if git is not None else GitHelper()).merge_base_with_origin_default(worktree)
 
 
 def issue_branch_number(branch: str) -> int | None:
@@ -169,9 +175,8 @@ def _worktree_candidates(base: Path, item: WorkItem) -> list[Path]:
     )
 
 
-def _require_repository_paths(repo: str, *paths: Path) -> None:
+def _require_repository_paths(repo: str, *paths: Path, git: GitHelper) -> None:
     """Reject occupied paths before any repository reuse can pull or fetch."""
-    git = GitHelper()
     for path in paths:
         if path.exists() and not git.repository_matches(path, repo):
             raise RuntimeError(

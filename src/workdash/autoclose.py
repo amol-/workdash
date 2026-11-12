@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 from . import launcher
 from .config import WorkdashConfig
-from .git import has_unpublished_work
+from .git import GitHelper
 from .github_client import GitHubClient
 from .launcher import (
     _format_zellij_pane_id,
@@ -55,7 +55,7 @@ class AutocloseSupervisor:
     """
 
     def __init__(
-        self, *, config: WorkdashConfig, lock: threading.RLock, github_client=None
+        self, *, config: WorkdashConfig, lock: threading.RLock, git: GitHelper, github_client=None
     ) -> None:
         """
         :param threading.RLock lock: The session lock pane operations share with code launches.
@@ -63,6 +63,7 @@ class AutocloseSupervisor:
         self._github_client = github_client if github_client is not None else GitHubClient()
         self._config = config
         self._lock = lock
+        self.git = git
         self._panes: dict[tuple[str, str], _SupervisedPane] = {}
         self._stopped = threading.Event()
         self._worker: threading.Thread | None = None
@@ -185,7 +186,7 @@ class AutocloseSupervisor:
                 instruction = render_autonomous_work_instruction(action, work)
                 self._send(entry, instruction, fingerprint)
         elif state is not None and _finished(state):
-            if has_unpublished_work(entry.repo_path, state.head_sha):
+            if self.git.has_unpublished_work(entry.repo_path, state.head_sha):
                 logger.info(
                     "Keeping pane %s open: its worktree holds unpublished work", entry.pane_id
                 )

@@ -14,7 +14,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .git import GitHelper, get_current_branch, get_repo_root
+from .git import GitHelper
 from .github_client import GitHubClient
 from .models import ci_status_symbol
 from .repo_worktree import issue_branch_number
@@ -23,7 +23,7 @@ from .repo_worktree import issue_branch_number
 def run_branchinfo(github_client=None) -> int:
     """Report the pull request and the issues it closes for the current branch."""
     try:
-        repo_path = get_repo_root()
+        repo_path = GitHelper().get_repo_root()
     except RuntimeError:
         print("Error: Not a git repository.", file=sys.stderr)
         return 1
@@ -31,7 +31,7 @@ def run_branchinfo(github_client=None) -> int:
     github = github_client if github_client is not None else GitHubClient()
     try:
         repo = _current_repo(repo_path)
-        branch = get_current_branch(repo_path)
+        branch = GitHelper().get_current_branch(repo_path)
         pull_request = github.branch_pull_request(repo, branch)
         symbol: str | None = None
         issues = []

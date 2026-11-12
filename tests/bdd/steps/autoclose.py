@@ -51,11 +51,15 @@ def _install_supervision(
         control_module,
         "GitHelper",
         lambda: SimpleNamespace(
-            branch_tracks_repository=lambda *_: True, find_worktree_for_branch=lambda *_: None
+            branch_tracks_repository=lambda *_: True,
+            find_worktree_for_branch=lambda *_: None,
+            has_unpublished_work=lambda *_: scenario_state.get("unpublished_local_work", False),
         ),
     )
-    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *_: existing)
-    monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
+    if "api_session" in scenario_state:
+        scenario_state["api_session"].git = control_module.GitHelper()
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *_, **kwargs: existing)
+    monkeypatch.setattr(control_module, "get_merge_base", lambda _path, **kwargs: None)
     monkeypatch.setattr(control_module, "prepare_launch_agent_prompt", lambda *a, **k: "PROMPT")
 
     clock = scenario_state.setdefault("clock", {"now": 0.0})
@@ -87,11 +91,6 @@ def _install_supervision(
     monkeypatch.setattr(autoclose_module.launcher.zellij, "send_zellij_pane_input", send)
     monkeypatch.setattr(autoclose_module.launcher.zellij, "press_zellij_pane_enter", press_enter)
     monkeypatch.setattr(autoclose_module.launcher.zellij, "close_zellij_pane", close)
-    monkeypatch.setattr(
-        autoclose_module,
-        "has_unpublished_work",
-        lambda *_: scenario_state.get("unpublished_local_work", False),
-    )
     # A fake clock makes minute-by-minute checks instant and deterministic.
     monkeypatch.setattr(autoclose_module.time, "monotonic", lambda: clock["now"])
 

@@ -15,6 +15,7 @@ import pytest
 from pytest_bdd import given, parsers, then, when
 from webob import Request
 
+import workdash.control as control_module
 import workdash.github_client as github_client_module
 from workdash.analysis_cache import AnalysisCache
 from workdash.backend import compute_suggestion_markers
@@ -88,7 +89,9 @@ def _install_code_fakes(scenario_state: dict[str, Any], monkeypatch: pytest.Monk
             branch_tracks_repository=lambda *_: True, find_worktree_for_branch=lambda *_: None
         ),
     )
-    monkeypatch.setattr("workdash.control.get_merge_base", lambda _path: None)
+    if "api_session" in scenario_state:
+        scenario_state["api_session"].git = control_module.GitHelper()
+    monkeypatch.setattr("workdash.control.get_merge_base", lambda _path, **kwargs: None)
 
     def prepare(item, repo_path, **kwargs):
         scenario_state["prompt_analysis"] = kwargs.get("analysis_path")
@@ -307,7 +310,7 @@ def _client_requests_info_api(
     )
     monkeypatch.setattr(
         "workdash.control.existing_worktree_path",
-        lambda _workdir, _item: scenario_state.get("known_worktree_path"),
+        lambda _workdir, _item, **kwargs: scenario_state.get("known_worktree_path"),
     )
     _call_api(scenario_state, work_items, tmp_path, "info")
 
@@ -1236,7 +1239,7 @@ def _worktree_already_exists(
     scenario_state["existing_worktree"] = str(path)
     monkeypatch.setattr(
         "workdash.control.existing_worktree_path",
-        lambda _workdir, item: path if format_work_item_id(item) == item_id else None,
+        lambda _workdir, item, **kwargs: path if format_work_item_id(item) == item_id else None,
     )
 
 

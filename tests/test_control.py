@@ -24,7 +24,7 @@ from gh_work_state_fake import (
     install_fake_github,
     todo_body,
 )
-from workdash.backend import IncludeResult
+from workdash.backend import IncludeResult, WorkdashBackend
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashControlError, WorkdashSession, format_work_item_id
 from workdash.github_client import GitHubClient
@@ -566,11 +566,13 @@ def _coding_session(
     monkeypatch.setattr(
         control_module.launcher.zellij, "load_zellij_panes", lambda _session: list(panes)
     )
-    monkeypatch.setattr(control_module, "existing_worktree_path", lambda _wd, _item: worktree)
+    monkeypatch.setattr(
+        control_module, "existing_worktree_path", lambda _wd, _item, **kwargs: worktree
+    )
     monkeypatch.setattr(control_module, "ensure_worktree", ensure_worktree)
-    monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
+    monkeypatch.setattr(control_module, "get_merge_base", lambda _path, **kwargs: None)
     monkeypatch.setattr(control_module, "prepare_launch_agent_prompt", lambda *a, **k: "PROMPT")
-    monkeypatch.setattr(control_module, "launch_agent_context", launch_agent)
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch_agent)
     monkeypatch.setattr(control_module, "_LAUNCH_VISIBILITY_INTERVAL_SECONDS", 0)
     session = WorkdashSession(
         config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi")}, workdir=str(tmp_path)),
@@ -647,7 +649,7 @@ def test_vscode_is_not_opened_while_an_agent_pane_is_live(monkeypatch, tmp_path)
     panes = [{"id": 5, "title": "code_owner_repo_1", "pane_cwd": str(tmp_path / "owner_repo_1")}]
     session, _worktree, _ensure, _launch = _coding_session(monkeypatch, tmp_path, panes)
     launch_vscode = MagicMock()
-    monkeypatch.setattr(control_module, "launch_vscode_context", launch_vscode)
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch_vscode", launch_vscode)
 
     result = session.code(target="owner/repo#ISSUE-1", agent="vscode", allow_vscode=True)
 
@@ -660,7 +662,7 @@ def test_vscode_opens_without_a_zellij_session(monkeypatch, tmp_path) -> None:
         monkeypatch, tmp_path, [], zellij_session=None
     )
     launch_vscode = MagicMock()
-    monkeypatch.setattr(control_module, "launch_vscode_context", launch_vscode)
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch_vscode", launch_vscode)
 
     assert session.get_agent_panes_for_item(session.work_items[0]) == []
     result = session.code(target="owner/repo#ISSUE-1", agent="vscode", allow_vscode=True)
@@ -790,7 +792,7 @@ def _authored_session(monkeypatch, tmp_path, panes=None):
     )
     git = MagicMock()
     git.branch_tracks_repository.return_value = True
-    monkeypatch.setattr(control_module, "GitHelper", lambda: git)
+    session.git = git
     return session, worktree, ensure, launch_agent, prepare
 
 
@@ -908,7 +910,7 @@ def test_autostart_appends_the_appendix_once_to_a_vscode_briefing(monkeypatch, t
     github.add_issue("owner/repo#1")
     session, worktree, _ensure, _launch_agent = _coding_session(monkeypatch, tmp_path, [])
     launch_vscode = MagicMock()
-    monkeypatch.setattr(control_module, "launch_vscode_context", launch_vscode)
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch_vscode", launch_vscode)
 
     result = session.code(
         target="owner/repo#ISSUE-1", agent="vscode", allow_vscode=True, autostart=True
@@ -936,7 +938,7 @@ def test_autostart_does_not_launch_where_the_redirected_pull_requests_agent_live
     monkeypatch.setattr(
         control_module,
         "existing_worktree_path",
-        lambda _wd, item: pull_request_worktree if item.number == 51 else None,
+        lambda _wd, item, **kwargs: pull_request_worktree if item.number == 51 else None,
     )
 
     result = session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
@@ -1736,7 +1738,7 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
     monkeypatch.setattr(
         control_module,
         "existing_worktree_path",
-        lambda *args, pinned: _pin_test_worktree(pinned, worktree_path),
+        lambda *args, pinned, git: _pin_test_worktree(pinned, worktree_path),
     )
     app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
 
@@ -1776,12 +1778,12 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
     assert get(base, peer="192.0.2.7").status_int == 403
     session.backend.github_client.fetch_item.return_value = None
     assert get("/api/items/owner/repo%23ISSUE-2/files/").status_int == 404
-    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args, pinned: None)
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args, pinned, git: None)
     assert get(base).status_int == 404
     monkeypatch.setattr(
         control_module,
         "existing_worktree_path",
-        lambda *args, pinned: _pin_test_worktree(pinned, worktree),
+        lambda *args, pinned, git: _pin_test_worktree(pinned, worktree),
     )
     (artifacts / "review.md").unlink()
     (artifacts / "escape").unlink()
@@ -1824,7 +1826,7 @@ def test_item_files_reject_symlink_substitution(tmp_path, monkeypatch, component
     monkeypatch.setattr(
         control_module,
         "existing_worktree_path",
-        lambda *args, pinned: _pin_test_worktree(pinned, worktree),
+        lambda *args, pinned, git: _pin_test_worktree(pinned, worktree),
     )
     app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
 
@@ -1919,7 +1921,7 @@ def test_item_files_reject_worktree_symlink_substitution(tmp_path, monkeypatch, 
     monkeypatch.setattr(
         control_module,
         "existing_worktree_path",
-        lambda *args, pinned: _pin_test_worktree(pinned, worktree),
+        lambda *args, pinned, git: _pin_test_worktree(pinned, worktree),
     )
     monkeypatch.setattr(control_module.os, "open", open_with_replacement)
     app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
@@ -1950,7 +1952,7 @@ def test_item_files_listing_validates_pinned_entries_after_replacement(tmp_path,
     monkeypatch.setattr(
         control_module,
         "existing_worktree_path",
-        lambda *args, pinned: _pin_test_worktree(pinned, worktree),
+        lambda *args, pinned, git: _pin_test_worktree(pinned, worktree),
     )
     original_listdir = control_module.os.listdir
 
@@ -1989,7 +1991,7 @@ def test_item_files_listing_rejects_directory_substitution(tmp_path, monkeypatch
     monkeypatch.setattr(
         control_module,
         "existing_worktree_path",
-        lambda *args, pinned: _pin_test_worktree(pinned, worktree),
+        lambda *args, pinned, git: _pin_test_worktree(pinned, worktree),
     )
     original_open = control_module.os.open
     replaced = False
@@ -2235,7 +2237,7 @@ def test_plan_first_issue_resumes_authored_pr_branch_without_existing_worktree(
     github.add_issue("owner/repo#1")
     github.add_pull_request("owner/repo#51", closes=("owner/repo#1",))
     session, _worktree, _ensure, launch, prepare = _authored_session(monkeypatch, tmp_path)
-    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *_args: None)
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *_args, **kwargs: None)
     result = session.code(target="owner/repo#ISSUE-1", agent="pi")
     assert result["item_id"] == "owner/repo#ISSUE-1"
     assert prepare.call_args.args[0].number == 51
@@ -2655,7 +2657,8 @@ def test_dispatch_uses_newly_actionable_pr_before_launch(monkeypatch, tmp_path):
     git = MagicMock()
     git.find_worktree_for_branch.return_value = None
     monkeypatch.setattr(repo_worktree, "GitHelper", lambda: git)
-    monkeypatch.setattr(repo_worktree, "existing_worktree_path", lambda *_: None)
+    session.git = git
+    monkeypatch.setattr(repo_worktree, "existing_worktree_path", lambda *_, **kwargs: None)
     github_helper = MagicMock()
     github_helper.fetch_worktree_head.return_value = ("pr-52-branch", "owner/other")
     monkeypatch.setattr(
@@ -2834,10 +2837,7 @@ def test_issue_coding_verifies_selected_pr_in_real_worktree(
     monkeypatch.setattr(
         session.backend.github_client, "fetch_worktree_head", helper.fetch_worktree_head
     )
-    monkeypatch.setattr(control_module, "GitHelper", repo_worktree.GitHelper)
-    monkeypatch.setattr(
-        session.backend.github_client, "fetch_worktree_head", helper.fetch_worktree_head
-    )
+    session.git = repo_worktree.GitHelper()
     pull = MagicMock()
     monkeypatch.setattr(repo_worktree.GitHelper, "pull_ff_only", pull)
 
@@ -2906,7 +2906,8 @@ def test_dispatch_checks_out_pull_request_head_branch(monkeypatch, tmp_path):
     git = MagicMock()
     git.find_worktree_for_branch.return_value = None
     monkeypatch.setattr(repo_worktree, "GitHelper", lambda: git)
-    monkeypatch.setattr(repo_worktree, "existing_worktree_path", lambda *_: None)
+    session.git = git
+    monkeypatch.setattr(repo_worktree, "existing_worktree_path", lambda *_, **kwargs: None)
     github_helper = MagicMock()
     github_helper.fetch_worktree_head.return_value = ("existing-pr-branch", "owner/repo")
     monkeypatch.setattr(
@@ -3018,7 +3019,7 @@ def test_plan_first_authored_pr_and_issue_use_same_context_and_worktree(monkeypa
         monkeypatch.setattr(
             control_module,
             "existing_worktree_path",
-            lambda _wd, item: worktree if item.item_type == WorkItemType.ISSUE else None,
+            lambda _wd, item, **kwargs: worktree if item.item_type == WorkItemType.ISSUE else None,
         )
         result = session.code(target=target, agent="pi")
         results.append(
@@ -3092,10 +3093,7 @@ def test_dispatch_rejects_invalid_issue_branch_upstream(monkeypatch, tmp_path, c
     monkeypatch.setattr(
         session.backend.github_client, "fetch_worktree_head", helper.fetch_worktree_head
     )
-    monkeypatch.setattr(control_module, "GitHelper", repo_worktree.GitHelper)
-    monkeypatch.setattr(
-        session.backend.github_client, "fetch_worktree_head", helper.fetch_worktree_head
-    )
+    session.git = repo_worktree.GitHelper()
 
     config_before = subprocess.run(
         [
@@ -3197,10 +3195,7 @@ def test_dispatch_resumes_pushed_targeted_todo_branch(monkeypatch, tmp_path, cas
     monkeypatch.setattr(
         session.backend.github_client, "fetch_worktree_head", helper.fetch_worktree_head
     )
-    monkeypatch.setattr(control_module, "GitHelper", repo_worktree.GitHelper)
-    monkeypatch.setattr(
-        session.backend.github_client, "fetch_worktree_head", helper.fetch_worktree_head
-    )
+    session.git = repo_worktree.GitHelper()
     panes = []
     monkeypatch.setattr(
         control_module.launcher.zellij, "load_zellij_panes", lambda _session: list(panes)
@@ -3275,7 +3270,7 @@ def test_untracked_pr_branch_requires_upstream(monkeypatch, tmp_path, created_fr
     monkeypatch.setattr(
         session.backend.github_client, "fetch_worktree_head", helper.fetch_worktree_head
     )
-    monkeypatch.setattr(control_module, "GitHelper", repo_worktree.GitHelper)
+    session.git = repo_worktree.GitHelper()
     with pytest.raises(RuntimeError, match="configure its upstream"):
         session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
     launch.assert_not_called()
@@ -3319,10 +3314,7 @@ def test_dispatch_rejects_unverified_branch_worktree_before_pull(monkeypatch, tm
     monkeypatch.setattr(
         session.backend.github_client, "fetch_worktree_head", helper.fetch_worktree_head
     )
-    monkeypatch.setattr(control_module, "GitHelper", repo_worktree.GitHelper)
-    monkeypatch.setattr(
-        session.backend.github_client, "fetch_worktree_head", helper.fetch_worktree_head
-    )
+    session.git = repo_worktree.GitHelper()
     monkeypatch.setattr(
         control_module, "existing_worktree_path", repo_worktree.existing_worktree_path
     )
@@ -3386,6 +3378,7 @@ def test_ready_and_code_share_replaceable_github_state(monkeypatch, tmp_path):
             return {"body": "Analysis from fake GitHub"}
 
     github = FakeGitHub()
+    git = session.git
     config = replace(session.config, agents={"pi": AgentConfig(launch="pi", analyze="pi")})
     backend = WorkdashBackend(github_client=github, config=config, cache_root=tmp_path / "cache")
     session = WorkdashSession(
@@ -3395,10 +3388,11 @@ def test_ready_and_code_share_replaceable_github_state(monkeypatch, tmp_path):
         suggestion_markers={},
         zellij_session="workdash-main",
     )
+    session.git = git
     prompts = []
     monkeypatch.setattr(
-        backend.analyzer,
-        "_run_analysis_command",
+        control_module.agent_execution.executor,
+        "analyze",
         lambda **kwargs: prompts.append(kwargs["prompt"]) or "Analysis result",
     )
     backend.analyze_item(item, "pi")
@@ -3470,8 +3464,8 @@ def test_zellij_replacement_tracks_terminal_and_coding_lifecycle(monkeypatch, tm
     fake = FakeZellij()
     monkeypatch.setattr(launcher_module, "zellij", fake)
     monkeypatch.setattr(control_module, "ensure_worktree", lambda *args, **kwargs: str(tmp_path))
-    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args: tmp_path)
-    monkeypatch.setattr(control_module, "get_merge_base", lambda path: None)
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(control_module, "get_merge_base", lambda path, **kwargs: None)
     monkeypatch.setattr(
         control_module, "prepare_launch_agent_prompt", lambda *a, **k: "It's a task"
     )
@@ -3513,3 +3507,200 @@ def test_zellij_replacement_tracks_terminal_and_coding_lifecycle(monkeypatch, tm
     assert session.pane_content(pane_id="terminal_2")["content"] == "continue\n"
     session.pane_close(pane_id="terminal_2")
     assert session.info()["panes"] == []
+
+
+def test_review_compatibility_delegates_raw_output_to_current_executor(monkeypatch):
+    from workdash import agent_execution
+    from workdash.analyzer import Analyzer
+
+    item = _work_item(number=1, title="Task")
+    fake = MagicMock()
+    fake.analyze.return_value = "  raw output\n"
+    monkeypatch.setattr(agent_execution, "executor", fake)
+    result = Analyzer()._run_analysis_command(
+        item=item, prompt="review prompt", command_tokens=["agent", "-p"], cwd="/tmp"
+    )
+    assert result == "  raw output\n"
+    fake.analyze.assert_called_once_with(
+        item=item, prompt="review prompt", command_tokens=["agent", "-p"], cwd="/tmp"
+    )
+
+
+def test_session_uses_its_git_to_identify_worktrees_for_ready_and_panes(monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    worktree = tmp_path / "owner_repo_1"
+    worktree.mkdir()
+    item = _work_item(number=1, title="Issue")
+    git = MagicMock()
+    git.worktree_proves_item.side_effect = lambda path, item: path == worktree
+    monkeypatch.setattr(control_module, "GitHelper", lambda: git)
+    panes = []
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: panes)
+    session = WorkdashSession(
+        config=WorkdashConfig(workdir=str(tmp_path)),
+        backend=SimpleNamespace(github_client=GitHubClient()),
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+
+    assert len(session.ready(scope="owner/repo", fail_unconfirmed=True)["items"]) == 1
+    session._unconfirmed_launches[str(worktree)] = float("inf")
+    with pytest.raises(WorkdashControlError, match="still unconfirmed"):
+        session.ready(scope="owner/repo", fail_unconfirmed=True)
+    session._unconfirmed_launches.clear()
+    panes.append({"id": 1, "title": "code_owner_repo_1", "pane_cwd": str(worktree)})
+    assert session.ready(scope="owner/repo")["items"] == []
+    assert session.get_agent_panes_for_item(item)[0]["pane_id"] == "terminal_1"
+    assert session.info()["panes"][0]["item"] == "owner/repo#ISSUE-1"
+
+
+def test_terminal_prepares_worktree_with_session_git(monkeypatch, tmp_path) -> None:
+    item = _work_item(number=1, title="Issue")
+    session = WorkdashSession(
+        config=WorkdashConfig(workdir=str(tmp_path)),
+        backend=MagicMock(),
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+    git = MagicMock()
+    git.find_worktree_for_branch.return_value = None
+    session.git = git
+    monkeypatch.setattr(
+        control_module,
+        "launch_terminal_context",
+        lambda path, **kwargs: SimpleNamespace(
+            session=kwargs["zellij_session"], cwd=path, pane_title="terminal", pane_id="1"
+        ),
+    )
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("real subprocess"))
+
+    result = session.terminal(target="owner/repo#ISSUE-1")
+
+    worktree = tmp_path / "owner_repo_1"
+    assert result["cwd"] == str(worktree)
+    git.create_worktree.assert_called_once_with(
+        tmp_path / "owner_repo", worktree, "issue-1", "origin/HEAD"
+    )
+
+
+def test_session_analyzes_and_launches_coding_agent_with_real_executor(
+    monkeypatch, tmp_path
+) -> None:
+    worktree = tmp_path / "owner_repo_1"
+    worktree.mkdir()
+    item = _work_item(number=1, title="Implement the issue")
+    config = WorkdashConfig(
+        agents={"pi": AgentConfig(analyze="pi -p", launch="pi")}, workdir=str(tmp_path)
+    )
+    backend = WorkdashBackend(cache_root=tmp_path / "cache", config=config)
+    session = WorkdashSession(
+        config=config,
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+    panes = []
+    launches = []
+    process = MagicMock(return_value=SimpleNamespace(stdout="  Useful analysis  \n"))
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(control_module, "ensure_worktree", lambda *_, **kwargs: str(worktree))
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *_, **kwargs: worktree)
+    monkeypatch.setattr(control_module, "get_merge_base", lambda *_, **kwargs: None)
+    monkeypatch.setattr("workdash.github_client.GitHubClient.fetch_analysis_context", lambda *_: {})
+    monkeypatch.setattr("workdash.github_client.GitHubClient.fetch_launch_context", lambda *_: {})
+    monkeypatch.setattr("workdash.agent_execution.subprocess.run", process)
+
+    fake_zellij = MagicMock()
+    fake_zellij.load_zellij_panes.side_effect = lambda _: list(panes)
+
+    def launch(repo, command, **kwargs):
+        launches.append((repo, command, kwargs))
+        panes.append({"id": 30, "title": "code_owner_repo_1", "pane_cwd": str(worktree)})
+        return launcher_module.ZellijPaneLaunch(
+            "workdash-main", "terminal_30", "code_owner_repo_1", repo
+        )
+
+    fake_zellij.launch_pane.side_effect = launch
+    monkeypatch.setattr(launcher_module, "zellij", fake_zellij)
+
+    analysis = session.analyze(target="owner/repo#ISSUE-1", agent="pi")
+    assert analysis["status"] == "generated"
+    assert base64.b64decode(analysis["file_content"]).decode() == "Useful analysis"
+    assert item.analysis == "Useful analysis"
+    assert backend.analysis_cache.load_analysis(item) == "Useful analysis"
+    args, kwargs = process.call_args
+    assert shlex.split(args[0][2])[:2] == ["pi", "-p"]
+    assert "Implement the issue" in shlex.split(args[0][2])[2]
+    assert kwargs["cwd"] == str(worktree)
+
+    coding = session.code(target="owner/repo#ISSUE-1", agent="pi", group="team")
+    assert coding["status"] == "launched"
+    assert coding["pane_id"] == "terminal_30"
+    assert coding["cwd"] == str(worktree)
+    assert len(launches) == 1
+    repo, command, kwargs = launches[0]
+    assert repo == str(worktree)
+    assert kwargs == {
+        "context": "Failed to launch coding agent in zellij",
+        "work_action": "code",
+        "zellij_session": "workdash-main",
+        "group": "team",
+    }
+    assert command[:2] == ["/bin/sh", "-ic"]
+    shell_command = shlex.split(command[2])
+    assert shell_command[0] == "pi"
+    assert "Implement the issue" in shell_command[1]
+    assert analysis["url"] in shell_command[1]
+
+
+def test_shared_agent_execution_can_simulate_analysis_and_coding(monkeypatch, tmp_path) -> None:
+    from workdash.analyzer import Analyzer
+
+    panes = []
+    session, worktree, _, _ = _coding_session(monkeypatch, tmp_path, panes)
+    item = session.work_items[0]
+
+    class FakeAgentExecution:
+        def __init__(self):
+            self.calls = []
+
+        def analyze(self, *, item, prompt, command_tokens, cwd):
+            self.calls.append(("analysis", item, prompt, command_tokens, cwd))
+            return "  Analysis from fake  \n"
+
+        def launch_vscode(self, repo_path, prompt):
+            self.calls.append(("vscode", repo_path, prompt))
+
+        def launch(self, repo_path, prompt, agent_command_tokens, *, zellij_session):
+            self.calls.append(("code", repo_path, prompt, agent_command_tokens, zellij_session))
+            panes.append({"id": 30, "title": "code_owner_repo_1", "pane_cwd": repo_path})
+            return SimpleNamespace(
+                session=zellij_session,
+                pane_id="terminal_30",
+                pane_title="code_owner_repo_1",
+                cwd=repo_path,
+            )
+
+    fake = FakeAgentExecution()
+    monkeypatch.setattr(control_module.agent_execution, "executor", fake)
+    monkeypatch.setattr(Analyzer, "_collect_github_context", lambda self, item: {})
+    monkeypatch.setattr(
+        Analyzer, "_build_agent_prompt", lambda self, item, context, **kw: "analysis prompt"
+    )
+
+    assert Analyzer().analyze(item, ["pi", "-p"], cwd=str(worktree)) == "Analysis from fake"
+    assert session.code(target="owner/repo#ISSUE-1", agent="pi")["status"] == "launched"
+    panes.clear()
+    assert (
+        session.code(target="owner/repo#ISSUE-1", agent="vscode", allow_vscode=True)["status"]
+        == "launched"
+    )
+    assert fake.calls == [
+        ("analysis", item, "analysis prompt", ["pi", "-p"], str(worktree)),
+        ("code", str(worktree), "PROMPT", ["pi"], "workdash-main"),
+        ("vscode", str(worktree), "PROMPT"),
+    ]

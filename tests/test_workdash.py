@@ -1530,8 +1530,8 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
-    monkeypatch.setattr(control_module, "ensure_worktree", lambda _wd, _item, **_kwargs: "/tmp/wt")
-    monkeypatch.setattr(control_module, "get_merge_base", lambda _path: None)
+    monkeypatch.setattr(control_module, "ensure_worktree", lambda _wd, _item, **kwargs: "/tmp/wt")
+    monkeypatch.setattr(control_module, "get_merge_base", lambda _path, **kwargs: None)
     monkeypatch.setattr(
         control_module,
         "prepare_launch_agent_prompt",
@@ -1550,14 +1550,16 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
             cwd=repo,
         )
 
-    monkeypatch.setattr(control_module, "launch_agent_context", fake_launch_agent_context)
+    monkeypatch.setattr(
+        control_module.agent_execution.executor, "launch", fake_launch_agent_context
+    )
     monkeypatch.setattr(
         control_module.launcher.zellij, "load_zellij_panes", lambda _session: list(panes)
     )
-    monkeypatch.setattr(control_module, "existing_worktree_path", lambda _wd, _item: None)
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda _wd, _item, **kwargs: None)
     monkeypatch.setattr(
-        control_module,
-        "launch_vscode_context",
+        control_module.agent_execution.executor,
+        "launch_vscode",
         lambda repo, prompt: vscode_calls.append((repo, prompt)),
     )
     monkeypatch.setenv("ZELLIJ", "0")
@@ -1997,3 +1999,36 @@ def test_code_group_is_forwarded_to_remote_server_and_reports_actual_tab(monkeyp
         == 0
     )
     assert "Tab: actual" in capsys.readouterr().out
+
+
+def test_interactive_diff_prepares_worktree_with_session_git(monkeypatch, tmp_path) -> None:
+    from unittest.mock import MagicMock
+
+    item = _issue()
+    git = MagicMock()
+    git.find_worktree_for_branch.return_value = None
+    backend = MagicMock()
+    backend.load_items.return_value = ([item], {})
+    config = replace(_VALID_CONFIG, workdir=str(tmp_path))
+    results = []
+
+    class FakeApp:
+        def __init__(self, **kwargs):
+            self.callback = kwargs["worktree_callback"]
+            kwargs["session"].git = git
+
+        def run(self, *, mouse):
+            results.append(self.callback(item))
+
+    monkeypatch.setattr(
+        workdash_module.WorkdashCommands, "_load_config_and_backend", lambda self: (config, backend)
+    )
+    monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("real subprocess"))
+
+    assert workdash_module.WorkdashCommands().interactive() == 0
+    worktree = tmp_path / "owner_repo_1"
+    assert results == [str(worktree)]
+    git.create_worktree.assert_called_once_with(
+        tmp_path / "owner_repo", worktree, "issue-1", "origin/HEAD"
+    )

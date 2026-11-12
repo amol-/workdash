@@ -79,7 +79,7 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
         "repo='owner/repo', number=1, title=os.environ['ZELLIJ_SESSION_NAME'], "
         "created_at=datetime.now(UTC), updated_at=datetime.now(UTC), url='https://example.com/1')\n"
         f"control.ensure_worktree = lambda *_args, **_kwargs: {str(tmp_path)!r}\n"
-        "control.get_merge_base = lambda *_args: None\n"
+        "control.get_merge_base = lambda *_args, **_kwargs: None\n"
         "from workdash.github_client import GitHubClient\n"
         "GitHubClient.work_pull_request = lambda *_args, **_kwargs: None\n"
         "control.prepare_launch_agent_prompt = lambda *_args, **_kwargs: 'test prompt'\n"
@@ -164,7 +164,7 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
 @pytest.mark.parametrize("tab_name", ["epic", "-foo"])
 def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, tab_name):
-    from workdash.launcher import launch_agent_context
+    from workdash.agent_execution import executor
     from workdash.launcher import zellij as zellij_client
 
     zellij = shutil.which("zellij")
@@ -192,7 +192,7 @@ def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, 
         for repo, group in [("first", tab_name), ("second", tab_name), ("third", None)]:
             path = tmp_path / repo
             path.mkdir()
-            launch = launch_agent_context(
+            launch = executor.launch(
                 str(path), "hello", ["/bin/sh", "-c", "sleep 120"], zellij_session=name, group=group
             )
             panes = zellij_client.load_zellij_panes(name)

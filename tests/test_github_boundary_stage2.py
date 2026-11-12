@@ -9,6 +9,9 @@ def test_worktree_uses_supplied_client_for_github_clone(tmp_path, monkeypatch):
     client = MagicMock()
     git = MagicMock()
     git.find_worktree_for_branch.return_value = None
+    git.clone_github_repository.side_effect = lambda repo, path, *, github_client: (
+        github_client.clone_repository(repo, path)
+    )
     monkeypatch.setattr(repo_worktree, "GitHelper", lambda: git)
     now = datetime.now(UTC)
     item = WorkItem(

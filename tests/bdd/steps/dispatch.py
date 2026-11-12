@@ -362,16 +362,16 @@ def _concurrent(scenario_state, monkeypatch, tmp_path):
     session = scenario_state["api_session"]
     install_zellij_agent_fakes(scenario_state, monkeypatch)
 
-    def path(_workdir, item):
+    def path(_workdir, item, **kwargs):
         directory = tmp_path / f"{item.repo.replace('/', '_')}_{item.number}"
         directory.mkdir(exist_ok=True)
         return directory
 
     monkeypatch.setattr(control, "existing_worktree_path", path)
     monkeypatch.setattr(
-        control, "ensure_worktree", lambda workdir, item, **_kwargs: str(path(workdir, item))
+        control, "ensure_worktree", lambda workdir, item, **kwargs: str(path(workdir, item))
     )
-    monkeypatch.setattr(control, "get_merge_base", lambda _: None)
+    monkeypatch.setattr(control, "get_merge_base", lambda _, **kwargs: None)
     monkeypatch.setattr(control, "prepare_launch_agent_prompt", lambda *a, **kw: "PROMPT")
     ready = session._ready
     barrier = Barrier(2)
