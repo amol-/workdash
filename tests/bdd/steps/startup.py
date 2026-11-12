@@ -167,7 +167,7 @@ def _run_system(
         monkeypatch.setattr(workdash_module, "load_config", lambda: config)
         if "_malformed_config" in scenario_state:
             monkeypatch.setattr(
-                workdash_module,
+                workdash_module.launcher.zellij,
                 "exec_zellij_wrapped_workdash",
                 lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
             )
@@ -343,7 +343,7 @@ def _user_starts_server_backed_client_command(
         lambda: (_ for _ in ()).throw(AssertionError("unexpected GitHub preflight")),
     )
     monkeypatch.setattr(
-        workdash_module,
+        workdash_module.launcher.zellij,
         "exec_zellij_wrapped_workdash",
         lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
     )
