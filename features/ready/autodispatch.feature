@@ -9,6 +9,11 @@ Feature: Automatically dispatch ready work
   closing its agent pane. Autodispatch does not merge work.
   A tenth consecutive launch of the same issue fails without another launch;
   work claimed by another agent is skipped rather than counted.
+  The dashboard shows the selected group (or automatic until known), scope,
+  current issue, stage, launch reason during development, and iteration with elapsed
+  time. While checking for another task, it retains the last selected group until
+  the next task selects a group. Issue URLs are shortened, and an issue shown as both scope and current
+  item appears only once, even when the issue number has leading zeroes; different scope and current item are labeled.
 
   @id:F-AUTODISPATCH-S001
   Scenario: An autodispatch session continues until no work is ready
@@ -20,6 +25,12 @@ Feature: Automatically dispatch ready work
     And the second issue is dispatched in group `project`
     When its agent pane disappears
     Then the autodispatch session finishes after no ready work remains
+
+  @id:F-AUTODISPATCH-S004
+  Scenario: The dashboard shows compact progress for an issue-scoped session
+    Given an autodispatch session for a targeted todo issue URL in group `project`
+    When the user views its progress while checking and developing
+    Then the dashboard shows the group, stage, iteration and launch reason without repeating the issue
 
   @id:F-AUTODISPATCH-S003
   Scenario: An autodispatch session uses the implementation repository groups by default

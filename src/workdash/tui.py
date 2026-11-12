@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, TypeVar
@@ -16,6 +17,7 @@ from textual.widgets import DataTable, Input, Static
 
 from .backend import IncludeResult, compute_suggestion_markers
 from .config import WorkdashAgentChoice
+from .github_client import parse_github_item_url
 from .launcher import launch_branchdiff_context, open_in_browser, open_markdown
 from .models import WorkItem, WorkItemType, ci_status_symbol, display_repo, format_type_label
 
@@ -437,12 +439,40 @@ class WorkdashApp(App[None]):
         ]
         widget = self.query_one("#autodispatch-progress", Static)
         widget.display = bool(entries)
-        widget.update(
-            "\n".join(
-                f"{entry['group'] or 'automatic'}  {entry['scope']}  {entry['current_item'] or '-'}  {entry['elapsed_seconds']}s"
-                for entry in entries
+
+        def short(value: str) -> str:
+            parsed = parse_github_item_url(value)
+            if parsed and parsed.item_type == WorkItemType.ISSUE:
+                return f"{parsed.repo}#{parsed.number}"
+            return re.sub(
+                r"#(?:ISSUE-)?(\d+)$",
+                lambda match: f"#{int(match.group(1))}",
+                value,
+                flags=re.IGNORECASE,
             )
-        )
+
+        rows = []
+        for entry in entries:
+            scope = short(entry["scope"])
+            item = short(entry["current_item"]) if entry["current_item"] else None
+            todo = re.search(r"#ISSUE-WT(\d+)$", item or "", re.IGNORECASE)
+            same_todo = todo and scope.lower() == (
+                f"{self._session.config.todo_repository}#{int(todo.group(1))}".lower()
+            )
+            target = (
+                f"scope: {scope}  item: {item}"
+                if item and item.lower() != scope.lower() and not same_todo
+                else scope
+            )
+            reason = (
+                f" ({entry['launch_reason'].replace('_', ' ')})"
+                if entry["stage"] == "developing" and entry["launch_reason"]
+                else ""
+            )
+            rows.append(
+                f"{entry['selected_group'] or 'automatic'}  {target}  {entry['stage']}{reason}  {entry['iteration']}/{entry['elapsed_seconds']}s"
+            )
+        widget.update("\n".join(rows))
 
     def refresh_from_session(self) -> None:
         if self._session is None:

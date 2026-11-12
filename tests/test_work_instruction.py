@@ -202,7 +202,7 @@ def test_a_briefing_does_not_redirect_an_issue_to_a_merged_pull_request(monkeypa
         "owner/repo#51", closes=("owner/repo#42",), state="MERGED", mergeable="UNKNOWN"
     )
 
-    item, text = autostart_briefing(
+    item, text, _ = autostart_briefing(
         _item(WorkItemType.ISSUE, 42),
         github_username="testuser",
         todo_repository="testuser/todos",

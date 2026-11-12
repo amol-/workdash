@@ -42,7 +42,7 @@ def autostart_briefing(
     github_username: str,
     todo_repository: str,
     github_client=None,
-) -> tuple[WorkItem, str]:
+) -> tuple[WorkItem, str, str]:
     """Return the item an autostarted agent works on and the text closing its briefing.
 
     An issue that an open pull request already closes is worked on through that
@@ -53,7 +53,7 @@ def autostart_briefing(
     """
 
     if item.kind in REVIEW_KINDS:
-        return item, _load("autostart_review.txt")
+        return item, _load("autostart_review.txt"), "review"
 
     github = github_client if github_client is not None else GitHubClient()
     state = github.work_pull_request(
@@ -66,11 +66,11 @@ def autostart_briefing(
             item = state.item
 
     if state is None:
-        return item, render_autonomous_work_instruction("implement", item)
+        return item, render_autonomous_work_instruction("implement", item), "implement"
     # Nothing to implement or repair, so the briefing carries no order to start working.
     if state.action in _AWAITING:
-        return item, render_work_instruction(state.action, state)
-    return item, render_autonomous_work_instruction(state.action, state)
+        return item, render_work_instruction(state.action, state), state.action
+    return item, render_autonomous_work_instruction(state.action, state), state.action
 
 
 def render_autonomous_work_instruction(action: str, work: WorkItem | PullRequestWorkState) -> str:
