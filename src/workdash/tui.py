@@ -19,7 +19,14 @@ from .backend import IncludeResult, compute_suggestion_markers
 from .config import WorkdashAgentChoice
 from .github_client import parse_github_item_url
 from .launcher import launch_branchdiff_context, open_in_browser, open_markdown
-from .models import WorkItem, WorkItemType, ci_status_symbol, display_repo, format_type_label
+from .models import (
+    WorkItem,
+    WorkItemKind,
+    WorkItemType,
+    ci_status_symbol,
+    display_repo,
+    format_type_label,
+)
 
 SuggestionMarkers = dict[tuple[WorkItemType, str, int], str]
 RefreshCallbackResult = Sequence[WorkItem] | tuple[Sequence[WorkItem], SuggestionMarkers]
@@ -175,14 +182,14 @@ class AnalyzeDialog(ModalScreen[str | None]):
 
 
 class CodeDialog(ModalScreen[str | None]):
-    """Modal dialog for choosing a coding tool to launch."""
+    """Modal dialog for choosing a coding action for the selected item."""
 
     DEFAULT_CSS = """
         #code-shell {
             align: center middle;
             width: 50;
             height: auto;
-            max-height: 18;
+            max-height: 20;
             border: solid $accent;
             background: $surface;
             padding: 1 2;
@@ -200,16 +207,23 @@ class CodeDialog(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="code-shell"):
-            yield Static("Launch coding session:", classes="code-line")
+            yield Static("Code menu:", classes="code-line")
             yield Static("")
             for choice in self._choices:
                 yield Static(f"({choice.key}) {choice.label}", classes="code-line", markup=False)
             if not self._choices:
                 yield Static("No coding agents configured.", classes="code-line")
             yield Static("")
+            yield Static("(e) edit (VSCode Copilot)", classes="code-line")
+            yield Static("(d) branchdiff", classes="code-line")
+            yield Static("(t) terminal", classes="code-line")
             yield Static("(Esc) Cancel", classes="code-line")
 
     def on_key(self, event) -> None:
+        if event.key in {"e", "d", "t"}:
+            event.stop()
+            self.dismiss({"e": ":edit", "d": ":diff", "t": ":terminal"}[event.key])
+            return
         choice = self._choices_by_key.get(event.key)
         if choice is not None:
             event.stop()
@@ -354,8 +368,7 @@ class WorkdashApp(App[None]):
         """
     SEARCH_HINT_TEXT = "(/)search"
     COMMAND_HINT_TEXT = (
-        f"{SEARCH_HINT_TEXT} (o)pen (r)efresh (a)nalyze (c)ode (d)iff "
-        "(t)erminal (i)nclude (w)todo (q)uit"
+        f"{SEARCH_HINT_TEXT} (o)pen (r)efresh (a)nalyze (c)ode (d)ispatch (i)nclude (w)todo (q)uit"
     )
     BINDINGS = [
         ("/", "search_items", "Search"),
@@ -363,8 +376,7 @@ class WorkdashApp(App[None]):
         ("r", "refresh_items", "Refresh"),
         ("a", "analyze_item", "Analyze"),
         ("c", "launch_code", "Code"),
-        ("d", "show_branchdiff", "Diff"),
-        ("t", "open_terminal", "Terminal"),
+        ("d", "dispatch_item", "Dispatch"),
         ("i", "include_item", "Include"),
         ("w", "capture_todo", "Todo"),
         ("q", "quit_app", "Quit"),
@@ -391,7 +403,6 @@ class WorkdashApp(App[None]):
         session: WorkdashSession | None = None,
         now_utc: datetime | None = None,
         focus_callback: Callable[[str], None] | None = None,
-        list_agent_panes_callback: Callable[[WorkItem], list[dict[str, object]]] | None = None,
     ) -> None:
         super().__init__()
         self._session = session
@@ -414,7 +425,7 @@ class WorkdashApp(App[None]):
         self._todo_callback = todo_callback
         self._now_utc = now_utc or datetime.now(UTC)
         self._focus_callback = focus_callback
-        self._list_agent_panes_callback = list_agent_panes_callback
+        self._dispatch_session_id: str | None = None
         self._status_message = "Ready."
 
     def compose(self) -> ComposeResult:
@@ -434,9 +445,18 @@ class WorkdashApp(App[None]):
     def _update_autodispatch_progress(self) -> None:
         if self._session is None:
             return
-        entries = [
-            entry for entry in self._session.autodispatch_sessions() if entry["status"] == "running"
-        ]
+        sessions = self._session.autodispatch_sessions()
+        running = [entry for entry in sessions if entry["status"] == "running"]
+        failed = [entry for entry in sessions if entry["status"] == "failed"]
+        started_failure = next(
+            (entry for entry in failed if entry["id"] == self._dispatch_session_id), None
+        )
+        if started_failure is not None:
+            self._dispatch_session_id = None
+            self._update_status(
+                f"Autodispatch {started_failure['id']} failed: {started_failure['error']}"
+            )
+        entries = running + failed[-3:]
         widget = self.query_one("#autodispatch-progress", Static)
         widget.display = bool(entries)
 
@@ -453,26 +473,30 @@ class WorkdashApp(App[None]):
 
         rows = []
         for entry in entries:
-            scope = short(entry["scope"])
-            item = short(entry["current_item"]) if entry["current_item"] else None
-            todo = re.search(r"#ISSUE-WT(\d+)$", item or "", re.IGNORECASE)
-            same_todo = todo and scope.lower() == (
-                f"{self._session.config.todo_repository}#{int(todo.group(1))}".lower()
-            )
-            target = (
-                f"scope: {scope}  item: {item}"
-                if item and item.lower() != scope.lower() and not same_todo
-                else scope
-            )
-            reason = (
-                f" ({entry['launch_reason'].replace('_', ' ')})"
-                if entry["stage"] == "developing" and entry["launch_reason"]
-                else ""
-            )
-            rows.append(
-                f"{entry['selected_group'] or 'automatic'}  {target}  {entry['stage']}{reason}  {entry['iteration']}/{entry['elapsed_seconds']}s"
-            )
-        widget.update("\n".join(rows))
+            if entry["status"] == "failed":
+                line = f"Failed {short(entry['scope'])}: {entry['error']}  ({entry['id']})"
+            else:
+                scope = short(entry["scope"])
+                item = short(entry["current_item"]) if entry["current_item"] else None
+                todo = re.search(r"#ISSUE-WT(\d+)$", item or "", re.IGNORECASE)
+                same_todo = todo and scope.lower() == (
+                    f"{self._session.config.todo_repository}#{int(todo.group(1))}".lower()
+                )
+                target = (
+                    f"scope: {scope}  item: {item}"
+                    if item and item.lower() != scope.lower() and not same_todo
+                    else scope
+                )
+                reason = (
+                    f" ({entry['launch_reason'].replace('_', ' ')})"
+                    if entry["stage"] == "developing" and entry["launch_reason"]
+                    else ""
+                )
+                line = f"{entry['selected_group'] or 'automatic'}  {target}  {entry['stage']}{reason}  {entry['iteration']}/{entry['elapsed_seconds']}s"
+            text = Text(" ".join(line.splitlines()))
+            text.truncate(max(0, self.size.width - 2), overflow="ellipsis")
+            rows.append(text)
+        widget.update(Text("\n").join(rows))
 
     def refresh_from_session(self) -> None:
         if self._session is None:
@@ -743,13 +767,40 @@ class WorkdashApp(App[None]):
         else:
             self._update_status(f"Analyzed {item_label} with {tool_label}.")
 
-    async def action_show_branchdiff(self) -> None:
-        """Launch branchdiff command in a new zellij pane for the selected item.
+    async def action_dispatch_item(self) -> None:
+        item = self._selected_item()
+        if item is None or self._session is None:
+            self._update_status("Dispatch skipped.")
+            return
+        if item.kind != WorkItemKind.AUTHORED_PR and item.item_type != WorkItemType.ISSUE:
+            self._update_status("Dispatch is only available for issues and authored pull requests.")
+            return
+
+        try:
+            started = await self._run_with_busy_screen(
+                message="Starting autodispatch...",
+                callback=lambda: self._session.start_autodispatch_for_item(item),
+            )
+        except Exception as error:
+            self._update_status(f"Dispatch failed: {error}")
+            self.notify(f"Dispatch failed: {error}", severity="error", timeout=10)
+            return
+        if started is None:
+            self._update_status("Cannot dispatch a pull request without a linked issue.")
+            self.notify("Cannot dispatch a pull request without a linked issue.", severity="error")
+            return
+        self._dispatch_session_id = str(started["id"])
+        self._update_status(f"Started autodispatch for {started['scope']}: {started['id']}.")
+
+    async def action_show_branchdiff(self, item: WorkItem | None = None) -> None:
+        """Launch branchdiff command in a new zellij pane for ``item``.
 
         Ensures the worktree exists, then spawns `workdash branchdiff`
         as a standalone command. Workdash doesn't handle the diff itself.
+
+        :param WorkItem item: the target item, defaulting to the current selection.
         """
-        selected_item = self._selected_item()
+        selected_item = item if item is not None else self._selected_item()
         if selected_item is None:
             self._update_status("No item selected for diff.")
             return
@@ -791,31 +842,35 @@ class WorkdashApp(App[None]):
 
     async def action_launch_code(self) -> None:
         selected_item = self._selected_item()
-        if selected_item is None or self._launch_callback is None:
+        if selected_item is None:
             self._update_status("Code launch skipped.")
             return
-        if self._list_agent_panes_callback is not None:
-            try:
-                active_panes = self._list_agent_panes_callback(selected_item)
-            except Exception as error:
-                self._update_status(f"Failed to check active panes: {error}")
-                self.notify(f"Failed to check active panes: {error}", severity="error", timeout=10)
-                return
-            if active_panes:
-                await self._focus_pane(str(active_panes[0]["pane_id"]))
-                return
 
         def _on_dialog_result(choice: str | None) -> None:
             if choice is None:
                 return
-            self._run_after_dialog(lambda: self._perform_launch(selected_item, choice))
+            if choice == ":diff":
+                self._run_after_dialog(lambda: self.action_show_branchdiff(selected_item))
+            elif choice == ":terminal":
+                self._run_after_dialog(lambda: self.action_open_terminal(selected_item))
+            else:
+                self._run_after_dialog(
+                    lambda: self._perform_launch(
+                        selected_item, "vscode" if choice == ":edit" else choice
+                    )
+                )
 
         await self.push_screen(CodeDialog(choices=self._code_choices), callback=_on_dialog_result)
 
     async def _perform_launch(self, item: WorkItem, choice: str) -> None:
         """Execute coding tool launch after the user picks from the dialog."""
 
-        tool_label = self._choice_tool_label(self._code_choices, choice)
+        if self._launch_callback is None:
+            self._update_status("Code launch skipped.")
+            return
+        tool_label = (
+            "VSCode" if choice == "vscode" else self._choice_tool_label(self._code_choices, choice)
+        )
         try:
             result = await self._run_with_busy_screen(
                 message=f"Launching {tool_label}...",
@@ -826,7 +881,6 @@ class WorkdashApp(App[None]):
             self.notify(f"Launch failed: {error}", severity="error", timeout=10, markup=False)
             return
         if result["status"] == "already_running":
-            # Another client started an agent while the dialog was open.
             await self._focus_pane(str(result["pane_id"]))
             return
         self._update_status(
@@ -840,7 +894,7 @@ class WorkdashApp(App[None]):
             return
         try:
             await self._run_with_busy_screen(
-                message="Focusing agent pane...",
+                message="Focusing pane...",
                 callback=lambda: self._focus_callback(pane_id),
             )
             self._update_status(f"Focused pane {pane_id}.")
@@ -848,11 +902,26 @@ class WorkdashApp(App[None]):
             self._update_status(f"Failed to focus pane: {error}")
             self.notify(f"Failed to focus pane: {error}", severity="error", timeout=10)
 
-    async def action_open_terminal(self) -> None:
-        selected_item = self._selected_item()
+    async def action_open_terminal(self, item: WorkItem | None = None) -> None:
+        """Open a terminal for ``item``, reusing its live pane when one exists.
+
+        :param WorkItem item: the target item, defaulting to the current selection.
+        """
+        selected_item = item if item is not None else self._selected_item()
         if selected_item is None or self._terminal_callback is None:
             self._update_status("Terminal launch skipped.")
             return
+        if self._session is not None:
+            try:
+                panes = await self._run_with_busy_screen(
+                    message="Checking terminal panes...",
+                    callback=lambda: self._session.get_terminal_panes_for_item(selected_item),
+                )
+            except Exception:  # noqa: BLE001 - reusing a terminal is advisory
+                panes = []
+            if panes:
+                await self._focus_pane(str(panes[0]["pane_id"]))
+                return
         try:
             await self._run_with_busy_screen(
                 message="Opening terminal...",

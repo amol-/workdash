@@ -34,7 +34,7 @@ Feature: First-time configuration
     - When no agent is detected and the user adds none, the wizard tells the user that at least one agent is required and asks for agents again; it never saves a configuration without an agent.
     - Agents are saved in the order they were detected or added.
     - The wizard explains that agents can be added or edited later in config.json.
-    - The TUI dialogs number their entries with single keys, so the wizard accepts at most 9 analysis agents and at most 8 coding agents, because VSCode Copilot takes the last number in the code dialog. Each section states its limit, counts the detected agents toward it, and stops asking for more commands once it is full.
+    - The TUI dialogs number their entries with single keys, so the wizard accepts at most 9 analysis agents and at most 9 coding agents. Each section states its limit, counts the detected agents toward it, and stops asking for more commands once it is full.
     - When Zellij is detected on PATH, the wizard tells the user what was detected.
     - When Zellij is not detected on PATH, the wizard tells the user it will install a local Zellij binary from the latest release URL and that a global Zellij install can be used instead when it is on PATH.
     - When Zellij is not detected on PATH, the wizard downloads the latest release binary for the current operating system and architecture under the workdash configuration directory and tells the user where it was installed.

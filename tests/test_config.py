@@ -167,9 +167,7 @@ def test_require_valid_accepts_partial_agent_config():
     assert config.tui_analyze_choices() == [
         WorkdashAgentChoice("1", "codex", "Analyze with codex", "codex")
     ]
-    assert config.tui_code_choices() == [
-        WorkdashAgentChoice("1", "vscode", "VSCode Copilot", "VSCode")
-    ]
+    assert config.tui_code_choices() == []
 
 
 def test_agents_are_offered_by_name_in_configuration_order():
@@ -191,7 +189,6 @@ def test_agents_are_offered_by_name_in_configuration_order():
     assert config.tui_code_choices() == [
         WorkdashAgentChoice("1", "pi", "pi", "pi"),
         WorkdashAgentChoice("2", "claude", "claude", "claude"),
-        WorkdashAgentChoice("3", "vscode", "VSCode Copilot", "VSCode"),
     ]
     assert config.analyze_agent_command_tokens("pi") == [
         "pi",
@@ -729,12 +726,12 @@ def test_configure_counts_detected_agents_toward_the_section_limits(
 ):
     config_path = tmp_path / "config.json"
     analyze_agents = [("my-agent -p", f"analyze-{number}") for number in range(6)]
-    code_agents = [("my-agent", f"code-{number}") for number in range(5)]
+    code_agents = [("my-agent", f"code-{number}") for number in range(6)]
     input_fn, prompts = _scripted_input(
         "",  # open command
         "",  # viewer terminal
         *[answer for pair in analyze_agents for answer in pair],  # 3 detected + 6 = 9, full
-        *[answer for pair in code_agents for answer in pair],  # 3 detected + 5 = 8, full
+        *[answer for pair in code_agents for answer in pair],  # 3 detected + 6 = 9, full
         "octocat",
         "",
         "",
@@ -747,9 +744,9 @@ def test_configure_counts_detected_agents_toward_the_section_limits(
     )
 
     assert sum(prompt.startswith("Agents for analyze") for prompt in prompts) == 6
-    assert sum(prompt.startswith("Agents for code") for prompt in prompts) == 5
+    assert sum(prompt.startswith("Agents for code") for prompt in prompts) == 6
     assert sum(1 for agent in config.agents.values() if agent.analyze) == 9
-    assert sum(1 for agent in config.agents.values() if agent.launch) == 8
+    assert sum(1 for agent in config.agents.values() if agent.launch) == 9
     assert capsys.readouterr().out.count("section is full") == 2
 
 

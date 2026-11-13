@@ -987,7 +987,7 @@ def run_branchdiff_tui_scenario(
     monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
 
     async def interactions(app, pilot) -> None:
-        await pilot.press("d")
+        await pilot.press("c", "d")
         for _ in range(40):
             await pilot.pause()
             status = app.query_one("#status-footer").render().plain

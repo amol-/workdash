@@ -1,13 +1,24 @@
 """Autodispatch behavior at the dispatch and pane boundaries."""
 
+import json
+import subprocess
 import threading
 import time
 from unittest.mock import MagicMock
 
 import pytest
-from pytest_bdd import given, then, when
+from pytest_bdd import given, parsers, then, when
+from textual.widgets import Static
 
+import workdash.control as control_module
+from gh_work_state_fake import install_fake_github
+from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession
+from workdash.github_client import GitHubClient
+from workdash.models import WorkItemKind, WorkItemType
+
+from .common import install_zellij_agent_fakes, make_work_item, run_app
+from .triage import is_linked_issues_query, linked_issues_response
 
 
 @pytest.fixture
@@ -175,10 +186,6 @@ def remains(autodispatch_state):
 
 @given("an autodispatch server with ready issues in different implementation repositories")
 def cross_repo_server(scenario_state, monkeypatch):
-    from gh_work_state_fake import install_fake_github
-    from workdash.config import AgentConfig, WorkdashConfig
-    from workdash.github_client import GitHubClient
-
     github = install_fake_github(monkeypatch)
     scenario_state["github"] = github
     github.add_issue("owner/parent#1", state="CLOSED")
@@ -310,3 +317,264 @@ def visible_progress(autodispatch_state):
     assert "project  owner/todos#42  checking  1/" in checking
     assert "project  owner/todos#42  developing (fix ci)  1/" in developing
     assert "owner/target#ISSUE-WT42" not in developing
+
+
+@pytest.fixture
+def dashboard_dispatch(scenario_state, monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("other/repo#3")
+    github.add_pull_request("owner/repo#9", closes=("other/repo#3",), mergeable="CONFLICTING")
+    original_run = subprocess.run
+
+    def run(command, *args, **kwargs):
+        if not is_linked_issues_query(command):
+            return original_run(command, *args, **kwargs)
+        if scenario_state.get("linked_issue_lookup_denied"):
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout=json.dumps(
+                    {
+                        "data": {"p0": None},
+                        "errors": [
+                            {
+                                "message": "Could not resolve to a Repository with the name "
+                                "'owner/repo'.",
+                                "path": ["p0"],
+                            }
+                        ],
+                    }
+                ),
+                stderr="gh: Not Found (HTTP 404)",
+            )
+        closed_issues = {}
+        for ref, pull_request in github.pull_requests.items():
+            closed_issues[ref] = tuple(
+                (repo, int(number))
+                for repo, _, number in (close.partition("#") for close in pull_request["closes"])
+            )
+        return linked_issues_response(command, closed_issues=closed_issues)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    session = WorkdashSession(
+        config=WorkdashConfig(
+            github_username="testuser",
+            workdir=tmp_path,
+            agents={"pi": AgentConfig(launch="pi", analyze="pi -p")},
+        ),
+        backend=MagicMock(github_client=GitHubClient()),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    monkeypatch.setattr(
+        session.backend.github_client, "fetch_worktree_head", lambda item: ("branch", item.repo)
+    )
+    session.git = MagicMock()
+    session.git.find_worktree_for_branch.return_value = None
+    install_zellij_agent_fakes(scenario_state, monkeypatch)
+    worktree = tmp_path / "owner_repo_9"
+    worktree.mkdir()
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args, **kwargs: None)
+    monkeypatch.setattr(control_module, "ensure_worktree", lambda *args, **kwargs: str(worktree))
+    monkeypatch.setattr(control_module, "get_merge_base", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        control_module, "prepare_launch_agent_prompt", lambda *args, **kwargs: "PROMPT"
+    )
+    monkeypatch.setattr(session.autoclose, "supervise", lambda **kwargs: None)
+    scenario_state["github"] = github
+    scenario_state["dashboard_session"] = session
+    yield
+    session.stop_autodispatch_sessions()
+
+
+@given("a ready issue selected in the dashboard")
+def dashboard_issue(dashboard_dispatch, scenario_state):
+    scenario_state["dashboard_item"] = make_work_item(repo="other/repo", number=3)
+    scenario_state["dashboard_expected"] = "other/repo#ISSUE-3"
+
+
+@given("the default coding agent cannot analyze but another agent can code and analyze")
+def compatible_agent(scenario_state):
+    agents = scenario_state["dashboard_session"].config.agents
+    agents.clear()
+    agents.update(
+        {
+            "code-only": AgentConfig(launch="code-only"),
+            "pi": AgentConfig(launch="pi", analyze="pi -p"),
+        }
+    )
+
+
+@given(
+    "an authored pull request selected in the dashboard linked only to an issue in another repository"
+)
+def dashboard_pr(dashboard_dispatch, scenario_state):
+    scenario_state["dashboard_item"] = make_work_item(
+        item_type=WorkItemType.PR, kind=WorkItemKind.AUTHORED_PR, number=9
+    )
+    scenario_state["dashboard_expected"] = "other/repo#ISSUE-3"
+
+
+@given("an authored pull request without a linked issue in the dashboard")
+def dashboard_pr_without_issue(dashboard_dispatch, scenario_state):
+    dashboard_pr(dashboard_dispatch, scenario_state)
+    scenario_state["github"].pull_requests["owner/repo#9"]["closes"] = ()
+
+
+@given("an authored pull request linked to an issue that is not ready")
+def dashboard_pr_not_ready(dashboard_dispatch, scenario_state):
+    dashboard_pr(dashboard_dispatch, scenario_state)
+    scenario_state["github"].issues["other/repo#3"]["state"] = "CLOSED"
+
+
+@given(
+    "an authored pull request selected in the dashboard linked to issues in several repositories"
+)
+def dashboard_pr_several_issues(dashboard_dispatch, scenario_state):
+    github = scenario_state["github"]
+    github.add_issue("beta/repo#1")
+    github.add_issue("alpha/repo#9")
+    github.add_issue("alpha/repo#3")
+    github.pull_requests["owner/repo#9"]["closes"] = (
+        "beta/repo#1",
+        "alpha/repo#9",
+        "alpha/repo#3",
+    )
+    scenario_state["dashboard_item"] = make_work_item(
+        item_type=WorkItemType.PR, kind=WorkItemKind.AUTHORED_PR, number=9
+    )
+    scenario_state["dashboard_expected"] = "alpha/repo#ISSUE-3"
+
+
+@given("an authored pull request selected in the dashboard whose linked issues GitHub denies")
+def dashboard_pr_denied(dashboard_dispatch, scenario_state):
+    dashboard_pr(dashboard_dispatch, scenario_state)
+    scenario_state["linked_issue_lookup_denied"] = True
+
+
+@given(parsers.parse("a pull request of somebody else selected in the dashboard that is {kind}"))
+def dashboard_other_pr(dashboard_dispatch, scenario_state, kind):
+    kinds = {
+        "waiting for my review": WorkItemKind.REVIEW_REQUESTED_PR,
+        "in a tracked repository": WorkItemKind.TRACKED_PR,
+    }
+    scenario_state["dashboard_item"] = make_work_item(
+        item_type=WorkItemType.PR, kind=kinds[kind], number=9
+    )
+
+
+@when("the user presses d to start autodispatch")
+def dashboard_press_dispatch(scenario_state):
+    session = scenario_state["dashboard_session"]
+    item = scenario_state["dashboard_item"]
+    session.work_items = [item]
+
+    async def interact(app, pilot):
+        footer = app.query_one("#status-footer", Static)
+        before = footer.render().plain
+        await pilot.press("d")
+        for _ in range(100):
+            await pilot.pause(0.02)
+            if footer.render().plain != before:
+                break
+        scenario_state["dispatch_status"] = footer.render().plain
+
+    run_app(work_items=[item], session=session, interactions=interact)
+
+
+@then("an autodispatch session launches that issue")
+@then("an autodispatch session launches that linked issue")
+@then("an autodispatch session launches the lowest linked issue")
+def dashboard_launched(scenario_state):
+    session = scenario_state["dashboard_session"]
+    wait_for(
+        lambda: (
+            session.autodispatch_sessions()
+            and (
+                session.autodispatch_sessions()[0]["current_item"]
+                or session.autodispatch_sessions()[0]["status"] != "running"
+            )
+        )
+    )
+    snapshot = session.autodispatch_sessions()[0]
+    expected = scenario_state["dashboard_expected"]
+    assert snapshot["current_item"] == expected, snapshot
+    assert snapshot["scope"] == expected
+    assert len(scenario_state.get("agent_launches", [])) == 1
+
+
+@then("an autodispatch session launches that issue with the compatible agent")
+def dashboard_launched_compatible(scenario_state):
+    dashboard_launched(scenario_state)
+    assert scenario_state["dashboard_session"].autodispatch_sessions()[0]["agent"] == "pi"
+
+
+@then("the dashboard reports that the pull request has no linked issue and starts no session")
+def dashboard_no_linked_issue(scenario_state):
+    assert "without a linked issue" in scenario_state["dispatch_status"]
+    assert scenario_state["dashboard_session"].autodispatch_sessions() == []
+
+
+@then("the dashboard reports the linked issue lookup failure and starts no session")
+def dashboard_linked_issue_failure(scenario_state):
+    status = scenario_state["dispatch_status"]
+    assert status.startswith("Dispatch failed:"), status
+    assert "GitHub lookup for 'owner/repo#PR-9' failed: Could not resolve" in status, status
+    assert scenario_state["dashboard_session"].autodispatch_sessions() == []
+
+
+@then("the dashboard reports that dispatch is unavailable and starts no session")
+def dashboard_dispatch_unavailable(scenario_state):
+    assert "Dispatch is only available" in scenario_state["dispatch_status"]
+    assert scenario_state["dashboard_session"].autodispatch_sessions() == []
+
+
+@then("an autodispatch session starts for the linked issue")
+def dashboard_session_started(scenario_state):
+    session = scenario_state["dashboard_session"]
+    wait_for(
+        lambda: (
+            session.autodispatch_sessions()
+            and session.autodispatch_sessions()[0]["status"] != "running"
+        )
+    )
+    snapshot = session.autodispatch_sessions()[0]
+    assert snapshot["scope"] == scenario_state["dashboard_expected"]
+    assert snapshot["status"] == "finished", snapshot
+    assert snapshot["current_item"] is None
+    assert scenario_state.get("agent_launches", []) == []
+
+
+@when("the user's autodispatch session fails")
+def dashboard_failure(scenario_state, monkeypatch):
+    session = scenario_state["dashboard_session"]
+    item = scenario_state["dashboard_item"]
+    session.work_items = [item]
+    monkeypatch.setattr(
+        session, "dispatch_once", MagicMock(side_effect=RuntimeError("GitHub unavailable"))
+    )
+
+    async def interact(app, pilot):
+        await pilot.press("d")
+        for _ in range(100):
+            await pilot.pause(0.02)
+            if (
+                "GitHub unavailable"
+                in app.query_one("#autodispatch-progress", Static).render().plain
+            ):
+                break
+        scenario_state["failure_display"] = (
+            app.query_one("#autodispatch-progress", Static).render().plain
+        )
+        scenario_state["failure_footer"] = app.query_one("#status-footer", Static).render().plain
+
+    run_app(work_items=[item], session=session, interactions=interact)
+
+
+@then("the dashboard shows the failed session and its error")
+def dashboard_failure_visible(scenario_state):
+    assert "failed" in scenario_state["failure_display"].lower()
+    assert "GitHub unavailable" in scenario_state["failure_display"]
+    assert "failed" in scenario_state["failure_footer"].lower()
+    assert "GitHub unavailable" in scenario_state["failure_footer"]

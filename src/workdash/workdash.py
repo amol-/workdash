@@ -459,7 +459,6 @@ class WorkdashCommands:
             include_callback=lambda url, _identities: session.include_item_by_url(url),
             todo_callback=lambda text, target: session.todo(text=text, target=target),
             focus_callback=session.focus_pane,
-            list_agent_panes_callback=session.get_agent_panes_for_item,
             session=session,
         )
         if server:

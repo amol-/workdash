@@ -1844,7 +1844,9 @@ class GitHubClient:
 
         Pull requests that close no issue are absent from the result. Every
         closing issue is reported, because a caller hiding covered work and a
-        caller naming a worktree do not accept the same issues.
+        caller naming a worktree do not accept the same issues. A pull request
+        GitHub denies or cannot resolve is reported through the progress callback
+        and left out.
 
         :param list pull_requests: ``(repo, number)`` pairs to look up.
         """
@@ -1852,84 +1854,26 @@ class GitHubClient:
         report_progress = (
             progress_callback if progress_callback is not None else _noop_progress_callback
         )
-        if not pull_requests:
-            return {}
-
-        # One aliased GraphQL document for every pull request: `gh pr view` per
-        # pull request would cost a round trip each.
-        alias_selections = [
-            f"p{index}: repository(owner: {json.dumps(repo.partition('/')[0])}, "
-            f"name: {json.dumps(repo.partition('/')[2])}) "
-            f"{{ pullRequest(number: {number}) {{ {_CLOSING_ISSUES_SELECTION} }} }}"
-            for index, (repo, number) in enumerate(pull_requests)
-        ]
-        command = [
-            "gh",
-            "api",
-            "graphql",
-            "-f",
-            f"query={{ {' '.join(alias_selections)} }}",
-        ]
-        failure_message_prefix = "Failed to inspect linked issues via gh"
-        completed = _run_gh_command_with_retry(
-            command,
-            not_found_message=(
-                "Failed to run gh linked issue lookup: gh CLI is not installed or not on PATH."
-            ),
-            failure_message_prefix=failure_message_prefix,
-            # A query where some aliases are denied still answers for the
-            # others, and gh reports that partial answer as a failure.
-            tolerate_partial_response=True,
-        )
-        try:
-            payload = json.loads(completed.stdout)
-        except json.JSONDecodeError as error:
-            raise RuntimeError(f"Failed to parse gh linked issue JSON: {error.msg}") from error
-        # A response without `data` is a whole-query failure such as expired
-        # credentials, which must not be mistaken for "no pull request closes an issue".
-        repositories_by_alias = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(repositories_by_alias, dict):
-            raise RuntimeError(
-                f"{failure_message_prefix}: "
-                f"{completed.stderr.strip() or 'response contained no data'}"
-            )
-        # Only the alias in an error's path attributes a failure to one pull
-        # request; the merged stderr concatenates every alias's message.
-        errors = payload.get("errors")
-        skips_by_alias: dict[str, str] = {}
-        subjects_by_alias = {
-            f"p{index}": f"{repo}#{number}" for index, (repo, number) in enumerate(pull_requests)
-        }
-        for entry in errors if isinstance(errors, list) else []:
-            entry_fields = entry if isinstance(entry, dict) else {}
-            message = entry_fields.get("message")
-            path = entry_fields.get("path")
-            alias = path[0] if isinstance(path, list) and path else None
-            subject = subjects_by_alias.get(alias)
-            if subject is None:
-                raise RuntimeError(f"{failure_message_prefix}: {message or 'unknown error'}")
-            if not isinstance(message, str) or not (
-                _is_repository_authorization_error(message) or _is_unresolvable_item_error(message)
-            ):
-                raise RuntimeError(
-                    f"{failure_message_prefix} ({subject}): {message or 'unknown error'}"
-                )
-            skips_by_alias[alias] = message
-
-        linked_issues: dict[tuple[str, int], list[tuple[str, int]]] = {}
-        for index, (repo, number) in enumerate(pull_requests):
-            alias = f"p{index}"
-            subject = subjects_by_alias[alias]
-            skip_reason = skips_by_alias.get(alias)
-            if skip_reason is not None:
-                report_progress(
-                    f"Warning: skipped linked issue lookup for {subject}: {skip_reason}"
-                )
-                continue
-            closing_issues = self._closing_issues(repositories_by_alias.get(alias), subject=subject)
-            if closing_issues:
-                linked_issues[(repo, number)] = closing_issues
+        linked_issues, skips = self._lookup_closing_issues(pull_requests)
+        for subject, reason in skips.items():
+            report_progress(f"Warning: skipped linked issue lookup for {subject}: {reason}")
         return linked_issues
+
+    def fetch_linked_issues_for_pull_request(self, repo: str, number: int) -> list[tuple[str, int]]:
+        """List the issues one pull request closes.
+
+        Returns an empty list when it closes no issue. Raises ``RuntimeError``
+        carrying GitHub's reason when the lookup is denied or cannot be resolved,
+        so an unknown answer never passes for a pull request without linked issues.
+
+        :param str repo: Repository of the pull request.
+        :param int number: Pull request number.
+        """
+
+        linked_issues, skips = self._lookup_closing_issues([(repo, number)])
+        if skips:
+            raise RuntimeError(skips[f"{repo}#{number}"])
+        return linked_issues.get((repo, number), [])
 
     def fetch_item(
         self, repo: str, number: int, *, github_username: str, todo_repository: str
@@ -2865,6 +2809,93 @@ class GitHubClient:
                 item["sub_issue_total"] = total
             items.append(item)
         return items
+
+    def _lookup_closing_issues(
+        self, pull_requests: list[tuple[str, int]]
+    ) -> tuple[dict[tuple[str, int], list[tuple[str, int]]], dict[str, str]]:
+        """Read the issues each pull request closes in one GraphQL call.
+
+        Returns the linked issues by pull request, plus GitHub's reason for every
+        pull request it denied or could not resolve.
+        """
+
+        if not pull_requests:
+            return {}, {}
+
+        # One aliased GraphQL document for every pull request: `gh pr view` per
+        # pull request would cost a round trip each.
+        alias_selections = [
+            f"p{index}: repository(owner: {json.dumps(repo.partition('/')[0])}, "
+            f"name: {json.dumps(repo.partition('/')[2])}) "
+            f"{{ pullRequest(number: {number}) {{ {_CLOSING_ISSUES_SELECTION} }} }}"
+            for index, (repo, number) in enumerate(pull_requests)
+        ]
+        command = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={{ {' '.join(alias_selections)} }}",
+        ]
+        failure_message_prefix = "Failed to inspect linked issues via gh"
+        completed = _run_gh_command_with_retry(
+            command,
+            not_found_message=(
+                "Failed to run gh linked issue lookup: gh CLI is not installed or not on PATH."
+            ),
+            failure_message_prefix=failure_message_prefix,
+            # A query where some aliases are denied still answers for the
+            # others, and gh reports that partial answer as a failure.
+            tolerate_partial_response=True,
+        )
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"Failed to parse gh linked issue JSON: {error.msg}") from error
+        # A response without `data` is a whole-query failure such as expired
+        # credentials, which must not be mistaken for "no pull request closes an issue".
+        repositories_by_alias = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(repositories_by_alias, dict):
+            raise RuntimeError(
+                f"{failure_message_prefix}: "
+                f"{completed.stderr.strip() or 'response contained no data'}"
+            )
+        # Only the alias in an error's path attributes a failure to one pull
+        # request; the merged stderr concatenates every alias's message.
+        errors = payload.get("errors")
+        skips_by_alias: dict[str, str] = {}
+        subjects_by_alias = {
+            f"p{index}": f"{repo}#{number}" for index, (repo, number) in enumerate(pull_requests)
+        }
+        for entry in errors if isinstance(errors, list) else []:
+            entry_fields = entry if isinstance(entry, dict) else {}
+            message = entry_fields.get("message")
+            path = entry_fields.get("path")
+            alias = path[0] if isinstance(path, list) and path else None
+            subject = subjects_by_alias.get(alias)
+            if subject is None:
+                raise RuntimeError(f"{failure_message_prefix}: {message or 'unknown error'}")
+            if not isinstance(message, str) or not (
+                _is_repository_authorization_error(message) or _is_unresolvable_item_error(message)
+            ):
+                raise RuntimeError(
+                    f"{failure_message_prefix} ({subject}): {message or 'unknown error'}"
+                )
+            skips_by_alias[alias] = message
+
+        linked_issues: dict[tuple[str, int], list[tuple[str, int]]] = {}
+        for index, (repo, number) in enumerate(pull_requests):
+            alias = f"p{index}"
+            if alias in skips_by_alias:
+                continue
+            closing_issues = self._closing_issues(
+                repositories_by_alias.get(alias), subject=subjects_by_alias[alias]
+            )
+            if closing_issues:
+                linked_issues[(repo, number)] = closing_issues
+        return linked_issues, {
+            subjects_by_alias[alias]: reason for alias, reason in skips_by_alias.items()
+        }
 
     @staticmethod
     def _closing_issues(repository_node: object, *, subject: str) -> list[tuple[str, int]]:

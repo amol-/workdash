@@ -9,7 +9,7 @@ Feature: Launch a coding session
   Rules:
     - Pressing "c" in the TUI opens a dialog to pick a configured coding agent.
     - Any agent configured with a launch command is a coding agent; the TUI also supports VSCode Copilot as an editor launch.
-    - The dialog lists the configured coding agents by name in configuration order, followed by VSCode Copilot.
+    - The dialog lists the configured coding agents by name in configuration order, with VSCode Copilot offered as `(e) edit`.
     - Before launching a session, the system prepares the worktree for the selected work item.
     - The launched coding agent is started inside the work item's worktree.
     - The launched coding agent is preloaded with GitHub context and, when available, the issue analysis for implementation or pull request analysis for review. An authored pull request with a linked issue is coded as that issue, with the same context and worktree selection as coding the issue; an authored pull request without a linked issue remains the target.
@@ -31,8 +31,8 @@ Feature: Launch a coding session
     - A coding session claims its worktree: at most one live agent pane works in a worktree at a time, whichever item, client, or TUI asks for it, and nothing but that live pane records the claim.
     - An agent pane belongs to a worktree when its title is the worktree's `code_` pane title, wherever its cwd has moved. Terminal panes, exited or held panes, and agent panes of other worktrees hold no claim, even when their cwd is inside the worktree.
     - Asking to code on a worktree with a live agent pane starts nothing: the result reports status `already_running` with that pane's ID and session, and never claims the requested agent is the one running. Only status `launched` means this request started the session.
-    - Pressing "c" on an item whose worktree has a live agent pane focuses that pane right away, without opening the dialog.
-    - The dialog offers only coding agents and Cancel. If an agent pane appears while the dialog is open, picking an agent focuses that pane instead of launching another.
+    - Pressing "c" opens the code dialog even when the worktree has a live agent pane.
+    - The dialog offers numbered coding agents, `(e) edit`, `(d) branchdiff`, `(t) terminal`, and Cancel. Picking an agent focuses any live agent pane for the worktree instead of launching another.
     - A new coding session is reported as launched only after its pane is visible in Zellij.
     - When Zellij cannot report live panes, the system starts no coding session and reports an error.
     - When a launched pane does not become visible, the launch is reported as an unconfirmed error, not as launched; requests for that worktree start nothing until the pane appears or a minute passes.
@@ -169,18 +169,19 @@ Feature: Launch a coding session
     Then the dialog offers `pi`, `claude`, and VSCode Copilot in that order
 
   @id:F-CODING-LAUNCH-S019
-  Scenario: An item with a live agent pane is focused without a dialog
+  Scenario: The code menu remains available when an agent is running
     Given the selected work item already has an open coding-agent pane
     When the user presses "c"
+    Then the dialog offers coding agents, edit, branchdiff, terminal, and Cancel
+    When the user picks a supported coding agent from the dialog
     Then the system focuses that pane
-    And no dialog is shown
     And no coding session is launched
 
   @id:F-CODING-LAUNCH-S020
-  Scenario: The coding dialog offers only agents and Cancel
+  Scenario: The coding dialog offers coding tools and worktree actions
     Given the TUI has a work item selected
     When the user presses "c"
-    Then the dialog offers only coding agents and Cancel
+    Then the dialog offers coding agents, edit, branchdiff, terminal, and Cancel
 
   @id:F-CODING-LAUNCH-S021
   Scenario: An agent started elsewhere while the dialog is open is focused instead of launched again

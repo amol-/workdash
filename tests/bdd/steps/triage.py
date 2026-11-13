@@ -44,14 +44,14 @@ from .common import (
 
 
 def linked_issues_response(
-    command: list[str], *, closed_issues: dict[str, tuple[str, int]] | None = None
+    command: list[str], *, closed_issues: dict[str, tuple[tuple[str, int], ...]] | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Answer the linked-issue GraphQL batch for a fake ``gh api graphql`` call.
 
     Aliases are read back from the query the production code built, so a
     scenario only has to name the pull requests that close an issue.
 
-    :param dict closed_issues: ``owner/repo#number`` -> closed ``(repo, number)``.
+    :param dict closed_issues: ``owner/repo#number`` -> the closed ``(repo, number)`` issues.
     """
 
     closed = closed_issues or {}
@@ -61,13 +61,14 @@ def linked_issues_response(
         r"{ pullRequest\(number: (\d+)\)",
         command[4],
     ):
-        issue = closed.get(f"{owner}/{name}#{number}")
+        issues = closed.get(f"{owner}/{name}#{number}", ())
         data[alias] = {
             "pullRequest": {
                 "closingIssuesReferences": {
-                    "nodes": []
-                    if issue is None
-                    else [{"number": issue[1], "repository": {"nameWithOwner": issue[0]}}]
+                    "nodes": [
+                        {"number": issue_number, "repository": {"nameWithOwner": repo}}
+                        for repo, issue_number in issues
+                    ]
                 }
             }
         }
@@ -75,7 +76,10 @@ def linked_issues_response(
 
 
 def is_linked_issues_query(command: list[str]) -> bool:
-    return command[:3] == ["gh", "api", "graphql"] and "closingIssuesReferences" in command[4]
+    """Tell the linked-issue batch apart from other queries that also select closing issues."""
+    return command[:3] == ["gh", "api", "graphql"] and bool(
+        re.search(r"pullRequest\(number: \d+\) \{ closingIssuesReferences", command[4])
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1004,7 +1008,8 @@ def _pull_request_and_issue_are_open_work(
         "workdash.github_client.subprocess.run",
         lambda command, **kwargs: (
             linked_issues_response(
-                command, closed_issues={f"owner/repo#{pr_number}": ("owner/repo", issue_number)}
+                command,
+                closed_issues={f"owner/repo#{pr_number}": (("owner/repo", issue_number),)},
             )
             if is_linked_issues_query(command)
             else (_ for _ in ()).throw(AssertionError(f"Unexpected gh command: {command}"))
@@ -1579,6 +1584,7 @@ def _refresh_will_fail(scenario_state: dict[str, Any]) -> None:
     scenario_state["refresh_fails"] = True
 
 
+@when(parsers.parse('the user chooses "{key}" from the code menu'))
 @when(parsers.parse('the user presses "{key}"'))
 def _user_presses_key(
     key: str,
@@ -2458,9 +2464,7 @@ def _no_included_items(scenario_state: dict[str, Any]) -> None:
 _SEARCH_TITLE_FRAGMENT = "parser"
 _SEARCH_UNMATCHED_TEXT = "nothing-here-matches-this"
 _SEARCH_ACTION_HINT = "(/)search"
-_FULL_ACTION_BAR = (
-    "(/)search (o)pen (r)efresh (a)nalyze (c)ode (d)iff (t)erminal (i)nclude (w)todo (q)uit"
-)
+_FULL_ACTION_BAR = "(/)search (o)pen (r)efresh (a)nalyze (c)ode (d)ispatch (i)nclude (w)todo (q)uit"
 
 
 async def _apply_search_filter(app, pilot, query: str) -> None:
