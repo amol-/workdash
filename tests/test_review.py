@@ -791,19 +791,19 @@ def test_background_review_failure_is_logged(setup_review, monkeypatch, caplog):
     def fail(*args, **kwargs):
         raise RuntimeError("agent failed")
 
-    original = control.logger.exception
+    original = control.logger.error
 
     def log_failure(*args, **kwargs):
         original(*args, **kwargs)
         finished.set()
 
     monkeypatch.setattr(control, "review_pull_request", fail)
-    monkeypatch.setattr(control.logger, "exception", log_failure)
+    monkeypatch.setattr(control.logger, "error", log_failure)
     result = session.review(target="owner/repo#PR-2", background=True)
     assert result["status"] == "started"
     assert finished.wait(3)
     assert "Review failed for owner/repo#2" in caplog.text
-    assert "agent failed" in caplog.text
+    assert "RuntimeError: agent failed" in caplog.text
 
 
 def test_real_server_cli_returns_while_agent_is_blocked(setup_review, monkeypatch, capsys):

@@ -35,6 +35,7 @@ Feature: Launch a coding session
     - The dialog offers numbered coding agents, `(e) edit`, `(d) branchdiff`, `(t) terminal`, and Cancel. Picking an agent focuses any live agent pane for the worktree instead of launching another.
     - A new coding session is reported as launched only after its pane is visible in Zellij.
     - When Zellij cannot report live panes, the system starts no coding session and reports an error.
+    - A pane listing Zellij answers unusably is retried before the system reports that it cannot report live panes.
     - When a launched pane does not become visible, the launch is reported as an unconfirmed error, not as launched; requests for that worktree start nothing until the pane appears or a minute passes.
     - When a launched agent exits right away, the launch is reported as an error naming its pane, and a retry may launch again.
     - The TUI, the JSON API, and `workdash code` share one launch path, so they enforce the same claim.
@@ -241,6 +242,14 @@ Feature: Launch a coding session
     Then the API returns an error saying Zellij pane state is unavailable
     And no coding agent is launched
     And the server does not prepare a worktree
+
+  @id:F-CODING-LAUNCH-S043
+  Scenario: A coding session starts when Zellij answers one pane listing unusably
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current dashboard items include `owner/repo#ISSUE-1`
+    And Zellij answers the first pane listing unusably
+    When a client requests code for `owner/repo#ISSUE-1` with agent `pi`
+    Then the last response reports status `launched` with a new pane ID
 
   @id:F-CODING-LAUNCH-S027
   Scenario: A launch whose pane never becomes visible is not repeated by a retry

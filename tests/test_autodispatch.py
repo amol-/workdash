@@ -21,7 +21,22 @@ from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashControlError, WorkdashSession, _make_turbogears_app
 from workdash.github_client import GitHubClient
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
-from workdash.tui import WorkdashApp
+from workdash.tui import _MAX_PROGRESS_ERROR_WIDTH, WorkdashApp
+from workdash.work_state import ReadyWork
+
+
+def _issue_item(number: int) -> WorkItem:
+    now = datetime.now(UTC)
+    return WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=number,
+        title="Fix the thing",
+        created_at=now,
+        updated_at=now,
+        url=f"https://github.com/owner/repo/issues/{number}",
+    )
 
 
 def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
@@ -136,7 +151,18 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
     from workdash.github_client import GitHubClient
 
     github_client = GitHubClient()
-    monkeypatch.setattr(github_client, "fetch_launch_context", lambda _: {})
+    original_run = subprocess.run
+    launch_reads = []
+
+    def run(command, *args, **kwargs):
+        if command[:3] == ["gh", "issue", "view"]:
+            launch_reads.append(command)
+            if len(launch_reads) == 1:
+                raise subprocess.CalledProcessError(1, command, stderr="HTTP 503")
+            return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+        return original_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
     polls = queue.Queue()
 
     def load_panes(_):
@@ -198,6 +224,7 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
             polls.get_nowait()
         polls.get(timeout=3)
         polls.get(timeout=3)
+        assert len(launch_reads) == 2
         assert len(launches) == 1 and launches[0][2]["group"] == (group or "repo")
         panes.clear()
         deadline = time.monotonic() + 3
@@ -423,6 +450,53 @@ def test_failed_pane_lookup_fails_session_without_dispatching_again(monkeypatch)
     entry = session.autodispatch_sessions()[0]
     assert entry["status"] == "failed" and "unavailable" in entry["error"]
     assert dispatch.call_count == 1
+
+
+def test_one_empty_pane_listing_does_not_end_supervision(monkeypatch):
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    monkeypatch.setattr(
+        session,
+        "dispatch_once",
+        MagicMock(
+            side_effect=[
+                {
+                    "status": "launched",
+                    "item_id": "owner/repo#ISSUE-1",
+                    "pane_id": "terminal_1",
+                    "session": "workdash",
+                },
+                {"status": "no_ready_task"},
+            ]
+        ),
+    )
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
+    listings = [[], [{"id": 1}], [{"id": 1}], [], []]
+    polls = 0
+
+    def load_panes(_session):
+        nonlocal polls
+        polls += 1
+        return listings.pop(0) if listings else []
+
+    review = MagicMock(return_value={"status": "started"})
+    monkeypatch.setattr(session, "review", review)
+    monkeypatch.setattr("workdash.autodispatch.launcher.zellij.load_zellij_panes", load_panes)
+    session.start_autodispatch(scope="owner/repo")
+    deadline = time.monotonic() + 3
+    while session.autodispatch_sessions()[0]["status"] == "running":
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert session.autodispatch_sessions()[0]["status"] == "finished"
+    # The pane counts as gone only after two consecutive listings miss it, so the empty
+    # listing while the agent was still working did not end supervision.
+    assert polls == 5
+    review.assert_called_once()
 
 
 def test_dispatch_reports_a_failed_linked_issue_lookup_as_a_github_error():
@@ -675,6 +749,39 @@ def test_tui_long_failures_leave_room_for_work_items():
             assert str(table.get_row_at(0)[2]) == "Visible task"
             assert table.region.height > 0
             assert app.query_one("#autodispatch-progress", Static).region.height == 3
+
+    asyncio.run(exercise())
+
+
+def test_tui_progress_keeps_a_failed_error_on_one_plain_line():
+    session = _tui_session()
+    error = "first line\n\x1b[31msecond line\x1b[0m\n" + "x" * 200
+    session.autodispatch_sessions.return_value = [
+        {
+            "id": "session-1",
+            "status": "failed",
+            "scope": "owner/repo",
+            "group": None,
+            "current_item": "owner/repo#ISSUE-1",
+            "elapsed_seconds": 2,
+            "selected_group": None,
+            "stage": "checking",
+            "launch_reason": None,
+            "iteration": 1,
+            "error": error,
+        }
+    ]
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        # Wide enough that the row is not clipped by the screen, so the assertion below
+        # proves the truncation rather than the terminal width.
+        async with app.run_test(size=(200, 24)):
+            rows = [strip.text for strip in app.screen._compositor.render_strips()]
+            [progress] = [row for row in rows if "Failed owner/repo:" in row]
+            assert ("first line second line " + "x" * 200)[:_MAX_PROGRESS_ERROR_WIDTH] in progress
+            assert "\x1b" not in progress
+            assert sum("second line" in row for row in rows) == 1
 
     asyncio.run(exercise())
 
@@ -1248,3 +1355,342 @@ def test_autodispatch_review_feedback_cycle(monkeypatch, tmp_path):
         session.stop_autodispatch_sessions()
         if session._autodispatch:
             next(iter(session._autodispatch.values())).thread.join(timeout=3)
+
+
+def test_explicit_issue_does_not_dispatch_if_pane_close_is_unconfirmed(monkeypatch, tmp_path):
+    item = _issue_item(1)
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    monkeypatch.setattr(session, "_ready", MagicMock(return_value=[ReadyWork(item=item)]))
+    monkeypatch.setattr("workdash.control.existing_worktree_path", lambda *a, **kw: str(tmp_path))
+    pane = {"id": 7, "title": f"code_{tmp_path.name}", "exited": False}
+    monkeypatch.setattr(session, "_live_panes", lambda: [pane])
+    monkeypatch.setattr("workdash.control._LAUNCH_VISIBILITY_CHECKS", 1)
+    monkeypatch.setattr("workdash.control._LAUNCH_VISIBILITY_INTERVAL_SECONDS", 0)
+    close = MagicMock()
+    monkeypatch.setattr("workdash.launcher.zellij.close_zellij_pane", close)
+    dispatch = MagicMock()
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    started = session.start_autodispatch(scope="owner/repo#ISSUE-1")
+    session._autodispatch[started["id"]].thread.join(2)
+    assert session.autodispatch_sessions()[0]["status"] == "failed"
+    close.assert_called_once()
+    dispatch.assert_not_called()
+
+
+def test_prepare_autodispatch_closes_agent_pane_in_a_pull_request_worktree(monkeypatch, tmp_path):
+    from workdash.work_state import PullRequestWorkState
+
+    item = _issue_item(1)
+    now = datetime.now(UTC)
+    pull_request = WorkItem(
+        kind=WorkItemKind.AUTHORED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=51,
+        title="Fix the thing",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/pull/51",
+        closing_issue_numbers=(1,),
+    )
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[item, pull_request],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    state = PullRequestWorkState(
+        item=pull_request,
+        state="OPEN",
+        author="testuser",
+        linked_issues=(item,),
+        head_sha="head",
+        head_writable=True,
+        base_ref="main",
+        base_head_sha="base",
+        mergeability="clean",
+        review_decision=None,
+        ci_status="passing",
+        failing_checks=(),
+        feedback=(),
+    )
+    monkeypatch.setattr(
+        session, "_ready", MagicMock(return_value=[ReadyWork(item=item, pull_request=state)])
+    )
+    # Both the issue and the pull request have a worktree, and the agent works in the
+    # pull request one.
+    issue_worktree = tmp_path / "owner_repo_1"
+    pull_request_worktree = tmp_path / "owner_repo_51"
+    issue_worktree.mkdir()
+    pull_request_worktree.mkdir()
+    monkeypatch.setattr(
+        "workdash.control.existing_worktree_path",
+        lambda _workdir, claim, **kwargs: (
+            issue_worktree if claim.number == 1 else pull_request_worktree
+        ),
+    )
+    panes = [{"id": 7, "title": "code_owner_repo_51", "pane_cwd": str(pull_request_worktree)}]
+    monkeypatch.setattr(session, "_live_panes", lambda: list(panes))
+    close = MagicMock(side_effect=lambda _session, _pane_id: panes.clear())
+    monkeypatch.setattr("workdash.launcher.zellij.close_zellij_pane", close)
+    session.prepare_autodispatch("owner/repo#ISSUE-1")
+    close.assert_called_once_with("workdash", "terminal_7")
+    assert panes == []
+
+
+@pytest.mark.parametrize("scope", ["owner/repo", "any", "owner/repo#PR-1"])
+def test_prepare_autodispatch_ignores_scopes_that_are_not_one_issue(monkeypatch, tmp_path, scope):
+    now = datetime.now(UTC)
+    pull_request = WorkItem(
+        kind=WorkItemKind.AUTHORED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=1,
+        title="Fix the thing",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/pull/1",
+    )
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[pull_request],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    monkeypatch.setattr("workdash.control.existing_worktree_path", lambda *a, **kw: str(tmp_path))
+    monkeypatch.setattr(
+        session, "_live_panes", lambda: [{"id": 7, "title": f"code_{tmp_path.name}"}]
+    )
+    close = MagicMock()
+    monkeypatch.setattr("workdash.launcher.zellij.close_zellij_pane", close)
+    session.prepare_autodispatch(scope)
+    close.assert_not_called()
+
+
+def test_rate_limited_launch_read_does_not_hold_the_session_lock(monkeypatch, tmp_path):
+    session = WorkdashSession(
+        config=WorkdashConfig(
+            github_username="testuser",
+            workdir=str(tmp_path),
+            agents={"pi": AgentConfig(launch="pi", analyze="pi -p")},
+        ),
+        backend=MagicMock(github_client=GitHubClient()),
+        work_items=[_issue_item(1)],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    monkeypatch.setattr("workdash.control.ensure_worktree", lambda *a, **kw: str(tmp_path))
+    monkeypatch.setattr("workdash.control.existing_worktree_path", lambda *a, **kw: None)
+    monkeypatch.setattr("workdash.control.get_merge_base", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "workdash.control.autostart_briefing", lambda item, **kw: (item, "briefing", None)
+    )
+    monkeypatch.setattr("workdash.control.launcher.zellij.load_zellij_panes", lambda _: [])
+    monkeypatch.setattr("workdash.github_client._TRANSIENT_RETRY_DELAY_SECONDS", 0.01)
+    reading = threading.Event()
+
+    def run(command, *args, **kwargs):
+        reading.set()
+        raise subprocess.CalledProcessError(1, command, stderr="API rate limit exceeded")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    failures = []
+
+    def launch():
+        try:
+            session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True, autoclose=True)
+        except RuntimeError as error:
+            failures.append(str(error))
+
+    worker = threading.Thread(target=launch)
+    worker.start()
+    assert reading.wait(2)
+    probe = threading.Thread(target=session.list_items)
+    probe.start()
+    probe.join(5)
+    assert not probe.is_alive(), "the session lock was held while waiting out a rate limit"
+    worker.join(10)
+    assert failures and "rate limit" in failures[0]
+
+
+@pytest.mark.parametrize(
+    ("first_scope", "second_scope"),
+    [
+        ("owner/repo#42", "https://github.com/OWNER/repo/issues/42"),
+        ("owner/repo#PR-7", "https://github.com/OWNER/repo/pull/7"),
+        ("target/repo#ISSUE-WT42", "https://github.com/owner/todos/issues/42"),
+    ],
+)
+def test_restart_equivalent_scope_replaces_failure(monkeypatch, first_scope, second_scope):
+    session = WorkdashSession(
+        config=WorkdashConfig(
+            todo_repository="owner/todos", agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}
+        ),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    monkeypatch.setattr(session, "prepare_autodispatch", lambda _: None)
+    monkeypatch.setattr(session, "dispatch_once", MagicMock(side_effect=RuntimeError("failed")))
+    first = session.start_autodispatch(scope=first_scope)
+    other = session.start_autodispatch(scope="owner/other#7")
+    for entry_id in (first["id"], other["id"]):
+        session._autodispatch[entry_id].thread.join(2)
+    monkeypatch.setattr(
+        session, "dispatch_once", MagicMock(return_value={"status": "no_ready_task"})
+    )
+    second = session.start_autodispatch(scope=second_scope)
+    session._autodispatch[second["id"]].thread.join(2)
+    # Only the failure of the restarted target is replaced.
+    assert [entry["id"] for entry in session.autodispatch_sessions()] == [other["id"], second["id"]]
+
+
+def test_starting_a_running_scope_replaces_it(monkeypatch):
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    monkeypatch.setattr(session, "prepare_autodispatch", lambda _: None)
+    dispatching = threading.Event()
+    release = threading.Event()
+
+    def dispatch(**_):
+        dispatching.set()
+        release.wait(2)
+        return {"status": "no_ready_task"}
+
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    try:
+        first = session.start_autodispatch(scope="owner/repo#42")
+        assert dispatching.wait(2)
+        first_entry = session._autodispatch[first["id"]]
+        second = session.start_autodispatch(scope="owner/repo#42")
+        assert [entry["id"] for entry in session.autodispatch_sessions()] == [second["id"]]
+        assert first_entry.status == "stopped"
+        release.set()
+        for entry in (first_entry, session._autodispatch[second["id"]]):
+            entry.thread.join(2)
+            assert not entry.thread.is_alive()
+    finally:
+        release.set()
+        session.stop_autodispatch_sessions()
+        for entry in session._autodispatch.values():
+            entry.thread.join(2)
+
+
+def test_server_start_reports_an_unusable_log_path(monkeypatch, tmp_path):
+    from workdash.control import WorkdashControlServer
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    monkeypatch.setattr("workdash.control.SERVER_LOG_PATH", blocker / "workdash.log")
+    monkeypatch.setattr("workdash.control.server_address", lambda: ("127.0.0.1", 0))
+    with pytest.raises(RuntimeError, match="workdash.log"):
+        WorkdashControlServer(MagicMock()).start()
+
+
+def test_started_server_logs_to_the_server_log_path_until_it_stops(monkeypatch, tmp_path):
+    import logging
+
+    from workdash.control import WorkdashControlServer
+
+    log = tmp_path / "workdash.log"
+    monkeypatch.setattr("workdash.control.SERVER_LOG_PATH", log)
+    monkeypatch.setattr("workdash.control.server_address", lambda: ("127.0.0.1", 0))
+    server = WorkdashControlServer(MagicMock())
+    server.start()
+    handler = server._log_handler
+    logging.getLogger("workdash.autodispatch").info("started")
+    server.stop()
+    assert "started" in log.read_text()
+    assert all(
+        handler not in logging.getLogger(name).handlers
+        for name in ("workdash.autodispatch", "workdash.control", "workdash.autoclose")
+    )
+
+
+def test_failed_second_server_preserves_running_server_log(monkeypatch, tmp_path):
+    import logging
+
+    from workdash.control import WorkdashControlServer
+
+    log = tmp_path / "workdash.log"
+    monkeypatch.setattr("workdash.control.SERVER_LOG_PATH", log)
+    monkeypatch.setattr("workdash.control.server_address", lambda: ("127.0.0.1", 0))
+    first = WorkdashControlServer(MagicMock())
+    first.start()
+    try:
+        port = first._httpds[0].server_address[1]
+        monkeypatch.setattr("workdash.control.server_address", lambda: ("127.0.0.1", port))
+        logging.getLogger("workdash.autodispatch").info("first server event")
+        with pytest.raises(RuntimeError, match="Cannot bind"):
+            WorkdashControlServer(MagicMock()).start()
+        assert "first server event" in log.read_text()
+        logging.getLogger("workdash.autodispatch").info("later server event")
+        assert "later server event" in log.read_text()
+    finally:
+        first.stop()
+
+
+def test_server_log_records_request_failures(monkeypatch, tmp_path):
+    import logging
+
+    from workdash.control import WorkdashControlServer
+
+    log = tmp_path / "workdash.log"
+    monkeypatch.setattr("workdash.control.SERVER_LOG_PATH", log)
+    monkeypatch.setattr("workdash.control.server_address", lambda: ("127.0.0.1", 0))
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    autodispatch_level = logging.getLogger("workdash.autodispatch").level
+    server = WorkdashControlServer(session)
+    server.start()
+    try:
+        app = _make_turbogears_app(session)
+        response = Request.blank(
+            "/api/v0/info",
+            method="POST",
+            content_type="application/json",
+            body=b'{"secret token": }',
+        ).get_response(app)
+        assert response.status_int == 400
+        session.info = MagicMock(
+            side_effect=WorkdashControlError("github_error", "GitHub is unavailable", status=502)
+        )
+        response = Request.blank(
+            "/api/v0/info", method="POST", content_type="application/json", body=b"{}"
+        ).get_response(app)
+        assert response.status_int == 502
+        session.info = MagicMock(side_effect=ValueError("unexpected failure"))
+        with pytest.raises(ValueError, match="unexpected failure"):
+            Request.blank(
+                "/api/v0/info", method="POST", content_type="application/json", body=b"{}"
+            ).get_response(app)
+        text = log.read_text()
+        assert "JSONDecodeError" in text and "Expecting value" in text
+        assert (
+            "Control request failed (github_error): WorkdashControlError: GitHub is unavailable"
+            in text
+        )
+        assert "Unexpected control request failure: ValueError: unexpected failure" in text
+        assert "secret token" not in text
+    finally:
+        server.stop()
+    assert logging.getLogger("workdash.autodispatch").level == autodispatch_level

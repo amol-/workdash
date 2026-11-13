@@ -12,6 +12,7 @@ Feature: Dispatch one ready issue
     - A newly launched agent's default group is the basename of the implementation repository, not the parent issue's repository. `--group` overrides it.
     - If the selected issue remains ready when rechecked, dispatch passes its issue ID to ordinary code, which independently reads the target's current GitHub work for the checkout and briefing. Readiness metadata in the result describes selection; the launched agent follows the newer state, even if the pull request or reasons changed or it now waits for CI, review, or merge. These reads are not atomic. If a selected pull request disappears without a replacement at recheck, another caller claims a candidate, or the selected work is no longer eligible, the server retries the next still-eligible candidate, bounded by the candidates. At most one confirmed pane is launched per dispatch; uncertainty or an upstream failure is an error, never a false empty result or a second launch.
     - A successful launch returns immediately with status `launched`, issue, action, reasons, and actual pane ID; the server owns the agent and its autoclose supervision after the client exits. An empty or exhausted scope returns success with status `no_ready_task`.
+    - Transient GitHub read failures are retried before dispatch reports an upstream failure.
     - Dispatch does not create sub-issues, merge, wait for completion, or run a scheduler. There is no `autocode` command.
 
   @id:F-DISPATCH-S001
@@ -125,3 +126,12 @@ Feature: Dispatch one ready issue
     Then the command connects to host `dashboard.lan`
     And the result reports status `launched`, issue `owner/repo#ISSUE-42`, agent `pi`, group `epic`, and the actual pane ID
     And the server supervises the launched pane
+
+  @id:F-DISPATCH-S012
+  Scenario: A transient GitHub read failure is retried instead of failing dispatch
+    Given a server-backed Workdash session is ready to answer
+    And GitHub repository `owner/repo` has open issue #42 with no sub-issues or pull request
+    And a GitHub read of `owner/repo` fails transiently
+    When the user runs `workdash dispatch owner/repo --json`
+    Then the result reports status `launched` and issue `owner/repo#ISSUE-42` with action `implement`
+    And exactly one agent is told to implement issue #42

@@ -37,6 +37,7 @@ from .launcher import (
     launch_terminal_context,
     prepare_launch_agent_prompt,
 )
+from .log_diagnostics import safe_error
 from .models import (
     REVIEW_KINDS,
     WorkItem,
@@ -62,6 +63,8 @@ logger = logging.getLogger(__name__)
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8765
 SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
+# Every successful server start replaces this diagnostic log.
+SERVER_LOG_PATH = Path.home() / ".config" / "workdash" / "workdash.log"
 # `owner/repo#42`, a Workdash item ID such as `owner/repo#CHECK-42`, or a
 # targeted todo ID such as `owner/repo#ISSUE-WT42`.
 _ITEM_REFERENCE_RE = re.compile(
@@ -394,8 +397,10 @@ class WorkdashSession:
                     item.number,
                     result["document_path"],
                 )
-            except Exception:
-                logger.exception("Review failed for %s#%s", item.repo, item.number)
+            except Exception as error:
+                logger.error(
+                    "Review failed for %s#%s: %s", item.repo, item.number, safe_error(error)
+                )
 
         try:
             threading.Thread(target=run_background, name="workdash-review", daemon=True).start()
@@ -730,8 +735,15 @@ class WorkdashSession:
         }
 
     def _ready(
-        self, scope: str, fail_unconfirmed: bool, *, include_shared_pr_issues: bool = False
+        self,
+        scope: str,
+        fail_unconfirmed: bool,
+        *,
+        include_shared_pr_issues: bool = False,
+        panes: Sequence[dict[str, object]] | None = None,
     ) -> list[ReadyWork]:
+        """Return the ready work of a scope; ``panes`` overrides the live panes that claim it."""
+
         issue = None
         if scope == "todo":
             repositories = [self.config.todo_repository]
@@ -770,7 +782,7 @@ class WorkdashSession:
                 status=HTTPStatus.BAD_GATEWAY,
             ) from error
         with self._lock:
-            panes = self._live_panes()
+            panes = self._live_panes() if panes is None else panes
             now = time.monotonic()
             if fail_unconfirmed:
                 for work in candidates:
@@ -814,6 +826,16 @@ class WorkdashSession:
             self, scope.strip(), group.strip() if group is not None else None, agent
         )
         with self._autodispatch_lock:
+            identity = self._scope_identity(entry.scope)
+            # A target has at most one session, so a new start replaces the old one
+            # instead of leaving two sessions competing for the same work.
+            for old in [
+                old
+                for old in self._autodispatch.values()
+                if self._scope_identity(old.scope) == identity
+            ]:
+                old.stop()
+                del self._autodispatch[old.id]
             self._autodispatch[entry.id] = entry
             entry.thread.start()
         return entry.snapshot()
@@ -851,6 +873,63 @@ class WorkdashSession:
             None,
         )
         return self.start_autodispatch(scope=scope, agent=agent)
+
+    def prepare_autodispatch(self, scope: str) -> None:
+        """Close the coding pane working on an exact issue that still has ready work.
+
+        An explicit issue (re)start intentionally interrupts that agent, accepting the
+        rare race between its stop and the new launch. A scope without ready work leaves
+        the pane alone, because no launch would replace it.
+        """
+
+        try:
+            item = self._require_item(scope)
+        except WorkdashControlError:
+            return
+        if item.item_type != WorkItemType.ISSUE:
+            return
+        item_id = format_work_item_id(item)
+        # Local panes are ignored: the pane this session is about to close must not hide
+        # the work it holds.
+        ready = self._ready(item_id, True, panes=[])
+        work = next((work for work in ready if format_work_item_id(work.item) == item_id), None)
+        if work is None:
+            return
+        # The agent may work in a worktree named after the pull request or a linked issue
+        # rather than the issue itself, so every claim of the work is a candidate.
+        paths = [
+            path
+            for claim in work.claims
+            if (path := existing_worktree_path(self.config.workdir, claim, git=self.git))
+            is not None
+        ]
+        if not paths:
+            return
+        live = self._live_panes()
+        pane_ids = sorted(
+            {pane["id"] for path in paths for pane in _agent_panes_in_worktree(live, path)}
+        )
+        for pane_id in pane_ids:
+            launcher.zellij.close_zellij_pane(self.zellij_session, _format_pane_id(pane_id))
+        for _ in range(_LAUNCH_VISIBILITY_CHECKS):
+            live = self._live_panes()
+            if not any(_agent_panes_in_worktree(live, path) for path in paths):
+                return
+            time.sleep(_LAUNCH_VISIBILITY_INTERVAL_SECONDS)
+        raise RuntimeError("Could not confirm existing coding pane was closed.")
+
+    def _scope_identity(self, scope: str) -> tuple[str, int] | str:
+        """Return the key that matches equivalent scopes, such as a todo ID and its URL.
+
+        GitHub numbers are unique across issues and pull requests, so the repository and
+        number identify the target whatever form names it.
+        """
+
+        try:
+            repo, number, _, _ = self._item_target(scope)
+        except WorkdashControlError:
+            return scope
+        return repo.lower(), number
 
     def autodispatch_sessions(self) -> list[dict[str, object]]:
         with self._autodispatch_lock:
@@ -973,6 +1052,33 @@ class WorkdashSession:
 
         return _analysis_http_url(item)
 
+    def _item_target(self, target: str) -> tuple[str, int, WorkItemType, bool]:
+        """Resolve a target to its repository, number, type, and whether it is a todo."""
+
+        parsed_url = parse_github_item_url(target)
+        reference = _ITEM_REFERENCE_RE.match(target)
+        if parsed_url is not None:
+            return parsed_url.repo, parsed_url.number, parsed_url.item_type, False
+        if (
+            reference is not None
+            and is_repository_name(reference["repo"])
+            and (reference["todo"] is None or reference["label"] == "ISSUE")
+        ):
+            # A targeted todo is an issue of the todo repository, listed under its target.
+            targeted_todo = reference["todo"] is not None
+            return (
+                self.config.todo_repository if targeted_todo else reference["repo"],
+                int(reference["number"]),
+                WorkItemType.ISSUE if reference["label"] in {None, "ISSUE"} else WorkItemType.PR,
+                targeted_todo,
+            )
+        raise WorkdashControlError(
+            "invalid_target",
+            f"{target!r} is not a Workdash item ID, an owner/repo#NUMBER issue, "
+            "or a GitHub issue or pull request URL.",
+            status=HTTPStatus.BAD_REQUEST,
+        )
+
     def _require_item(self, target: str) -> WorkItem:
         """Resolve an explicit target, fetching it from GitHub when the dashboard lacks it.
 
@@ -980,30 +1086,7 @@ class WorkdashSession:
         presentation choice, not a limit on which items can be acted on.
         """
 
-        parsed_url = parse_github_item_url(target)
-        reference = _ITEM_REFERENCE_RE.match(target)
-        if parsed_url is not None:
-            repo, number, item_type = parsed_url.repo, parsed_url.number, parsed_url.item_type
-            targeted_todo = False
-        elif (
-            reference is not None
-            and is_repository_name(reference["repo"])
-            and (reference["todo"] is None or reference["label"] == "ISSUE")
-        ):
-            # A targeted todo is an issue of the todo repository, listed under its target.
-            targeted_todo = reference["todo"] is not None
-            repo = self.config.todo_repository if targeted_todo else reference["repo"]
-            number = int(reference["number"])
-            item_type = (
-                WorkItemType.ISSUE if reference["label"] in {None, "ISSUE"} else WorkItemType.PR
-            )
-        else:
-            raise WorkdashControlError(
-                "invalid_target",
-                f"{target!r} is not a Workdash item ID, an owner/repo#NUMBER issue, "
-                "or a GitHub issue or pull request URL.",
-                status=HTTPStatus.BAD_REQUEST,
-            )
+        repo, number, item_type, targeted_todo = self._item_target(target)
         item = next(
             (item for item in self.work_items if (item.repo, item.number) == (repo, number)), None
         )
@@ -1142,6 +1225,8 @@ class WorkdashControlServer:
         self._listeners = listeners
         self._httpds: list[BaseServer] = []
         self._threads: list[threading.Thread] = []
+        self._log_handler: logging.Handler | None = None
+        self._autodispatch_log_level = logging.NOTSET
 
     def start(self) -> None:
         """Bind every listener before serving the shared JSON API."""
@@ -1169,6 +1254,25 @@ class WorkdashControlServer:
                 f"Cannot bind Workdash server at {host}:{port}: {error}. "
                 "Is another `workdash --server` running?"
             ) from error
+        log_path = SERVER_LOG_PATH
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._log_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+            self._log_handler.setFormatter(
+                logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+            )
+            autodispatch_logger = logging.getLogger("workdash.autodispatch")
+            self._autodispatch_log_level = autodispatch_logger.level
+            autodispatch_logger.setLevel(logging.INFO)
+            autodispatch_logger.addHandler(self._log_handler)
+            logging.getLogger("workdash.control").addHandler(self._log_handler)
+            logging.getLogger("workdash.autoclose").addHandler(self._log_handler)
+        except OSError as error:
+            self.stop()
+            raise RuntimeError(
+                f"Cannot write the Workdash server log at {log_path}: {error}. "
+                "Check that the directory is writable."
+            ) from error
         for httpd in self._httpds:
             thread = threading.Thread(
                 target=httpd.serve_forever,
@@ -1184,6 +1288,12 @@ class WorkdashControlServer:
         for httpd in self._httpds[: len(self._threads)]:
             httpd.shutdown()
         self._session.stop_autodispatch_sessions()
+        if self._log_handler is not None:
+            for name in ("workdash.autodispatch", "workdash.control", "workdash.autoclose"):
+                logging.getLogger(name).removeHandler(self._log_handler)
+            logging.getLogger("workdash.autodispatch").setLevel(self._autodispatch_log_level)
+            self._log_handler.close()
+            self._log_handler = None
         for httpd in self._httpds:
             httpd.server_close()
         for thread in self._threads:
@@ -1698,14 +1808,21 @@ def _handle_json_request(request, response, action) -> dict[str, object]:
             )
         return {"ok": True, "result": action(payload)}
     except WorkdashControlError as error:
+        if error.status >= 500:
+            logger.error("Control request failed (%s): %s", error.code, safe_error(error))
         response.status_int = error.status
         return _error_envelope(error.code, str(error))
     except RuntimeError as error:
+        logger.error("Control request failed: %s", safe_error(error))
         response.status_int = HTTPStatus.INTERNAL_SERVER_ERROR
         return _error_envelope("server_error", str(error))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        logger.warning("Invalid request JSON: %s", safe_error(error))
         response.status_int = HTTPStatus.BAD_REQUEST
         return _error_envelope("invalid_json", f"Request body is not valid JSON: {error}")
+    except Exception as error:
+        logger.error("Unexpected control request failure: %s", safe_error(error))
+        raise
 
 
 def _source_filtered_wsgi_app(app, accepted_ips: Collection[str] = ()):

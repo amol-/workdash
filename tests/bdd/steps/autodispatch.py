@@ -4,6 +4,7 @@ import json
 import subprocess
 import threading
 import time
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,9 +14,9 @@ from textual.widgets import Static
 import workdash.control as control_module
 from gh_work_state_fake import install_fake_github
 from workdash.config import AgentConfig, WorkdashConfig
-from workdash.control import WorkdashSession
+from workdash.control import WorkdashControlError, WorkdashSession
 from workdash.github_client import GitHubClient
-from workdash.models import WorkItemKind, WorkItemType
+from workdash.models import WorkItem, WorkItemKind, WorkItemType
 
 from .common import install_zellij_agent_fakes, make_work_item, run_app
 from .triage import is_linked_issues_query, linked_issues_response
@@ -260,6 +261,45 @@ def repository_groups(scenario_state):
         assert session.autodispatch_sessions()[0]["group"] is None
     finally:
         session.stop_autodispatch_sessions()
+
+
+@given("an autodispatch session has failed")
+def failed_session(autodispatch_state, monkeypatch):
+    session = autodispatch_state["session"]
+    autodispatch_state["failure"] = "dispatch failed: " + "x" * 200
+    monkeypatch.setattr(session, "prepare_autodispatch", lambda _: None)
+    monkeypatch.setattr(
+        session,
+        "dispatch_once",
+        MagicMock(side_effect=RuntimeError(autodispatch_state["failure"])),
+    )
+    session.start_autodispatch(scope="owner/repo#42")
+    wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "failed")
+
+
+@then("the failure is visible in autodispatch progress")
+def failure_visible(autodispatch_state):
+    assert autodispatch_state["progress"][0]["error"] == autodispatch_state["failure"]
+    # `workdash info` reports the whole error the TUI collapses onto one truncated line.
+    [reported] = autodispatch_state["session"].info()["autodispatch_sessions"]
+    assert reported["error"] == autodispatch_state["failure"]
+
+
+@when("the user restarts autodispatch for the same scope")
+def restart_failed(autodispatch_state, monkeypatch):
+    session = autodispatch_state["session"]
+    monkeypatch.setattr(
+        session, "dispatch_once", MagicMock(return_value={"status": "no_ready_task"})
+    )
+    session.start_autodispatch(scope="owner/repo#ISSUE-42")
+
+
+@then("the old failure is no longer shown")
+def failure_removed(autodispatch_state):
+    assert all(
+        entry["status"] != "failed"
+        for entry in autodispatch_state["session"].autodispatch_sessions()
+    )
 
 
 @given("an autodispatch session for a targeted todo issue URL in group `project`")
@@ -578,3 +618,118 @@ def dashboard_failure_visible(scenario_state):
     assert "GitHub unavailable" in scenario_state["failure_display"]
     assert "failed" in scenario_state["failure_footer"].lower()
     assert "GitHub unavailable" in scenario_state["failure_footer"]
+
+
+def _issue(number: int) -> WorkItem:
+    now = datetime.now(UTC)
+    return WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=number,
+        title="Fix the thing",
+        created_at=now,
+        updated_at=now,
+        url=f"https://github.com/owner/repo/issues/{number}",
+    )
+
+
+@given("a coding agent is already running for issue `owner/repo#ISSUE-1`")
+def coding_agent_running(scenario_state, monkeypatch, tmp_path):
+    scenario_state["github"] = install_fake_github(monkeypatch)
+    session = WorkdashSession(
+        config=WorkdashConfig(
+            github_username="testuser", agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}
+        ),
+        backend=MagicMock(github_client=GitHubClient()),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+
+    def require_item(target):
+        if target != "owner/repo#ISSUE-1":
+            raise WorkdashControlError("invalid_target", target)
+        return _issue(1)
+
+    monkeypatch.setattr(session, "_require_item", require_item)
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    monkeypatch.setattr("workdash.control.existing_worktree_path", lambda *a, **kw: str(worktree))
+    panes = [
+        {"id": 7, "title": f"code_{worktree.name}"},
+        {"id": 9, "title": "code_other"},
+    ]
+    monkeypatch.setattr(session, "_live_panes", lambda: list(panes))
+
+    def close_pane(_session, pane_id):
+        panes[:] = [pane for pane in panes if f"terminal_{pane['id']}" != pane_id]
+
+    close = MagicMock(side_effect=close_pane)
+    monkeypatch.setattr("workdash.launcher.zellij.close_zellij_pane", close)
+    scenario_state.update(agent_session=session, agent_panes=panes, close_pane=close, dispatched=[])
+
+    def dispatch(**_):
+        scenario_state["dispatched"].append(any(pane["id"] == 7 for pane in panes))
+        return {"status": "no_ready_task"}
+
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+
+
+@given("issue `owner/repo#ISSUE-1` has ready work")
+def issue_has_ready_work(scenario_state):
+    scenario_state["github"].add_issue("owner/repo#1", state="OPEN")
+
+
+@given("issue `owner/repo#ISSUE-1` has no ready work")
+def issue_has_no_ready_work(scenario_state):
+    scenario_state["github"].add_issue("owner/repo#1", state="CLOSED")
+
+
+@when("the user starts autodispatch for issue `owner/repo#ISSUE-1`")
+def start_for_issue(scenario_state):
+    session = scenario_state["agent_session"]
+    session.start_autodispatch(scope="owner/repo#ISSUE-1")
+    wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "finished")
+
+
+@then("that coding agent pane is closed before the issue is dispatched")
+def pane_closed_before_dispatch(scenario_state):
+    assert scenario_state["dispatched"] == [False]
+    assert [pane["id"] for pane in scenario_state["agent_panes"]] == [9]
+    scenario_state["close_pane"].assert_called_once_with("workdash", "terminal_7")
+
+
+@then("that coding agent pane stays open")
+def pane_stays_open(scenario_state):
+    assert [pane["id"] for pane in scenario_state["agent_panes"]] == [7, 9]
+    scenario_state["close_pane"].assert_not_called()
+
+
+@when("the user starts autodispatch for repository `owner/repo`")
+def start_for_repository(scenario_state):
+    session = scenario_state["agent_session"]
+    session.start_autodispatch(scope="owner/repo")
+    wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "finished")
+
+
+@given("an autodispatch session is running for `owner/repo`")
+def running_session(autodispatch_state):
+    session = autodispatch_state["session"]
+    session.start_autodispatch(scope="owner/repo")
+    wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "running")
+
+
+@when("the user starts autodispatch again for `owner/repo`")
+def start_again(autodispatch_state):
+    session = autodispatch_state["session"]
+    [previous] = session.autodispatch_sessions()
+    autodispatch_state["previous"] = session._autodispatch[previous["id"]]
+    autodispatch_state["id"] = session.start_autodispatch(scope="owner/repo")["id"]
+
+
+@then("the previous session is stopped and replaced")
+def previous_replaced(autodispatch_state):
+    session = autodispatch_state["session"]
+    assert autodispatch_state["previous"].status == "stopped"
+    assert [entry["id"] for entry in session.autodispatch_sessions()] == [autodispatch_state["id"]]

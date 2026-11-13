@@ -175,6 +175,30 @@ def _current_briefing(scenario_state):
     assert "AUTOSTART: IMPLEMENT" not in prompt
 
 
+@given("a GitHub read of `owner/repo` fails transiently")
+def _transient_read(scenario_state, monkeypatch, request):
+    run = subprocess.run
+    remaining = [1]
+
+    def flaky(command, *args, **kwargs):
+        # The launch context is the read dispatch makes after choosing the issue.
+        if command[:3] == ["gh", "issue", "view"]:
+            if remaining:
+                remaining.pop()
+                raise failure("HTTP 502")
+            return subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps({"state": "OPEN", "title": "Fix the thing"})
+            )
+        return run(command, *args, **kwargs)
+
+    def assert_injected_failure_fired():
+        assert not remaining, "the injected transient GitHub read failure never fired"
+
+    scenario_state["real_launch_context"] = True
+    monkeypatch.setattr(subprocess, "run", flaky)
+    request.addfinalizer(assert_injected_failure_fired)
+
+
 @given("GitHub cannot report the work state")
 def _github_down(scenario_state):
     scenario_state["github"].failures["ReadyRepositoryIssues"] = failure("HTTP 502")

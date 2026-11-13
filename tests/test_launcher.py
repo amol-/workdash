@@ -1,6 +1,8 @@
 import shutil
 import subprocess
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -285,7 +287,9 @@ def test_list_workdash_sessions_treats_no_zellij_sessions_as_empty(
     assert launcher_module.zellij.list_workdash_sessions() == []
 
 
-def test_load_zellij_panes_returns_dict_panes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_zellij_panes_asks_zellij_for_every_pane_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     run_args = []
 
     def fake_run(args, **kwargs):
@@ -1495,3 +1499,59 @@ def test_terminal_launch_uses_public_zellij_operation(monkeypatch):
     result = launch_terminal_context("/tmp/repo", zellij_session="workdash-main")
     assert result is fake.launch_pane.return_value
     fake.launch_pane.assert_called_once()
+
+
+def _fake_zellij_pane_read(monkeypatch, *answers):
+    run = MagicMock(side_effect=answers)
+    monkeypatch.setattr("workdash.launcher._resolve_zellij_binary", lambda: "zellij")
+    monkeypatch.setattr("workdash.launcher._ZELLIJ_PANE_READ_RETRY_SECONDS", 0)
+    monkeypatch.setattr("workdash.launcher.subprocess.run", run)
+    return run
+
+
+@pytest.mark.parametrize(
+    "unusable_answer",
+    [
+        # Zellij 0.45.1 exits 0 and prints its session list for an unavailable session.
+        subprocess.CompletedProcess(
+            [], 0, stdout="Session 'workdash' not found. The following sessions are active:\n"
+        ),
+        subprocess.TimeoutExpired("zellij", 5),
+    ],
+    ids=["unavailable-session", "hung-zellij"],
+)
+def test_zellij_pane_read_retries_an_unusable_answer(monkeypatch, unusable_answer):
+    run = _fake_zellij_pane_read(
+        monkeypatch, unusable_answer, subprocess.CompletedProcess([], 0, stdout='[{"id": 1}]')
+    )
+    assert launcher_module.zellij.load_zellij_panes("workdash") == [{"id": 1}]
+    assert run.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        subprocess.CalledProcessError(1, "zellij", stderr="session not found"),
+        subprocess.CompletedProcess([], 0, stdout="Session 'workdash' not found."),
+        subprocess.CompletedProcess([], 0, stdout='{"id": 1}'),
+    ],
+)
+def test_zellij_pane_read_gives_up_after_retrying(monkeypatch, answer):
+    attempts = launcher_module._ZELLIJ_PANE_READ_ATTEMPTS
+    run = _fake_zellij_pane_read(monkeypatch, *[answer] * attempts)
+    with pytest.raises(RuntimeError, match="Zellij"):
+        launcher_module.zellij.load_zellij_panes("workdash")
+    assert run.call_count == attempts
+
+
+def test_zellij_pane_read_gives_up_within_a_few_seconds(monkeypatch):
+    sleep = MagicMock()
+    monkeypatch.setattr("workdash.launcher.time", SimpleNamespace(sleep=sleep))
+    run = MagicMock(side_effect=subprocess.TimeoutExpired("zellij", 5))
+    monkeypatch.setattr("workdash.launcher._resolve_zellij_binary", lambda: "zellij")
+    monkeypatch.setattr("workdash.launcher.subprocess.run", run)
+    with pytest.raises(RuntimeError, match="Zellij"):
+        launcher_module.zellij.load_zellij_panes("workdash")
+    timeouts = [call.kwargs["timeout"] for call in run.call_args_list]
+    waits = [call.args[0] for call in sleep.call_args_list]
+    assert sum(timeouts) + sum(waits) <= 5
