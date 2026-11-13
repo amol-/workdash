@@ -7,7 +7,7 @@ Feature: Generate an analysis
 
   Rules:
     - A fresh analysis can be generated with any agent configured for analysis.
-    - A fresh issue analysis reuses an existing matching worktree, or runs in a temporary detached worktree based on the target repository's current default branch, even if it has changed since cloning; the temporary worktree is removed even if analysis fails.
+    - A fresh issue analysis reuses an existing matching worktree, or runs in a temporary detached worktree based on the target repository's current default branch, even if it has changed and the old default was deleted; the temporary worktree is removed even if analysis fails.
     - Issue analysis does not create or link an issue branch; pull request analysis uses the pull request's head repository and branch.
     - Cached analysis is returned without preparing a worktree.
     - The agent can inspect the local source code alongside the supplied issue or pull request discussion.
