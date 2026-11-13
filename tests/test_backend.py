@@ -710,7 +710,13 @@ def test_analyze_item_uses_cache_then_falls_back_to_analyzer_and_saves() -> None
             self.analyze_calls: list[tuple[int, list[str] | None]] = []
 
         def analyze(
-            self, item: WorkItem, command_tokens: list[str] | None = None, *, cwd=None
+            self,
+            item: WorkItem,
+            command_tokens: list[str] | None = None,
+            *,
+            cwd=None,
+            zellij_session=None,
+            group=None,
         ) -> str | None:
             self.analyze_calls.append((item.number, command_tokens))
             return f"## Summary\nanalysis {item.number}"
@@ -747,7 +753,9 @@ def test_analyze_item_uses_cache_then_falls_back_to_analyzer_and_saves() -> None
     )
 
     cached_result = backend.analyze_item(cached_item, tool="cached")
-    generated_result = backend.analyze_item(uncached_item, tool="codex")
+    generated_result = backend.analyze_item(
+        uncached_item, tool="codex", cwd="/tmp/worktree", zellij_session="workdash-main"
+    )
 
     assert cached_result == "/tmp/analyses/owner_repo_PR100.md"
     assert generated_result == "/tmp/analyses/owner_repo_PR101.md"
@@ -803,7 +811,13 @@ def test_analyze_item_tool_claude_bypasses_cache() -> None:
             self.analyze_calls: list[tuple[int, list[str] | None]] = []
 
         def analyze(
-            self, item: WorkItem, command_tokens: list[str] | None = None, *, cwd=None
+            self,
+            item: WorkItem,
+            command_tokens: list[str] | None = None,
+            *,
+            cwd=None,
+            zellij_session=None,
+            group=None,
         ) -> str | None:
             self.analyze_calls.append((item.number, command_tokens))
             return f"## Summary\nfresh analysis {item.number}"
@@ -926,12 +940,16 @@ def test_analyze_item_runs_pi_with_its_configured_analyze_command() -> None:
         created_at=datetime(2026, 2, 2, 0, 0, 0, tzinfo=UTC),
     )
 
-    backend.analyze_item(item, tool="pi")
+    backend.analyze_item(
+        item, tool="pi", cwd="/tmp/worktree", zellij_session="workdash-main", group="repo"
+    )
 
     analyzer.analyze.assert_called_once_with(
         item,
         command_tokens=["pi", "--no-session", "--tools", "read,grep,find,ls", "-p"],
-        cwd=None,
+        cwd="/tmp/worktree",
+        zellij_session="workdash-main",
+        group="repo",
     )
     cache.save.assert_called_once_with(item, "## Summary\nanalysis")
 

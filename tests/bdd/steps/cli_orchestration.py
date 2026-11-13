@@ -145,6 +145,7 @@ def _run_workdash(
                     result = scenario_state["api_session"].analyze(
                         target=payload["target"],
                         agent=payload.get("agent"),
+                        group=payload.get("group"),
                     )
                     scenario_state["last_control_result"] = result
                     return result
@@ -156,6 +157,13 @@ def _run_workdash(
                         group=payload.get("group"),
                         autoclose=payload.get("autoclose", False),
                     )
+                if endpoint == "review":
+                    return {
+                        "status": "started",
+                        "item_id": payload["target"],
+                        "agent": payload.get("agent") or "codex",
+                        "document_path": "/tmp/review.md",
+                    }
                 if endpoint == "dispatch":
                     return scenario_state["api_session"].dispatch_once(
                         scope=payload["scope"],
@@ -713,6 +721,48 @@ def _run_action_with_agent(
         monkeypatch,
         capsys,
     )
+
+
+@when("the user runs `workdash analyze owner/repo#ISSUE-1 --group epic --json`")
+def _run_analyze_group_json(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(
+        ["analyze", "owner/repo#ISSUE-1", "--group", "epic", "--json"],
+        scenario_state,
+        monkeypatch,
+        capsys,
+    )
+
+
+@when("the user runs `workdash review owner/repo#PR-2 --group epic --json`")
+def _run_review_group_json(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_workdash(
+        ["review", "owner/repo#PR-2", "--group", "epic", "--json"],
+        scenario_state,
+        monkeypatch,
+        capsys,
+    )
+
+
+@then(parsers.parse("the command asks the server to analyze in tab `{group}`"))
+def _analyze_in_tab(group: str, scenario_state: dict[str, Any]) -> None:
+    request = scenario_state["control_requests"][-1]
+    assert request["endpoint"] == "analyze"
+    assert request["payload"]["group"] == group
+
+
+@then(parsers.parse("the command asks the server to review in tab `{group}`"))
+def _review_in_tab(group: str, scenario_state: dict[str, Any]) -> None:
+    request = scenario_state["control_requests"][-1]
+    assert request["endpoint"] == "review"
+    assert request["payload"]["group"] == group
 
 
 @when("the user runs `workdash terminal owner/repo#ISSUE-1 --json`")

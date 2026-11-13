@@ -1,3 +1,4 @@
+import json
 import shutil
 import subprocess
 from datetime import UTC, datetime
@@ -1555,3 +1556,147 @@ def test_zellij_pane_read_gives_up_within_a_few_seconds(monkeypatch):
     timeouts = [call.kwargs["timeout"] for call in run.call_args_list]
     waits = [call.args[0] for call in sleep.call_args_list]
     assert sum(timeouts) + sum(waits) <= 5
+
+
+def test_launch_pane_and_wait_blocks_on_the_pane_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launcher_module.Zellij().launch_pane_and_wait(
+        "/tmp/owner_repo_52",
+        ["/bin/bash", "-ic", "agent"],
+        context="Failed to generate analysis",
+        work_action="analyse",
+        zellij_session="workdash-main",
+        group=None,
+    )
+
+    assert commands == [
+        [
+            "/usr/bin/zellij",
+            "--session",
+            "workdash-main",
+            "action",
+            "new-pane",
+            "--name",
+            "analyse_owner_repo_52",
+            "--cwd",
+            "/tmp/owner_repo_52",
+            "--close-on-exit",
+            "--block-until-exit",
+            "--",
+            "/bin/bash",
+            "-ic",
+            "agent",
+        ]
+    ]
+
+
+def test_launch_pane_and_wait_opens_the_requested_group_tab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if command[4:5] == ["list-panes"]:
+            return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
+        stdout = "4\n" if command[4:5] == ["new-tab"] else ""
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launcher_module.Zellij().launch_pane_and_wait(
+        "/tmp/owner_repo_52",
+        ["/bin/bash", "-ic", "review"],
+        context="Failed to generate analysis",
+        work_action="review",
+        zellij_session="workdash-main",
+        group="project",
+    )
+
+    assert commands[1][4:7] == ["new-tab", "--name=project", "--no-focus"]
+    assert commands[2][4:9] == ["new-pane", "--tab-id", "4", "--name", "review_owner_repo_52"]
+
+
+def test_launch_pane_and_wait_reuses_an_existing_group_tab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if command[4:5] == ["list-panes"]:
+            return subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps([{"tab_name": "project", "tab_id": 2}]), stderr=""
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launcher_module.Zellij().launch_pane_and_wait(
+        "/tmp/owner_repo_52",
+        ["/bin/bash", "-ic", "review"],
+        context="Failed to generate analysis",
+        work_action="review",
+        zellij_session="workdash-main",
+        group="project",
+    )
+
+    assert not any(command[4:5] == ["new-tab"] for command in commands)
+    assert commands[-1][4:9] == ["new-pane", "--tab-id", "2", "--name", "review_owner_repo_52"]
+
+
+def test_launch_pane_and_wait_reports_zellij_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="",
+            stderr="Session 'workdash-main' not found.",
+        ),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Failed to generate analysis: Session 'workdash-main' not found.",
+    ):
+        launcher_module.Zellij().launch_pane_and_wait(
+            "/tmp/owner_repo_52",
+            ["/bin/bash", "-ic", "agent"],
+            context="Failed to generate analysis",
+            work_action="analyse",
+            zellij_session="workdash-main",
+            group=None,
+        )
+
+
+def test_launch_pane_and_wait_requires_a_zellij_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
+
+    with pytest.raises(RuntimeError, match="requires a Zellij session"):
+        launcher_module.Zellij().launch_pane_and_wait(
+            "/tmp/owner_repo_52",
+            ["/bin/bash", "-ic", "agent"],
+            context="Failed to generate analysis",
+            work_action="analyse",
+            zellij_session=None,
+            group=None,
+        )

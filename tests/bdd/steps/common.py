@@ -25,6 +25,7 @@ from textual.screen import ModalScreen
 
 import workdash.control as control_module
 import workdash.github_client as github_client_module
+from pane_launch_fake import install_pane_launch
 from workdash.backend import IncludeResult, compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession, format_work_item_id
@@ -149,6 +150,7 @@ def run_app(
     refresh_callback=None,
     analyze_callback=None,
     launch_callback=None,
+    review_callback=None,
     worktree_callback=None,
     terminal_callback=None,
     include_callback=None,
@@ -183,6 +185,7 @@ def run_app(
         refresh_callback=refresh_callback,
         analyze_callback=analyze_callback,
         launch_callback=launch_callback,
+        review_callback=review_callback,
         worktree_callback=worktree_callback,
         analyze_choices=config.tui_analyze_choices(),
         code_choices=config.tui_code_choices(),
@@ -292,6 +295,11 @@ def _reports_worktree_error_details(scenario_state: dict[str, Any]) -> None:
     else:
         prefix = "Worktree setup failed"
     assert f"{prefix}: worktree failed" in status
+
+
+@given("the Workdash server is not attached to a Zellij session")
+def _server_without_zellij_session(scenario_state: dict[str, Any]) -> None:
+    scenario_state["no_zellij_session"] = True
 
 
 @given("the system is running inside a Zellij session")
@@ -456,8 +464,11 @@ class FakeApiBackend:
         self._state["work_items"] = items
         return items, compute_suggestion_markers(items)
 
-    def analyze_item(self, item: WorkItem, tool: str = "codex", *, cwd=None) -> str | None:
+    def analyze_item(
+        self, item: WorkItem, tool: str = "codex", *, cwd=None, zellij_session=None, group=None
+    ) -> str | None:
         self._state.setdefault("analyze_calls", []).append((format_work_item_id(item), tool))
+        self._state["analysis_group"] = group
         if tool == "cached":
             return None
         if "analysis_path" not in self._state:
@@ -468,6 +479,12 @@ class FakeApiBackend:
             self._state.get("analysis_content", "analysis body\n"), encoding="utf-8"
         )
         return str(analysis_path)
+
+
+def install_pane(scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run each pane command in its cwd, as Zellij does, recording the launch."""
+
+    scenario_state["pane_launches"] = install_pane_launch(monkeypatch)
 
 
 def install_zellij_agent_fakes(

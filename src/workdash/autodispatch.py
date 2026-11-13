@@ -136,10 +136,14 @@ class _AutodispatchSession:
                         self.launch_reason = None
                     stage = "review"
                     review = self.owner.review(
-                        target=str(result.get("pr_id", result["item_id"])), agent=selected
+                        target=str(result.get("pr_id", result["item_id"])),
+                        agent=selected,
+                        group=self.group,
                     )
                     if "pr_id" in result and review["status"] == "nothing_to_review":
-                        self.owner.review(target=str(result["item_id"]), agent=selected)
+                        self.owner.review(
+                            target=str(result["item_id"]), agent=selected, group=self.group
+                        )
         except Exception as error:
             logger.error("Session %s failed during %s: %s", self.id, stage, safe_error(error))
             with self.lock:

@@ -28,6 +28,7 @@ Feature: CLI orchestration commands
     - `workdash info --all` also reports live non-plugin panes in the server-backed Workdash session, but extra panes are `unknown` kind with unknown item mapping.
     - Missing optional agent commands mean that agent operation is not configured, not that the whole config is invalid.
     - `workdash analyze` accepts only configured analysis agents reported by `workdash show-config`.
+    - `workdash analyze --group NAME` and `workdash review --group NAME` ask the server to open the analysis or review pane in the named Zellij tab, creating it if needed; without the option the pane opens in the tab named after the code repository's basename.
     - `workdash code` launches only configured coding agents reported by `workdash show-config`.
     - `workdash code --group NAME` asks the server to open a new agent in the named Zellij tab, creating it if needed; without the option it opens in the current tab.
     - Code results report the actual tab of the agent pane, including an already-running pane, in human and JSON output.
@@ -355,6 +356,19 @@ Feature: CLI orchestration commands
     When the user runs `workdash code owner/repo#ISSUE-1 --group epic --host dashboard.lan --json`
     Then the command connects to host `dashboard.lan`
     And the result reports the agent in tab `epic`
+
+  @id:F-CLI-ORCHESTRATION-S045
+  Scenario: Analyze asks the server for the requested tab
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current Workdash items include an assigned issue without cached analysis
+    When the user runs `workdash analyze owner/repo#ISSUE-1 --group epic --json`
+    Then the command asks the server to analyze in tab `epic`
+
+  @id:F-CLI-ORCHESTRATION-S046
+  Scenario: Review asks the server for the requested tab
+    Given a server-backed Workdash session has loaded dashboard items
+    When the user runs `workdash review owner/repo#PR-2 --group epic --json`
+    Then the command asks the server to review in tab `epic`
 
   @id:F-CLI-ORCHESTRATION-S044
   Scenario: Code with autoclose asks the server to supervise the new pane

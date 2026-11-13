@@ -179,11 +179,16 @@ class WorkdashCommands:
             _print_pane_info(result)
         return 0
 
-    def analyze_cli(self, *, target: str, agent: str | None, json_output: bool) -> int:
+    def analyze_cli(
+        self, *, target: str, agent: str | None, group: str | None, json_output: bool
+    ) -> int:
         """Analyze a current work item through the local Workdash server."""
 
+        payload: dict[str, object] = {"target": target, "agent": agent}
+        if group is not None:
+            payload["group"] = group
         try:
-            result = self._client.request("analyze", {"target": target, "agent": agent})
+            result = self._client.request("analyze", payload)
         except WorkdashControlError as error:
             _print_control_error(error)
             return 1
@@ -198,10 +203,15 @@ class WorkdashCommands:
             _print_analysis_result(result)
         return 0
 
-    def review_cli(self, *, target: str, agent: str | None, json_output: bool) -> int:
+    def review_cli(
+        self, *, target: str, agent: str | None, group: str | None, json_output: bool
+    ) -> int:
         """Review a pull request through the local Workdash server."""
+        payload: dict[str, object] = {"target": target, "agent": agent}
+        if group is not None:
+            payload["group"] = group
         try:
-            result = self._client.request("review", {"target": target, "agent": agent})
+            result = self._client.request("review", payload)
         except WorkdashControlError as error:
             _print_control_error(error)
             return 1
@@ -475,6 +485,9 @@ class WorkdashCommands:
                 autostart=False,
                 autoclose=False,
             ),
+            review_callback=lambda item, tool: session.review(
+                target=format_work_item_id(item), agent=tool, background=False
+            ),
             analyze_choices=config.tui_analyze_choices(),
             code_choices=config.tui_code_choices(),
             terminal_callback=lambda item: session.terminal(target=format_work_item_id(item)),
@@ -552,11 +565,15 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
         return commands.analyze_cli(
             target=options.target or "",
             agent=options.agent,
+            group=options.group,
             json_output=options.json_output,
         )
     if options.command == "review":
         return commands.review_cli(
-            target=options.target or "", agent=options.agent, json_output=options.json_output
+            target=options.target or "",
+            agent=options.agent,
+            group=options.group,
+            json_output=options.json_output,
         )
     if options.command == "code":
         return commands.code_cli(
@@ -708,6 +725,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         "--agent",
         help="Configured analysis agent to run when no fresh cache exists.",
     )
+    analyze_parser.add_argument("--group", help="Zellij tab for the analysis pane.")
     analyze_parser.add_argument(
         "--json",
         dest="json_output",
@@ -718,6 +736,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     review_parser = subparsers.add_parser("review", help="Review an open pull request.")
     review_parser.add_argument("target", metavar="ITEM", help="Pull request or linked issue.")
     review_parser.add_argument("--agent", help="Configured analysis agent to run.")
+    review_parser.add_argument("--group", help="Zellij tab for the review pane.")
     review_parser.add_argument(
         "--json",
         dest="json_output",

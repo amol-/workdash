@@ -14,7 +14,14 @@ from workdash.backend import IncludeResult
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
-from workdash.tui import AnalyzeDialog, CodeDialog, SearchDialog, WorkdashApp
+from workdash.tui import (
+    AnalyzeDialog,
+    BusyScreen,
+    CodeDialog,
+    ReviewDialog,
+    SearchDialog,
+    WorkdashApp,
+)
 
 _DEFAULT_TUI_CONFIG = WorkdashConfig(
     agents={
@@ -744,6 +751,16 @@ def _assert_no_modal_screens(app: WorkdashApp) -> None:
     assert lingering == []
 
 
+async def _wait_for_busy_message(expected: str, pilot) -> None:
+    for _ in range(20):
+        await pilot.pause()
+        if isinstance(pilot.app.screen, BusyScreen):
+            message = pilot.app.screen.query_one("#busy-message", Static).render().plain
+            assert message == expected
+            return
+    raise AssertionError(f"no busy screen shown; expected {expected!r}")
+
+
 async def _wait_for_footer(footer: Static, expected: str, pilot) -> None:
     for _ in range(20):
         await pilot.pause()
@@ -814,13 +831,171 @@ def test_code_dialog_shows_every_choice_without_scrolling() -> None:
             assert isinstance(app.screen, CodeDialog)
             lines = [str(line.render()) for line in app.screen.query(".code-line")]
             assert lines[1] == "(1) agent1"
-            assert lines[-4:] == [
+            assert lines[-5:] == [
                 "(e) edit (VSCode Copilot)",
                 "(d) branchdiff",
                 "(t) terminal",
+                "(r) auto review",
                 "(Esc) Cancel",
             ]
             assert app.screen.query_one("#code-shell").max_scroll_y == 0
+
+    asyncio.run(run_smoke())
+
+
+def test_code_menu_auto_review_waits_with_a_progress_dialog_then_reports_completion() -> None:
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+    )
+    review_calls: list[tuple[WorkItem, str]] = []
+    release_review = threading.Event()
+
+    def review_callback(item: WorkItem, agent: str) -> dict[str, object]:
+        review_calls.append((item, agent))
+        release_review.wait(5)
+        return {"status": "reviewed", "agent": agent}
+
+    app = WorkdashApp(
+        work_items=[work_item],
+        analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
+        code_choices=_DEFAULT_TUI_CONFIG.tui_code_choices(),
+        review_callback=review_callback,
+        now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await pilot.press("c")
+            await pilot.pause()
+            assert isinstance(app.screen, CodeDialog)
+            await pilot.press("r")
+            await pilot.pause()
+            assert isinstance(app.screen, ReviewDialog)
+            lines = [str(line.render()) for line in app.screen.query(".review-line")]
+            assert lines == ["Review with:", "(1) claude", "(2) codex", "(Esc) Cancel"]
+
+            await pilot.press("2")
+            await _wait_for_busy_message("Reviewing with codex...", pilot)
+            assert review_calls == [(work_item, "codex")]
+            release_review.set()
+            await _wait_for_footer(
+                app.query_one("#status-footer", Static),
+                "Reviewed pr owner/repo#22 with codex.",
+                pilot,
+            )
+            _assert_no_modal_screens(app)
+
+    asyncio.run(run_smoke())
+
+
+def test_code_menu_auto_review_reports_the_agent_that_reviewed() -> None:
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+    )
+    review_calls: list[tuple[WorkItem, str]] = []
+    app = WorkdashApp(
+        work_items=[work_item],
+        analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
+        code_choices=_DEFAULT_TUI_CONFIG.tui_code_choices(),
+        review_callback=lambda item, agent: (
+            review_calls.append((item, agent)) or {"status": "reviewed", "agent": "claude"}
+        ),
+        now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await pilot.press("c", "r", "2")
+            await _wait_for_footer(
+                app.query_one("#status-footer", Static),
+                "Reviewed pr owner/repo#22 with claude.",
+                pilot,
+            )
+            assert review_calls == [(work_item, "codex")]
+
+    asyncio.run(run_smoke())
+
+
+def test_code_menu_auto_review_reports_nothing_to_review() -> None:
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=11,
+        title="Fix parser",
+        created_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/issues/11",
+    )
+    app = WorkdashApp(
+        work_items=[work_item],
+        analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
+        review_callback=lambda item, agent: {"status": "nothing_to_review"},
+        now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await pilot.press("c", "r", "1")
+            await _wait_for_footer(
+                app.query_one("#status-footer", Static),
+                "Nothing to review for issue owner/repo#11.",
+                pilot,
+            )
+
+    asyncio.run(run_smoke())
+
+
+def test_code_menu_auto_review_failure_reports_the_error() -> None:
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+    )
+
+    def failing_review(item: WorkItem, agent: str) -> dict[str, object]:
+        raise RuntimeError("review failed")
+
+    app = WorkdashApp(
+        work_items=[work_item],
+        analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
+        review_callback=failing_review,
+        now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+    )
+    notifications: list[tuple[str, str | None]] = []
+    app.notify = lambda message, **kwargs: notifications.append(  # type: ignore[method-assign]
+        (message, kwargs.get("severity"))
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            await pilot.press("c", "r", "1")
+            await _wait_for_footer(
+                app.query_one("#status-footer", Static),
+                "Review failed: review failed",
+                pilot,
+            )
+            assert notifications == [("Review failed: review failed", "error")]
+            _assert_no_modal_screens(app)
 
     asyncio.run(run_smoke())
 

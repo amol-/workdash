@@ -257,10 +257,16 @@ class WorkdashSession:
         }
 
     def analyze(
-        self, *, target: str, agent: str | None = None, prefer_cache: bool = True
+        self,
+        *,
+        target: str,
+        agent: str | None = None,
+        prefer_cache: bool = True,
+        group: str | None = None,
     ) -> dict[str, object]:
         """Analyze an explicit target through the shared action path."""
 
+        _validate_group(group)
         item = self._require_item(target)
         with self._lock:
             item_id = format_work_item_id(item)
@@ -284,6 +290,7 @@ class WorkdashSession:
                 item,
                 tool=selected_agent or "cached",
                 prefer_cache=prefer_cache,
+                group=group or _default_group(item),
             )
             if path is None:
                 raise WorkdashControlError(
@@ -313,9 +320,15 @@ class WorkdashSession:
             }
 
     def review(
-        self, *, target: str, agent: str | None = None, background: bool = False
+        self,
+        *,
+        target: str,
+        agent: str | None = None,
+        background: bool = False,
+        group: str | None = None,
     ) -> dict[str, object]:
         """Review an open pull request using a configured one-shot agent."""
+        _validate_group(group)
         item = self._require_item(target)
         if item.item_type == WorkItemType.ISSUE:
             linked = self.backend.github_client.linked_open_pull_request(item)
@@ -337,6 +350,13 @@ class WorkdashSession:
                     raise WorkdashControlError(
                         "no_agent", "No analysis agents are configured.", status=HTTPStatus.CONFLICT
                     )
+                if not self.zellij_session:
+                    raise WorkdashControlError(
+                        "zellij_session_required",
+                        "Review requires a known Workdash Zellij session.",
+                        status=HTTPStatus.CONFLICT,
+                    )
+                selected_group = group or _default_group(item)
                 with self._lock:
                     cwd = ensure_worktree(
                         self.config.workdir,
@@ -372,7 +392,14 @@ class WorkdashSession:
         def run_review():
             try:
                 result = review_pull_request(
-                    item, context=context, cwd=cwd, tokens=tokens, document=document, git=self.git
+                    item,
+                    context=context,
+                    cwd=cwd,
+                    tokens=tokens,
+                    document=document,
+                    git=self.git,
+                    zellij_session=self.zellij_session,
+                    group=selected_group,
                 )
                 result["agent"] = selected
             except BaseException as error:
@@ -434,10 +461,7 @@ class WorkdashSession:
             from GitHub state and closing it when the work is done. Needs ``autostart``.
         """
 
-        if group is not None and (not isinstance(group, str) or not group.strip()):
-            raise WorkdashControlError(
-                "bad_request", "Group must be a non-empty string.", status=HTTPStatus.BAD_REQUEST
-            )
+        _validate_group(group)
         if autoclose and not autostart:
             raise WorkdashControlError(
                 "bad_request",
@@ -976,7 +1000,7 @@ class WorkdashSession:
             implementation = (
                 candidate.pull_request.item if candidate.pull_request else candidate.item
             )
-            selected_group = group or display_repo(implementation).rsplit("/", 1)[-1]
+            selected_group = group or _default_group(implementation)
             launch = self.code(
                 target=candidate_id,
                 agent=agent,
@@ -1033,19 +1057,30 @@ class WorkdashSession:
         if self.items_changed_callback is not None:
             self.items_changed_callback()
 
-    def _analyze_item(self, item: WorkItem, *, tool: str, prefer_cache: bool) -> str | None:
+    def _analyze_item(
+        self, item: WorkItem, *, tool: str, prefer_cache: bool, group: str
+    ) -> str | None:
         if prefer_cache:
             cached_path = self.backend.analyze_item(item, tool="cached")
             if cached_path is not None:
                 return cached_path
-        cwd = (
-            ensure_worktree(
-                self.config.workdir, item, git=self.git, github_client=self.backend.github_client
+        if tool == "cached":
+            return None
+        if not self.zellij_session:
+            raise WorkdashControlError(
+                "zellij_session_required",
+                "Analysis requires a known Workdash Zellij session.",
+                status=HTTPStatus.CONFLICT,
             )
-            if tool != "cached"
-            else None
+        return self.backend.analyze_item(
+            item,
+            tool=tool,
+            cwd=ensure_worktree(
+                self.config.workdir, item, git=self.git, github_client=self.backend.github_client
+            ),
+            zellij_session=self.zellij_session,
+            group=group,
         )
-        return self.backend.analyze_item(item, tool=tool, cwd=cwd)
 
     def analysis_url(self, item: WorkItem) -> str:
         """Return the HTTP URL under which this item's analysis markdown is served."""
@@ -1555,6 +1590,7 @@ def _make_turbogears_app(session: WorkdashSession):
                 lambda payload: self._session.analyze(
                     target=_required_text(payload, "target"),
                     agent=_optional_text(payload, "agent"),
+                    **({"group": _required_text(payload, "group")} if "group" in payload else {}),
                 ),
             )
 
@@ -1567,6 +1603,7 @@ def _make_turbogears_app(session: WorkdashSession):
                     target=_required_text(payload, "target"),
                     agent=_optional_text(payload, "agent"),
                     background=True,
+                    **({"group": _required_text(payload, "group")} if "group" in payload else {}),
                 ),
             )
 
@@ -1889,6 +1926,19 @@ def _optional_text(payload: dict[str, object], field: str) -> str | None:
             status=HTTPStatus.BAD_REQUEST,
         )
     return value
+
+
+def _validate_group(group: str | None) -> None:
+    if group is not None and (not isinstance(group, str) or not group.strip()):
+        raise WorkdashControlError(
+            "bad_request", "Group must be a non-empty string.", status=HTTPStatus.BAD_REQUEST
+        )
+
+
+def _default_group(item: WorkItem) -> str:
+    """The Zellij tab that groups the panes of the item's code repository."""
+
+    return display_repo(item).rsplit("/", 1)[-1]
 
 
 def _optional_bool(payload: dict[str, object], field: str) -> bool:

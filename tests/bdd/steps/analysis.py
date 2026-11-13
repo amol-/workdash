@@ -8,8 +8,8 @@ the WorkdashBackend + AnalysisCache layer for cache-freshness scenarios.
 from __future__ import annotations
 
 import json
-import shlex
 import subprocess
+import sys
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
@@ -23,13 +23,20 @@ from textual.widgets import Static
 from workdash.analysis_cache import AnalysisCache
 from workdash.analyzer import Analyzer
 from workdash.backend import WorkdashBackend
-from workdash.config import WorkdashConfig
+from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession, format_work_item_id
 from workdash.launcher import open_in_browser
 from workdash.models import WorkItem
 from workdash.tui import AnalyzeDialog, WorkdashApp
 
-from .common import NOW_UTC, make_valid_config, make_work_item, modal_screen_names
+from .common import (
+    NOW_UTC,
+    _configure_agents,
+    install_pane,
+    make_valid_config,
+    make_work_item,
+    modal_screen_names,
+)
 
 # --------------------------------------------------------------------------
 # Shared helpers for analysis scenarios
@@ -333,6 +340,32 @@ def _have_analyze_dialog_on_cached(
     scenario_state["cache"] = cache
 
 
+@given(parsers.parse('the item\'s worktree directory is named "{name}"'))
+def _worktree_directory_name(scenario_state: dict[str, Any], name: str) -> None:
+    scenario_state["worktree_name"] = name
+
+
+@then(parsers.parse('the analysis agent runs in a Zellij pane named "{pane_name}"'))
+def _analysis_pane_name(scenario_state: dict[str, Any], pane_name: str) -> None:
+    launches = scenario_state["pane_launches"]
+    assert len(launches) == 1, launches
+    assert launches[0]["pane_name"] == pane_name
+
+
+@then(parsers.parse('the analysis pane opens in the Zellij tab named "{tab_name}"'))
+def _analysis_pane_tab(scenario_state: dict[str, Any], tab_name: str) -> None:
+    assert [launch["group"] for launch in scenario_state["pane_launches"]] == [tab_name]
+
+
+@then("the system reports that analysis requires a Zellij session")
+def _analysis_needs_zellij(scenario_state: dict[str, Any]) -> None:
+    assert "requires a known Workdash Zellij session" in scenario_state["analyze_status"], (
+        scenario_state["analyze_status"]
+    )
+    assert scenario_state["worktree_calls"] == []
+    assert scenario_state["pane_launches"] == []
+
+
 @given("the next fresh analysis will fail")
 def _next_fresh_fails(scenario_state: dict[str, Any]) -> None:
     scenario_state["_fresh_fails"] = True
@@ -366,8 +399,6 @@ def _run_generate_fresh(
 ) -> None:
     """Drive fresh analysis through the TUI, session, analyzer and cache."""
 
-    from workdash.config import AgentConfig
-
     worktree_calls: list[WorkItem] = []
     analyze_calls: list[tuple[WorkItem, str]] = []
     opened_paths: list[str] = []
@@ -376,15 +407,11 @@ def _run_generate_fresh(
     cache = AnalysisCache(tmp_path / "cache")
     analyzer = Analyzer()
     scenario_state["target_source"] = {"src/cards.py": "value = 42\n"}
-    _install_analysis_agent(scenario_state, monkeypatch, output=fresh_body)
+    _install_analysis_agent(scenario_state, monkeypatch, tmp_path, output=fresh_body)
 
     config = WorkdashConfig(
         github_username="testuser",
-        agents={
-            "codex": AgentConfig(analyze="codex exec", launch="codex"),
-            "claude": AgentConfig(analyze="claude -p", launch="claude"),
-            "pi": AgentConfig(launch="pi"),
-        },
+        agents=scenario_state["agents"],
         repositories=("owner/repo",),
         workdir=str(tmp_path / "wrk"),
     )
@@ -396,7 +423,7 @@ def _run_generate_fresh(
 
     def worktree_callback(item: WorkItem) -> str:
         worktree_calls.append(item)
-        root = tmp_path / "wt"
+        root = tmp_path / scenario_state.get("worktree_name", "wt")
         for name, content in scenario_state["target_source"].items():
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -408,7 +435,7 @@ def _run_generate_fresh(
         backend=backend,
         work_items=list(work_items),
         suggestion_markers={},
-        zellij_session=None,
+        zellij_session=None if scenario_state.get("no_zellij_session") else "workdash-main",
     )
     monkeypatch.setattr(
         "workdash.control.ensure_worktree", lambda workdir, item, **_kwargs: worktree_callback(item)
@@ -461,6 +488,8 @@ def _run_generate_fresh(
     scenario_state["busy_messages"] = busy_messages
     scenario_state["cache"] = cache
     scenario_state["fresh_body"] = fresh_body
+    if scenario_state["agent_record"].exists():
+        _record_agent_run(scenario_state)
 
 
 @when("the user chooses to open the cached analysis")
@@ -568,9 +597,45 @@ def _previous_cache_preserved(scenario_state: dict[str, Any]) -> None:
 
 
 def _install_analysis_agent(
-    scenario_state, monkeypatch, *, output="# Analysis\nSource inspection complete."
+    scenario_state, monkeypatch, tmp_path, *, output="# Analysis\nSource inspection complete."
 ):
-    """Fake only GitHub and the external agent, inspecting its cwd and prompt."""
+    """Fake GitHub and Zellij; the analysis agent is a real script the pane runs."""
+    record = tmp_path / "agent-record.json"
+    agent = tmp_path / "analysis-agent"
+    sources = sorted(scenario_state.get("target_source", {}))
+    failure = (
+        "sys.stderr.write('analysis failed\\n')\nsys.exit(1)\n"
+        if scenario_state.get("_fresh_fails")
+        else ""
+    )
+    agent.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        "root = pathlib.Path.cwd()\n"
+        "record = {'cwd': str(root), 'prompt': sys.argv[-1],\n"
+        f"          'sources': {{path: (root / path).read_text() for path in {sources!r}}}}}\n"
+        f"pathlib.Path({str(record)!r}).write_text(json.dumps(record))\n"
+        f"print({output!r})\n" + failure,
+        encoding="utf-8",
+    )
+    agent.chmod(0o755)
+    scenario_state["agent_command"] = str(agent)
+    scenario_state["agent_record"] = record
+    install_pane(scenario_state, monkeypatch)
+    _install_github_discussion(scenario_state, monkeypatch)
+    _configure_agents(
+        scenario_state,
+        {
+            "codex": AgentConfig(analyze=str(agent), launch="codex"),
+            "claude": AgentConfig(analyze=str(agent), launch="claude"),
+            "pi": AgentConfig(launch="pi"),
+        },
+    )
+
+
+def _install_github_discussion(scenario_state, monkeypatch):
+    """Fake the GitHub discussion the analysis prompt is built from."""
+
     previous_run = subprocess.run
 
     def fake_run(command, **kwargs):
@@ -580,22 +645,17 @@ def _install_analysis_agent(
                 "discussion", {"title": "Issue title", "body": "Issue discussion"}
             )
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps(discussion), stderr="")
-        if len(command) > 1 and command[1] == "-ic":
-            if scenario_state.get("_fresh_fails"):
-                raise subprocess.CalledProcessError(1, command, stderr="analysis failed")
-            root = Path(kwargs["cwd"])
-            prompt = shlex.split(command[2])[-1]
-            scenario_state["agent_cwd"] = root
-            scenario_state["agent_prompt"] = prompt
-            scenario_state["agent_sources"] = {
-                path: (root / path).read_text() for path in scenario_state["target_source"]
-            }
-            assert "Inspect the local source code" in prompt
-            assert "file path and line number without a URL" in prompt
-            return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
         return previous_run(command, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+def _record_agent_run(scenario_state):
+    """Expose what the real analysis agent saw to the scenario steps."""
+    record = json.loads(Path(scenario_state["agent_record"]).read_text(encoding="utf-8"))
+    scenario_state["agent_cwd"] = Path(record["cwd"])
+    scenario_state["agent_prompt"] = record["prompt"]
+    scenario_state["agent_sources"] = record["sources"]
 
 
 def run_source_analysis(scenario_state, monkeypatch, tmp_path):
@@ -603,9 +663,10 @@ def run_source_analysis(scenario_state, monkeypatch, tmp_path):
 
     session = scenario_state["api_session"]
     _install_fake_git(scenario_state, monkeypatch, workdir=Path(session.config.workdir))
-    _install_analysis_agent(scenario_state, monkeypatch)
+    _install_analysis_agent(scenario_state, monkeypatch, tmp_path)
     session.backend = WorkdashBackend(config=session.config, cache_root=tmp_path / "analysis-cache")
     session.analyze(target=format_work_item_id(scenario_state["todo_item"]), prefer_cache=False)
+    _record_agent_run(scenario_state)
     scenario_state["worktree_path"] = str(scenario_state["agent_cwd"])
 
 
@@ -616,6 +677,8 @@ def _fresh_agent_has_source_and_discussion(scenario_state, tmp_path):
     assert scenario_state["agent_cwd"] == tmp_path / "wt"
     assert scenario_state["agent_sources"]["src/cards.py"] == "value = 42\n"
     assert "Issue discussion" in scenario_state["agent_prompt"]
+    assert "Inspect the local source code" in scenario_state["agent_prompt"]
+    assert "file path and line number without a URL" in scenario_state["agent_prompt"]
 
 
 @given(parsers.parse("the selected work item's code is hosted at `{repository}`"))

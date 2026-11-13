@@ -1830,9 +1830,15 @@ def test_fake_git_prepares_and_reuses_review_worktree_with_merge_base(monkeypatc
     assert git.clones == [("fork/repo", tmp_path / "fork_repo")]
     assert "git diff base123..HEAD" in launch.call_args.args[1]
     assert git.fetches == ["origin", "upstream"]
+    session.zellij_session = "workdash-main"
     analysis = session.analyze(target="owner/repo#CHECK-42", agent="pi", prefer_cache=False)
     assert analysis["status"] == "generated"
-    assert backend.analyze_item.call_args.kwargs == {"tool": "pi", "cwd": path}
+    assert backend.analyze_item.call_args.kwargs == {
+        "tool": "pi",
+        "cwd": path,
+        "zellij_session": "workdash-main",
+        "group": "repo",
+    }
     assert git.pulls == [Path(path)]
     assert git.fetches == ["origin", "upstream", "upstream"]
     artifacts = Path(path) / ".workdash"

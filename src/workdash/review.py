@@ -10,7 +10,15 @@ from .models import WorkItem, WorkItemType
 
 
 def review_pull_request(
-    item: WorkItem, *, context: dict, cwd: str, tokens: list[str], document: Path, git: GitHelper
+    item: WorkItem,
+    *,
+    context: dict,
+    cwd: str,
+    tokens: list[str],
+    document: Path,
+    git: GitHelper,
+    zellij_session: str,
+    group: str | None,
 ) -> dict:
     """Run a review and return the fresh completion document."""
     exclude = git.get_git_path("info/exclude", Path(cwd))
@@ -47,7 +55,13 @@ def review_pull_request(
                     f"Previous agent output file: {output_file}"
                 )
             output = analyzer._run_analysis_command(
-                item=item, prompt=prompt, command_tokens=tokens, cwd=cwd
+                item=item,
+                prompt=prompt,
+                command_tokens=tokens,
+                cwd=cwd,
+                work_action="review",
+                zellij_session=zellij_session,
+                group=group,
             )
             if document.is_file():
                 content = document.read_text(encoding="utf-8", errors="replace")

@@ -42,7 +42,7 @@ _DETECTABLE_AGENTS = {
 # the code dialog's editor launch).
 _RESERVED_AGENT_NAMES = frozenset({"cached", "vscode"})
 # The TUI dialogs number agent entries with single keys, so a section holds at most
-# nine agents. The code menu's edit, branchdiff and terminal entries take letters.
+# nine agents. The code menu's edit, branchdiff, terminal and review entries take letters.
 _MAX_AGENTS = 9
 # What each section of the wizard's agent step asks for: the command's purpose and an example.
 _AGENT_SECTION_HELP = {

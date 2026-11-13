@@ -154,8 +154,8 @@ workdash ready SCOPE [--json]   # list the GitHub work ready to be picked up nex
 workdash dispatch SCOPE [--agent NAME] [--group NAME] [--host HOST] [--json]  # launch one ready issue
 workdash autodispatch SCOPE [--group NAME] [--agent NAME] [--host HOST] [--json]  # start a session
 workdash autodispatch-stop SESSION_ID [--host HOST] [--json]  # stop a session
-workdash analyze ITEM [--agent NAME] [--json]  # analyze an item
-workdash review ITEM [--agent NAME] [--json]   # autonomously review an open PR
+workdash analyze ITEM [--agent NAME] [--group NAME] [--json]  # analyze an item
+workdash review ITEM [--agent NAME] [--group NAME] [--json]   # autonomously review an open PR
 workdash code ITEM [--agent NAME] [--group NAME] [--autoclose] [--json]  # launch an autonomous coding agent, or report the running one
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
 workdash todo TEXT [--target REPOSITORY] [--body BODY] [--json]  # capture a todo
@@ -213,7 +213,10 @@ The `repositories` list in `config.json` accepts:
   (if any), or run a fresh analysis with any configured analysis agent. Fresh
   analyses are cached and rendered as HTML with your configured viewer.
 - `c` — open the code menu for the selected item. Choose a numbered coding
-  agent, `(e) edit` for VSCode Copilot, `(d) branchdiff`, or `(t) terminal`. `workdash` prepares a
+  agent, `(e) edit` for VSCode Copilot, `(d) branchdiff`, `(t) terminal`, or
+  `(r) auto review`, which asks which analysis agent reviews the item, shows a
+  progress dialog until the review finishes, and then reports the outcome.
+  `workdash` prepares a
   dedicated git worktree for the item and starts the chosen tool in it, preloaded
   with context about the issue or PR. If an agent is already running in the
   item's worktree, choosing a numbered agent focuses its pane instead of launching another.
@@ -455,7 +458,7 @@ Workdash session as `kind=unknown` with unknown item mapping.
 
 ## Analyze command
 
-`workdash analyze ITEM [--agent NAME] [--json]` requires a running
+`workdash analyze ITEM [--agent NAME] [--group NAME] [--json]` requires a running
 `workdash --server` session and analyzes a work item. `ITEM` can be a row ID from
 `workdash list` (such as `owner/repo#ISSUE-123`), `owner/repo#123` for an issue,
 or a GitHub issue/PR URL. The item does not need to be on the dashboard: the
@@ -463,7 +466,10 @@ server looks up any issue or pull request it can access on GitHub, without addin
 it to `workdash list` or to the included items. `workdash terminal` accepts the
 same items. It reuses a
 fresh cached analysis when available, otherwise the server prepares the item's
-worktree and runs the selected configured analysis agent.
+worktree and runs the selected configured analysis agent in a Zellij pane named
+`analyse_<worktree>`. The pane opens in the tab named by `--group`, or else in the
+tab named after the code repository's basename. A fresh analysis needs a known
+Zellij session; a cached analysis works without one.
 
 The server analyze response includes `content_type` (`text/markdown`), `file_name`,
 and base64 `file_content` so clients do not need filesystem access to the server
@@ -473,11 +479,14 @@ base64 content.
 
 ## Review command
 
-`workdash review ITEM [--agent NAME] [--json]` requires a running server. ITEM
-accepts the same references as `analyze`: a pull request or an issue with a linked
-open pull request. If there is no open pull request, it reports nothing to review.
-The server prepares the PR worktree and starts a background review using the
-selected configured analysis agent without using the analysis cache. The command returns the
+`workdash review ITEM [--agent NAME] [--group NAME] [--json]` requires a running
+server. ITEM accepts the same references as `analyze`: a pull request or an issue
+with a linked open pull request. If there is no open pull request, it reports
+nothing to review. The server prepares the PR worktree and starts a background
+review in a Zellij pane named `review_<worktree>`, opened in the tab named by
+`--group` or else the code repository's basename, using the selected configured
+analysis agent without using the analysis cache. A review needs a known Zellij
+session. The command returns the
 started review, agent, and intended document path on the server without waiting for completion.
 The document may not exist yet, and a failed review may not produce it. The first analysis
 agent is selected by default. The agent needs GitHub access and permission to

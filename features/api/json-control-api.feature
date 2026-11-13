@@ -32,6 +32,7 @@ Feature: Local JSON control API
     - Acting on a target outside the dashboard neither adds it to the dashboard list nor to the included items.
     - `POST /api/v0/code` accepts an optional boolean `autostart`, false when omitted, that makes a newly launched coding agent work autonomously; any non-boolean value is rejected as a bad request without launching anything.
     - `POST /api/v0/code` accepts an optional nonempty `group` string naming the Zellij tab for a new agent; the server creates the tab if absent, and omitting it opens the pane in the current tab.
+    - `POST /api/v0/analyze` and `POST /api/v0/review` accept an optional nonempty `group` string naming the Zellij tab for the analysis or review pane; the server creates the tab if absent, and omitting it opens the pane in the tab named after the code repository's basename.
     - Code responses report the actual tab of the live pane, including when an existing agent already holds the worktree.
     - Target errors are distinct: a malformed target is `invalid_target` (400), an issue or pull request GitHub cannot find or the server cannot access is `unknown_item` (404), an issue reference naming a pull request or the reverse is `unsupported_item_type` (400), and a failing GitHub request is `github_error` (502).
     - `POST /api/v0/ready` takes a required `scope` and returns the ready work as an ordered `items` list; a pull request ID or URL is not an issue scope and is `unsupported_item_type` (400).
@@ -60,6 +61,13 @@ Feature: Local JSON control API
     And the current dashboard items include `owner/repo#ISSUE-1`
     When a client requests the item's analysis URL
     Then the API returns a not found error
+
+  @id:F-API-JSON-CONTROL-S037
+  Scenario: Analyze API runs the analysis in the requested tab
+    Given a server-backed Workdash session has loaded dashboard items
+    And the current dashboard items include `owner/repo#ISSUE-1`
+    When a client requests analysis for `owner/repo#ISSUE-1` in group `epic`
+    Then the server runs the analysis in the Zellij tab named `epic`
 
   @id:F-API-JSON-CONTROL-S001
   Scenario: Server-backed startup exposes a local JSON API with the TUI

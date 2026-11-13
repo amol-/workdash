@@ -188,6 +188,51 @@ class AnalyzeDialog(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class ReviewDialog(ModalScreen[str | None]):
+    """Modal dialog for choosing which analysis agent reviews the selected item."""
+
+    DEFAULT_CSS = """
+        #review-shell {
+            align: center middle;
+            width: 50;
+            height: auto;
+            max-height: 17;
+            border: solid $accent;
+            background: $surface;
+            padding: 1 2;
+        }
+        .review-line {
+            width: 100%;
+        }
+        """
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, *, choices: Sequence[WorkdashAgentChoice]) -> None:
+        super().__init__()
+        self._choices = tuple(choices)
+        self._choices_by_key = {choice.key: choice for choice in self._choices}
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="review-shell"):
+            yield Static("Review with:", classes="review-line")
+            yield Static("")
+            for choice in self._choices:
+                yield Static(f"({choice.key}) {choice.agent}", classes="review-line", markup=False)
+            if not self._choices:
+                yield Static("No analysis agents configured.", classes="review-line")
+            yield Static("")
+            yield Static("(Esc) Cancel", classes="review-line")
+
+    def on_key(self, event) -> None:
+        choice = self._choices_by_key.get(event.key)
+        if choice is not None:
+            event.stop()
+            self.dismiss(choice.agent)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class CodeDialog(ModalScreen[str | None]):
     """Modal dialog for choosing a coding action for the selected item."""
 
@@ -196,7 +241,7 @@ class CodeDialog(ModalScreen[str | None]):
             align: center middle;
             width: 50;
             height: auto;
-            max-height: 20;
+            max-height: 21;
             border: solid $accent;
             background: $surface;
             padding: 1 2;
@@ -224,12 +269,13 @@ class CodeDialog(ModalScreen[str | None]):
             yield Static("(e) edit (VSCode Copilot)", classes="code-line")
             yield Static("(d) branchdiff", classes="code-line")
             yield Static("(t) terminal", classes="code-line")
+            yield Static("(r) auto review", classes="code-line")
             yield Static("(Esc) Cancel", classes="code-line")
 
     def on_key(self, event) -> None:
-        if event.key in {"e", "d", "t"}:
+        if event.key in {"e", "d", "t", "r"}:
             event.stop()
-            self.dismiss({"e": ":edit", "d": ":diff", "t": ":terminal"}[event.key])
+            self.dismiss({"e": ":edit", "d": ":diff", "t": ":terminal", "r": ":review"}[event.key])
             return
         choice = self._choices_by_key.get(event.key)
         if choice is not None:
@@ -399,6 +445,7 @@ class WorkdashApp(App[None]):
         refresh_callback: Callable[[], RefreshCallbackResult] | None = None,
         analyze_callback: Callable[[WorkItem, str], AnalyzeCallbackResult] | None = None,
         launch_callback: Callable[[WorkItem, str], dict[str, object]] | None = None,
+        review_callback: Callable[[WorkItem, str], dict[str, object]] | None = None,
         worktree_callback: Callable[[WorkItem], str] | None = None,
         analyze_choices: Sequence[WorkdashAgentChoice] | None = None,
         code_choices: Sequence[WorkdashAgentChoice] | None = None,
@@ -424,6 +471,7 @@ class WorkdashApp(App[None]):
         self._refresh_callback = refresh_callback
         self._analyze_callback = analyze_callback
         self._launch_callback = launch_callback
+        self._review_callback = review_callback
         self._worktree_callback = worktree_callback
         self._analyze_choices = tuple(analyze_choices or ())
         self._code_choices = tuple(code_choices or ())
@@ -866,6 +914,8 @@ class WorkdashApp(App[None]):
                 self._run_after_dialog(lambda: self.action_show_branchdiff(selected_item))
             elif choice == ":terminal":
                 self._run_after_dialog(lambda: self.action_open_terminal(selected_item))
+            elif choice == ":review":
+                self._run_after_dialog(lambda: self._choose_review_agent(selected_item))
             else:
                 self._run_after_dialog(
                     lambda: self._perform_launch(
@@ -899,6 +949,41 @@ class WorkdashApp(App[None]):
         self._update_status(
             f"Launched {tool_label} for {item.item_type.value} {item.repo}#{item.number}."
         )
+
+    async def _choose_review_agent(self, item: WorkItem) -> None:
+        """Ask which analysis agent reviews ``item``, then start the review."""
+
+        def _on_dialog_result(choice: str | None) -> None:
+            if choice is not None:
+                self._run_after_dialog(lambda: self._perform_review(item, choice))
+
+        await self.push_screen(
+            ReviewDialog(choices=self._analyze_choices), callback=_on_dialog_result
+        )
+
+    async def _perform_review(self, item: WorkItem, choice: str) -> None:
+        """Review the pull request after the user picks an analysis agent."""
+
+        if self._review_callback is None:
+            self._update_status("Review skipped.")
+            return
+        tool_label = self._choice_tool_label(self._analyze_choices, choice)
+        item_label = f"{item.item_type.value} {item.repo}#{item.number}"
+        try:
+            result = await self._run_with_busy_screen(
+                message=f"Reviewing with {tool_label}...",
+                callback=lambda c=choice: self._review_callback(item, c),
+            )
+        except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
+            self._update_status(f"Review failed: {error}")
+            self.notify(f"Review failed: {error}", severity="error", timeout=10, markup=False)
+            return
+        if result["status"] == "nothing_to_review":
+            self._update_status(f"Nothing to review for {item_label}.")
+            return
+        # A repeated request waits on the running review, whose agent may differ.
+        reviewed_label = self._choice_tool_label(self._analyze_choices, str(result["agent"]))
+        self._update_status(f"Reviewed {item_label} with {reviewed_label}.")
 
     async def _focus_pane(self, pane_id: str) -> None:
         """Focus a Zellij pane by its ID."""

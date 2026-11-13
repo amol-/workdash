@@ -897,6 +897,45 @@ def test_autodispatch_reviews_before_reselecting_and_limits_consecutive_issues(
         assert review_event == ("review", *dispatch_event[1:])
 
 
+def test_autodispatch_reviews_in_its_group(monkeypatch):
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    dispatch = MagicMock(
+        side_effect=[
+            {
+                "status": "launched",
+                "item_id": "owner/repo#ISSUE-1",
+                "pr_id": "owner/repo#PR-2",
+                "pane_id": "terminal_1",
+                "session": "workdash",
+            },
+            {"status": "no_ready_task"},
+        ]
+    )
+    reviews = []
+
+    def review(**kwargs):
+        reviews.append((kwargs["target"], kwargs["group"]))
+        return {"status": "nothing_to_review"}
+
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    monkeypatch.setattr(session, "review", review)
+    monkeypatch.setattr("workdash.launcher.zellij", MagicMock(load_zellij_panes=lambda _: []))
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.001)
+    session.start_autodispatch(scope="owner/repo", group="epic")
+    entry = next(iter(session._autodispatch.values()))
+    entry.thread.join(timeout=3)
+    assert not entry.thread.is_alive()
+    assert entry.status == "finished"
+    # The pull request review and the retry on the issue both stay in the group.
+    assert reviews == [("owner/repo#PR-2", "epic"), ("owner/repo#ISSUE-1", "epic")]
+
+
 def test_autodispatch_fails_on_review_error(monkeypatch):
     session = WorkdashSession(
         config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
@@ -1038,7 +1077,7 @@ def test_autodispatch_waits_for_selected_pull_request_review(monkeypatch, tmp_pa
     entered, release = threading.Event(), threading.Event()
     reviewed = []
 
-    def reviewer(*, item, prompt, command_tokens, cwd):
+    def reviewer(*, item, prompt, command_tokens, cwd, work_action, zellij_session, group):
         reviewed.append(item.number)
         entered.set()
         assert release.wait(3)
@@ -1054,7 +1093,7 @@ def test_autodispatch_waits_for_selected_pull_request_review(monkeypatch, tmp_pa
     }
     session.backend.resolve_analyze_command_tokens.return_value = ["pi", "-p"]
     monkeypatch.setattr("workdash.control.ensure_worktree", lambda *args, **kwargs: str(tmp_path))
-    monkeypatch.setattr("workdash.agent_execution.executor", MagicMock(analyze=reviewer))
+    monkeypatch.setattr("workdash.agent_execution.executor", MagicMock(run_in_pane=reviewer))
     monkeypatch.setattr("workdash.launcher.zellij", MagicMock(load_zellij_panes=lambda _: []))
     monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.001)
     session.start_autodispatch(scope="owner/repo")
@@ -1114,7 +1153,7 @@ def test_autodispatch_real_review_handles_no_pr_and_reviewer_failure(monkeypatch
     monkeypatch.setattr("workdash.control.ensure_worktree", lambda *args, **kwargs: str(tmp_path))
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     reviewer = MagicMock(side_effect=RuntimeError("review failed"))
-    monkeypatch.setattr("workdash.agent_execution.executor", MagicMock(analyze=reviewer))
+    monkeypatch.setattr("workdash.agent_execution.executor", MagicMock(run_in_pane=reviewer))
     monkeypatch.setattr("workdash.launcher.zellij", MagicMock(load_zellij_panes=lambda _: []))
     monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.001)
     session.start_autodispatch(scope="owner/repo")
@@ -1255,7 +1294,9 @@ def test_autodispatch_review_feedback_cycle(monkeypatch, tmp_path):
                 github.resolved = True
             zellij.panes.clear()
 
-        def analyze(self, *, item, prompt, command_tokens, cwd):
+        def run_in_pane(
+            self, *, item, prompt, command_tokens, cwd, work_action, zellij_session, group
+        ):
             if not github.finding:
                 github.finding = True
                 outcome = "Major finding posted inline"

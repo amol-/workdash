@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
@@ -34,6 +35,8 @@ _ZELLIJ_PANE_READ_RETRY_SECONDS = 0.25
 _ZELLIJ_PANE_READ_TIMEOUT_SECONDS = 2.0
 # Terminal control sequences in text captured from a pane or an error message.
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
+# Concurrent launches for one group must not each create their own tab.
+_GROUP_TAB_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -306,6 +309,7 @@ def _build_zellij_new_pane_command(
     work_action: str,
     zellij_session: str | None = None,
     tab_id: object = None,
+    blocking: bool = False,
 ) -> list[str]:
     session_args = ["--session", zellij_session] if zellij_session is not None else []
     return [
@@ -317,6 +321,8 @@ def _build_zellij_new_pane_command(
         *_zellij_pane_name_argument(work_action, repo_path),
         "--cwd",
         repo_path,
+        # A blocking pane reports its command's exit status as zellij's own.
+        *(["--close-on-exit", "--block-until-exit"] if blocking else []),
         "--",
         *command,
     ]
@@ -864,37 +870,6 @@ class Zellij:
             if target_session
             else set()
         )
-        tab_id = None
-        if group is not None:
-            if not target_session:
-                raise RuntimeError(f"{context}: grouping requires a selected Zellij session.")
-            panes = self.load_zellij_panes(target_session)
-            tab_id = next(
-                (pane.get("tab_id") for pane in panes if pane.get("tab_name") == group), None
-            )
-            if tab_id is None:
-                try:
-                    result = subprocess.run(
-                        [
-                            zellij,
-                            "--session",
-                            target_session,
-                            "action",
-                            "new-tab",
-                            f"--name={group}",
-                            "--no-focus",
-                        ],
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                    )
-                except subprocess.CalledProcessError as error:
-                    raise RuntimeError(
-                        f"{context}: {error.stderr.strip() or error.stdout.strip()}"
-                    ) from error
-                tab_id = result.stdout.strip()
-                if not tab_id.isdigit():
-                    raise RuntimeError(f"{context}: Zellij did not report the new tab ID.")
         _run_launch_command(
             _build_zellij_new_pane_command(
                 zellij,
@@ -902,7 +877,7 @@ class Zellij:
                 command,
                 work_action=work_action,
                 zellij_session=target_session or None,
-                tab_id=tab_id,
+                tab_id=self._group_tab_id(zellij, target_session, group, context=context),
             ),
             context=context,
         )
@@ -930,6 +905,40 @@ class Zellij:
             pane_title=pane_title,
             cwd=repo_path,
         )
+
+    def launch_pane_and_wait(
+        self,
+        repo_path: str,
+        command: list[str],
+        *,
+        context: str,
+        work_action: str,
+        zellij_session: str | None,
+        group: str | None,
+    ) -> None:
+        """Run a command in a new Zellij pane and wait for it to exit."""
+        target_session = (zellij_session or "").strip()
+        if not target_session:
+            raise RuntimeError(f"{context}: running an agent in a pane requires a Zellij session.")
+        zellij = _resolve_zellij_binary()
+        completed = subprocess.run(
+            _build_zellij_new_pane_command(
+                zellij,
+                repo_path,
+                command,
+                work_action=work_action,
+                zellij_session=target_session,
+                tab_id=self._group_tab_id(zellij, target_session, group, context=context),
+                blocking=True,
+            ),
+            capture_output=True,
+            text=True,
+        )
+        # Zellij reports its own failures on stderr while still exiting zero when it
+        # cannot find the session, so the status alone does not tell whether the
+        # command ran and the caller must check what the pane left behind.
+        if completed.stderr.strip():
+            raise RuntimeError(f"{context}: {completed.stderr.strip()}")
 
     @staticmethod
     def focus_zellij_pane(session: str, pane_id: str) -> None:
@@ -989,6 +998,50 @@ class Zellij:
             raise RuntimeError(
                 f"Failed to close Zellij pane {pane_id} in {session}: {details or error.returncode}"
             ) from error
+
+    def _group_tab_id(
+        self, zellij: str, session: str, group: str | None, *, context: str
+    ) -> str | None:
+        """Return the tab ID named ``group``, creating that tab when it does not exist."""
+
+        if group is None:
+            return None
+        if not session:
+            raise RuntimeError(f"{context}: grouping requires a selected Zellij session.")
+        with _GROUP_TAB_LOCK:
+            tab_id = next(
+                (
+                    pane.get("tab_id")
+                    for pane in self.load_zellij_panes(session)
+                    if pane.get("tab_name") == group
+                ),
+                None,
+            )
+            if tab_id is not None:
+                return str(tab_id)
+            try:
+                result = subprocess.run(
+                    [
+                        zellij,
+                        "--session",
+                        session,
+                        "action",
+                        "new-tab",
+                        f"--name={group}",
+                        "--no-focus",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as error:
+                raise RuntimeError(
+                    f"{context}: {error.stderr.strip() or error.stdout.strip()}"
+                ) from error
+            tab_id = result.stdout.strip()
+            if not tab_id.isdigit():
+                raise RuntimeError(f"{context}: Zellij did not report the new tab ID.")
+            return tab_id
 
     def _find_zellij_pane(self, session: str, pane_id: str) -> dict[str, object] | None:
         """Return the identified pane's state, or None when it cannot be read."""
