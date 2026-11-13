@@ -72,19 +72,19 @@ The wizard fills in:
 
 ### URL and analysis viewer
 
-The same viewer opens selected issue/PR URLs (`o`) and rendered analysis HTML
-(fresh or cached). Configure it with `workdash --configure`, or edit
+Separate viewers open selected issue/PR URLs (`o`) and analyses (fresh or cached). Configure it with `workdash --configure`, or edit
 `~/.config/workdash/config.json` for advanced commands:
 
 ```json
 {
   "open": "term-copy --quiet",
-  "open_needs_pane": false
+  "open_needs_pane": false,
+  "analysis_viewer": {"command": "workdash markdownview", "format": "markdown", "needs_pane": true}
 }
 ```
 
 `open` remains a command string. Quoted arguments are supported; Workdash appends
-one literal URL or HTML file path as the final argument. There are no templates,
+one literal URL as the final argument. There are no templates,
 shell expansion, or implicit shell commands. Explicit executable paths are allowed;
 quote paths containing spaces. A missing `open` command prevents startup and tells
 you to run `--configure`; there is no runtime default.
@@ -107,6 +107,13 @@ viewer child errors stay visible in the pane.
 Re-running `--configure` otherwise only prompts for empty fields, except for
 Zellij and GitHub CLI: the wizard always checks for global binaries first and
 downloads fresh local copies when none are available.
+
+The analysis viewer is required and defaults to `workdash markdownview` in the
+wizard. Choose `markdown` or `html` for a custom command and whether it needs
+a terminal pane. Direct analysis viewers run without blocking Workdash or a time limit.
+Analyses are passed as local file URLs; the HTTP server is not
+required. `workdash markdownview PATH` also accepts file, HTTP and HTTPS URLs;
+it intentionally does not verify HTTPS certificates.
 
 ### Agents
 
@@ -211,7 +218,7 @@ The `repositories` list in `config.json` accepts:
 - `r` — refresh the list from GitHub.
 - `a` — analyze the selected item. Opens a dialog to open the cached analysis
   (if any), or run a fresh analysis with any configured analysis agent. Fresh
-  analyses are cached and rendered as HTML with your configured viewer.
+  analyses are cached and opened with your configured analysis viewer.
 - `c` — open the code menu for the selected item. Choose a numbered coding
   agent, `(e) edit` for VSCode Copilot, `(d) branchdiff`, `(t) terminal`, or
   `(r) auto review`, which asks which analysis agent reviews the item, shows a
@@ -471,11 +478,8 @@ worktree and runs the selected configured analysis agent in a Zellij pane named
 tab named after the code repository's basename. A fresh analysis needs a known
 Zellij session; a cached analysis works without one.
 
-The server analyze response includes `content_type` (`text/markdown`), `file_name`,
-and base64 `file_content` so clients do not need filesystem access to the server
-cache. The CLI writes that content to a secure temporary local file and reports it
-as `analysis_path`. `--json` emits the same client-side result without the raw
-base64 content.
+The server analyze response includes Markdown and rendered HTML URLs using the
+request host. The CLI reports the Markdown URL; `--json` omits file content.
 
 ## Review command
 

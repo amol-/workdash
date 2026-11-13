@@ -71,7 +71,7 @@ def test_configure_bootstraps_binaries_using_supplied_github_client(tmp_path, mo
     client.download_release.return_value = archive.getvalue()
     monkeypatch.setattr(config.platform, "system", lambda: "Linux")
     monkeypatch.setattr(config.platform, "machine", lambda: "x86_64")
-    inputs = iter(["", "", "", "", "octocat", "", ""])
+    inputs = iter(["", "", "", "", "", "octocat", "", ""])
     config.configure(
         tmp_path / "config.json",
         input_fn=lambda _: next(inputs),

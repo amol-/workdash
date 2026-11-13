@@ -11,6 +11,7 @@ import stat
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Collection, Sequence
 from concurrent.futures import Future
@@ -1587,12 +1588,32 @@ def _make_turbogears_app(session: WorkdashSession):
             return _handle_json_request(
                 request,
                 response,
-                lambda payload: self._session.analyze(
-                    target=_required_text(payload, "target"),
-                    agent=_optional_text(payload, "agent"),
-                    **({"group": _required_text(payload, "group")} if "group" in payload else {}),
-                ),
+                lambda payload: self._analyze(payload),
             )
+
+        def _analyze(self, payload):
+            host = request.host
+            match = re.fullmatch(r"([A-Za-z0-9._-]+)(?::([0-9]{1,5}))?", host)
+            if (
+                not match
+                or len(match.group(1)) > 253
+                or any(
+                    not re.fullmatch(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?", label)
+                    for label in match.group(1).removesuffix(".").split(".")
+                )
+                or (match.group(2) and not 1 <= int(match.group(2)) <= 65535)
+            ):
+                raise WorkdashControlError("bad_request", "Invalid request host.", status=400)
+            result = self._session.analyze(
+                target=_required_text(payload, "target"),
+                agent=_optional_text(payload, "agent"),
+                **({"group": _required_text(payload, "group")} if "group" in payload else {}),
+            )
+            path = urllib.parse.urlsplit(result["url"]).path
+            result["url"] = f"http://{host}{path}"
+            result["markdown_url"] = result["url"]
+            result["html_url"] = result["url"] + "/html"
+            return result
 
         @expose("json")
         def review(self):
@@ -1709,7 +1730,11 @@ def _make_turbogears_app(session: WorkdashSession):
                     raise WorkdashControlError(
                         "method_not_allowed", "Only GET is supported.", status=405
                     )
-                if len(path) == 3 and path[2] == "analysis":
+                if (
+                    len(path) in (3, 4)
+                    and path[2] == "analysis"
+                    and (len(path) == 3 or path[3] == "html")
+                ):
                     return self._serve_analysis(path)
                 if len(path) < 3 or path[2] != "files":
                     raise WorkdashControlError("not_found", "Unknown endpoint.", status=404)
@@ -1809,6 +1834,9 @@ def _make_turbogears_app(session: WorkdashSession):
                 raise WorkdashControlError(
                     "not_found", "No cached analysis for this item.", status=404
                 )
+            if len(path) == 4:
+                response.content_type = "text/html; charset=utf-8"
+                return launcher.render_analysis_html(analysis).encode("utf-8")
             response.content_type = "text/markdown; charset=utf-8"
             return analysis.encode("utf-8")
 

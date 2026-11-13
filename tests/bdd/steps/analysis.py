@@ -25,7 +25,7 @@ from workdash.analyzer import Analyzer
 from workdash.backend import WorkdashBackend
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession, format_work_item_id
-from workdash.launcher import open_in_browser
+from workdash.launcher import open_markdown
 from workdash.models import WorkItem
 from workdash.tui import AnalyzeDialog, WorkdashApp
 
@@ -446,15 +446,19 @@ def _run_generate_fresh(
         result = session.analyze(target=format_work_item_id(item), agent=tool, prefer_cache=False)
         return result["path"]
 
-    viewer_run = MagicMock(side_effect=lambda argv, **kwargs: opened_paths.append(argv[-1]))
-    agent_run = subprocess.run
+    viewer_run = MagicMock(
+        side_effect=lambda argv, **kwargs: (
+            opened_paths.append(argv[-1]) or MagicMock(wait=MagicMock(return_value=0))
+        )
+    )
+    agent_popen = subprocess.Popen
     monkeypatch.setattr(
         subprocess,
-        "run",
+        "Popen",
         lambda argv, **kwargs: (
             viewer_run(argv, **kwargs)
             if argv[:2] == ["term-view", "--quiet"]
-            else agent_run(argv, **kwargs)
+            else agent_popen(argv, **kwargs)
         ),
     )
     scenario_state["viewer_run"] = viewer_run
@@ -477,7 +481,9 @@ def _run_generate_fresh(
         work_items=list(work_items),
         worktree_callback=worktree_callback,
         analyze_callback=analyze_callback,
-        open_url_callback=partial(open_in_browser, command="term-view --quiet"),
+        open_markdown_callback=partial(
+            open_markdown, command="term-view --quiet", format="markdown"
+        ),
         session=session,
         interactions=interactions,
         busy_messages=busy_messages,
@@ -492,6 +498,11 @@ def _run_generate_fresh(
         _record_agent_run(scenario_state)
 
 
+@given("the analysis viewer is configured for HTML without a server")
+def _html_viewer_without_server(scenario_state):
+    scenario_state["analysis_format"] = "html"
+
+
 @when("the user chooses to open the cached analysis")
 def _choose_open_cached(
     scenario_state: dict[str, Any],
@@ -504,8 +515,12 @@ def _choose_open_cached(
     analysis_md_path = cache.build_analysis_path(item)
 
     opened_paths: list[str] = []
-    viewer_run = MagicMock(side_effect=lambda argv, **kwargs: opened_paths.append(argv[-1]))
-    monkeypatch.setattr(subprocess, "run", viewer_run)
+    viewer_run = MagicMock(
+        side_effect=lambda argv, **kwargs: (
+            opened_paths.append(argv[-1]) or MagicMock(wait=MagicMock(return_value=0))
+        )
+    )
+    monkeypatch.setattr(subprocess, "Popen", viewer_run)
     scenario_state["viewer_run"] = viewer_run
 
     def analyze_callback(item_: WorkItem, tool: str = "codex") -> str | None:
@@ -536,12 +551,24 @@ def _choose_open_cached(
     run_app(
         work_items=list(work_items),
         analyze_callback=analyze_callback,
-        open_url_callback=partial(open_in_browser, command="term-view --quiet"),
+        open_markdown_callback=partial(
+            open_markdown,
+            command="term-view --quiet",
+            format=scenario_state.get("analysis_format", "markdown"),
+        ),
         session=session,
         interactions=interactions,
     )
     scenario_state["opened_paths"] = opened_paths
     scenario_state["analysis_md_path"] = str(analysis_md_path)
+
+
+@then("the viewer opens a local HTML file containing the rendered analysis")
+def _html_analysis_opened(scenario_state):
+    path = Path(scenario_state["analysis_md_path"]).with_suffix(".html").resolve()
+    assert scenario_state["opened_paths"] == [path.as_uri()]
+    assert "<h1>cached analysis</h1>" in path.read_text(encoding="utf-8")
+    assert "<p>body</p>" in path.read_text(encoding="utf-8")
 
 
 @then("the system prepares the work item's worktree")
@@ -570,16 +597,15 @@ def _generated_cached(scenario_state: dict[str, Any]) -> None:
     assert cache.load_analysis(item) == scenario_state["fresh_body"]
 
 
-@then("the analysis HTTP URL is opened with the configured viewer")
+@then("the analysis URL is opened with the configured viewer")
 def _analysis_url_opened(scenario_state: dict[str, Any]) -> None:
     item: WorkItem = scenario_state["selected_item"]
-    expected_url = "http://127.0.0.1:8765" + AnalysisCache.build_analysis_url_path(item)
+    expected_url = scenario_state["cache"].build_analysis_path(item).resolve().as_uri()
     scenario_state["viewer_run"].assert_called_once_with(
         ["term-view", "--quiet", expected_url],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=4,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     assert scenario_state["opened_paths"] == [expected_url]
 

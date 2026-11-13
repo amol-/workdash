@@ -88,6 +88,7 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
         "control.prepare_launch_agent_prompt = lambda *_args, **_kwargs: 'test prompt'\n"
         "cli.GitHubClient.check_authentication = lambda self: None\n"
         "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
+        "analysis_viewer={'command': 'workdash markdownview', 'format': 'markdown', 'needs_pane': True}, "
         f"agents={{'agent': AgentConfig(launch={shlex.quote(str(agent))!r})}}, repositories=('owner/repo',), "
         f"workdir={str(tmp_path)!r}, todo_repository='test/todos')\n"
         "cli.WorkdashBackend.load_items = lambda self, progress_callback=None: ([item], {})\n"
@@ -306,6 +307,7 @@ def test_persistent_dashboard_quit_and_restart_in_real_zellij(tmp_path, repeat):
         "from workdash.config import WorkdashConfig, AgentConfig\n"
         'cli.GitHubClient.check_authentication = lambda self: ("expired" if os.getenv("TEST_EXPIRED") else None)\n'
         "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
+        "analysis_viewer={'command': 'workdash markdownview', 'format': 'markdown', 'needs_pane': True}, "
         "agents={'agent': AgentConfig(launch='sh')}, repositories=('owner/repo',), "
         "workdir='/tmp', todo_repository='test/todos')\n"
         "cli.WorkdashBackend.load_items = lambda self, progress_callback=None: ([], {})\n"
@@ -493,3 +495,114 @@ def test_persistent_dashboard_quit_and_restart_in_real_zellij(tmp_path, repeat):
                 pass
             os.waitpid(pid, 0)
             os.close(fd)
+
+
+@pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
+def test_analysis_viewer_renders_and_closes_fullscreen_pane(tmp_path, monkeypatch):
+    from workdash import launcher
+
+    zellij = shutil.which("zellij")
+    name = f"workdash-viewer-test-{uuid.uuid4().hex}"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    executable = bin_dir / "workdash"
+    executable.write_text(
+        f"#!{sys.executable}\nfrom workdash.workdash import main\nraise SystemExit(main())\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    document = tmp_path / "analysis with spaces.md"
+    document.write_text(
+        "# Analysis heading\n\n- First item\n- Second item\n\n"
+        "| Name | Value |\n| --- | --- |\n| Alpha | Beta |\n\n"
+        "```python\nprint('code example')\n```\n\n"
+        + "\n\n".join(f"Paragraph {i}" for i in range(40))
+        + "\n\n## End of analysis\n"
+    )
+    env = os.environ.copy()
+    for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
+        env.pop(key, None)
+    env.update(TERM="xterm-256color", SHELL="/bin/sh", PATH="/usr/bin:/bin")
+    pid, fd = pty.fork()
+    if pid == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        os.execve(zellij, [zellij, "--session", name], env)
+
+    def action(*args):
+        return subprocess.run(
+            [zellij, "--session", name, "action", *args], capture_output=True, text=True, env=env
+        )
+
+    def wait_for(predicate):
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            result = action("list-panes", "--json", "--all")
+            if result.stdout.strip().startswith("["):
+                panes = json.loads(result.stdout)
+                if predicate(panes):
+                    return panes
+            if os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT):
+                break
+            time.sleep(0.1)
+        status = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        os.set_blocking(fd, False)
+        try:
+            output = os.read(fd, 65536).decode(errors="replace")
+        except (BlockingIOError, OSError):
+            output = ""
+        pytest.fail(
+            f"Zellij pane state not reached (client status: {status}): "
+            f"{result.stdout} {result.stderr}; {output}"
+        )
+
+    try:
+        initial = wait_for(lambda panes: any(not p["is_plugin"] for p in panes))
+        initial_ids = {p["id"] for p in initial if not p["is_plugin"]}
+        launcher.open_markdown(
+            str(document),
+            "workdash markdownview",
+            format="markdown",
+            needs_pane=True,
+            zellij_session=name,
+        )
+        panes = wait_for(
+            lambda panes: any(
+                not p["is_plugin"] and p["id"] not in initial_ids and p["is_fullscreen"]
+                for p in panes
+            )
+        )
+        viewer = next(p for p in panes if not p["is_plugin"] and p["id"] not in initial_ids)
+        pane_id = f"terminal_{viewer['id']}"
+        deadline = time.monotonic() + 15
+        screen = ""
+        while time.monotonic() < deadline:
+            screen = action("dump-screen", "--pane-id", pane_id).stdout
+            if "code example" in screen:
+                break
+            time.sleep(0.1)
+        for text in (
+            "Analysis heading",
+            "First item",
+            "Second item",
+            "Alpha",
+            "Beta",
+            "code example",
+        ):
+            assert text in screen
+        assert "# Analysis heading" not in screen
+        assert "```" not in screen
+        assert action("send-keys", "--pane-id", pane_id, "End").returncode == 0
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            screen = action("dump-screen", "--pane-id", pane_id).stdout
+            if "End of analysis" in screen:
+                break
+            time.sleep(0.1)
+        assert "End of analysis" in screen
+        assert action("write-chars", "--pane-id", pane_id, "q").returncode == 0
+        panes = wait_for(
+            lambda panes: all(p["is_plugin"] or p["id"] != viewer["id"] for p in panes)
+        )
+        assert initial_ids <= {p["id"] for p in panes if not p["is_plugin"]}
+    finally:
+        _cleanup_sessions(zellij, env, [(name, pid, fd)])

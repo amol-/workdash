@@ -51,6 +51,7 @@ OUTPUT:
 Produce a Markdown document with exactly these sections. Write substantive content
 in each section, not placeholders.
 The output MUST be valid, well-formed CommonMark Markdown.
+Do not include scripts in the analysis document, including script tags or inline event handlers.
 When using lists, use valid Markdown list syntax (`1.` for ordered lists or `-`
 for bullets), and leave a blank line before the first list item.
 Whenever you mention a specific struct, type, class, interface, function, method,

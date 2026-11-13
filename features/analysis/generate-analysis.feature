@@ -15,9 +15,16 @@ Feature: Generate an analysis
     - A fresh analysis runs in a Zellij pane of its own, named `analyse_<worktree>`, so the user can watch the analysis pane while it runs.
     - The analysis pane opens in the Zellij tab named after the code repository's basename, or in the tab named by an explicitly requested group.
     - A fresh analysis needs a known Zellij session; opening a cached analysis does not.
-    - After a successful fresh analysis, the system caches the result and opens its HTTP analysis URL with the same configured viewer used for work item URLs.
-    - Opening a cached analysis also opens that URL, including its fullscreen terminal choice and current session.
-    - The analysis URL is passed literally after configured viewer arguments; opening an analysis does not prepare a worktree and does not read the server's filesystem.
+    - After a successful fresh analysis, the system caches the result and opens a local file URL in the format selected for the separately configured analysis viewer.
+    - Opening a cached analysis also uses the configured analysis viewer without requiring the HTTP server.
+    - The analysis URL is passed literally after configured viewer arguments; opening an analysis does not prepare a worktree.
+    - Direct analysis viewers continue running until closed by the user without blocking Workdash; an early viewer failure is reported to the user.
+    - Pane-based analysis viewers open fullscreen and close when the viewer exits.
+    - The built-in Markdown viewer renders Markdown from local paths, file URLs, and HTTP or HTTPS URLs.
+    - Activating an external link in the built-in Markdown viewer leaves the analysis open.
+    - The analysis API returns Markdown and HTML URLs based on the validated request host, including hostnames containing underscores and fully qualified DNS names ending in a dot; the CLI reports the Markdown URL.
+    - HTML analyses preserve raw HTML and Markdown images, subject to the viewer's behavior.
+    - An analysis viewer command, format, and pane choice are required configuration, separate from the viewer for work item links.
     - When an analysis fails or produces no content, the system closes any progress overlay, reports the failure details to the user, and leaves any previous cached analysis untouched.
 
   @id:F-ANALYSIS-GENERATE-S001
@@ -28,13 +35,26 @@ Feature: Generate an analysis
     And the analysis agent starts inside that worktree with access to the code and the work item's discussion
     And the system shows that the analysis is in progress
     And the generated analysis is cached
-    And the analysis HTTP URL is opened with the configured viewer
+    And the analysis URL is opened with the configured viewer
 
   @id:F-ANALYSIS-GENERATE-S002
   Scenario: Opening a cached analysis opens its URL
     Given the selected work item has a cached analysis
     When the user chooses to open the cached analysis
     Then the cached analysis URL is opened with the configured viewer
+
+  @id:F-ANALYSIS-GENERATE-S007
+  Scenario: Open cached HTML analysis without a server
+    Given the selected work item has a cached analysis
+    And the analysis viewer is configured for HTML without a server
+    When the user chooses to open the cached analysis
+    Then the viewer opens a local HTML file containing the rendered analysis
+
+  @id:F-ANALYSIS-GENERATE-S008
+  Scenario: Retrieve both analysis formats using the connected host
+    Given a server-backed Workdash session has an item with a cached analysis
+    When a client requests its analysis through the connected host
+    Then the returned Markdown and HTML URLs use that host and serve the analysis
 
   @id:F-ANALYSIS-GENERATE-S003
   Scenario: Failing analysis reports to the user and preserves the cache

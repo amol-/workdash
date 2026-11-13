@@ -21,6 +21,7 @@ from workdash.workdash import _print_work_items, _print_work_items_result
 _VALID_CONFIG = WorkdashConfig(
     github_username="testuser",
     open_command="xdg-open",
+    analysis_viewer={"command": "workdash markdownview", "format": "markdown", "needs_pane": True},
     agents={
         "codex": AgentConfig(analyze="codex exec", launch="codex"),
         "claude": AgentConfig(analyze="claude -p", launch="claude"),
@@ -301,7 +302,7 @@ def test_main_server_refresh_callback_reraises_unrelated_runtime_errors(
 
 
 @pytest.mark.parametrize("needs_pane", [False, True])
-def test_main_passes_configured_agent_choices_and_shared_viewer_to_tui(
+def test_main_passes_configured_agent_choices_and_separate_viewers_to_tui(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
     needs_pane: bool,
@@ -312,6 +313,7 @@ def test_main_passes_configured_agent_choices_and_shared_viewer_to_tui(
         github_username="testuser",
         open_command='term-copy --label "two words"',
         open_needs_pane=needs_pane,
+        analysis_viewer={"command": "analysis-viewer", "format": "html", "needs_pane": needs_pane},
         agents={"codex": AgentConfig(analyze="codex exec")},
         repositories=("owner/*",),
         workdir="~/wrk",
@@ -345,7 +347,12 @@ def test_main_passes_configured_agent_choices_and_shared_viewer_to_tui(
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, stdout="terminal_17\n", stderr="")
 
+    def fake_popen(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(wait=lambda **kw: 0)
+
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-selected")
 
@@ -368,11 +375,11 @@ def test_main_passes_configured_agent_choices_and_shared_viewer_to_tui(
         assert commands == [
             [*prefix, "new-pane", "--", *viewer_argv, item.url],
             [*prefix, "toggle-fullscreen", "-p", "terminal_17"],
-            [*prefix, "new-pane", "--", *viewer_argv, str(html_path)],
+            [*prefix, "new-pane", "--close-on-exit", "--", "analysis-viewer", html_path.as_uri()],
             [*prefix, "toggle-fullscreen", "-p", "terminal_17"],
         ]
     else:
-        assert commands == [[*viewer_argv, item.url], [*viewer_argv, str(html_path)]]
+        assert commands == [[*viewer_argv, item.url], ["analysis-viewer", html_path.as_uri()]]
 
 
 def test_main_tui_analyze_callback_uses_worktree_and_backend(
@@ -919,6 +926,9 @@ def test_main_analyze_human_output_formats_server_response(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    markdown_url = "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis"
+    html_url = f"{markdown_url}/html"
+
     class FakeControlClient:
         def __init__(self, host="127.0.0.1") -> None:
             assert host == "127.0.0.1"
@@ -929,7 +939,9 @@ def test_main_analyze_human_output_formats_server_response(
             return {
                 "item_id": "owner/repo#ISSUE-1",
                 "path": "/server/cache/analysis.md",
-                "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
+                "url": markdown_url,
+                "markdown_url": markdown_url,
+                "html_url": html_url,
                 "agent": "codex",
                 "cache_used": False,
                 "status": "generated",
@@ -948,7 +960,8 @@ def test_main_analyze_human_output_formats_server_response(
         for line in output.splitlines()
         if line.startswith("Analysis URL: ")
     )
-    assert analysis_url == "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis"
+    assert analysis_url == markdown_url
+    assert html_url not in output
     assert "Item: owner/repo#ISSUE-1" in output
     assert "Agent: codex" in output
     assert "Status: generated" in output

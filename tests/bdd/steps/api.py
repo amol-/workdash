@@ -827,7 +827,9 @@ def _api_returns_analysis_result(scenario_state: dict[str, Any]) -> None:
     assert result == {
         "item_id": "owner/repo#ISSUE-1",
         "path": scenario_state["analysis_path"],
-        "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
+        "url": "http://localhost:80/api/items/owner/repo%23ISSUE-1/analysis",
+        "markdown_url": "http://localhost:80/api/items/owner/repo%23ISSUE-1/analysis",
+        "html_url": "http://localhost:80/api/items/owner/repo%23ISSUE-1/analysis/html",
         "agent": "codex",
         "cache_used": False,
         "status": "generated",
@@ -1512,6 +1514,47 @@ def _item_with_cached_analysis(scenario_state, work_items, tmp_path):
     scenario_state["analysis_cache"] = cache
     session = ensure_api_session(scenario_state, work_items, tmp_path)
     session.backend.analysis_cache = cache
+
+
+@when("a client requests its analysis through the connected host")
+def _request_analysis_through_host(scenario_state, work_items, tmp_path, monkeypatch):
+    session = ensure_api_session(scenario_state, work_items, tmp_path)
+    cache = scenario_state["analysis_cache"]
+    monkeypatch.setattr(
+        session.backend, "analyze_item", lambda item, **kwargs: str(cache.build_analysis_path(item))
+    )
+    app = _source_filtered_wsgi_app(_make_turbogears_app(session))
+    req = Request.blank(
+        "/api/v0/analyze",
+        method="POST",
+        host="dashboard.test:9876",
+        content_type="application/json",
+        body=b'{"target":"owner/repo#ISSUE-1"}',
+    )
+    req.environ["REMOTE_ADDR"] = "127.0.0.1"
+    result = req.get_response(app)
+    assert result.status_int == 200
+    scenario_state["analysis_urls"] = result.json["result"]
+    scenario_state["analysis_app"] = app
+
+
+@then("the returned Markdown and HTML URLs use that host and serve the analysis")
+def _analysis_formats_served(scenario_state):
+    result = scenario_state["analysis_urls"]
+    base = "http://dashboard.test:9876/api/items/owner/repo%23ISSUE-1/analysis"
+    assert result["markdown_url"] == base
+    assert result["html_url"] == base + "/html"
+    for key, content_type, content in (
+        ("markdown_url", "text/markdown", "# cached analysis"),
+        ("html_url", "text/html", "<h1>cached analysis</h1>"),
+    ):
+        req = Request.blank(result[key])
+        req.environ["REMOTE_ADDR"] = "127.0.0.1"
+        response = req.get_response(scenario_state["analysis_app"])
+        assert response.status_int == 200
+        assert response.content_type == content_type
+        assert content in response.text
+        assert "body" in response.text
 
 
 @when("a client requests the item's analysis URL")

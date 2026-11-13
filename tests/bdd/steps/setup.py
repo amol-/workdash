@@ -116,6 +116,35 @@ def _empty_defaults_then_username(scenario_state: dict[str, Any]) -> None:
     ]
 
 
+@given("the user accepts the default analysis viewer")
+def _default_analysis_viewer(scenario_state: dict[str, Any]) -> None:
+    scenario_state["analysis_answers"] = [""]
+
+
+@given("the user chooses a custom HTML analysis viewer requiring a terminal pane")
+def _custom_analysis_viewer(scenario_state: dict[str, Any]) -> None:
+    scenario_state["on_path_tools"].add("term-view")
+    scenario_state["analysis_answers"] = ["term-view --quiet", "html", "y"]
+
+
+@then("the saved analysis viewer uses Markdown in a terminal pane")
+def _default_analysis_saved(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["written_config"].analysis_viewer == {
+        "command": "workdash markdownview",
+        "format": "markdown",
+        "needs_pane": True,
+    }
+
+
+@then("the saved analysis viewer uses that command and HTML in a terminal pane")
+def _custom_analysis_saved(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["written_config"].analysis_viewer == {
+        "command": "term-view --quiet",
+        "format": "html",
+        "needs_pane": True,
+    }
+
+
 @given("the platform opener is available")
 def _platform_opener_available(scenario_state: dict[str, Any]) -> None:
     scenario_state.setdefault("on_path_tools", set()).add(config_module._default_open_command())
@@ -203,10 +232,13 @@ def _run_configure_with_fakes(
     # By default the user ends both agent sections without adding agents.
     agent_answers = iter(scenario_state.get("agent_answers", ["", ""]))
     prompts: list[str] = []
+    analysis_answers = iter(scenario_state.get("analysis_answers", [""]))
 
     def input_fn(prompt: str) -> str:
         prompts.append(prompt)
         print(prompt)
+        if prompt.startswith(("Analysis viewer [", "Analysis format", "Does the analysis viewer")):
+            return next(analysis_answers)
         if prompt.startswith(("Agents for", "Agent name")):
             try:
                 return next(agent_answers)
@@ -350,10 +382,11 @@ def _tells_user_what_was_set(scenario_state: dict[str, Any]) -> None:
 @then("the system only prompts for fields that were empty")
 def _only_prompts_empty(scenario_state: dict[str, Any]) -> None:
     prompts = scenario_state["prompts"]
-    # Only the workdir and the todo repository were empty in the partial configuration.
-    assert len(prompts) == 2, prompts
-    assert "Work directory" in prompts[0]
-    assert "Todo repository" in prompts[1]
+    # The viewer, workdir and todo repository were empty.
+    assert len(prompts) == 3, prompts
+    assert "Analysis viewer" in prompts[0]
+    assert "Work directory" in prompts[1]
+    assert "Todo repository" in prompts[2]
 
 
 @then("previously set fields are preserved in the saved configuration")

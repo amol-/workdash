@@ -154,6 +154,7 @@ def test_analyze_for_pr_writes_diff_to_tempfile_and_injects_path(
     prompt = recorded_prompt(tmp_path)
     assert "reviewing a GitHub pull request" in prompt
     assert "well-formed CommonMark Markdown" in prompt
+    assert "Do not include scripts in the analysis document" in prompt
     assert "Markdown link that points to the exact definition line on GitHub" in prompt
     assert "headRefName" in prompt
     assert "](https://github.com/owner/repo/blob/<headRefName>/path/to/file.go#L42)" in prompt
@@ -191,6 +192,7 @@ def test_analyze_for_issue_uses_issue_template_and_no_diff(
     prompt = recorded_prompt(tmp_path)
     assert "analyzing a GitHub issue" in prompt
     assert "well-formed CommonMark Markdown" in prompt
+    assert "Do not include scripts in the analysis document" in prompt
     assert ".diff" not in prompt
 
 

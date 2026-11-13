@@ -813,11 +813,7 @@ class WorkdashApp(App[None]):
             return
         if analysis_path is not None:
             try:
-                analysis_url = self._session_analysis_url(item)
-                if analysis_url is not None:
-                    self._open_url_callback(analysis_url)
-                else:
-                    self._open_markdown_callback(analysis_path)
+                self._open_markdown_callback(analysis_path)
             except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
                 self._update_status(f"Failed to open analysis: {error}")
                 self.notify(f"Failed to open analysis: {error}", severity="error", timeout=10)

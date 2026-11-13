@@ -198,3 +198,17 @@ Feature: First-time configuration
     When the user runs the system with "--configure"
     Then the system writes default values for configurable fields
     And the system prompts again for the GitHub username
+
+  @id:F-SETUP-CONFIGURE-S020
+  Scenario: Accept the default analysis viewer
+    Given the user has no configuration file
+    And the user accepts the default analysis viewer
+    When the user runs the system with "--configure"
+    Then the saved analysis viewer uses Markdown in a terminal pane
+
+  @id:F-SETUP-CONFIGURE-S021
+  Scenario: Choose a custom HTML analysis viewer
+    Given the user has no configuration file
+    And the user chooses a custom HTML analysis viewer requiring a terminal pane
+    When the user runs the system with "--configure"
+    Then the saved analysis viewer uses that command and HTML in a terminal pane
