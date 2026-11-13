@@ -2,17 +2,17 @@
 
 import json
 import os
-import secrets
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator, Sequence
+import time
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 
 import markdown
 
@@ -206,6 +206,21 @@ def is_live_zellij_pane(pane: dict[str, object]) -> bool:
     )
 
 
+def _is_dashboard_pane(pane: dict[str, object]) -> bool:
+    if is_live_zellij_pane(pane) and not pane.get("pane_command"):
+        raise RuntimeError("Cannot determine whether the Workdash dashboard is running.")
+    command_text = str(pane.get("pane_command") or "")
+    try:
+        tokens = shlex.split(command_text)
+    except ValueError:
+        tokens = command_text.split()
+    return is_live_zellij_pane(pane) and (
+        "--persistent-pane" in tokens
+        or any(Path(token).name == "workdash" for token in tokens[:2])
+        or any(tokens[i : i + 2] == ["-m", "workdash"] for i in range(len(tokens) - 1))
+    )
+
+
 def _pane_input_error(
     session: str, pane_id: str, error: subprocess.CalledProcessError
 ) -> RuntimeError:
@@ -238,7 +253,7 @@ def _write_zellij_startup_layout(workdash_command: Sequence[str], *, session_nam
     args = " ".join(_quote_kdl_string(argument) for argument in workdash_command[1:])
     layout = (
         f"session_name {_quote_kdl_string(session_name)}\n"
-        'on_force_close "quit"\n'
+        'on_force_close "detach"\n'
         "session_serialization false\n"
         "disable_session_metadata true\n"
         "show_startup_tips false\n"
@@ -253,15 +268,12 @@ def _write_zellij_startup_layout(workdash_command: Sequence[str], *, session_nam
         '            plugin location="zellij:status-bar"\n'
         "        }\n"
         "    }\n"
-        '    tab name="workdash" {\n'
-        '        pane split_direction="vertical" {\n'
-        '            pane size="50%" split_direction="horizontal" {\n'
-        f'                pane command={command} close_on_exit=true size="75%" {{\n'
-        f"                    args {args}\n"
-        "                }\n"
-        '                pane size="25%"\n'
+        '    tab name="dashboard" {\n'
+        '        pane split_direction="horizontal" {\n'
+        f'            pane name="workdash tui" command={command} size="75%" {{\n'
+        f"                args {args}\n"
         "            }\n"
-        '            pane size="50%"\n'
+        '            pane size="25%"\n'
         "        }\n"
         "    }\n"
         "}\n"
@@ -484,19 +496,157 @@ class Zellij:
         self._toggle_zellij_pane_fullscreen(session, pane_id)
 
     @staticmethod
-    def exec_zellij_wrapped_workdash(argv: Sequence[str] | None) -> NoReturn:
+    def exec_zellij_wrapped_workdash(
+        argv: Sequence[str] | None, preflight: Callable[[], bool] = lambda: True
+    ) -> None:
         zellij = _resolve_zellij_binary()
 
         original_args = list(argv) if argv is not None else sys.argv[1:]
-        session_name = f"workdash-{secrets.token_hex(4)}"
-        workdash_command = _build_direct_workdash_command(original_args)
-        layout_path = _write_zellij_startup_layout(workdash_command, session_name=session_name)
-        command = [zellij, "--layout", layout_path]
+        session_name = "workdash"
+        for index, arg in enumerate(original_args):
+            if arg == "--session":
+                session_name = original_args[index + 1]
+            elif arg.startswith("--session="):
+                session_name = arg.partition("=")[2]
+        workdash_command = _build_direct_workdash_command(["--persistent-pane", *original_args])
+        try:
+            result = subprocess.run(
+                [zellij, "list-sessions", "--no-formatting"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            sessions = [
+                line.split(" [Created ", 1)[0]
+                for line in result.stdout.splitlines()
+                if "(EXITED" not in line
+            ]
+        except OSError as error:
+            raise RuntimeError(f"Failed to list Zellij sessions: {error}") from error
+        except subprocess.CalledProcessError as error:
+            details = (error.stderr or "").strip() or (error.stdout or "").strip()
+            if "no active zellij sessions found" not in details.lower():
+                raise RuntimeError(
+                    f"Failed to list Zellij sessions: {details or error.returncode}"
+                ) from error
+            sessions = []
+        if session_name in sessions:
+            panes = Zellij.load_zellij_panes(session_name)
+            dashboard_panes = [
+                pane
+                for pane in panes
+                if pane.get("title") == "workdash tui" and pane.get("is_plugin") is not True
+            ]
+            running = any([_is_dashboard_pane(pane) for pane in dashboard_panes])
+            if running:
+                print(
+                    "Workdash is already running; new options are ignored. Attaching...", flush=True
+                )
+                time.sleep(1)
+            else:
+                if not preflight():
+                    return
+                prefix = [zellij, "--session", session_name, "action"]
+                try:
+                    for pane in dashboard_panes:
+                        subprocess.run(
+                            [
+                                *prefix,
+                                "rename-pane",
+                                "-p",
+                                f"terminal_{pane['id']}",
+                                "workdash old",
+                            ],
+                            check=True,
+                            capture_output=True,
+                            text=True,
+                        )
+                    tab = next(
+                        (
+                            pane.get("tab_id")
+                            for pane in panes
+                            if pane.get("tab_name") == "dashboard"
+                        ),
+                        None,
+                    )
+                    if tab is None:
+                        tab = subprocess.run(
+                            [*prefix, "new-tab", "--name", "dashboard"],
+                            check=True,
+                            capture_output=True,
+                            text=True,
+                        ).stdout.strip()
+                    subprocess.run(
+                        [
+                            *prefix,
+                            "new-pane",
+                            "--tab-id",
+                            str(tab),
+                            "--name",
+                            "workdash tui",
+                            "--",
+                            *workdash_command,
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                except OSError as error:
+                    raise RuntimeError(f"Failed to start dashboard in Zellij: {error}") from error
+                except subprocess.CalledProcessError as error:
+                    details = (error.stderr or "").strip() or (error.stdout or "").strip()
+                    raise RuntimeError(
+                        f"Failed to start dashboard in Zellij: {details or error.returncode}"
+                    ) from error
+            command = [zellij, "attach", session_name]
+        else:
+            if not preflight():
+                return
+            layout_path = _write_zellij_startup_layout(workdash_command, session_name=session_name)
+            command = [zellij, "--layout", layout_path]
         try:
             os.execvp(zellij, command)
         except OSError as error:
             raise RuntimeError(f"failed to start zellij: {error}") from error
         raise AssertionError("os.execvp returned unexpectedly")
+
+    def name_dashboard_pane(self, session: str, pane_id: str) -> None:
+        stale = [
+            pane
+            for pane in self.load_zellij_panes(session)
+            if pane.get("title") == "workdash tui"
+            and pane.get("is_plugin") is not True
+            and str(pane.get("id")) != pane_id
+        ]
+        if any([_is_dashboard_pane(pane) for pane in stale]):
+            raise RuntimeError("A Workdash dashboard is already running in this session.")
+        for pane in stale:
+            _run_launch_command(
+                [
+                    _resolve_zellij_binary(),
+                    "--session",
+                    session,
+                    "action",
+                    "rename-pane",
+                    "-p",
+                    f"terminal_{pane['id']}",
+                    "workdash old",
+                ],
+                context="Failed to rename stale dashboard pane",
+            )
+        _run_launch_command(
+            [
+                _resolve_zellij_binary(),
+                "--session",
+                session,
+                "action",
+                "rename-pane",
+                "-p",
+                f"terminal_{pane_id}",
+                "workdash tui",
+            ],
+            context="Failed to name dashboard pane",
+        )
 
     @staticmethod
     def list_workdash_sessions() -> list[str]:
