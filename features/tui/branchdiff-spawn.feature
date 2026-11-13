@@ -5,7 +5,7 @@ Feature: TUI spawns branchdiff viewer
   in a new terminal pane for reviewing pull request changes.
 
   Rules:
-    - Pressing 'd' in the TUI spawns `workdash branchdiff` in a new zellij pane.
+    - Choosing 'd' from the TUI code menu spawns `workdash branchdiff` in a new zellij pane.
     - The command runs in the worktree directory of the selected work item.
     - Workdash ensures the worktree exists before spawning the command.
     - For pull request work items, Workdash asks GitHub for the PR base branch at launch time and passes the Workdash-managed base remote target to branchdiff.
@@ -18,7 +18,7 @@ Feature: TUI spawns branchdiff viewer
     Given the TUI has a pull request work item selected
     And GitHub reports the PR base branch "release/2026"
     And the worktree for that item exists
-    When the user presses "d"
+    When the user chooses "d" from the code menu
     Then Workdash has prepared the worktree for the selected item
     And Workdash asks GitHub for that PR's base branch
     And a new zellij pane opens
@@ -30,7 +30,7 @@ Feature: TUI spawns branchdiff viewer
   Scenario: Workdash TUI spawns branchdiff for a non-PR work item without a target branch
     Given the TUI has a work item selected
     And the worktree for that item exists
-    When the user presses "d"
+    When the user chooses "d" from the code menu
     Then Workdash has prepared the worktree for the selected item
     And GitHub is not queried for a PR base branch
     And a new zellij pane opens
@@ -40,7 +40,7 @@ Feature: TUI spawns branchdiff viewer
   Scenario: Workdash TUI handles worktree preparation failure
     Given the TUI has a work item selected
     And the next worktree preparation will fail
-    When the user presses "d"
+    When the user chooses "d" from the code menu
     Then the system reports the worktree error details to the user
     And no diff viewer pane is opened
     And no progress overlay remains

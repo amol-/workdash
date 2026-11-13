@@ -7,16 +7,18 @@ import subprocess
 import threading
 import time
 from datetime import UTC, datetime
+from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from textual.widgets import DataTable, Static
 from webob import Request
 
 from gh_work_state_fake import HEAD_SHA, check_run, install_fake_github, todo_body
 from workdash.config import AgentConfig, WorkdashConfig
-from workdash.control import WorkdashSession, _make_turbogears_app
+from workdash.control import WorkdashControlError, WorkdashSession, _make_turbogears_app
 from workdash.github_client import GitHubClient
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import WorkdashApp
@@ -423,6 +425,64 @@ def test_failed_pane_lookup_fails_session_without_dispatching_again(monkeypatch)
     assert dispatch.call_count == 1
 
 
+def test_dispatch_reports_a_failed_linked_issue_lookup_as_a_github_error():
+    now = datetime.now(UTC)
+    pull_request = WorkItem(
+        kind=WorkItemKind.AUTHORED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=9,
+        title="Authored pull request",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/pull/9",
+    )
+    github_client = MagicMock()
+    github_client.fetch_linked_issues_for_pull_request.side_effect = RuntimeError(
+        "Could not resolve to a Repository with the name 'owner/repo'."
+    )
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(github_client=github_client),
+        work_items=[pull_request],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+
+    with pytest.raises(WorkdashControlError) as raised:
+        session.start_autodispatch_for_item(pull_request)
+
+    assert (raised.value.code, raised.value.status) == ("github_error", HTTPStatus.BAD_GATEWAY)
+    assert str(raised.value) == (
+        "GitHub lookup for 'owner/repo#PR-9' failed: "
+        "Could not resolve to a Repository with the name 'owner/repo'."
+    )
+    assert session.autodispatch_sessions() == []
+
+
+def _tui_session(*items: WorkItem) -> MagicMock:
+    """Return a fake session whose dashboard shows the given work items."""
+
+    session = MagicMock()
+    session.work_items = list(items)
+    session.suggestion_markers = {}
+    return session
+
+
+def _visible_task() -> WorkItem:
+    now = datetime.now(UTC)
+    return WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=42,
+        title="Visible task",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/issues/42",
+    )
+
+
 @pytest.mark.parametrize(
     "scope",
     [
@@ -434,21 +494,7 @@ def test_failed_pane_lookup_fails_session_without_dispatching_again(monkeypatch)
     ],
 )
 def test_tui_shows_running_sessions_and_remains_interactive(scope):
-    session = MagicMock()
-    now = datetime.now(UTC)
-    session.work_items = [
-        WorkItem(
-            kind=WorkItemKind.TRACKED_ISSUE,
-            item_type=WorkItemType.ISSUE,
-            repo="owner/repo",
-            number=42,
-            title="Visible task",
-            created_at=now,
-            updated_at=now,
-            url="https://github.com/owner/repo/issues/42",
-        )
-    ]
-    session.suggestion_markers = {}
+    session = _tui_session(_visible_task())
     session.autodispatch_sessions.return_value = [
         {
             "status": "running",
@@ -477,24 +523,158 @@ def test_tui_shows_running_sessions_and_remains_interactive(scope):
 
     async def exercise():
         async with app.run_test() as pilot:
-            rows = [strip.text for strip in app.screen._compositor.render_strips()]
-            first = next(row for row in rows if "first" in row)
+            progress = app.query_one("#autodispatch-progress", Static)
+            lines = progress.render().plain.splitlines()
+            first = next(line for line in lines if "first" in line)
             assert first.count("owner/a#1") == 1 and "1/5s" in first and "fix ci" in first
             assert "scope:" not in first and "item:" not in first
             assert any(
-                "automatic" in row
-                and "scope: owner/b" in row
-                and "item: owner/b#2" in row
-                and "2/10s" in row
-                and "checking" in row
-                for row in rows
+                "automatic" in line
+                and "scope: owner/b" in line
+                and "item: owner/b#2" in line
+                and "2/10s" in line
+                and "checking" in line
+                for line in lines
             )
-            assert any("Visible task" in row for row in rows)
-            assert next(i for i, row in enumerate(rows) if "automatic" in row) < next(
-                i for i, row in enumerate(rows) if "Visible task" in row
-            )
+            table = app.query_one("#work-items", DataTable)
+            assert str(table.get_row_at(0)[2]) == "Visible task"
+            assert progress.region.y < table.region.y
             await pilot.press("/")
             assert len(app.screen_stack) > 1
+
+    asyncio.run(exercise())
+
+
+def test_tui_reports_the_failure_of_the_session_the_user_started():
+    session = _tui_session(_visible_task())
+    session.start_autodispatch_for_item.return_value = {
+        "id": "session-1",
+        "scope": "owner/repo#ISSUE-42",
+    }
+    running = {
+        "id": "session-1",
+        "status": "running",
+        "scope": "owner/repo#ISSUE-42",
+        "group": None,
+        "current_item": None,
+        "elapsed_seconds": 1,
+        "selected_group": None,
+        "stage": "checking",
+        "launch_reason": None,
+        "iteration": 1,
+    }
+    session.autodispatch_sessions.return_value = [running]
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+            await pilot.press("d")
+            await pilot.pause()
+            assert footer.render().plain == (
+                "Started autodispatch for owner/repo#ISSUE-42: session-1."
+            )
+            # Another action replaces the footer before the session fails.
+            await pilot.press("r")
+            await pilot.pause()
+            assert footer.render().plain == "Refresh skipped."
+            session.autodispatch_sessions.return_value = [
+                {**running, "status": "failed", "error": "GitHub unavailable"}
+            ]
+            for _ in range(100):
+                await pilot.pause(0.02)
+                if "GitHub unavailable" in footer.render().plain:
+                    break
+            assert footer.render().plain == "Autodispatch session-1 failed: GitHub unavailable"
+
+    asyncio.run(exercise())
+
+
+def test_tui_reports_a_dispatch_that_cannot_start():
+    session = _tui_session(_visible_task())
+    session.autodispatch_sessions.return_value = []
+    session.start_autodispatch_for_item.side_effect = RuntimeError("linked issue lookup denied")
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+            await pilot.press("d")
+            for _ in range(100):
+                await pilot.pause(0.02)
+                if "Dispatch failed" in footer.render().plain:
+                    break
+            assert footer.render().plain == "Dispatch failed: linked issue lookup denied"
+
+    asyncio.run(exercise())
+
+
+def test_tui_limits_old_failures_without_hiding_running_sessions():
+    session = _tui_session()
+    session.autodispatch_sessions.return_value = [
+        {
+            "id": str(i),
+            "status": "failed",
+            "scope": f"owner/failure-{i}",
+            "group": None,
+            "current_item": None,
+            "elapsed_seconds": 1,
+            "error": "dispatch failed",
+        }
+        for i in range(10)
+    ] + [
+        {
+            "id": "active",
+            "status": "running",
+            "scope": "owner/active",
+            "group": None,
+            "current_item": "owner/active#ISSUE-1",
+            "elapsed_seconds": 2,
+            "selected_group": None,
+            "stage": "checking",
+            "launch_reason": None,
+            "iteration": 1,
+        }
+    ]
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test():
+            lines = app.query_one("#autodispatch-progress", Static).render().plain.splitlines()
+            assert any("owner/active" in line for line in lines)
+            for i in range(7, 10):
+                assert any(
+                    f"owner/failure-{i}" in line and "dispatch failed" in line for line in lines
+                )
+            assert not any("owner/failure-6" in line for line in lines)
+            assert app.query_one("#work-items", DataTable).region.height > 0
+
+    asyncio.run(exercise())
+
+
+def test_tui_long_failures_leave_room_for_work_items():
+    session = _tui_session(_visible_task())
+    error = "dispatch failed " + "long error " * 80 + "\nmore details"
+    session.autodispatch_sessions.return_value = [
+        {
+            "id": str(i),
+            "status": "failed",
+            "scope": f"owner/failure-{i}",
+            "group": None,
+            "current_item": None,
+            "elapsed_seconds": 1,
+            "error": error,
+        }
+        for i in range(3)
+    ]
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test(size=(80, 24)):
+            table = app.query_one("#work-items", DataTable)
+            assert str(table.get_row_at(0)[2]) == "Visible task"
+            assert table.region.height > 0
+            assert app.query_one("#autodispatch-progress", Static).region.height == 3
 
     asyncio.run(exercise())
 

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -14,7 +16,7 @@ from textual.widgets import Static
 
 from workdash.agent_execution import executor
 from workdash.control import WorkdashSession, format_work_item_id
-from workdash.launcher import launch_terminal_context
+from workdash.launcher import _zellij_pane_name_for_work_action, launch_terminal_context
 from workdash.models import WorkItem
 
 from .common import make_valid_config, make_work_item, modal_screen_names, run_app
@@ -128,6 +130,64 @@ def _reports_terminal_backed_actions_require_zellij(scenario_state: dict[str, An
     )
 
 
+def _scenario_panes(
+    scenario_state: dict[str, Any], worktree_path: Path, tmp_path: Path
+) -> list[dict[str, object]]:
+    """Return the Zellij panes the scenario's fake ``list-panes`` reports."""
+
+    terminal_title = _zellij_pane_name_for_work_action("terminal", str(worktree_path))
+    if scenario_state.get("existing_terminal"):
+        return [
+            {"id": 4, "title": "code_wt", "pane_cwd": str(worktree_path)},
+            {
+                "id": 5,
+                "title": "amol@host: cwd",
+                "pane_command": "/bin/bash -i",
+                "pane_cwd": str(worktree_path),
+            },
+        ]
+    if scenario_state.get("running_terminal"):
+        return [
+            {
+                "id": 5,
+                "title": terminal_title,
+                "pane_command": "sleep 300",
+                "pane_cwd": str(worktree_path),
+            }
+        ]
+    if scenario_state.get("terminal_left_worktree"):
+        return [
+            {
+                "id": 5,
+                "title": terminal_title,
+                "pane_command": "/bin/bash -i",
+                "pane_cwd": str(tmp_path.parent),
+            }
+        ]
+    if scenario_state.get("terminal_in_same_named_worktree"):
+        other_worktree = tmp_path / "other" / worktree_path.name
+        other_worktree.mkdir(parents=True)
+        return [
+            {
+                "id": 5,
+                "title": _zellij_pane_name_for_work_action("terminal", str(other_worktree)),
+                "pane_command": "/bin/bash -i",
+                "pane_cwd": str(other_worktree),
+            }
+        ]
+    if scenario_state.get("other_programs"):
+        return [
+            {
+                "id": pane_id,
+                "title": command,
+                "pane_command": command,
+                "pane_cwd": str(worktree_path),
+            }
+            for pane_id, command in [(6, "nvim"), (7, "pytest")]
+        ]
+    return []
+
+
 def run_terminal_scenario(
     scenario_state: dict[str, Any],
     work_items: list[WorkItem],
@@ -155,6 +215,9 @@ def run_terminal_scenario(
     captured: dict[str, Any] = {}
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir(exist_ok=True)
+    panes = _scenario_panes(scenario_state, worktree_path, tmp_path)
+    # A transient failure: only the advisory check for an existing terminal fails.
+    lookup_failures = 1 if scenario_state.get("terminal_lookup_fails") else 0
 
     def ensure_worktree(_workdir: str, item: WorkItem, **_kwargs) -> str:
         if scenario_state.get("worktree_fails"):
@@ -163,36 +226,49 @@ def run_terminal_scenario(
         return str(worktree_path)
 
     def fake_run(command, **kwargs):
+        nonlocal lookup_failures
         if "list-panes" in command:
-            return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
+            if lookup_failures:
+                lookup_failures -= 1
+                raise subprocess.CalledProcessError(
+                    1, command, stderr="Failed to list Zellij panes: session not found"
+                )
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(panes), stderr="")
         if scenario_state.get("terminal_launch_fails"):
             raise subprocess.CalledProcessError(1, command, stderr="terminal launch failed")
         terminal_commands.append(command)
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(control_module, "ensure_worktree", ensure_worktree)
+    monkeypatch.setattr(
+        control_module, "existing_worktree_path", lambda *args, **kwargs: worktree_path
+    )
     monkeypatch.setenv("SHELL", "/bin/bash")
     monkeypatch.setattr(
         shutil, "which", lambda name: "/usr/bin/zellij" if name == "zellij" else None
     )
     monkeypatch.setattr(subprocess, "run", fake_run)
+    # Worktrees live under the configured workdir, so the scenario's worktree and
+    # its same-named sibling live there too.
     session = WorkdashSession(
-        config=make_valid_config(),
+        config=replace(make_valid_config(), workdir=str(tmp_path)),
         backend=SimpleNamespace(analysis_cache=None, github_client=None),  # type: ignore[arg-type]
         work_items=list(work_items),
         suggestion_markers={},
         zellij_session=zellij_session,
     )
 
+    focused_panes = []
+
     def launch_callback(item: WorkItem, tool: str = "codex") -> None:
         launch_calls.append((item, tool))
 
     async def interactions(app, pilot) -> None:
-        await pilot.press("t")
+        await pilot.press("c", "t")
         for _ in range(40):
             await pilot.pause()
             status = app.query_one("#status-footer", Static).render().plain
-            if "Opened terminal" in status or "Terminal failed" in status:
+            if "Opened terminal" in status or "Terminal failed" in status or "Focused" in status:
                 break
         captured["status"] = app.query_one("#status-footer", Static).render().plain
         captured["modal_screen_names"] = modal_screen_names(app)
@@ -201,8 +277,11 @@ def run_terminal_scenario(
         work_items=list(work_items),
         terminal_callback=lambda item: session.terminal(target=format_work_item_id(item)),
         launch_callback=launch_callback,
+        session=session,
+        focus_callback=focused_panes.append,
         interactions=interactions,
     )
+    scenario_state["focused_panes"] = focused_panes
     scenario_state["worktree_calls"] = worktree_calls
     scenario_state["worktree_path"] = str(worktree_path)
     scenario_state["terminal_commands"] = terminal_commands
@@ -248,3 +327,43 @@ def _reports_terminal_launch_error_details(scenario_state: dict[str, Any]) -> No
 @then("no terminal is opened")
 def _no_terminal_opened(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["terminal_calls"] == []
+
+
+@given("a plain shell is already open in that worktree alongside a coding agent")
+def _existing_terminal(scenario_state):
+    scenario_state["existing_terminal"] = True
+
+
+@given("a Workdash terminal is running a program in that worktree")
+def _running_terminal(scenario_state):
+    scenario_state["running_terminal"] = True
+
+
+@given("a Workdash terminal in that worktree changed to another directory")
+def _terminal_left_worktree(scenario_state):
+    scenario_state["terminal_left_worktree"] = True
+
+
+@then("the existing terminal is focused without opening another")
+def _focused_existing_terminal(scenario_state):
+    assert scenario_state["focused_panes"] == ["terminal_5"]
+    assert scenario_state["terminal_commands"] == []
+    assert scenario_state["worktree_calls"] == []
+
+
+@given("an editor and a test runner are open in that worktree")
+def _other_programs(scenario_state):
+    scenario_state["other_programs"] = True
+
+
+@given("the next check for an existing terminal will fail")
+def _terminal_lookup_fails(scenario_state):
+    scenario_state["terminal_lookup_fails"] = True
+
+
+@given(
+    "a terminal is open in another worktree under the working directory "
+    "whose directory has the same name"
+)
+def _terminal_in_same_named_worktree(scenario_state):
+    scenario_state["terminal_in_same_named_worktree"] = True

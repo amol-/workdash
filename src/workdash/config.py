@@ -41,9 +41,9 @@ _DETECTABLE_AGENTS = {
 # Names that mean something else inside Workdash (the analyze dialog's cached analysis and
 # the code dialog's editor launch).
 _RESERVED_AGENT_NAMES = frozenset({"cached", "vscode"})
-# The TUI dialogs number entries with single keys; VSCode Copilot takes the last code number.
-_MAX_ANALYZE_AGENTS = 9
-_MAX_CODE_AGENTS = 8
+# The TUI dialogs number agent entries with single keys, so a section holds at most
+# nine agents. The code menu's edit, branchdiff and terminal entries take letters.
+_MAX_AGENTS = 9
 # What each section of the wizard's agent step asks for: the command's purpose and an example.
 _AGENT_SECTION_HELP = {
     "analyze": ("commands that run once and print the analysis", "claude -p"),
@@ -136,7 +136,6 @@ class WorkdashConfig:
     def tui_code_choices(self) -> list[WorkdashAgentChoice]:
         return _numbered_agent_choices(
             [(name, name, name) for name in self.configured_code_agents()]
-            + [("vscode", "VSCode Copilot", "VSCode")]
         )
 
     def analyze_agent_command_tokens(self, agent: str) -> list[str]:
@@ -579,8 +578,8 @@ def configure(
             print(f"No supported agent found on PATH (looked for {', '.join(_DETECTABLE_AGENTS)}).")
         print("Each agent command is run with the task prompt appended as its last argument.")
         while True:
-            _prompt_agents(input_fn, agents, "Agents for analyze", "analyze", _MAX_ANALYZE_AGENTS)
-            _prompt_agents(input_fn, agents, "Agents for code", "launch", _MAX_CODE_AGENTS)
+            _prompt_agents(input_fn, agents, "Agents for analyze", "analyze", _MAX_AGENTS)
+            _prompt_agents(input_fn, agents, "Agents for code", "launch", _MAX_AGENTS)
             if agents:
                 break
             print("At least one agent is required.")

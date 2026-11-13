@@ -836,6 +836,94 @@ def test_fetch_linked_issues_reraises_a_non_authorization_failure(
     assert not any("Warning: skipped linked issue lookup" in warning for warning in warnings)
 
 
+def test_fetch_linked_issues_for_pull_request_lists_the_issues_it_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        assert command[:3] == ["gh", "api", "graphql"]
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "p0": {
+                            "pullRequest": {
+                                "closingIssuesReferences": {
+                                    "nodes": [
+                                        {
+                                            "number": 41830,
+                                            "repository": {"nameWithOwner": "other/repo"},
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert GitHubClient().fetch_linked_issues_for_pull_request("owner/repo", 42) == [
+        ("other/repo", 41830)
+    ]
+
+
+def test_fetch_linked_issues_for_pull_request_returns_nothing_when_it_closes_no_issue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout=json.dumps(
+                {"data": {"p0": {"pullRequest": {"closingIssuesReferences": {"nodes": []}}}}}
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert GitHubClient().fetch_linked_issues_for_pull_request("owner/repo", 42) == []
+
+
+@pytest.mark.parametrize(
+    "skip_error",
+    [
+        "GraphQL: Resource protected by organization SAML enforcement. "
+        "You must grant your OAuth token access to this organization.",
+        "Could not resolve to a Repository with the name 'owner/repo'.",
+    ],
+)
+def test_fetch_linked_issues_for_pull_request_raises_the_reason_github_denied_it(
+    monkeypatch: pytest.MonkeyPatch, skip_error: str
+) -> None:
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=command,
+            output=json.dumps(
+                {
+                    "data": {"p0": None},
+                    "errors": [{"path": ["p0"], "message": skip_error}],
+                }
+            ),
+            stderr=skip_error,
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError) as raised:
+        GitHubClient().fetch_linked_issues_for_pull_request("owner/repo", 42)
+
+    assert str(raised.value) == skip_error
+
+
 def test_list_open_reviewed_prs_returns_open_prs_reviewed_by_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

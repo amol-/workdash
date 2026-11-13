@@ -130,8 +130,7 @@ work too. At least one agent is required.
 The wizard asks about agents only when none is configured: it adds `claude`,
 `codex`, and `pi` when found on your `PATH`, then asks for more analyze and
 launch commands, each with a name. The TUI numbers its entries with single
-keys, so the wizard accepts at most 9 analysis agents and 8 coding agents
-(VSCode Copilot takes the last number in the code dialog).
+keys, so the wizard accepts at most 9 analysis agents and 9 coding agents.
 
 ## Usage
 
@@ -203,12 +202,14 @@ The `repositories` list in `config.json` accepts:
 - `a` — analyze the selected item. Opens a dialog to open the cached analysis
   (if any), or run a fresh analysis with any configured analysis agent. Fresh
   analyses are cached and rendered as HTML with your configured viewer.
-- `c` — launch a coding session on the selected item. Opens a dialog to pick
-  one of your configured coding agents or VSCode Copilot. `workdash` prepares a
+- `c` — open the code menu for the selected item. Choose a numbered coding
+  agent, `(e) edit` for VSCode Copilot, `(d) branchdiff`, or `(t) terminal`. `workdash` prepares a
   dedicated git worktree for the item and starts the chosen tool in it, preloaded
   with context about the issue or PR. If an agent is already running in the
-  item's worktree, `c` focuses its pane instead of opening the dialog.
-- `t` — open a terminal in the selected item's worktree (no agent launched).
+  item's worktree, choosing a numbered agent focuses its pane instead of launching another.
+- `d` — start an autodispatch session for the selected issue or a linked issue
+  of an authored PR, including in another repository. A PR without a linked
+  issue cannot be dispatched.
 - `w` — capture a todo. Opens a dialog asking for the todo text and an
   optional target repository.
 - `q` — quit.
@@ -411,8 +412,8 @@ including cross-repository work; `--group` overrides it. Each session dispatches
 seconds for its pane to disappear, then synchronously reviews the linked open PR before checking readiness again. If there is no linked PR, review is skipped. The selected agent must support both coding and one-shot analysis. Review failure fails the session. The session fails before a tenth consecutive dispatch of the same issue; selecting another issue resets the count. It does not merge PRs. Multiple independent sessions can run at once.
 
 `workdash info` and `workdash info --json` report sessions, their current task,
-status, elapsed time and any failure. The TUI shows running sessions above the
-work table without blocking interaction. Stop a session with
+status, elapsed time and any failure. The TUI shows running sessions and the three
+most recently started failed sessions, including failure details, above the work table. Stop a session with
 `workdash autodispatch-stop SESSION_ID`; stopping does not close its agent pane.
 A dispatch already in progress may still finish launching its pane after stopping.
 Pane disappearance is not proof that the work was merged or completed.
@@ -506,8 +507,14 @@ and reports an error; a retry within a minute of an unconfirmed launch fails too
 An agent that exits right after launch is reported as an error and does not block
 a retry.
 Terminal panes do not count. VSCode Copilot, offered only by the TUI, holds no
-claim and is not opened while an agent pane is live. In the TUI, `c` on an item
-with a live agent pane focuses that pane instead of opening the dialog.
+claim and is not opened while an agent pane is live. In the TUI, `c` opens the
+code menu; choosing a numbered agent focuses any live agent pane for the worktree.
+Choosing terminal focuses an existing terminal in the worktree instead of opening
+another: a Workdash terminal, even when it runs a program or its shell changed
+directory, or a plain shell. Agent and diff panes are excluded, and so is a
+terminal in another worktree under the configured `workdir`, even one whose
+directory has the same name. Outside `workdir` a terminal carrying this
+worktree's Workdash title is treated as this worktree's terminal.
 
 `workdash code` always autostarts the agent: its briefing ends with an appendix
 telling it to work without routine confirmation, commit, push, and open a pull

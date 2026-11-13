@@ -100,6 +100,7 @@ for _step_module in (
             "work_items",
             "valid_config",
             "autodispatch_state",
+            "dashboard_dispatch",
             "config_path",
         }:
             globals()[_name] = getattr(_step_module, _name)

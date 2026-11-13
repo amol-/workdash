@@ -46,7 +46,13 @@ from .models import (
     format_type_label,
 )
 from .repo_resolver import validate_repository_selectors
-from .repo_worktree import ensure_worktree, existing_worktree_path, get_merge_base, main_repo_path
+from .repo_worktree import (
+    ensure_worktree,
+    existing_worktree_for_branch,
+    existing_worktree_path,
+    get_merge_base,
+    worktree_branch,
+)
 from .review import review_pull_request
 from .work_instruction import autostart_briefing
 from .work_state import ReadyWork
@@ -542,9 +548,7 @@ class WorkdashSession:
                     repo_path = todo_path
             if repo_path is None and selected_head is not None:
                 branch, repo = selected_head
-                repo_path = git.find_worktree_for_branch(
-                    main_repo_path(self.config.workdir, repo), branch
-                )
+                repo_path = existing_worktree_for_branch(self.config.workdir, repo, branch, git=git)
             if repo_path is not None:
                 claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
                 if claimed is not None:
@@ -814,6 +818,40 @@ class WorkdashSession:
             entry.thread.start()
         return entry.snapshot()
 
+    def start_autodispatch_for_item(self, item: WorkItem) -> dict[str, object] | None:
+        """Start an autodispatch session scoped to the item's issue.
+
+        An authored pull request dispatches the issue it closes, in whatever
+        repository that issue lives, picking the lowest repository name and then
+        issue number as coding the pull request does. It returns None when the
+        pull request closes no issue, and raises when GitHub cannot report them.
+
+        :param WorkItem item: The dashboard item the user dispatched.
+        """
+        scope = format_work_item_id(item)
+        if item.kind == WorkItemKind.AUTHORED_PR:
+            try:
+                linked = self.backend.github_client.fetch_linked_issues_for_pull_request(
+                    item.repo, item.number
+                )
+            except RuntimeError as error:
+                raise WorkdashControlError(
+                    "github_error",
+                    f"GitHub lookup for {scope!r} failed: {error}",
+                    status=HTTPStatus.BAD_GATEWAY,
+                ) from error
+            if not linked:
+                return None
+            repo, number = min(linked, key=lambda issue: (issue[0].lower(), issue[1]))
+            scope = f"{repo}#ISSUE-{number}"
+        # A session reviews its own work, so its agent must analyze as well as code.
+        analyze_agents = self.config.configured_analyze_agents()
+        agent = next(
+            (name for name in self.config.configured_code_agents() if name in analyze_agents),
+            None,
+        )
+        return self.start_autodispatch(scope=scope, agent=agent)
+
     def autodispatch_sessions(self) -> list[dict[str, object]]:
         with self._autodispatch_lock:
             return [entry.snapshot() for entry in self._autodispatch.values()]
@@ -1037,17 +1075,52 @@ class WorkdashSession:
             status=HTTPStatus.BAD_REQUEST,
         )
 
-    def get_agent_panes_for_item(self, item: WorkItem) -> list[dict[str, object]]:
-        """Return the live agent panes working in the item's worktree, lowest pane ID first."""
+    def get_terminal_panes_for_item(self, item: WorkItem) -> list[dict[str, object]]:
+        """Return live terminal panes working in the item's worktree, in Zellij's listing order.
 
+        Callers reuse the first listed pane.
+        """
         worktree = existing_worktree_path(self.config.workdir, item, git=self.git)
+        if worktree is None and self.zellij_session:
+            repo, branch = worktree_branch(item, github_client=self.backend.github_client)
+            worktree = existing_worktree_for_branch(self.config.workdir, repo, branch, git=self.git)
         if worktree is None or not self.zellij_session:
             return []
-        item_by_cwd = {_normalized_path(worktree): format_work_item_id(item)}
-        return [
-            _pane_payload(self.zellij_session, pane, item_by_cwd, kind="agent")
-            for pane in _agent_panes_in_worktree(self._live_panes(), worktree)
-        ]
+        shells = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh"}
+        shells.add(os.path.basename(os.environ.get("SHELL", "")))
+        item_id = format_work_item_id(item)
+        item_by_cwd = {_normalized_path(worktree): item_id}
+        terminal_title = _zellij_pane_name_for_work_action("terminal", str(worktree))
+        workdir_root = _normalized_path(self.config.workdir) + os.sep
+        panes = []
+        for pane in self._live_panes():
+            if not is_live_zellij_pane(pane):
+                continue
+            title = str(pane.get("title") or "")
+            command = pane.get("pane_command")
+            runs_shell = (
+                isinstance(command, str)
+                and command.strip()
+                and os.path.basename(command.split(maxsplit=1)[0]) in shells
+            )
+            if title.startswith(("code_", "diff_")):
+                continue
+            # A shell is a terminal whatever its title; another program is only one
+            # when Workdash launched it in this worktree.
+            if title != terminal_title and not runs_shell:
+                continue
+            payload = _pane_payload(self.zellij_session, pane, item_by_cwd, kind="terminal")
+            # A Workdash terminal keeps its launch title when its shell changes
+            # directory, so a title match outside the workdir is still ours.
+            # Anything under the workdir belongs to a worktree, so it needs its
+            # cwd to match.
+            cwd = pane.get("pane_cwd")
+            outside_workdir = isinstance(cwd, str) and not _normalized_path(cwd).startswith(
+                workdir_root
+            )
+            if payload["item"] == item_id or (title == terminal_title and outside_workdir):
+                panes.append(payload)
+        return panes
 
     def focus_pane(self, pane_id: str) -> None:
         """Focus a Zellij pane by its ID.

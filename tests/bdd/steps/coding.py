@@ -427,7 +427,6 @@ def run_code_dialog_scenario(
         work_items=list(work_items),
         launch_callback=launch_callback,
         focus_callback=focus_calls.append,
-        list_agent_panes_callback=session.get_agent_panes_for_item,
         interactions=interactions,
         config=config,
     )
@@ -453,19 +452,16 @@ def _system_focuses_pane(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["focus_calls"] == ["terminal_7"]
 
 
-@then("no dialog is shown")
-def _no_dialog_shown(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["dialog_lines"] is None
-
-
-@then("the dialog offers only coding agents and Cancel")
-def _dialog_offers_only_agents_and_cancel(scenario_state: dict[str, Any]) -> None:
+@then("the dialog offers coding agents, edit, branchdiff, terminal, and Cancel")
+def _dialog_offers_coding_tools(scenario_state: dict[str, Any]) -> None:
     options = [line for line in scenario_state["dialog_lines"] if line.startswith("(")]
     assert options == [
         "(1) claude",
         "(2) codex",
         "(3) pi",
-        "(4) VSCode Copilot",
+        "(e) edit (VSCode Copilot)",
+        "(d) branchdiff",
+        "(t) terminal",
         "(Esc) Cancel",
     ]
 
@@ -491,7 +487,7 @@ def _dialog_offers_agents_then_vscode(
     first: str, second: str, scenario_state: dict[str, Any]
 ) -> None:
     lines = scenario_state["dialog_lines"]
-    expected = [f"(1) {first}", f"(2) {second}", "(3) VSCode Copilot"]
+    expected = [f"(1) {first}", f"(2) {second}", "(e) edit (VSCode Copilot)"]
     assert [line for line in lines if line in expected] == expected, lines
 
 

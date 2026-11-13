@@ -190,7 +190,6 @@ def test_agent_panes_map_an_authored_pr_to_the_worktree_of_the_issue_it_closes(
         zellij_session="workdash-main",
     )
 
-    assert [pane["pane_id"] for pane in session.get_agent_panes_for_item(item)] == ["terminal_1"]
     assert [pane["item"] for pane in session.info()["panes"]] == ["owner/repo#PR-42149"]
 
 
@@ -590,9 +589,9 @@ def test_code_reports_the_lowest_live_agent_pane_tied_to_the_worktree(
 ) -> None:
     worktree = tmp_path / "owner_repo_1"
     panes = [
-        # The agent changed directory, but its title still names the worktree.
-        {"id": 9, "title": "code_owner_repo_1", "pane_cwd": "/elsewhere"},
-        {"id": 4, "title": "code_owner_repo_1", "pane_cwd": str(worktree / "src")},
+        # The lowest agent changed directory, but its title still names the worktree.
+        {"id": 4, "title": "code_owner_repo_1", "pane_cwd": "/elsewhere"},
+        {"id": 9, "title": "code_owner_repo_1", "pane_cwd": str(worktree / "src")},
         # An agent of another worktree that changed directory into this one.
         {"id": 3, "title": "code_owner_repo_2", "pane_cwd": str(worktree)},
         {"id": 1, "title": "code_owner_repo_1", "pane_cwd": str(worktree), "exited": True},
@@ -608,20 +607,13 @@ def test_code_reports_the_lowest_live_agent_pane_tied_to_the_worktree(
         "item_id": "owner/repo#ISSUE-1",
         "session": "workdash-main",
         "agent": None,
-        "cwd": str(worktree / "src"),
+        "cwd": "/elsewhere",
         "pane_title": "code_owner_repo_1",
         "pane_id": "terminal_4",
         "tab_name": None,
     }
     ensure_worktree.assert_not_called()
     launch_agent.assert_not_called()
-    # The loaded dashboard row is used as is, without a GitHub lookup.
-    assert [
-        pane["pane_id"] for pane in session.get_agent_panes_for_item(session.work_items[0])
-    ] == [
-        "terminal_4",
-        "terminal_9",
-    ]
 
 
 @pytest.mark.parametrize(
@@ -646,6 +638,21 @@ def test_code_starts_nothing_when_live_agent_panes_cannot_be_checked(
     launch_agent.assert_not_called()
 
 
+def test_code_does_not_launch_when_pane_listing_fails(monkeypatch, tmp_path) -> None:
+    session, _worktree, ensure_worktree, launch_agent = _coding_session(monkeypatch, tmp_path, [])
+    monkeypatch.setattr(
+        control_module.launcher.zellij,
+        "load_zellij_panes",
+        MagicMock(side_effect=RuntimeError("pane listing failed")),
+    )
+
+    with pytest.raises(control_module.WorkdashControlError, match="pane listing failed"):
+        session.code(target="owner/repo#ISSUE-1", agent="pi")
+
+    ensure_worktree.assert_not_called()
+    launch_agent.assert_not_called()
+
+
 def test_vscode_is_not_opened_while_an_agent_pane_is_live(monkeypatch, tmp_path) -> None:
     panes = [{"id": 5, "title": "code_owner_repo_1", "pane_cwd": str(tmp_path / "owner_repo_1")}]
     session, _worktree, _ensure, _launch = _coding_session(monkeypatch, tmp_path, panes)
@@ -665,7 +672,6 @@ def test_vscode_opens_without_a_zellij_session(monkeypatch, tmp_path) -> None:
     launch_vscode = MagicMock()
     monkeypatch.setattr(control_module.agent_execution.executor, "launch_vscode", launch_vscode)
 
-    assert session.get_agent_panes_for_item(session.work_items[0]) == []
     result = session.code(target="owner/repo#ISSUE-1", agent="vscode", allow_vscode=True)
 
     assert result["status"] == "launched"
@@ -3623,7 +3629,6 @@ def test_session_uses_its_git_to_identify_worktrees_for_ready_and_panes(monkeypa
     session._unconfirmed_launches.clear()
     panes.append({"id": 1, "title": "code_owner_repo_1", "pane_cwd": str(worktree)})
     assert session.ready(scope="owner/repo")["items"] == []
-    assert session.get_agent_panes_for_item(item)[0]["pane_id"] == "terminal_1"
     assert session.info()["panes"][0]["item"] == "owner/repo#ISSUE-1"
 
 
@@ -3775,3 +3780,168 @@ def test_shared_agent_execution_can_simulate_analysis_and_coding(monkeypatch, tm
         ("code", str(worktree), "PROMPT", ["pi"], "workdash-main"),
         ("vscode", str(worktree), "PROMPT"),
     ]
+
+
+def _terminal_session(workdir: Path, item: WorkItem) -> WorkdashSession:
+    return WorkdashSession(
+        config=WorkdashConfig(workdir=str(workdir)),
+        backend=MagicMock(),
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+
+
+def test_terminal_panes_match_worktree_and_exclude_agents_and_exited_panes(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHELL", "/usr/local/bin/nu")
+    worktree = tmp_path / "owner_repo_1"
+    worktree.mkdir()
+    item = _work_item(number=1, title="Work")
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args, **kwargs: worktree)
+    monkeypatch.setattr(
+        control_module.launcher.zellij,
+        "load_zellij_panes",
+        lambda _: [
+            {
+                "id": 1,
+                "title": "code_owner_repo_1",
+                "pane_command": "/bin/bash",
+                "pane_cwd": str(worktree),
+                "exited": False,
+            },
+            {
+                "id": 2,
+                "title": "terminal_owner_repo_1",
+                "pane_command": "/bin/bash -i",
+                "pane_cwd": str(worktree / "subdir"),
+                "exited": False,
+            },
+            {
+                "id": 3,
+                "title": "terminal_owner_repo_1",
+                "pane_command": "/bin/bash",
+                "pane_cwd": str(worktree),
+                "exited": True,
+            },
+            {"id": 4, "title": "terminal_owner_repo_2", "pane_cwd": str(worktree), "exited": False},
+            {
+                "id": 6,
+                "title": "diff_owner_repo_1",
+                "pane_command": "/bin/bash",
+                "pane_cwd": str(worktree),
+                "exited": False,
+            },
+            {
+                "id": 7,
+                "title": "amol@host: cwd",
+                "pane_command": "/bin/bash",
+                "pane_cwd": str(worktree),
+            },
+            {
+                "id": 11,
+                "title": "terminal_owner_repo_1",
+                "pane_command": "nvim",
+                "pane_cwd": str(worktree),
+            },
+            {
+                "id": 12,
+                "title": "terminal_owner_repo_1",
+                "pane_command": "pytest",
+                "pane_cwd": str(worktree),
+            },
+            {
+                "id": 14,
+                "title": "my shell",
+                "pane_command": "/usr/local/bin/nu -i",
+                "pane_cwd": str(worktree),
+            },
+            {"id": 13, "title": "terminal_owner_repo_1", "pane_cwd": str(worktree)},
+            {"id": 8, "title": "nvim", "pane_cwd": str(worktree)},
+            {"id": 9, "title": "pytest", "pane_cwd": str(worktree)},
+            {"id": 10, "title": "claude", "pane_cwd": str(worktree)},
+            {
+                "id": 5,
+                "title": "terminal_owner_repo_1",
+                "pane_command": "/bin/bash",
+                "pane_cwd": str(tmp_path / "other" / worktree.name),
+                "exited": False,
+            },
+        ],
+    )
+    session = _terminal_session(tmp_path, item)
+    assert [pane["pane_id"] for pane in session.get_terminal_panes_for_item(item)] == [
+        "terminal_2",
+        "terminal_7",
+        "terminal_11",
+        "terminal_12",
+        "terminal_14",
+        "terminal_13",
+    ]
+
+
+@pytest.mark.parametrize("item_type", [WorkItemType.ISSUE, WorkItemType.PR])
+def test_terminal_lookup_finds_worktree_reused_by_branch(tmp_path, monkeypatch, item_type):
+    from workdash.launcher import _zellij_pane_name_for_work_action
+
+    item = _work_item(number=7, title="work", item_type=item_type)
+    session = _terminal_session(tmp_path, item)
+    worktree = tmp_path / "custom-checkout"
+    worktree.mkdir()
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args, **kwargs: None)
+    session.git = MagicMock()
+    session.git.find_worktree_for_branch.return_value = worktree
+    session.git.repository_matches.return_value = True
+    session.backend.github_client.fetch_worktree_head.return_value = ("pr-branch", "fork/repo")
+    title = _zellij_pane_name_for_work_action("terminal", str(worktree))
+    monkeypatch.setattr(
+        control_module.launcher.zellij,
+        "load_zellij_panes",
+        lambda _: [
+            {"id": 5, "title": title, "pane_command": "/bin/bash -i", "pane_cwd": str(worktree)}
+        ],
+    )
+    assert session.get_terminal_panes_for_item(item)[0]["pane_id"] == "terminal_5"
+    repo, branch = (
+        ("fork_repo", "pr-branch") if item_type == WorkItemType.PR else ("owner_repo", "issue-7")
+    )
+    session.git.find_worktree_for_branch.assert_called_once_with(tmp_path / repo, branch)
+
+
+def test_terminal_pane_is_reused_unless_it_moved_into_another_worktree(tmp_path, monkeypatch):
+    workdir = tmp_path / "workdir"
+    worktree = workdir / "owner_repo_1"
+    worktree.mkdir(parents=True)
+    other_worktree = workdir / "other" / worktree.name
+    other_worktree.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere" / worktree.name
+    elsewhere.mkdir(parents=True)
+    item = _work_item(number=1, title="Work")
+    panes = [
+        {
+            "id": 5,
+            "title": "terminal_owner_repo_1",
+            "pane_command": "/bin/bash -i",
+            "pane_cwd": str(other_worktree),
+        }
+    ]
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args, **kwargs: worktree)
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: list(panes))
+    session = _terminal_session(workdir, item)
+    assert session.get_terminal_panes_for_item(item) == []
+    # Our own terminal shares the title but changed directory outside the workdir.
+    panes.append(
+        {
+            "id": 6,
+            "title": "terminal_owner_repo_1",
+            "pane_command": "/bin/bash -i",
+            "pane_cwd": str(elsewhere),
+        }
+    )
+    assert [pane["pane_id"] for pane in session.get_terminal_panes_for_item(item)] == ["terminal_6"]
+
+
+def test_terminal_pane_lookup_returns_nothing_without_a_zellij_session(monkeypatch, tmp_path):
+    session, _worktree, _ensure, _launch = _coding_session(
+        monkeypatch, tmp_path, [], zellij_session=None
+    )
+    assert session.get_terminal_panes_for_item(session.work_items[0]) == []

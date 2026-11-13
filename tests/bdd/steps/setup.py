@@ -481,7 +481,7 @@ def _shows_section_listing_agents(
 def _sections_state_their_limits(scenario_state: dict[str, Any]) -> None:
     output = scenario_state["output"]
     assert "at most 9" in _section(output, "Agents for analyze")
-    assert "at most 8" in _section(output, "Agents for code")
+    assert "at most 9" in _section(output, "Agents for code")
 
 
 @then("each section asks for another command until the user answers with an empty line")
