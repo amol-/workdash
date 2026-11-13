@@ -242,8 +242,7 @@ def analysis_worktree(
             git.clone_repository(repo, main)
         else:
             git.clone_github_repository(repo, main, github_client=github_client)
-    git.fetch_remote(main, "origin")
-    _refresh_origin_head(main)
+    _refresh_origin_head(main, configure_fetch=False)
     with tempfile.TemporaryDirectory(prefix="workdash-analysis-") as directory:
         path = Path(directory) / wt.name
         subprocess.run(
@@ -265,7 +264,21 @@ def analysis_worktree(
             )
 
 
-def _refresh_origin_head(main: Path) -> None:
+def get_merge_base(worktree: str, *, git: GitHelper | None = None) -> str | None:
+    """Return the merge-base commit between HEAD and origin's default branch.
+
+    Returns None if the merge-base cannot be determined (e.g. shallow clone).
+    """
+    return (git if git is not None else GitHelper()).merge_base_with_origin_default(worktree)
+
+
+def issue_branch_number(branch: str) -> int | None:
+    """Return the issue number of a branch named the way ``ensure_worktree`` names an issue's."""
+    match = _ISSUE_BRANCH_RE.match(branch)
+    return int(match.group(1)) if match else None
+
+
+def _refresh_origin_head(main: Path, *, configure_fetch: bool = True) -> None:
     remote_head = subprocess.run(
         ["git", "ls-remote", "--symref", "origin", "HEAD"],
         cwd=main,
@@ -280,8 +293,33 @@ def _refresh_origin_head(main: Path) -> None:
     if default_ref is None or not default_ref.startswith("refs/heads/"):
         raise RuntimeError("Failed to determine origin's default branch.")
     branch = default_ref.removeprefix("refs/heads/")
+    fetch_spec = f"+{default_ref}:refs/remotes/origin/{branch}"
+    if configure_fetch:
+        fetch_specs = subprocess.run(
+            ["git", "config", "--get-all", "remote.origin.fetch"],
+            cwd=main,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        if (
+            fetch_spec not in fetch_specs
+            and "+refs/heads/*:refs/remotes/origin/*" not in fetch_specs
+        ):
+            subprocess.run(
+                [
+                    "git",
+                    "config",
+                    "--add",
+                    "remote.origin.fetch",
+                    "+refs/heads/*:refs/remotes/origin/*",
+                ],
+                cwd=main,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
     subprocess.run(
-        ["git", "fetch", "origin", f"+{default_ref}:refs/remotes/origin/{branch}"],
+        ["git", "fetch", "origin", fetch_spec],
         cwd=main,
         check=True,
         capture_output=True,
@@ -294,20 +332,6 @@ def _refresh_origin_head(main: Path) -> None:
         capture_output=True,
         text=True,
     )
-
-
-def get_merge_base(worktree: str, *, git: GitHelper | None = None) -> str | None:
-    """Return the merge-base commit between HEAD and origin's default branch.
-
-    Returns None if the merge-base cannot be determined (e.g. shallow clone).
-    """
-    return (git if git is not None else GitHelper()).merge_base_with_origin_default(worktree)
-
-
-def issue_branch_number(branch: str) -> int | None:
-    """Return the issue number of a branch named the way ``ensure_worktree`` names an issue's."""
-    match = _ISSUE_BRANCH_RE.match(branch)
-    return int(match.group(1)) if match else None
 
 
 def _worktree_candidates(base: Path, item: WorkItem) -> list[Path]:

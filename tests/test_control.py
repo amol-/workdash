@@ -4220,7 +4220,7 @@ def test_code_creates_worktree_for_existing_pr_branch(monkeypatch, tmp_path, ups
             ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True
         ).stdout.strip()
 
-    git(tmp_path, "init", "--bare", str(origin))
+    git(tmp_path, "init", "--bare", "-b", "main", str(origin))
     git(tmp_path, "init", "-b", "main", str(main))
     git(main, "config", "user.email", "test@example.com")
     git(main, "config", "user.name", "Test")

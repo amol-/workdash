@@ -2055,6 +2055,20 @@ def test_issue_branch_selection_with_real_git(tmp_path, monkeypatch, case):
         github.create_issue_branch.assert_not_called()
     else:
         github.create_issue_branch.assert_called_once_with("owner/repo", 42, "issue-42")
+    if case == "single_fallback":
+        git(seed, "commit", "--allow-empty", "-m", "later default work")
+        git(seed, "push", "origin", "new-default")
+        next_worktree = Path(ensure_worktree(str(workdir), make_issue(43), github_client=github))
+        assert git(next_worktree, "rev-parse", "HEAD") == git(seed, "rev-parse", "HEAD")
+        assert git(worktree, "rev-parse", "HEAD") == expected
+        git(seed, "switch", "-c", "latest-default")
+        git(seed, "commit", "--allow-empty", "-m", "latest default")
+        git(seed, "push", "origin", "latest-default")
+        git(origin, "symbolic-ref", "HEAD", "refs/heads/latest-default")
+        git(seed, "push", "origin", "--delete", "new-default")
+        git(main, "fetch", "origin")
+        latest_worktree = Path(ensure_worktree(str(workdir), make_issue(44), github_client=github))
+        assert git(latest_worktree, "rev-parse", "HEAD") == git(seed, "rev-parse", "HEAD")
     if case in {"remote", "linked", "single_remote", "single_linked", "single_retry"}:
         git(seed, "push", "origin", "--delete", "issue-42")
         git(main, "fetch", "--prune", "origin")
@@ -2191,6 +2205,7 @@ def test_analysis_refreshes_changed_remote_default(tmp_path, monkeypatch, single
     main = workdir / "owner_repo"
     git(workdir, "clone", *(["--single-branch"] if single_branch else []), str(origin), str(main))
     git(main, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+    fetch_config = git(main, "config", "--get-all", "remote.origin.fetch")
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{origin}.insteadOf")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/owner/repo.git")
@@ -2205,6 +2220,21 @@ def test_analysis_refreshes_changed_remote_default(tmp_path, monkeypatch, single
     ) as path:
         assert (Path(path) / "source").read_text() == "new default"
         assert git(path, "rev-parse", "HEAD") == git(seed, "rev-parse", "HEAD")
+    assert git(main, "config", "--get-all", "remote.origin.fetch") == fetch_config
+    if single_branch:
+        git(main, "config", "--add", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+        fetch_config = git(main, "config", "--get-all", "remote.origin.fetch")
+
+    git(seed, "push", "origin", "--delete", "main")
+    (seed / "source").write_text("later default")
+    git(seed, "commit", "-am", "later")
+    git(seed, "push", "origin", "new-default")
+    with analysis_worktree(
+        str(workdir), make_issue(), git=GitHelper(), github_client=MagicMock()
+    ) as path:
+        assert (Path(path) / "source").read_text() == "later default"
+    assert git(main, "config", "--get-all", "remote.origin.fetch") == fetch_config
+    assert git(main, "rev-parse", "main") != git(seed, "rev-parse", "HEAD")
 
 
 @pytest.mark.parametrize("divergent", [False, True])
