@@ -12,13 +12,6 @@ from textual_diff_view import DiffView
 import workdash.branchdiff as branchdiff
 
 
-@pytest.fixture(autouse=True)
-def _no_zellij_pane(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep branchdiff tests from resizing the Zellij pane pytest itself runs in."""
-    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
-    monkeypatch.delenv("ZELLIJ_PANE_ID", raising=False)
-
-
 def test_changed_files_include_committed_modified_and_untracked_files(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "dev@example.com"], cwd=tmp_path, check=True)
