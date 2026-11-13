@@ -291,11 +291,22 @@ class WorkdashBackend:
     def resolve_analyze_command_tokens(self, tool: str) -> list[str]:
         return self.config.analyze_agent_command_tokens(tool)
 
-    def analyze_item(self, item: WorkItem, tool: str, *, cwd: str | None = None) -> str | None:
+    def analyze_item(
+        self,
+        item: WorkItem,
+        tool: str,
+        *,
+        cwd: str | None = None,
+        zellij_session: str | None = None,
+        group: str | None = None,
+    ) -> str | None:
         """Generate or retrieve analysis, returning the markdown file path.
 
         :param str tool: ``"cached"`` to return existing analysis, or the name of a
             configured analysis agent to force a fresh run with it.
+        :param str cwd: Worktree the analysis pane runs in, needed for a fresh run.
+        :param str zellij_session: Zellij session that hosts the analysis pane.
+        :param str group: Zellij tab for the analysis pane.
         """
 
         if tool == "cached":
@@ -305,7 +316,13 @@ class WorkdashBackend:
                 return str(self.analysis_cache.build_analysis_path(item))
             return None
         command_tokens = self.resolve_analyze_command_tokens(tool)
-        analysis_content = self.analyzer.analyze(item, command_tokens=command_tokens, cwd=cwd)
+        analysis_content = self.analyzer.analyze(
+            item,
+            command_tokens=command_tokens,
+            cwd=cwd,
+            zellij_session=zellij_session,
+            group=group,
+        )
         if analysis_content is None:
             return None
         self.analysis_cache.save(item, analysis_content)

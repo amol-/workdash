@@ -3,6 +3,7 @@ import json
 import re
 import shlex
 import subprocess
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -381,7 +382,7 @@ def test_main_tui_analyze_callback_uses_worktree_and_backend(
     item = _issue()
     analysis_path = tmp_path / "analysis.md"
     ensure_calls: list[tuple[str | None, WorkItem]] = []
-    analyze_calls: list[tuple[WorkItem, str, str | None]] = []
+    analyze_calls: list[tuple[WorkItem, str, str | None, str | None, str | None]] = []
     captured_callback: dict[str, object] = {}
 
     class FakeBackend:
@@ -392,8 +393,8 @@ def test_main_tui_analyze_callback_uses_worktree_and_backend(
             assert progress_callback is not None
             return [item], {}
 
-        def analyze_item(self, item, tool="codex", *, cwd=None):
-            analyze_calls.append((item, tool, cwd))
+        def analyze_item(self, item, tool="codex", *, cwd=None, zellij_session=None, group=None):
+            analyze_calls.append((item, tool, cwd, zellij_session, group))
             analysis_path.write_text("analysis body\n", encoding="utf-8")
             return str(analysis_path)
 
@@ -418,14 +419,94 @@ def test_main_tui_analyze_callback_uses_worktree_and_backend(
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
     monkeypatch.setattr(control_module, "ensure_worktree", fake_ensure_worktree)
     monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-selected")
 
     assert workdash_module.main([]) == 0
 
     result = captured_callback["analyze"](item, tool="codex")
 
     assert ensure_calls == [(_VALID_CONFIG.workdir, item)]
-    assert analyze_calls == [(item, "codex", "/tmp/worktree")]
+    assert analyze_calls == [(item, "codex", "/tmp/worktree", "workdash-selected", "repo")]
     assert result == str(analysis_path)
+
+
+def test_main_tui_review_callback_waits_for_the_review_to_finish(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=1,
+        title="PR title",
+        created_at=datetime(2026, 2, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 1, tzinfo=UTC),
+        url="https://example.com/pull/1",
+    )
+    captured_callback: dict[str, object] = {}
+    review_running = threading.Event()
+    release_review = threading.Event()
+    review_finished = threading.Event()
+
+    class FakeBackend:
+        def __init__(self, config=None, **kwargs) -> None:
+            self.github_client = SimpleNamespace(
+                fetch_launch_context=lambda _item: {"state": "OPEN"}
+            )
+
+        def load_items(self, progress_callback=None):
+            return [item], {}
+
+        def resolve_analyze_command_tokens(self, _tool):
+            return ["agent", "-p"]
+
+        def include_item_by_url(self, _url, _existing_identities):
+            return None
+
+    class FakeApp:
+        def __init__(self, **kwargs) -> None:
+            captured_callback["review"] = kwargs["review_callback"]
+
+        def run(self, *, mouse: bool) -> None:
+            return None
+
+    def blocking_review(_item, **_kwargs):
+        review_running.set()
+        release_review.wait(5)
+        review_finished.set()
+        return {"status": "reviewed", "document_path": str(tmp_path / "review.md")}
+
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
+    monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
+    monkeypatch.setattr(control_module, "ensure_worktree", lambda *args, **kwargs: str(tmp_path))
+    monkeypatch.setattr(control_module, "review_pull_request", blocking_review)
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-selected")
+
+    assert workdash_module.main([]) == 0
+
+    results: list[dict[str, object]] = []
+    thread = threading.Thread(
+        target=lambda: results.append(captured_callback["review"](item, "codex"))
+    )
+    thread.start()
+    try:
+        assert review_running.wait(5)
+        assert not review_finished.is_set()
+        thread.join(0.2)
+        assert thread.is_alive()
+        assert results == []
+    finally:
+        release_review.set()
+    thread.join(10)
+    assert review_finished.is_set()
+    assert results == [
+        {"status": "reviewed", "document_path": str(tmp_path / "review.md"), "agent": "codex"}
+    ]
 
 
 def test_main_list_command_does_not_print_loading_message(

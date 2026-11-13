@@ -165,6 +165,85 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
+def test_launch_pane_and_wait_blocks_until_the_pane_command_exits_in_its_group_tab(tmp_path):
+    import threading
+
+    from workdash.launcher import zellij as zellij_client
+
+    zellij = shutil.which("zellij")
+    name = f"workdash-wait-test-{uuid.uuid4().hex}"
+    env = os.environ.copy()
+    for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
+        env.pop(key, None)
+    env.update(TERM="xterm-256color", SHELL="/bin/sh")
+    pid, fd = pty.fork()
+    if pid == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        os.execve(zellij, [zellij, "--session", name], env)
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                if zellij_client.load_zellij_panes(name):
+                    break
+            except RuntimeError:
+                pass
+            time.sleep(0.1)
+        else:
+            pytest.fail("Zellij did not start")
+
+        def wait_for(command, group):
+            path = tmp_path / uuid.uuid4().hex
+            path.mkdir()
+            zellij_client.launch_pane_and_wait(
+                str(path),
+                ["/bin/sh", "-c", command],
+                context="test",
+                work_action="review",
+                zellij_session=name,
+                group=group,
+            )
+            return path
+
+        # The call returns only once the pane command has run to completion.
+        ran = wait_for("echo ran > ran.txt", None)
+        assert (ran / "ran.txt").read_text().strip() == "ran"
+
+        # The pane closes on exit, so the tab is inspected while the pane still runs.
+        release = tmp_path / "release"
+        grouped = []
+        thread = threading.Thread(
+            target=lambda: grouped.append(
+                wait_for(
+                    f"while [ ! -e {release} ]; do sleep 0.05; done; echo grouped > grouped.txt",
+                    "project",
+                )
+            )
+        )
+        thread.start()
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                tabs = {
+                    pane.get("tab_name")
+                    for pane in zellij_client.load_zellij_panes(name)
+                    if not pane.get("is_plugin")
+                }
+                if "project" in tabs:
+                    break
+                time.sleep(0.1)
+            else:
+                pytest.fail("the grouped pane did not open in its tab")
+        finally:
+            release.touch()
+            thread.join(20)
+        assert not thread.is_alive()
+        assert (grouped[0] / "grouped.txt").read_text().strip() == "grouped"
+    finally:
+        _cleanup_sessions(zellij, env, [(name, pid, fd)])
+
+
+@pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
 @pytest.mark.parametrize("tab_name", ["epic", "-foo"])
 def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, tab_name):
     from workdash.agent_execution import executor

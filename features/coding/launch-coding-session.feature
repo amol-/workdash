@@ -32,7 +32,7 @@ Feature: Launch a coding session
     - An agent pane belongs to a worktree when its title is the worktree's `code_` pane title, wherever its cwd has moved. Terminal panes, exited or held panes, and agent panes of other worktrees hold no claim, even when their cwd is inside the worktree.
     - Asking to code on a worktree with a live agent pane starts nothing: the result reports status `already_running` with that pane's ID and session, and never claims the requested agent is the one running. Only status `launched` means this request started the session.
     - Pressing "c" opens the code dialog even when the worktree has a live agent pane.
-    - The dialog offers numbered coding agents, `(e) edit`, `(d) branchdiff`, `(t) terminal`, and Cancel. Picking an agent focuses any live agent pane for the worktree instead of launching another.
+    - The dialog offers numbered coding agents, `(e) edit`, `(d) branchdiff`, `(t) terminal`, `(r) auto review`, and Cancel. Picking an agent focuses any live agent pane for the worktree instead of launching another.
     - A new coding session is reported as launched only after its pane is visible in Zellij.
     - When Zellij cannot report live panes, the system starts no coding session and reports an error.
     - A pane listing Zellij answers unusably is retried before the system reports that it cannot report live panes.
@@ -173,7 +173,7 @@ Feature: Launch a coding session
   Scenario: The code menu remains available when an agent is running
     Given the selected work item already has an open coding-agent pane
     When the user presses "c"
-    Then the dialog offers coding agents, edit, branchdiff, terminal, and Cancel
+    Then the dialog offers coding agents, edit, branchdiff, terminal, auto review, and Cancel
     When the user picks a supported coding agent from the dialog
     Then the system focuses that pane
     And no coding session is launched
@@ -182,7 +182,7 @@ Feature: Launch a coding session
   Scenario: The coding dialog offers coding tools and worktree actions
     Given the TUI has a work item selected
     When the user presses "c"
-    Then the dialog offers coding agents, edit, branchdiff, terminal, and Cancel
+    Then the dialog offers coding agents, edit, branchdiff, terminal, auto review, and Cancel
 
   @id:F-CODING-LAUNCH-S021
   Scenario: An agent started elsewhere while the dialog is open is focused instead of launched again

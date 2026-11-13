@@ -2,6 +2,7 @@ import base64
 import json
 import shlex
 import subprocess
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -1730,6 +1731,23 @@ def test_code_api_forwards_group_and_rejects_invalid_group():
         assert request.get_response(app).status_int == status
     session.code.assert_called_once_with(
         target="owner/repo#1", agent=None, autostart=False, group="epic", autoclose=False
+    )
+
+
+def test_review_api_forwards_group_and_rejects_invalid_group():
+    session = MagicMock()
+    session.review.return_value = {"status": "started"}
+    app = control_module._make_turbogears_app(session)
+    for group, status in [("epic", 200), ("", 400), ([], 400)]:
+        request = Request.blank(
+            "/api/v0/review",
+            method="POST",
+            content_type="application/json",
+            body=json.dumps({"target": "owner/repo#1", "group": group}).encode(),
+        )
+        assert request.get_response(app).status_int == status
+    session.review.assert_called_once_with(
+        target="owner/repo#1", agent=None, background=True, group="epic"
     )
 
 
@@ -3469,10 +3487,12 @@ def test_ready_and_code_share_replaceable_github_state(monkeypatch, tmp_path):
     prompts = []
     monkeypatch.setattr(
         control_module.agent_execution.executor,
-        "analyze",
+        "run_in_pane",
         lambda **kwargs: prompts.append(kwargs["prompt"]) or "Analysis result",
     )
-    backend.analyze_item(item, "pi")
+    backend.analyze_item(
+        item, "pi", cwd=str(tmp_path), zellij_session="workdash-main", group="repo"
+    )
     assert "Analysis from fake GitHub" in prompts[0]
     monkeypatch.setattr(
         control_module, "prepare_launch_agent_prompt", launcher_module.prepare_launch_agent_prompt
@@ -3592,14 +3612,26 @@ def test_review_compatibility_delegates_raw_output_to_current_executor(monkeypat
 
     item = _work_item(number=1, title="Task")
     fake = MagicMock()
-    fake.analyze.return_value = "  raw output\n"
+    fake.run_in_pane.return_value = "  raw output\n"
     monkeypatch.setattr(agent_execution, "executor", fake)
     result = Analyzer()._run_analysis_command(
-        item=item, prompt="review prompt", command_tokens=["agent", "-p"], cwd="/tmp"
+        item=item,
+        prompt="review prompt",
+        command_tokens=["agent", "-p"],
+        cwd="/tmp",
+        work_action="review",
+        zellij_session="workdash-main",
+        group="repo",
     )
     assert result == "  raw output\n"
-    fake.analyze.assert_called_once_with(
-        item=item, prompt="review prompt", command_tokens=["agent", "-p"], cwd="/tmp"
+    fake.run_in_pane.assert_called_once_with(
+        item=item,
+        prompt="review prompt",
+        command_tokens=["agent", "-p"],
+        cwd="/tmp",
+        work_action="review",
+        zellij_session="workdash-main",
+        group="repo",
     )
 
 
@@ -3668,8 +3700,11 @@ def test_session_analyzes_and_launches_coding_agent_with_real_executor(
     worktree = tmp_path / "owner_repo_1"
     worktree.mkdir()
     item = _work_item(number=1, title="Implement the issue")
+    agent = tmp_path / "pi"
+    agent.write_text(f"#!{sys.executable}\nprint('  Useful analysis  ')\n")
+    agent.chmod(0o755)
     config = WorkdashConfig(
-        agents={"pi": AgentConfig(analyze="pi -p", launch="pi")}, workdir=str(tmp_path)
+        agents={"pi": AgentConfig(analyze=str(agent), launch="pi")}, workdir=str(tmp_path)
     )
     backend = WorkdashBackend(cache_root=tmp_path / "cache", config=config)
     session = WorkdashSession(
@@ -3680,27 +3715,38 @@ def test_session_analyzes_and_launches_coding_agent_with_real_executor(
         zellij_session="workdash-main",
     )
     panes = []
-    launches = []
-    process = MagicMock(return_value=SimpleNamespace(stdout="  Useful analysis  \n"))
-    monkeypatch.setenv("SHELL", "/bin/sh")
     monkeypatch.setattr(control_module, "ensure_worktree", lambda *_, **kwargs: str(worktree))
     monkeypatch.setattr(control_module, "existing_worktree_path", lambda *_, **kwargs: worktree)
     monkeypatch.setattr(control_module, "get_merge_base", lambda *_, **kwargs: None)
     monkeypatch.setattr("workdash.github_client.GitHubClient.fetch_analysis_context", lambda *_: {})
     monkeypatch.setattr("workdash.github_client.GitHubClient.fetch_launch_context", lambda *_: {})
-    monkeypatch.setattr("workdash.agent_execution.subprocess.run", process)
 
-    fake_zellij = MagicMock()
-    fake_zellij.load_zellij_panes.side_effect = lambda _: list(panes)
+    analysis_launches = []
+    coding_launches = []
 
-    def launch(repo, command, **kwargs):
-        launches.append((repo, command, kwargs))
+    def launch_pane_and_wait(repo_path, command, *, context, work_action, zellij_session, group):
+        analysis_launches.append(
+            {
+                "repo_path": repo_path,
+                "command": command,
+                "work_action": work_action,
+                "zellij_session": zellij_session,
+                "group": group,
+            }
+        )
+        subprocess.run(command, cwd=repo_path, capture_output=True, text=True)
+
+    def launch_pane(repo, command, **kwargs):
+        coding_launches.append((repo, command, kwargs))
         panes.append({"id": 30, "title": "code_owner_repo_1", "pane_cwd": str(worktree)})
         return launcher_module.ZellijPaneLaunch(
             "workdash-main", "terminal_30", "code_owner_repo_1", repo
         )
 
-    fake_zellij.launch_pane.side_effect = launch
+    fake_zellij = MagicMock()
+    fake_zellij.load_zellij_panes.side_effect = lambda _: list(panes)
+    fake_zellij.launch_pane_and_wait.side_effect = launch_pane_and_wait
+    fake_zellij.launch_pane.side_effect = launch_pane
     monkeypatch.setattr(launcher_module, "zellij", fake_zellij)
 
     analysis = session.analyze(target="owner/repo#ISSUE-1", agent="pi")
@@ -3708,17 +3754,21 @@ def test_session_analyzes_and_launches_coding_agent_with_real_executor(
     assert base64.b64decode(analysis["file_content"]).decode() == "Useful analysis"
     assert item.analysis == "Useful analysis"
     assert backend.analysis_cache.load_analysis(item) == "Useful analysis"
-    args, kwargs = process.call_args
-    assert shlex.split(args[0][2])[:2] == ["pi", "-p"]
-    assert "Implement the issue" in shlex.split(args[0][2])[2]
-    assert kwargs["cwd"] == str(worktree)
+    (launch,) = analysis_launches
+    assert launch["repo_path"] == str(worktree)
+    assert (launch["work_action"], launch["group"]) == ("analyse", "repo")
+    assert launch["zellij_session"] == "workdash-main"
+    shell_command = launch["command"][2]
+    assert launch["command"][:2] == ["/bin/sh", "-c"]
+    assert f"-ic '{agent} " in shell_command
+    assert "Implement the issue" in shell_command
 
     coding = session.code(target="owner/repo#ISSUE-1", agent="pi", group="team")
     assert coding["status"] == "launched"
     assert coding["pane_id"] == "terminal_30"
     assert coding["cwd"] == str(worktree)
-    assert len(launches) == 1
-    repo, command, kwargs = launches[0]
+    assert len(coding_launches) == 1
+    repo, command, kwargs = coding_launches[0]
     assert repo == str(worktree)
     assert kwargs == {
         "context": "Failed to launch coding agent in zellij",
@@ -3726,7 +3776,7 @@ def test_session_analyzes_and_launches_coding_agent_with_real_executor(
         "zellij_session": "workdash-main",
         "group": "team",
     }
-    assert command[:2] == ["/bin/sh", "-ic"]
+    assert command[1] == "-ic"
     shell_command = shlex.split(command[2])
     assert shell_command[0] == "pi"
     assert "Implement the issue" in shell_command[1]
@@ -3744,7 +3794,9 @@ def test_shared_agent_execution_can_simulate_analysis_and_coding(monkeypatch, tm
         def __init__(self):
             self.calls = []
 
-        def analyze(self, *, item, prompt, command_tokens, cwd):
+        def run_in_pane(
+            self, *, item, prompt, command_tokens, cwd, work_action, zellij_session, group
+        ):
             self.calls.append(("analysis", item, prompt, command_tokens, cwd))
             return "  Analysis from fake  \n"
 
@@ -3768,7 +3820,10 @@ def test_shared_agent_execution_can_simulate_analysis_and_coding(monkeypatch, tm
         Analyzer, "_build_agent_prompt", lambda self, item, context, **kw: "analysis prompt"
     )
 
-    assert Analyzer().analyze(item, ["pi", "-p"], cwd=str(worktree)) == "Analysis from fake"
+    assert (
+        Analyzer().analyze(item, ["pi", "-p"], cwd=str(worktree), zellij_session="workdash-main")
+        == "Analysis from fake"
+    )
     assert session.code(target="owner/repo#ISSUE-1", agent="pi")["status"] == "launched"
     panes.clear()
     assert (

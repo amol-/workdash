@@ -452,7 +452,7 @@ def _system_focuses_pane(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["focus_calls"] == ["terminal_7"]
 
 
-@then("the dialog offers coding agents, edit, branchdiff, terminal, and Cancel")
+@then("the dialog offers coding agents, edit, branchdiff, terminal, auto review, and Cancel")
 def _dialog_offers_coding_tools(scenario_state: dict[str, Any]) -> None:
     options = [line for line in scenario_state["dialog_lines"] if line.startswith("(")]
     assert options == [
@@ -462,6 +462,7 @@ def _dialog_offers_coding_tools(scenario_state: dict[str, Any]) -> None:
         "(e) edit (VSCode Copilot)",
         "(d) branchdiff",
         "(t) terminal",
+        "(r) auto review",
         "(Esc) Cancel",
     ]
 

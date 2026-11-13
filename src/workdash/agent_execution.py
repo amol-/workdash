@@ -2,7 +2,9 @@
 
 import os
 import shlex
-import subprocess
+import shutil
+import tempfile
+from pathlib import Path
 
 from . import launcher
 from .models import WorkItem
@@ -55,33 +57,65 @@ class AgentExecution:
             context="Failed to start Copilot chat",
         )
 
-    def analyze(
-        self, *, item: WorkItem, prompt: str, command_tokens: list[str], cwd: str | None
+    def run_in_pane(
+        self,
+        *,
+        item: WorkItem,
+        prompt: str,
+        command_tokens: list[str],
+        cwd: str,
+        work_action: str,
+        zellij_session: str,
+        group: str | None,
     ) -> str:
+        """Run a one-shot agent in a Zellij pane and return what it printed.
+
+        The agent's stdout is teed so the user watches it in the pane while the
+        caller reads the same text back.
+        """
         user_shell = os.environ.get("SHELL", "/bin/sh")
-        shell_command = shlex.join([*command_tokens, prompt])
-        try:
-            completed = subprocess.run(
-                [user_shell, "-ic", shell_command],
-                check=True,
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
+        context = (
+            f"Failed to generate analysis for {item.item_type.value} {item.repo}#{item.number}"
+        )
+        # Zellij never reports back when the pane command cannot be started, so an
+        # unusable shell must fail here instead of blocking the caller forever.
+        if shutil.which(user_shell) is None:
+            raise RuntimeError(f"{context}: shell '{user_shell}' not found.")
+        with tempfile.TemporaryDirectory(prefix="workdash-agent-") as temp_dir:
+            stdout_path = Path(temp_dir) / "stdout"
+            stderr_path = Path(temp_dir) / "stderr"
+            status_path = Path(temp_dir) / "status"
+            # The agent runs under the user's $SHELL so aliases work, but the pipeline
+            # around it needs a POSIX shell: fish and csh cannot parse brace groups.
+            # The braces keep the agent's status out of the pipeline's status, tee's.
+            # The pane's stdin is a terminal that never sends EOF, so an agent that
+            # reads stdin would hang; /dev/null makes it read EOF instead.
+            agent_command = shlex.join([user_shell, "-ic", shlex.join([*command_tokens, prompt])])
+            shell_command = (
+                f"{{ {agent_command} < /dev/null"
+                f" 2> {shlex.quote(str(stderr_path))};"
+                f" echo $? > {shlex.quote(str(status_path))}; }}"
+                f" | tee {shlex.quote(str(stdout_path))}"
             )
-        except FileNotFoundError as error:
-            raise RuntimeError(
-                f"Failed to generate analysis: shell '{user_shell}' not found."
-            ) from error
-        except subprocess.CalledProcessError as error:
-            stderr = (error.stderr or "").strip()
-            raise RuntimeError(
-                f"Failed to generate analysis for {item.item_type.value} "
-                f"{item.repo}#{item.number}: "
-                f"{stderr or f'process exited with code {error.returncode}'}"
-            ) from error
-        return completed.stdout
+            launcher.zellij.launch_pane_and_wait(
+                cwd,
+                ["/bin/sh", "-c", shell_command],
+                context=context,
+                work_action=work_action,
+                zellij_session=zellij_session,
+                group=group,
+            )
+            # Zellij can exit zero without running the pane at all, so the files the
+            # pane writes are the proof that it ran.
+            if not status_path.exists() or not stdout_path.exists():
+                raise RuntimeError(f"{context}: the Zellij pane never ran")
+            exit_code = int(status_path.read_text(encoding="utf-8").strip())
+            if exit_code != 0:
+                stderr = stderr_path.read_text(encoding="utf-8").strip()
+                raise RuntimeError(
+                    f"{context}: {stderr or f'process exited with code {exit_code}'}"
+                )
+            return stdout_path.read_text(encoding="utf-8")
 
 
 executor = AgentExecution()

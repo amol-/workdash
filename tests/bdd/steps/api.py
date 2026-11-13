@@ -356,11 +356,35 @@ def _request_analysis(
     work_items: list[WorkItem],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    group: str | None = None,
 ) -> None:
     scenario_state["analysis_path"] = str(tmp_path / "analysis.md")
     _install_fake_ensure_worktree(scenario_state, monkeypatch)
-    payload = {"target": item_id} if agent is None else {"target": item_id, "agent": agent}
+    payload = {"target": item_id}
+    if agent is not None:
+        payload["agent"] = agent
+    if group is not None:
+        payload["group"] = group
     _call_api(scenario_state, work_items, tmp_path, "analyze", payload)
+
+
+@when(parsers.parse("a client requests analysis for `{item_id}` in group `{group}`"))
+def _client_requests_analysis_in_group(
+    item_id: str,
+    group: str,
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _request_analysis(item_id, None, scenario_state, work_items, tmp_path, monkeypatch, group=group)
+
+
+@then(parsers.parse("the server runs the analysis in the Zellij tab named `{group}`"))
+def _analysis_runs_in_tab(group: str, scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["api_status"] == 200, scenario_state["api_payload"]
+    assert scenario_state["analysis_group"] == group
 
 
 @when(parsers.parse("a client requests code for `{item_id}` with agent `{agent}`"))

@@ -12,6 +12,9 @@ Feature: Generate an analysis
     - Source citations link to the code repository's own hosting service, including GitHub, GitLab, and Codeberg.
     - When the source-link format is not immediately obvious, the agent cites the file path and line number without inventing a URL.
     - While the analysis runs, the system shows the user that work is in progress.
+    - A fresh analysis runs in a Zellij pane of its own, named `analyse_<worktree>`, so the user can watch the analysis pane while it runs.
+    - The analysis pane opens in the Zellij tab named after the code repository's basename, or in the tab named by an explicitly requested group.
+    - A fresh analysis needs a known Zellij session; opening a cached analysis does not.
     - After a successful fresh analysis, the system caches the result and opens its HTTP analysis URL with the same configured viewer used for work item URLs.
     - Opening a cached analysis also opens that URL, including its fullscreen terminal choice and current session.
     - The analysis URL is passed literally after configured viewer arguments; opening an analysis does not prepare a worktree and does not read the server's filesystem.
@@ -41,6 +44,21 @@ Feature: Generate an analysis
     Then the system reports the failure to the user
     And no dialog or progress overlay remains
     And the previously cached analysis is preserved
+
+  @id:F-ANALYSIS-GENERATE-S005
+  Scenario: A fresh analysis runs in its own pane in the code repository's tab
+    Given the user has the analyze dialog open on a work item
+    And the item's worktree directory is named "owner_repo_52"
+    When the user chooses to generate a fresh analysis with a configured analysis agent
+    Then the analysis agent runs in a Zellij pane named "analyse_owner_repo_52"
+    And the analysis pane opens in the Zellij tab named "repo"
+
+  @id:F-ANALYSIS-GENERATE-S006
+  Scenario: A fresh analysis needs a Zellij session
+    Given the Workdash server is not attached to a Zellij session
+    And the user has the analyze dialog open on a work item
+    When the user chooses to generate a fresh analysis with a configured analysis agent
+    Then the system reports that analysis requires a Zellij session
 
   @id:F-ANALYSIS-GENERATE-S004
   Scenario Outline: Analysis source citations follow the code repository's hosting service

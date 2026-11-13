@@ -29,10 +29,24 @@ class Analyzer:
         self.github_client = github_client if github_client is not None else GitHubClient()
 
     def _run_analysis_command(
-        self, *, item: WorkItem, prompt: str, command_tokens: list[str], cwd: str | None
+        self,
+        *,
+        item: WorkItem,
+        prompt: str,
+        command_tokens: list[str],
+        cwd: str,
+        work_action: str,
+        zellij_session: str,
+        group: str | None,
     ) -> str:
-        return agent_execution.executor.analyze(
-            item=item, prompt=prompt, command_tokens=command_tokens, cwd=cwd
+        return agent_execution.executor.run_in_pane(
+            item=item,
+            prompt=prompt,
+            command_tokens=command_tokens,
+            cwd=cwd,
+            work_action=work_action,
+            zellij_session=zellij_session,
+            group=group,
         )
 
     def _collect_github_context(self, item: WorkItem) -> dict[str, Any]:
@@ -71,7 +85,13 @@ class Analyzer:
         return template.format(**format_kwargs)
 
     def analyze(
-        self, item: WorkItem, command_tokens: list[str], *, cwd: str | None = None
+        self,
+        item: WorkItem,
+        command_tokens: list[str],
+        *,
+        cwd: str,
+        zellij_session: str,
+        group: str | None = None,
     ) -> str | None:
         """Collect GitHub context, build the prompt, and run analysis.
 
@@ -81,6 +101,9 @@ class Analyzer:
         pushing the argv above the kernel's per-string limit.
 
         :param list[str] command_tokens: Command tokens used to invoke the analysis agent.
+        :param str cwd: Worktree the analysis pane runs in.
+        :param str zellij_session: Zellij session that hosts the analysis pane.
+        :param str group: Zellij tab for the analysis pane.
         """
 
         github_context = self._collect_github_context(item)
@@ -100,8 +123,14 @@ class Analyzer:
 
         try:
             prompt = self._build_agent_prompt(item, github_context, diff_path=diff_file_path)
-            output = agent_execution.executor.analyze(
-                item=item, prompt=prompt, command_tokens=command_tokens, cwd=cwd
+            output = self._run_analysis_command(
+                item=item,
+                prompt=prompt,
+                command_tokens=command_tokens,
+                cwd=cwd,
+                work_action="analyse",
+                zellij_session=zellij_session,
+                group=group,
             )
         finally:
             if diff_file_path is not None:
