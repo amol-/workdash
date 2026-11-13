@@ -165,9 +165,19 @@ workdash write PANE_ID TEXT [--raw] [--json]  # send text to a live pane
 workdash show-config [--json] # show configured agents and selected server address
 workdash --debug             # verbose logging
 workdash --configure         # run the interactive setup wizard
+workdash --session NAME      # use a named persistent Zellij session
 workdash --direct            # start without the automatic Zellij wrapper
 workdash --version           # print version and exit
 ```
+
+Outside Zellij, the dashboard creates or attaches to the persistent `workdash`
+session. Use `--session NAME` to select another session. A new session has a
+dashboard above a shell, with Zellij's tab and status bars. If the dashboard is
+already running, new options are ignored; otherwise it starts with the supplied
+options in the `dashboard` tab. Pressing `q` exits the dashboard but keeps the
+session and its panes; Ctrl+Q quits the entire session. Inside Zellij, Workdash
+runs in the current pane and uses the current session regardless of `--session`.
+`--direct` bypasses the automatic wrapper.
 
 ## What gets shown
 

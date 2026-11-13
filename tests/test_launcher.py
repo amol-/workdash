@@ -1002,6 +1002,9 @@ def test_exec_zellij_wrapped_workdash_replaces_process_with_layout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     exec_calls: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")
+    )
 
     def fake_which(command: str) -> str | None:
         if command == "zellij":
@@ -1014,7 +1017,6 @@ def test_exec_zellij_wrapped_workdash_replaces_process_with_layout(
 
     monkeypatch.setattr(shutil, "which", fake_which)
     monkeypatch.setattr(launcher_module.os, "execvp", fake_execvp)
-    monkeypatch.setattr(launcher_module.secrets, "token_hex", lambda length: "abc123ef")
     monkeypatch.setattr(launcher_module.sys, "argv", ["/usr/local/bin/workdash"])
     monkeypatch.setenv("SHELL", "/opt/homebrew/bin/nu")
 
@@ -1033,15 +1035,15 @@ def test_exec_zellij_wrapped_workdash_replaces_process_with_layout(
     ]
     with open(exec_calls[0][1][2], encoding="utf-8") as layout_file:
         layout = layout_file.read()
-    assert 'session_name "workdash-abc123ef"' in layout
-    assert 'on_force_close "quit"' in layout
+    assert 'session_name "workdash"' in layout
+    assert 'on_force_close "detach"' in layout
     assert "session_serialization false" in layout
     assert "disable_session_metadata true" in layout
     assert "show_startup_tips false" in layout
     assert "attach_to_session false" in layout
-    assert 'tab name="workdash"' in layout
-    assert 'pane command="/usr/local/bin/workdash" close_on_exit=true' in layout
-    assert 'args "--direct" "--refresh"' in layout
+    assert 'tab name="dashboard"' in layout
+    assert 'pane name="workdash tui" command="/usr/local/bin/workdash"' in layout
+    assert 'args "--direct" "--persistent-pane" "--refresh"' in layout
     assert "kill-session" not in layout
     assert "trap " not in layout
     assert "compact-bar" not in layout
@@ -1051,6 +1053,9 @@ def test_exec_zellij_wrapped_workdash_preserves_module_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     exec_calls: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")
+    )
 
     monkeypatch.setattr(
         shutil,
@@ -1062,7 +1067,6 @@ def test_exec_zellij_wrapped_workdash_preserves_module_invocation(
         "execvp",
         lambda file, args: exec_calls.append((file, args)) or (_ for _ in ()).throw(SystemExit(0)),
     )
-    monkeypatch.setattr(launcher_module.secrets, "token_hex", lambda length: "abc123ef")
     monkeypatch.setenv("SHELL", "/bin/bash")
     monkeypatch.setattr(
         launcher_module.sys,
@@ -1076,9 +1080,9 @@ def test_exec_zellij_wrapped_workdash_preserves_module_invocation(
 
     with open(exec_calls[0][1][2], encoding="utf-8") as layout_file:
         layout = layout_file.read()
-    assert 'tab name="workdash"' in layout
-    assert 'pane command="/usr/bin/python3.12" close_on_exit=true' in layout
-    assert 'args "-m" "workdash" "--direct" "--refresh"' in layout
+    assert 'tab name="dashboard"' in layout
+    assert 'pane name="workdash tui" command="/usr/bin/python3.12"' in layout
+    assert 'args "-m" "workdash" "--direct" "--persistent-pane" "--refresh"' in layout
     assert "kill-session" not in layout
 
 
@@ -1086,6 +1090,9 @@ def test_exec_zellij_wrapped_workdash_preserves_workdash_module_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     exec_calls: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")
+    )
 
     monkeypatch.setattr(
         shutil,
@@ -1097,7 +1104,6 @@ def test_exec_zellij_wrapped_workdash_preserves_workdash_module_invocation(
         "execvp",
         lambda file, args: exec_calls.append((file, args)) or (_ for _ in ()).throw(SystemExit(0)),
     )
-    monkeypatch.setattr(launcher_module.secrets, "token_hex", lambda length: "abc123ef")
     monkeypatch.setattr(
         launcher_module.sys,
         "argv",
@@ -1111,8 +1117,8 @@ def test_exec_zellij_wrapped_workdash_preserves_workdash_module_invocation(
 
     with open(exec_calls[0][1][2], encoding="utf-8") as layout_file:
         layout = layout_file.read()
-    assert 'pane command="/usr/bin/python3.12" close_on_exit=true' in layout
-    assert 'args "-m" "workdash" "--direct" "--refresh"' in layout
+    assert 'pane name="workdash tui" command="/usr/bin/python3.12"' in layout
+    assert 'args "-m" "workdash" "--direct" "--persistent-pane" "--refresh"' in layout
 
 
 def test_exec_zellij_wrapped_workdash_reports_exec_failure(
@@ -1122,6 +1128,9 @@ def test_exec_zellij_wrapped_workdash_reports_exec_failure(
         shutil,
         "which",
         lambda command: "/usr/bin/zellij" if command == "zellij" else None,
+    )
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")
     )
     monkeypatch.setattr(
         launcher_module.os,

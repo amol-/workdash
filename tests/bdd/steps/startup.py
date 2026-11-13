@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from typing import Any
 
 import pytest
@@ -170,7 +171,7 @@ def _run_system(
             monkeypatch.setattr(
                 workdash_module.launcher.zellij,
                 "exec_zellij_wrapped_workdash",
-                lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
+                lambda _argv, preflight: preflight(),
             )
         monkeypatch.setattr(
             workdash_module,
@@ -269,7 +270,35 @@ def _start_interactive_dashboard(
         zellij=bool(scenario_state.get("_zellij_installed")),
     )
     monkeypatch.setattr(launcher_module.os, "execvp", fake_execvp)
-    monkeypatch.setattr(launcher_module.secrets, "token_hex", lambda length: "abc123ef")
+
+    def run(command, **kwargs):
+        scenario_state.setdefault("zellij_actions", []).append(command)
+        output = "project [Created now]\n" if scenario_state.get("named_dashboard") else ""
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(launcher_module.subprocess, "run", run)
+    if scenario_state.get("named_dashboard"):
+        command = (
+            "/usr/bin/python -m workdash --direct"
+            if scenario_state["named_dashboard"] == "running"
+            else "/bin/sh"
+        )
+        monkeypatch.setattr(
+            launcher_module.Zellij,
+            "load_zellij_panes",
+            lambda session: [
+                {
+                    "id": 2,
+                    "title": "workdash tui",
+                    "tab_name": "dashboard",
+                    "tab_id": 3,
+                    "pane_command": command,
+                }
+            ],
+        )
+        monkeypatch.setattr(launcher_module.time, "sleep", lambda seconds: None)
+    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+    monkeypatch.delenv("ZELLIJ_PANE_ID", raising=False)
     if scenario_state.get("outside_zellij"):
         monkeypatch.delenv("ZELLIJ", raising=False)
     else:
@@ -430,14 +459,6 @@ def _replaces_with_zellij_process(scenario_state: dict[str, Any]) -> None:
     assert command[0] == "/usr/bin/zellij"
 
 
-@then("the Zellij process starts a fresh workdash-prefixed session")
-def _zellij_starts_fresh_workdash_session(scenario_state: dict[str, Any]) -> None:
-    command = scenario_state["exec_calls"][0][1]
-    assert command[:2] == ["/usr/bin/zellij", "--layout"]
-    layout = _read_startup_layout(scenario_state)
-    assert 'session_name "workdash-abc123ef"' in layout
-
-
 @then("the Zellij process runs the dashboard with `--direct`")
 def _zellij_runs_dashboard_direct(scenario_state: dict[str, Any]) -> None:
     layout = _read_startup_layout(scenario_state)
@@ -467,53 +488,11 @@ def _read_startup_layout(scenario_state: dict[str, Any]) -> str:
         return layout_file.read()
 
 
-@then("the Zellij process is configured to quit on force close")
-def _zellij_process_quits_on_force_close(scenario_state: dict[str, Any]) -> None:
-    layout = _read_startup_layout(scenario_state)
-    assert 'on_force_close "quit"' in layout
-
-
-@then("the Zellij process disables session resurrection state")
-def _zellij_process_disables_resurrection_state(scenario_state: dict[str, Any]) -> None:
-    layout = _read_startup_layout(scenario_state)
-    assert "session_serialization false" in layout
-    assert "disable_session_metadata true" in layout
-
-
-@then("the dashboard pane closes when the dashboard exits")
-def _dashboard_pane_closes_when_dashboard_exits(scenario_state: dict[str, Any]) -> None:
-    layout = _read_startup_layout(scenario_state)
-    assert "close_on_exit=true" in layout
-
-
-@then("the first tab is named `workdash`")
+@then("the first tab is named `dashboard`")
 def _first_tab_is_named_workdash(scenario_state: dict[str, Any]) -> None:
     layout = _read_startup_layout(scenario_state)
     tab_names = re.findall(r'^\s*tab name="([^"]*)"', layout, re.MULTILINE)
-    assert tab_names[0] == "workdash"
-
-
-@then("the dashboard runs in a pane on the left")
-def _dashboard_runs_in_left_pane(scenario_state: dict[str, Any]) -> None:
-    layout = _read_startup_layout(scenario_state)
-    assert re.search(
-        r'split_direction="vertical" \{\s+'
-        r'pane size="50%" split_direction="horizontal" \{\s+'
-        r"pane command=",
-        layout,
-    )
-
-
-@then("a small terminal pane sits under the dashboard pane")
-def _small_terminal_pane_under_dashboard(scenario_state: dict[str, Any]) -> None:
-    layout = _read_startup_layout(scenario_state)
-    assert re.search(r'args [^\n]*\n\s+\}\s+pane size="25%"\n', layout)
-
-
-@then("a full-height terminal pane sits on the right")
-def _full_height_terminal_pane_on_right(scenario_state: dict[str, Any]) -> None:
-    layout = _read_startup_layout(scenario_state)
-    assert re.search(r'pane size="25%"\n\s+\}\s+pane size="50%"\n', layout)
+    assert tab_names[0] == "dashboard"
 
 
 @then("the Zellij session shows the tab bar at the top")
@@ -571,3 +550,59 @@ def _reports_malformed_config_with_wizard_guidance(scenario_state: dict[str, Any
     assert "agents.pi.launch" in output
     assert "workdash --configure" in output
     assert "Traceback" not in output
+
+
+@given("the named session `project` already has a running dashboard")
+def _named_session_running(scenario_state):
+    scenario_state.update(outside_zellij=True, _zellij_installed=True, named_dashboard="running")
+
+
+@given("the named session `project` has a stopped dashboard")
+def _named_session_stopped(scenario_state):
+    scenario_state.update(outside_zellij=True, _zellij_installed=True, named_dashboard="stopped")
+
+
+@when("the user starts the dashboard in the named session with server mode")
+def _start_named_session(scenario_state, monkeypatch, capsys):
+    _start_interactive_dashboard(
+        scenario_state, monkeypatch, capsys, argv=["--session", "project", "--server"]
+    )
+
+
+@then("the system attaches to the named session")
+def _attaches_named_session(scenario_state):
+    assert scenario_state["exec_calls"][0][1] == ["/usr/bin/zellij", "attach", "project"]
+
+
+@then("the system reports that the new options are ignored")
+def _reports_options_ignored(scenario_state):
+    assert "options are ignored" in scenario_state["output"]
+
+
+@then("the system starts a dashboard with server mode in that session")
+def _starts_dashboard_in_named_session(scenario_state):
+    command = next(c for c in scenario_state["zellij_actions"] if "new-pane" in c)
+    assert command[1:3] == ["--session", "project"]
+    assert "--server" in command
+
+
+@then("the previous dashboard pane is preserved")
+def _preserves_previous_pane(scenario_state):
+    actions = scenario_state["zellij_actions"]
+    assert any("rename-pane" in c and "terminal_2" in c for c in actions)
+    assert not any("close-pane" in c for c in actions)
+
+
+@then("the Zellij session detaches when the terminal closes")
+def _session_detaches_on_terminal_close(scenario_state):
+    assert 'on_force_close "detach"' in _read_startup_layout(scenario_state)
+
+
+@then("the dashboard is above a shell pane")
+def _dashboard_above_shell(scenario_state):
+    layout = _read_startup_layout(scenario_state)
+    assert re.search(
+        r'split_direction="horizontal".*pane name="workdash tui".*pane size="25%"',
+        layout,
+        re.DOTALL,
+    )

@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import pty
+import select
 import shlex
 import shutil
 import signal
@@ -209,3 +210,205 @@ def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, 
         assert len({p["tab_id"] for p in panes if p.get("tab_name") == tab_name}) == 1
     finally:
         _cleanup_sessions(zellij, env, [(name, pid, fd)])
+
+
+@pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
+@pytest.mark.parametrize("repeat", range(2))
+def test_persistent_dashboard_quit_and_restart_in_real_zellij(tmp_path, repeat):
+    zellij = shutil.which("zellij")
+    name = "workdash" if repeat == 0 else f"wd-{uuid.uuid4().hex[:8]}"
+    script = tmp_path / "workdash"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import os\n"
+        "import workdash.workdash as cli\n"
+        "from workdash.config import WorkdashConfig, AgentConfig\n"
+        'cli.GitHubClient.check_authentication = lambda self: ("expired" if os.getenv("TEST_EXPIRED") else None)\n'
+        "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
+        "agents={'agent': AgentConfig(launch='sh')}, repositories=('owner/repo',), "
+        "workdir='/tmp', todo_repository='test/todos')\n"
+        "cli.WorkdashBackend.load_items = lambda self, progress_callback=None: ([], {})\n"
+        "raise SystemExit(cli.main())\n"
+    )
+    script.chmod(0o755)
+    env = os.environ.copy()
+    for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
+        env.pop(key, None)
+    env.update(
+        TERM="xterm-256color",
+        SHELL="/bin/sh",
+        ZELLIJ_SOCKET_DIR=str(tmp_path / "sockets"),
+        XDG_CACHE_HOME=str(tmp_path / "cache"),
+        XDG_DATA_HOME=str(tmp_path / "data"),
+        XDG_CONFIG_HOME=str(tmp_path / "config"),
+    )
+    clients = []
+
+    def start(*args, expired=False):
+        pid, fd = pty.fork()
+        if pid == 0:
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+            os.execve(
+                str(script),
+                [str(script), *([] if repeat == 0 else ["--session", name]), *args],
+                {**env, **({"TEST_EXPIRED": "1"} if expired else {})},
+            )
+        clients.append((pid, fd))
+
+    def action(*args):
+        return subprocess.run(
+            [zellij, "--session", name, "action", *args], capture_output=True, text=True, env=env
+        )
+
+    def wait_for(predicate):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            result = action("list-panes", "--json", "--all")
+            if result.stdout.strip().startswith("["):
+                panes = json.loads(result.stdout)
+                if predicate(panes):
+                    return panes
+            time.sleep(0.1)
+        output = []
+        for _, fd in clients:
+            os.set_blocking(fd, False)
+            try:
+                output.append(os.read(fd, 65536).decode(errors="replace"))
+            except BlockingIOError:
+                pass
+        processes = subprocess.run(
+            [
+                "ps",
+                "-o",
+                "pid,ppid,state,wchan,args",
+                "--forest",
+                "-p",
+                ",".join(str(pid) for pid, _ in clients),
+            ],
+            capture_output=True,
+            text=True,
+        ).stdout
+        pytest.fail(
+            f"session {name} did not reach expected pane state: {result.stdout} {result.stderr}; "
+            f"client output: {output}; processes: {processes}"
+        )
+
+    try:
+        start()
+        time.sleep(2)
+        panes = wait_for(lambda panes: any(p.get("title") == "workdash tui" for p in panes))
+        dashboard = next(p for p in panes if p.get("title") == "workdash tui")
+        shell = next(p for p in panes if not p["is_plugin"] and p["id"] != dashboard["id"])
+        assert dashboard["tab_name"] == "dashboard" and dashboard["pane_y"] < shell["pane_y"]
+        assert {p.get("plugin_url") for p in panes} >= {"zellij:tab-bar", "zellij:status-bar"}
+        pane_id = f"terminal_{dashboard['id']}"
+        wait_for(
+            lambda panes: any(
+                p.get("title") == "workdash tui" and "--direct" in str(p.get("pane_command"))
+                for p in panes
+            )
+        )
+        start("--server", expired=True)
+        output = b""
+        deadline = time.monotonic() + 10
+        while b"options are ignored" not in output and time.monotonic() < deadline:
+            if select.select([clients[-1][1]], [], [], 0.1)[0]:
+                output += os.read(clients[-1][1], 65536)
+        assert b"options are ignored" in output
+        panes = wait_for(lambda panes: any(p.get("title") == "workdash tui" for p in panes))
+        assert sum(p.get("title") == "workdash tui" for p in panes) == 1
+        time.sleep(2)
+        assert len(action("list-clients").stdout.splitlines()) >= 2
+        assert action("write-chars", "--pane-id", pane_id, "q").returncode == 0
+        wait_for(
+            lambda panes: any(
+                p.get("title") == "workdash tui" and p.get("pane_command") == "/bin/sh -i"
+                for p in panes
+            )
+        )
+        assert "Ctrl+Q" in action("dump-screen", "--pane-id", pane_id).stdout
+        start("--debug", expired=True)
+        _, status = os.waitpid(clients[-1][0], 0)
+        assert os.waitstatus_to_exitcode(status) == 1
+        os.close(clients.pop()[1])
+        assert (
+            len(
+                [
+                    p
+                    for p in json.loads(action("list-panes", "--json", "--all").stdout)
+                    if p.get("title") == "workdash tui"
+                ]
+            )
+            == 1
+        )
+        start("--debug")
+        panes = wait_for(
+            lambda panes: any(
+                p.get("title") == "workdash tui" and "--debug" in str(p.get("pane_command"))
+                for p in panes
+            )
+        )
+        old = next(p for p in panes if p.get("id") == dashboard["id"] and not p["is_plugin"])
+        assert old["title"] == "workdash old" and old["pane_command"] == "/bin/sh -i"
+        assert next(p for p in panes if p.get("title") == "workdash tui")["tab_name"] == "dashboard"
+        assert action("new-tab", "--name", "keep").returncode == 0
+        tab_id = next(p for p in panes if p.get("title") == "workdash tui")["tab_id"]
+        assert action("close-tab", "--tab-id", str(tab_id)).returncode == 0
+        start("--refresh")
+        panes = wait_for(
+            lambda panes: any(
+                p.get("title") == "workdash tui" and "--refresh" in str(p.get("pane_command"))
+                for p in panes
+            )
+        )
+        assert next(p for p in panes if p.get("title") == "workdash tui")["tab_name"] == "dashboard"
+        assert any(p.get("tab_name") == "keep" for p in panes)
+        recovered = next(p for p in panes if p.get("title") == "workdash tui")
+        time.sleep(2)
+        assert (
+            action("write-chars", "--pane-id", f"terminal_{recovered['id']}", "q").returncode == 0
+        )
+        wait_for(
+            lambda panes: any(
+                p.get("id") == recovered["id"] and p.get("pane_command") == "/bin/sh -i"
+                for p in panes
+            )
+        )
+        keep = next(p for p in panes if p.get("tab_name") == "keep" and not p["is_plugin"])
+        keep_id = f"terminal_{keep['id']}"
+        assert action("write-chars", "--pane-id", keep_id, str(script)).returncode == 0
+        assert action("send-keys", "--pane-id", keep_id, "Enter").returncode == 0
+        panes = wait_for(
+            lambda panes: any(
+                p.get("title") == "workdash tui" and p.get("tab_name") == "keep" for p in panes
+            )
+        )
+        inside = next(
+            p for p in panes if p.get("title") == "workdash tui" and p.get("tab_name") == "keep"
+        )
+        assert inside["id"] == keep["id"]
+        start("--debug", expired=True)
+        output = b""
+        deadline = time.monotonic() + 10
+        while b"options are ignored" not in output and time.monotonic() < deadline:
+            if select.select([clients[-1][1]], [], [], 0.1)[0]:
+                output += os.read(clients[-1][1], 65536)
+        assert b"options are ignored" in output
+        panes = json.loads(action("list-panes", "--json", "--all").stdout)
+        assert sum(p.get("title") == "workdash tui" for p in panes) == 1
+        old = next(p for p in panes if p.get("id") == recovered["id"] and not p["is_plugin"])
+        assert old["title"] == "workdash old" and old["pane_command"] == "/bin/sh -i"
+        assert action("write-chars", "--pane-id", f"terminal_{inside['id']}", "q").returncode == 0
+        time.sleep(1)
+        assert "Ctrl+Q" in action("dump-screen", "--pane-id", f"terminal_{inside['id']}").stdout
+
+    finally:
+        if clients:
+            _cleanup_sessions(zellij, env, [(name, *clients[0])])
+        for pid, fd in clients[1:]:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(pid, 0)
+            os.close(fd)

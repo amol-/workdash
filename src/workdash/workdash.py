@@ -74,24 +74,45 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.command == "show-config":
         return commands.show_config(json_output=options.json_output)
 
-    commands._github_client = GitHubClient()
-    inject_workdash_local_bin_into_path()
-    gh_error = commands._github_client.check_authentication()
-    if gh_error:
-        print(f"Error: {gh_error}", file=sys.stderr, flush=True)
-        return 1
-
-    if not commands.preload_config():
-        return 1
+    def preflight() -> bool:
+        commands._github_client = GitHubClient()
+        inject_workdash_local_bin_into_path()
+        gh_error = commands._github_client.check_authentication()
+        if gh_error:
+            print(f"Error: {gh_error}", file=sys.stderr, flush=True)
+            return False
+        return commands.preload_config()
 
     if _should_wrap_interactive_start(options):
         try:
-            launcher.zellij.exec_zellij_wrapped_workdash(argv)
+            launcher.zellij.exec_zellij_wrapped_workdash(argv, preflight)
+            return 1
         except RuntimeError as error:
             print(f"Error: {error}", file=sys.stderr, flush=True)
             return 1
+    elif not preflight():
+        return 1
 
-    return commands.interactive(server=options.server, listeners=options.listeners)
+    if os.getenv("ZELLIJ") and not options.persistent_pane:
+        session = os.getenv("ZELLIJ_SESSION_NAME")
+        pane = os.getenv("ZELLIJ_PANE_ID")
+        if session and pane:
+            try:
+                launcher.zellij.name_dashboard_pane(session, pane)
+            except RuntimeError as error:
+                print(f"Error: {error}", file=sys.stderr, flush=True)
+                return 1
+
+    result = commands.interactive(server=options.server, listeners=options.listeners)
+    if (options.persistent_pane or os.getenv("ZELLIJ")) and result == 0:
+        print(
+            "Dashboard exited. Ctrl+Q quits the entire Zellij session and all its panes.",
+            flush=True,
+        )
+        if options.persistent_pane:
+            shell = os.environ.get("SHELL") or "/bin/sh"
+            os.execvp(shell, [shell, "-i"])
+    return result
 
 
 @dataclass(frozen=True)
@@ -104,6 +125,7 @@ class CLIOptions:
     direct: bool
     server: bool
     json_output: bool
+    persistent_pane: bool = False
     command: str | None = None
     session: str | None = None
     target: str | None = None
@@ -619,6 +641,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         action="store_true",
         help="Start directly without wrapping the interactive dashboard in Zellij.",
     )
+    parser.add_argument("--session", help="Select the persistent Zellij session.")
+    parser.add_argument("--persistent-pane", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--server",
         action="store_true",
@@ -948,6 +972,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         direct=namespace.direct,
         server=namespace.server,
         json_output=namespace.json_output,
+        persistent_pane=namespace.persistent_pane,
         command=namespace.command,
         session=getattr(namespace, "session", None),
         target=getattr(namespace, "target", None),

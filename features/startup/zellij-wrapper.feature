@@ -1,33 +1,22 @@
 @feature:F-STARTUP-ZELLIJ-WRAPPER
-Feature: Start the interactive dashboard inside Zellij
-
-  The interactive dashboard owns the Zellij boundary at startup. Once the TUI
-  starts, terminal-backed work actions can rely on an existing Zellij session
-  instead of managing operating system terminals or guessing target sessions.
+Feature: Persistent dashboard Zellij session
 
   Rules:
-    - If the user starts the interactive dashboard outside Zellij, the system replaces the current process with Zellij.
-    - Before locating Zellij at startup, the system appends the workdash-local bin directory to PATH so a global Zellij wins when present and the local downloaded binary is a fallback.
-    - If no Zellij binary can be found after extending PATH, startup exits with a clear message telling the user to run the configuration wizard.
-    - The replacement Zellij process starts a new `workdash-<random>` session and runs the dashboard with `--direct`.
-    - The session's first tab is named `workdash` and holds three panes: the dashboard on the left, a small terminal pane under it, and a full-height terminal pane on the right.
-    - The session shows Zellij's tab bar at the top and status bar at the bottom.
-    - If the user starts the interactive dashboard inside Zellij, the system starts directly.
-    - If the user passes `--direct`, the system starts directly even when Zellij is not detected.
-    - Non-interactive command modes do not wrap themselves in Zellij.
-    - The replacement Zellij process uses Zellij's documented force-close behavior to quit the session when its terminal closes.
-    - The replacement Zellij process disables session serialization and session metadata so closed generated sessions do not become resurrection targets.
-    - When the dashboard command exits, its Zellij pane closes instead of leaving an exited command pane behind.
-    - Starting with `--server` preserves the startup wrapper behavior, and the wrapped dashboard command runs with `--direct --server`.
-    - Direct mode is only for bypassing the startup wrapper.
+    - Outside Zellij, workdash creates or attaches to the `workdash` session; `--session NAME` selects another session.
+    - A new session has a `dashboard` tab with tab and status bars, a dashboard pane named `workdash tui` above a shell pane.
+    - If the dashboard is already running, workdash reports that the new options are ignored and attaches after one second.
+    - If the dashboard is not running, workdash starts it with the new options in the `dashboard` tab, creating that tab if needed, and preserves any stale dashboard pane under another name.
+    - Quitting the dashboard leaves the session running and tells the user that Ctrl+Q quits the whole session and all its panes.
+    - Inside Zellij, the dashboard starts in the current pane and uses the current session regardless of `--session`; stale dashboard panes are preserved under another name, and a running dashboard is not renamed.
+    - Direct mode bypasses the wrapper; server-backed client commands never wrap.
+    - Startup preflight runs before starting a new dashboard; attaching to a running dashboard does not require it. Missing Zellij reports configuration guidance.
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S001
-  Scenario: Interactive startup outside Zellij replaces itself with a fresh workdash Zellij session
+  Scenario: Start a dashboard outside Zellij
     Given the system is not running inside a Zellij session
     And Zellij is installed on PATH
     When the user starts the interactive dashboard
     Then the system replaces itself with a Zellij process
-    And the Zellij process starts a fresh workdash-prefixed session
     And the Zellij process runs the dashboard with `--direct`
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S002
@@ -43,50 +32,58 @@ Feature: Start the interactive dashboard inside Zellij
     Then the system starts the dashboard directly
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S004
-  Scenario: Server-backed client commands outside Zellij do not wrap themselves
+  Scenario: Server-backed client commands do not wrap themselves
     Given the system is not running inside a Zellij session
     When the user starts a server-backed client command
     Then the system does not replace itself with Zellij
     And the command connects to the local Workdash server
 
-  @id:F-STARTUP-ZELLIJ-WRAPPER-S005
-  Scenario: The generated Zellij session uses documented close behavior
-    Given the system is not running inside a Zellij session
-    And Zellij is installed on PATH
-    When the user starts the interactive dashboard
-    Then the Zellij process is configured to quit on force close
-    And the Zellij process disables session resurrection state
-    And the dashboard pane closes when the dashboard exits
-
   @id:F-STARTUP-ZELLIJ-WRAPPER-S006
-  Scenario: Missing Zellij binary aborts interactive startup
+  Scenario: Missing Zellij aborts interactive startup
     Given the system is not running inside a Zellij session
     And Zellij is not installed on PATH
     When the user starts the interactive dashboard
     Then the system tells the user to run the configuration wizard
     And the system exits with a non-zero status
 
-  @id:F-STARTUP-ZELLIJ-WRAPPER-S007
-  Scenario: Server mode outside Zellij wraps the server-backed dashboard
-    Given the system is not running inside a Zellij session
-    And Zellij is installed on PATH
-    When the user starts the interactive dashboard with `--server`
-    Then the system replaces itself with a Zellij process
-    And the Zellij process starts a fresh workdash-prefixed session
-    And the Zellij process runs the dashboard with `--direct --server`
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S010
+  Scenario: Attach to a running dashboard in a named session
+    Given the named session `project` already has a running dashboard
+    When the user starts the dashboard in the named session with server mode
+    Then the system attaches to the named session
+    And the system reports that the new options are ignored
 
-  @id:F-STARTUP-ZELLIJ-WRAPPER-S008
-  Scenario: The generated Zellij session starts with a three-pane workdash tab
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S011
+  Scenario: Restart a dashboard in an existing session
+    Given the named session `project` has a stopped dashboard
+    When the user starts the dashboard in the named session with server mode
+    Then the system starts a dashboard with server mode in that session
+    And the previous dashboard pane is preserved
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S012
+  Scenario: Closing the terminal leaves the new session running
     Given the system is not running inside a Zellij session
     And Zellij is installed on PATH
     When the user starts the interactive dashboard
-    Then the first tab is named `workdash`
-    And the dashboard runs in a pane on the left
-    And a small terminal pane sits under the dashboard pane
-    And a full-height terminal pane sits on the right
+    Then the Zellij session detaches when the terminal closes
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S007
+  Scenario: Server mode starts a server-backed dashboard
+    Given the system is not running inside a Zellij session
+    And Zellij is installed on PATH
+    When the user starts the interactive dashboard with `--server`
+    Then the Zellij process runs the dashboard with `--direct --server`
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S008
+  Scenario: A new session starts with a dashboard and shell
+    Given the system is not running inside a Zellij session
+    And Zellij is installed on PATH
+    When the user starts the interactive dashboard
+    Then the first tab is named `dashboard`
+    And the dashboard is above a shell pane
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S009
-  Scenario: The generated Zellij session shows the tab bar and the status bar
+  Scenario: A new session shows the tab bar and status bar
     Given the system is not running inside a Zellij session
     And Zellij is installed on PATH
     When the user starts the interactive dashboard

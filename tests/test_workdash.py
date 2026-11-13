@@ -111,8 +111,9 @@ def test_main_prints_loading_message_before_tui_start(
     assert captured.out.startswith("Loading work items from GitHub...\n")
 
 
+@pytest.mark.parametrize("argv", [[], ["--session", "another-session"]])
 def test_main_bare_interactive_uses_own_zellij_session_from_environment(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, argv: list[str]
 ) -> None:
     # Outside --server, the dashboard must find active agent panes for itself
     # (e.g. to offer focusing one instead of only starting a new session), so
@@ -142,7 +143,7 @@ def test_main_bare_interactive_uses_own_zellij_session_from_environment(
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-abc123")
 
-    assert workdash_module.main([]) == 0
+    assert workdash_module.main(argv) == 0
 
     assert captured["session"].zellij_session == "workdash-abc123"
 
@@ -523,7 +524,7 @@ def test_main_rejects_missing_or_malformed_viewer_before_zellij_wrapping(
     monkeypatch.setattr(
         workdash_module.launcher.zellij,
         "exec_zellij_wrapped_workdash",
-        lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
+        lambda _argv, preflight: preflight(),
     )
     monkeypatch.delenv("ZELLIJ", raising=False)
 
@@ -565,7 +566,7 @@ def test_main_exits_with_config_guidance_when_startup_config_command_is_malforme
     monkeypatch.setattr(
         workdash_module.launcher.zellij,
         "exec_zellij_wrapped_workdash",
-        lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
+        lambda _argv, preflight: preflight(),
     )
     monkeypatch.delenv("ZELLIJ", raising=False)
 
@@ -1378,7 +1379,8 @@ def test_main_outside_zellij_replaces_process_with_zellij(
 ) -> None:
     wrapper_calls: list[object] = []
 
-    def fake_wrapper(argv):
+    def fake_wrapper(argv, preflight):
+        assert preflight()
         wrapper_calls.append(argv)
         raise SystemExit(0)
 
@@ -1444,7 +1446,9 @@ def test_main_outside_zellij_checks_gh_before_replacing_process(
     monkeypatch.delenv("ZELLIJ", raising=False)
     monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: None)
     monkeypatch.setattr(
-        workdash_module.launcher.zellij, "exec_zellij_wrapped_workdash", wrapper_calls.append
+        workdash_module.launcher.zellij,
+        "exec_zellij_wrapped_workdash",
+        lambda argv, preflight: wrapper_calls.append(argv) if preflight() else None,
     )
 
     exit_code = workdash_module.main([])
@@ -1756,6 +1760,9 @@ def test_server_listener_flags_reach_the_zellij_dashboard(monkeypatch, tmp_path)
         raise SystemExit(0)
 
     monkeypatch.setattr(launcher_module, "_write_zellij_startup_layout", capture_layout)
+    monkeypatch.setattr(
+        launcher_module.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")
+    )
     monkeypatch.setattr(launcher_module.os, "execvp", execvp)
     argv = ["--server", "--listen", "dashboard.lan@192.0.2.1", "--listen", "192.0.2.5@192.0.2.2"]
     with pytest.raises(SystemExit) as error:
