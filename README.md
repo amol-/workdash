@@ -282,6 +282,13 @@ added by URL only shares the issue's worktree from the next refresh onwards.
 process. It listens on `WORKDASH_HOST` (default `127.0.0.1:8765`) and stops all
 listeners when the TUI exits. Control requests use JSON; item artifact GETs return file contents or a JSON listing.
 
+A server writes its diagnostic log to `~/.config/workdash/workdash.log`, which
+each successful start replaces so it always describes the current run; a start
+that cannot bind leaves the existing log untouched. If the log cannot be
+written, startup fails and names the path instead of running without
+diagnostics. The log records server-side failures and where they happened, and
+omits raw command output and request bodies.
+
 For trusted LAN access, add repeatable `--listen HOST@IP1,IP2` options alongside
 `--server`. Each listener needs a nonempty list of exact accepted source IPs
 (no hostnames or subnets). All supplied source IPs are shared across every

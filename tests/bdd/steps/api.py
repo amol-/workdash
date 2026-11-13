@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import subprocess
 import threading
 from pathlib import Path
@@ -1283,6 +1284,33 @@ def _zellij_cannot_report_panes(scenario_state: dict[str, Any]) -> None:
     scenario_state["zellij_unavailable"] = True
 
 
+@given("Zellij answers the first pane listing unusably")
+def _zellij_answers_first_listing_unusably(
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    import workdash.launcher as launcher_module
+
+    scenario_state["zellij_reads_real_panes"] = True
+    panes = scenario_state.setdefault("panes", [])
+    answers = [subprocess.CompletedProcess([], 0, stdout="Session 'workdash-main' not found.\n")]
+
+    def run(command, **_kwargs):
+        if answers:
+            return answers.pop()
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(panes))
+
+    def assert_unusable_answer_consumed():
+        assert not answers, "the unusable pane listing was never read"
+
+    monkeypatch.setattr(launcher_module, "subprocess", SimpleNamespace(run=run))
+    monkeypatch.setattr(launcher_module, "_resolve_zellij_binary", lambda: "zellij")
+    monkeypatch.setattr(launcher_module, "_ZELLIJ_PANE_READ_RETRY_SECONDS", 0)
+    monkeypatch.setattr(
+        launcher_module.zellij, "load_zellij_panes", launcher_module.Zellij.load_zellij_panes
+    )
+    request.addfinalizer(assert_unusable_answer_consumed)
+
+
 @given("launched agent panes never become visible in Zellij")
 def _launched_panes_never_visible(scenario_state: dict[str, Any]) -> None:
     scenario_state["launched_panes_invisible"] = True
@@ -1487,3 +1515,50 @@ def _analysis_not_found(scenario_state):
     assert response.status_int == 404
     assert response.json["ok"] is False
     assert response.json["error"]["code"] == "not_found"
+
+
+@given("an existing server log from a previous server run")
+def _existing_server_log(scenario_state, tmp_path, monkeypatch):
+    log = tmp_path / "workdash.log"
+    log.write_text("previous run output")
+    monkeypatch.setattr("workdash.control.SERVER_LOG_PATH", log)
+    monkeypatch.setattr("workdash.control.server_address", lambda: ("127.0.0.1", 0))
+    scenario_state["server_log"] = log
+
+
+@when("a server-backed Workdash session starts and a background dispatch fails")
+def _server_starts_and_dispatch_fails(scenario_state, work_items, tmp_path, monkeypatch, request):
+    from workdash.control import WorkdashControlServer
+
+    session = ensure_api_session(scenario_state, work_items, tmp_path)
+
+    def fail_dispatch(**_kwargs):
+        raise RuntimeError("Failed to gather work state") from subprocess.CalledProcessError(
+            4, ["gh", "api", "graphql"], stderr="gh: Not Found (HTTP 404) token=ghp_secret"
+        )
+
+    monkeypatch.setattr(session, "dispatch_once", fail_dispatch)
+    server = WorkdashControlServer(session)
+    server.start()
+    request.addfinalizer(server.stop)
+    started = session.start_autodispatch(scope="owner/repo")
+    session._autodispatch[started["id"]].thread.join(2)
+
+
+@then("the server log records the failure and where it happened")
+def _log_records_failure(scenario_state):
+    text = scenario_state["server_log"].read_text()
+    assert "failed during dispatch" in text
+    assert re.search(r"RuntimeError at \w+:\d+", text)
+    assert "exit 4" in text
+    assert "HTTP 404" in text
+
+
+@then("the server log holds only the current run")
+def _log_holds_current_run(scenario_state):
+    assert "previous run output" not in scenario_state["server_log"].read_text()
+
+
+@then("the server log omits the failure's raw details")
+def _log_omits_raw_details(scenario_state):
+    assert "ghp_secret" not in scenario_state["server_log"].read_text()

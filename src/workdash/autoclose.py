@@ -10,7 +10,6 @@ pane no longer matches the session, pane ID and title it was registered with.
 from __future__ import annotations
 
 import logging
-import re
 import threading
 import time
 from dataclasses import dataclass
@@ -21,9 +20,11 @@ from .config import WorkdashConfig
 from .git import GitHelper
 from .github_client import GitHubClient
 from .launcher import (
+    ANSI_ESCAPE_RE,
     _format_zellij_pane_id,
     is_live_zellij_pane,
 )
+from .log_diagnostics import safe_error
 from .models import REVIEW_KINDS, WorkItem, WorkItemType
 from .work_instruction import render_autonomous_work_instruction
 from .work_state import PullRequestWorkState
@@ -42,7 +43,6 @@ RETRY_SECONDS = (120.0, 300.0, 900.0)
 RESOLVE_SECONDS = 5 * 60.0
 # The only actions worth sending; every other action describes waiting for others.
 _WORK_ACTIONS = {"implement", "fix_ci", "fix_merge_conflicts", "address_review"}
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
 _COMPLETED_ACTIONS = {"awaiting_review", "awaiting_merge"}
 
 
@@ -119,7 +119,9 @@ class AutocloseSupervisor:
                 entry.retry_at = (
                     time.monotonic() + RETRY_SECONDS[min(entry.failures, len(RETRY_SECONDS)) - 1]
                 )
-                logger.warning("Autoclose check of pane %s failed: %s", entry.pane_id, error)
+                logger.warning(
+                    "Autoclose check of pane %s failed: %s", entry.pane_id, safe_error(error)
+                )
                 if entry.failures > len(RETRY_SECONDS) and not entry.stalled:
                     # Past the longest retry the pane is effectively unsupervised; say so once.
                     entry.stalled = True
@@ -374,5 +376,5 @@ def _state_fingerprint(action: str, state: PullRequestWorkState | None) -> str:
 def _screen_signature(screen: str) -> str:
     """Return pane text without terminal control sequences and trailing blanks."""
 
-    text = _ANSI_RE.sub("", screen)
+    text = ANSI_ESCAPE_RE.sub("", screen)
     return "\n".join(line.rstrip() for line in text.splitlines()).strip("\n")

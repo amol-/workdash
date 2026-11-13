@@ -18,7 +18,12 @@ from textual.widgets import DataTable, Input, Static
 from .backend import IncludeResult, compute_suggestion_markers
 from .config import WorkdashAgentChoice
 from .github_client import parse_github_item_url
-from .launcher import launch_branchdiff_context, open_in_browser, open_markdown
+from .launcher import (
+    ANSI_ESCAPE_RE,
+    launch_branchdiff_context,
+    open_in_browser,
+    open_markdown,
+)
 from .models import (
     WorkItem,
     WorkItemKind,
@@ -34,6 +39,8 @@ AnalyzeCallbackResult = str | None
 _CallbackResult = TypeVar("_CallbackResult")
 # The Repo column is capped at this reference name so the title keeps more room.
 _MAX_REPO_WIDTH = 15
+# A failed session's error is external text, so one progress row shows at most this much.
+_MAX_PROGRESS_ERROR_WIDTH = 60
 _TYPE_CODES = {"ISSUE": "IS", "PR": "PR", "REVIEW": "RV", "CHECK": "VR"}
 
 if TYPE_CHECKING:
@@ -474,7 +481,13 @@ class WorkdashApp(App[None]):
         rows = []
         for entry in entries:
             if entry["status"] == "failed":
-                line = f"Failed {short(entry['scope'])}: {entry['error']}  ({entry['id']})"
+                # Error text can span lines and carry escape sequences; the full text
+                # stays available through `workdash info`.
+                error = " ".join(ANSI_ESCAPE_RE.sub("", str(entry["error"])).split())
+                line = (
+                    f"Failed {short(entry['scope'])}: {error[:_MAX_PROGRESS_ERROR_WIDTH]}"
+                    f"  ({entry['id']})"
+                )
             else:
                 scope = short(entry["scope"])
                 item = short(entry["current_item"]) if entry["current_item"] else None

@@ -107,6 +107,8 @@ def _run_workdash(
         cmd = args[0]
         if cmd[:2] == ["gh", "api"] and scenario_state.get("github_lookup_installed"):
             return github_run(*args, **kwargs)
+        if cmd[:3] == ["gh", "issue", "view"] and scenario_state.get("real_launch_context"):
+            return github_run(*args, **kwargs)
         if cmd == ["git", "rev-parse", "--show-toplevel"]:
             cwd = Path(kwargs["cwd"]).resolve()
             if str(kwargs["cwd"]) in scenario_state.get("git_origins", {}):
@@ -196,11 +198,12 @@ def _run_workdash(
                 lambda _workdir, _item, **kwargs: scenario_state["known_worktree_path"],
             )
         monkeypatch.setattr(control_module, "get_merge_base", lambda _path, **kwargs: None)
-        monkeypatch.setattr(
-            control_module,
-            "prepare_launch_agent_prompt",
-            lambda *args, **kwargs: "PROMPT",
-        )
+        if not scenario_state.get("real_launch_context"):
+            monkeypatch.setattr(
+                control_module,
+                "prepare_launch_agent_prompt",
+                lambda *args, **kwargs: "PROMPT",
+            )
         monkeypatch.setattr(
             control_module,
             "launch_terminal_context",

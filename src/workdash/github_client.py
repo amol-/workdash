@@ -455,6 +455,7 @@ def _run_gh_command_with_retry(
     report_progress: Callable[[str], None] = _noop_progress_callback,
     retry_label: str | None = None,
     tolerate_partial_response: bool = False,
+    retry_delay_seconds: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a ``gh`` subprocess with bounded retry on transient failures.
 
@@ -468,6 +469,9 @@ def _run_gh_command_with_retry(
         command instead of raising when it still printed something. GraphQL
         answers a partially denied query with both data and errors, and gh
         reports that as a failure.
+    :param float | None retry_delay_seconds: Replace the delay chosen for the
+        failure shape. Waiting out a rate limit is too slow for a read that
+        holds the session lock.
     """
 
     for attempt in range(_TRANSIENT_RETRIES + 1):
@@ -513,11 +517,12 @@ def _run_gh_command_with_retry(
                                 command, error.returncode, stdout=error.stdout, stderr=stderr
                             )
             if attempt < _TRANSIENT_RETRIES and transient:
-                delay = (
-                    _RATE_LIMIT_RETRY_DELAY_SECONDS
-                    if _is_rate_limit_error(stderr)
-                    else _TRANSIENT_RETRY_DELAY_SECONDS
-                )
+                if retry_delay_seconds is not None:
+                    delay = retry_delay_seconds
+                elif _is_rate_limit_error(stderr):
+                    delay = _RATE_LIMIT_RETRY_DELAY_SECONDS
+                else:
+                    delay = _TRANSIENT_RETRY_DELAY_SECONDS
                 if retry_label is not None:
                     report_progress(
                         f"{retry_label} got transient error, "
@@ -2588,19 +2593,18 @@ class GitHubClient:
         command: list[str],
         context_label: str,
     ) -> dict[str, Any]:
-        try:
-            completed = subprocess.run(command, check=True, capture_output=True, text=True)
-        except FileNotFoundError as error:
-            raise RuntimeError(
+        completed = _run_gh_command_with_retry(
+            command,
+            not_found_message=(
                 f"Failed to gather {context_label} with gh: gh CLI is not installed or not on PATH."
-            ) from error
-        except subprocess.CalledProcessError as error:
-            stderr = (error.stderr or "").strip()
-            raise RuntimeError(
+            ),
+            failure_message_prefix=(
                 f"Failed to gather {context_label} for {item.item_type.value} "
-                f"{item.repo}#{item.number}: "
-                f"{stderr or f'process exited with code {error.returncode}'}"
-            ) from error
+                f"{item.repo}#{item.number}"
+            ),
+            # Callers read this context while holding the session lock.
+            retry_delay_seconds=_TRANSIENT_RETRY_DELAY_SECONDS,
+        )
         try:
             payload = json.loads(completed.stdout)
         except json.JSONDecodeError as error:

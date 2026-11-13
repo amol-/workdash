@@ -71,6 +71,7 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
     harness.write_text(
         "import os\n"
         "from datetime import UTC, datetime\n"
+        "from pathlib import Path\n"
         "import workdash.workdash as cli\n"
         "import workdash.control as control\n"
         "from workdash.config import WorkdashConfig, AgentConfig\n"
@@ -81,6 +82,7 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
         "created_at=datetime.now(UTC), updated_at=datetime.now(UTC), url='https://example.com/1')\n"
         f"control.ensure_worktree = lambda *_args, **_kwargs: {str(tmp_path)!r}\n"
         "control.get_merge_base = lambda *_args, **_kwargs: None\n"
+        f"control.SERVER_LOG_PATH = Path({str(tmp_path / 'workdash.log')!r})\n"
         "from workdash.github_client import GitHubClient\n"
         "GitHubClient.work_pull_request = lambda *_args, **_kwargs: None\n"
         "control.prepare_launch_agent_prompt = lambda *_args, **_kwargs: 'test prompt'\n"

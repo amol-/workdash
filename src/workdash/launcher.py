@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -25,6 +26,14 @@ _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _BROWSER_OPEN_COMMANDS = ("xdg-open", "open")
 _BROWSER_OPEN_TIMEOUT_SECONDS = 4
 _WORKDASH_LOCAL_BIN = LOCAL_BIN_PATH
+# A Zellij session that is still starting answers unusably for a moment, so a pane
+# listing is retried once before it counts as unavailable. The whole read stays
+# short because callers list panes while holding the session lock.
+_ZELLIJ_PANE_READ_ATTEMPTS = 2
+_ZELLIJ_PANE_READ_RETRY_SECONDS = 0.25
+_ZELLIJ_PANE_READ_TIMEOUT_SECONDS = 2.0
+# Terminal control sequences in text captured from a pane or an error message.
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
 
 
 @dataclass(frozen=True)
@@ -480,6 +489,52 @@ def _resolve_branchdiff_pr_base_ref(item: WorkItem, *, github_client=None) -> st
     return f"{remote}/{base_ref_name}"
 
 
+def _read_zellij_panes(session: str) -> list[dict[str, object]]:
+    """Read one pane listing, reporting every unusable answer as ``RuntimeError``.
+
+    Zellij exits 0 and prints its session list when the session is not available, so a
+    listing that is not pane JSON is a failure like a failed or hung command.
+    """
+
+    command = [
+        _resolve_zellij_binary(),
+        "--session",
+        session,
+        "action",
+        "list-panes",
+        "--json",
+        "--all",
+        "--command",
+        "--state",
+        "--tab",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_ZELLIJ_PANE_READ_TIMEOUT_SECONDS,
+        )
+    except subprocess.CalledProcessError as error:
+        details = (error.stderr or "").strip() or (error.stdout or "").strip()
+        raise RuntimeError(
+            f"Failed to list Zellij panes for {session}: {details or error.returncode}"
+        ) from error
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"Failed to list Zellij panes for {session}: no answer within "
+            f"{_ZELLIJ_PANE_READ_TIMEOUT_SECONDS:.0f}s"
+        ) from error
+    try:
+        panes = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"Failed to parse Zellij pane JSON: {error.msg}") from error
+    if not isinstance(panes, list):
+        raise RuntimeError("Zellij pane JSON must be a list.")
+    return [pane for pane in panes if isinstance(pane, dict)]
+
+
 class Zellij:
     """All Zellij interactions must go through this object."""
 
@@ -677,37 +732,16 @@ class Zellij:
 
     @staticmethod
     def load_zellij_panes(session: str) -> list[dict[str, object]]:
-        zellij = _resolve_zellij_binary()
-        try:
-            completed = subprocess.run(
-                [
-                    zellij,
-                    "--session",
-                    session,
-                    "action",
-                    "list-panes",
-                    "--json",
-                    "--all",
-                    "--command",
-                    "--state",
-                    "--tab",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError as error:
-            details = (error.stderr or "").strip() or (error.stdout or "").strip()
-            raise RuntimeError(
-                f"Failed to list Zellij panes for {session}: {details or error.returncode}"
-            ) from error
-        try:
-            panes = json.loads(completed.stdout)
-        except json.JSONDecodeError as error:
-            raise RuntimeError(f"Failed to parse Zellij pane JSON: {error.msg}") from error
-        if not isinstance(panes, list):
-            raise RuntimeError("Zellij pane JSON must be a list.")
-        return [pane for pane in panes if isinstance(pane, dict)]
+        """List a session's panes, retrying briefly while Zellij answers unusably."""
+
+        for attempt in range(1, _ZELLIJ_PANE_READ_ATTEMPTS + 1):
+            try:
+                return _read_zellij_panes(session)
+            except RuntimeError:
+                if attempt == _ZELLIJ_PANE_READ_ATTEMPTS:
+                    raise
+                time.sleep(_ZELLIJ_PANE_READ_RETRY_SECONDS)
+        raise AssertionError("unreachable: retry loop exited without return or raise")
 
     @contextmanager
     def zellij_fullscreen_pane(self) -> Iterator[None]:

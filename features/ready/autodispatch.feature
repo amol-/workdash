@@ -5,10 +5,21 @@ Feature: Automatically dispatch ready work
   task uses its implementation repository's group; an explicit group overrides it.
   After each agent pane disappears, the session reviews the pull request selected
   for that dispatch if it remains open, or a currently linked open pull request
-  otherwise, before selecting more ready work. It finishes when no ready work remains. A user can stop a session without
-  closing its agent pane. Autodispatch does not merge work.
+  otherwise, before selecting more ready work. A pane counts as gone only once two
+  consecutive checks miss it, so a listing that omits a live pane does not end
+  supervision. It finishes when no ready work remains. A user can stop a session
+  without closing its agent pane. Autodispatch does not merge work.
   A tenth consecutive launch of the same issue fails without another launch;
-  work claimed by another agent is skipped rather than counted.
+  work claimed by another agent is skipped rather than counted. A target has at most
+  one session: starting a session for a target that already has one stops and replaces
+  it, whether that session was running or failed, even when the target is referenced in
+  another form, including a targeted todo ID and its underlying todo issue URL. A failed
+  session stays visible in progress with its error collapsed onto a single truncated
+  line, while `workdash info` reports the full error. Starting a session for an exact issue
+  that still has ready work closes any coding pane already working on that issue
+  before dispatching, interrupting that agent; the rare race between its stop and the
+  new launch is accepted. A scope without ready work leaves the coding pane working on
+  it untouched, because nothing would replace it.
   The dashboard shows the selected group (or automatic until known), scope,
   current issue, stage, launch reason during development, and iteration with elapsed
   time. While checking for another task, it retains the last selected group until
@@ -113,3 +124,38 @@ Feature: Automatically dispatch ready work
     Given a ready issue selected in the dashboard
     When the user's autodispatch session fails
     Then the dashboard shows the failed session and its error
+
+  @id:F-AUTODISPATCH-S014
+  Scenario: A failed session remains visible until restarted
+    Given an autodispatch session has failed
+    When the user inspects autodispatch progress
+    Then the failure is visible in autodispatch progress
+    When the user restarts autodispatch for the same scope
+    Then the old failure is no longer shown
+
+  @id:F-AUTODISPATCH-S015
+  Scenario: Starting an exact issue closes the coding agent already working on it
+    Given a coding agent is already running for issue `owner/repo#ISSUE-1`
+    And issue `owner/repo#ISSUE-1` has ready work
+    When the user starts autodispatch for issue `owner/repo#ISSUE-1`
+    Then that coding agent pane is closed before the issue is dispatched
+
+  @id:F-AUTODISPATCH-S016
+  Scenario: Starting an exact issue without ready work leaves its agent running
+    Given a coding agent is already running for issue `owner/repo#ISSUE-1`
+    And issue `owner/repo#ISSUE-1` has no ready work
+    When the user starts autodispatch for issue `owner/repo#ISSUE-1`
+    Then that coding agent pane stays open
+
+  @id:F-AUTODISPATCH-S017
+  Scenario: Starting a repository scope leaves coding panes running
+    Given a coding agent is already running for issue `owner/repo#ISSUE-1`
+    And issue `owner/repo#ISSUE-1` has ready work
+    When the user starts autodispatch for repository `owner/repo`
+    Then that coding agent pane stays open
+
+  @id:F-AUTODISPATCH-S018
+  Scenario: Starting a target that is already running replaces its session
+    Given an autodispatch session is running for `owner/repo`
+    When the user starts autodispatch again for `owner/repo`
+    Then the previous session is stopped and replaced
