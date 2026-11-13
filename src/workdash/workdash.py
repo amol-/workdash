@@ -467,7 +467,11 @@ class WorkdashCommands:
                 and (session.work_items, session.suggestion_markers)
             ),
             worktree_callback=lambda item: ensure_worktree(
-                config.workdir, item, git=session.git, github_client=backend.github_client
+                config.workdir,
+                item,
+                git=session.git,
+                github_client=backend.github_client,
+                todo_repository=config.todo_repository,
             ),
             analyze_callback=lambda item, tool: session.analyze(
                 target=format_work_item_id(item), agent=tool, prefer_cache=(tool == "cached")

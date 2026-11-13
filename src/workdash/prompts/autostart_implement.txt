@@ -32,7 +32,7 @@ cleanly into the CURRENT base branch. Unknown mergeability or unknown CI status 
 not proof of completion. A pull request existing is not completion either.
 
 For an issue, create a pull request that closes it with GitHub's closing keyword
-(`Fixes owner/repo#NUMBER`). For an existing pull request, update THAT pull
+(`Fixes #NUMBER`, without a repository prefix). For an existing pull request, update THAT pull
 request's head branch and never create a second one.
 
 After each push, classify the newest head SHA's CI from GitHub's check results and

@@ -59,6 +59,11 @@ def _install_fake_git(
     def fake_run(*args, **kwargs):
         cmd = args[0]
         recorded.append(list(cmd))
+        if cmd[:3] == ["gh", "issue", "develop"]:
+            if scenario_state.get("linked_branch_available"):
+                scenario_state["github_linked_branch"] = cmd[cmd.index("--name") + 1]
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            raise subprocess.CalledProcessError(1, cmd)
         if cmd[:3] == ["gh", "pr", "view"]:
             return subprocess.CompletedProcess(cmd, 0, stdout=head_info, stderr="")
         if cmd[:3] == ["gh", "repo", "clone"] or cmd[:2] == ["git", "clone"]:
@@ -76,7 +81,19 @@ def _install_fake_git(
             if ":" not in origin:
                 origin = f"https://github.com/{origin}.git"
             return subprocess.CompletedProcess(cmd, 0, stdout=origin, stderr="")
-        if cmd[:2] == ["git", "fetch"]:
+        if cmd == ["git", "ls-remote", "--symref", "origin", "HEAD"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="ref: refs/heads/main\tHEAD\nabc123\tHEAD\n", stderr=""
+            )
+        if cmd[:2] == ["git", "ls-remote"]:
+            branch = cmd[-1].removeprefix("refs/heads/")
+            return subprocess.CompletedProcess(
+                cmd,
+                0 if scenario_state.get("github_linked_branch") == branch else 2,
+                stdout="",
+                stderr="",
+            )
+        if cmd[:2] == ["git", "fetch"] or cmd[:4] == ["git", "remote", "set-head", "origin"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd == ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="origin/main\n", stderr="")
@@ -102,6 +119,8 @@ def _install_fake_git(
             if "-b" in cmd:
                 path_index = cmd.index("-b") + 2
                 wt_path = Path(cmd[path_index])
+            elif "--detach" in cmd:
+                wt_path = Path(cmd[4])
             else:
                 wt_path = Path(cmd[3])
             wt_path.mkdir(parents=True, exist_ok=True)
@@ -109,6 +128,8 @@ def _install_fake_git(
                 source = wt_path / name
                 source.parent.mkdir(parents=True, exist_ok=True)
                 source.write_text(content)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:3] == ["git", "worktree", "remove"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[:2] == ["git", "config"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -141,6 +162,40 @@ def _user_needs_issue_worktree(
     scenario_state["work_item"] = item
     scenario_state["workdir"] = tmp_path
     _install_fake_git(scenario_state, monkeypatch, workdir=tmp_path)
+
+
+@given("GitHub can create a linked issue branch")
+def _linked_branch_available(scenario_state: dict[str, Any]) -> None:
+    scenario_state["linked_branch_available"] = True
+
+
+@given("GitHub cannot create a linked issue branch")
+def _linked_branch_unavailable(scenario_state: dict[str, Any]) -> None:
+    scenario_state["linked_branch_available"] = False
+
+
+@then("the issue branch is linked on GitHub and tracked locally")
+def _linked_issue_branch(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["github_linked_branch"] == "issue-42"
+    assert Path(scenario_state["worktree_path"]).is_dir()
+    calls = scenario_state["_recorded_git_calls"]
+    assert ["gh", "issue", "develop", "42", "--repo", "owner/repo", "--name", "issue-42"] in calls
+    assert any(
+        cmd[:5] == ["git", "worktree", "add", "-b", "issue-42"] and cmd[-1] == "origin/issue-42"
+        for cmd in calls
+    )
+    assert ["git", "config", "branch.issue-42.remote", "origin"] in calls
+    assert ["git", "config", "branch.issue-42.merge", "refs/heads/issue-42"] in calls
+
+
+@then("the issue branch is local and starts from the default branch")
+def _local_issue_branch(scenario_state: dict[str, Any]) -> None:
+    calls = scenario_state["_recorded_git_calls"]
+    assert ["gh", "issue", "develop", "42", "--repo", "owner/repo", "--name", "issue-42"] in calls
+    assert any(
+        cmd[:5] == ["git", "worktree", "add", "-b", "issue-42"] and cmd[-1] == "origin/HEAD"
+        for cmd in calls
+    )
 
 
 @when("the system prepares the worktree")

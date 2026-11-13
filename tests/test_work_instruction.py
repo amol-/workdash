@@ -58,7 +58,8 @@ def test_implement_is_a_self_contained_kickoff_without_the_autostart_policy() ->
     text = render_work_instruction("implement", _item(WorkItemType.ISSUE, 7))
 
     assert "Continue the assigned issue https://github.com/owner/repo/issues/7." in text
-    assert "Fixes reference" in text
+    assert "Fixes #NUMBER" in text
+    assert "owner/repo#NUMBER" not in text
     assert "no checks are required or observed" in text
     assert "coordination workflows" not in text
 
@@ -269,3 +270,11 @@ def test_review_instructions_require_fix_or_explanation_and_resolution() -> None
         "request re-review from each reviewer whose changes-requested review you addressed" in text
     )
     assert "If a re-review request fails, report the blocker" in text
+
+
+def test_autonomous_implement_prompt_uses_unqualified_closing_reference() -> None:
+    from workdash.work_instruction import render_autonomous_work_instruction
+
+    text = render_autonomous_work_instruction("implement", _item(WorkItemType.ISSUE, 7))
+    assert "Fixes #NUMBER" in text
+    assert "owner/repo#NUMBER" not in text

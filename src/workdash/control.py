@@ -48,6 +48,7 @@ from .models import (
 )
 from .repo_resolver import validate_repository_selectors
 from .repo_worktree import (
+    analysis_worktree,
     ensure_worktree,
     existing_worktree_for_branch,
     existing_worktree_path,
@@ -363,6 +364,7 @@ class WorkdashSession:
                         item,
                         git=self.git,
                         github_client=self.backend.github_client,
+                        todo_repository=self.config.todo_repository,
                     )
                 tokens = self.backend.resolve_analyze_command_tokens(selected)
                 document = Path(cwd) / ".workdash" / "reviews" / f"review-{uuid4().hex}.md"
@@ -585,7 +587,11 @@ class WorkdashSession:
             if repo_path is not None:
                 verify_selected_head(repo_path)
             repo_path = ensure_worktree(
-                self.config.workdir, item, git=git, github_client=self.backend.github_client
+                self.config.workdir,
+                item,
+                git=git,
+                github_client=self.backend.github_client,
+                todo_repository=self.config.todo_repository,
             )
             claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
             if claimed is not None:
@@ -731,7 +737,11 @@ class WorkdashSession:
         with self._lock:
             item_id = format_work_item_id(item)
             repo_path = ensure_worktree(
-                self.config.workdir, item, git=self.git, github_client=self.backend.github_client
+                self.config.workdir,
+                item,
+                git=self.git,
+                github_client=self.backend.github_client,
+                todo_repository=self.config.todo_repository,
             )
             launch = launch_terminal_context(
                 repo_path,
@@ -1072,15 +1082,16 @@ class WorkdashSession:
                 "Analysis requires a known Workdash Zellij session.",
                 status=HTTPStatus.CONFLICT,
             )
-        return self.backend.analyze_item(
+        with analysis_worktree(
+            self.config.workdir,
             item,
-            tool=tool,
-            cwd=ensure_worktree(
-                self.config.workdir, item, git=self.git, github_client=self.backend.github_client
-            ),
-            zellij_session=self.zellij_session,
-            group=group,
-        )
+            git=self.git,
+            github_client=self.backend.github_client,
+            todo_repository=self.config.todo_repository,
+        ) as cwd:
+            return self.backend.analyze_item(
+                item, tool=tool, cwd=cwd, zellij_session=self.zellij_session, group=group
+            )
 
     def analysis_url(self, item: WorkItem) -> str:
         """Return the HTTP URL under which this item's analysis markdown is served."""

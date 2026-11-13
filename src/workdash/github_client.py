@@ -1344,6 +1344,20 @@ class GitHubClient:
             )
         return base_ref_name.strip(), self._head_repo_from_payload(payload, item.repo)
 
+    def create_issue_branch(self, repo: str, number: int, branch: str) -> None:
+        """Create a GitHub branch linked to an issue."""
+        try:
+            subprocess.run(
+                ["gh", "issue", "develop", str(number), "--repo", repo, "--name", branch],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            raise RuntimeError(
+                f"Failed to create linked branch {branch} for {repo}#{number}."
+            ) from exc
+
     def clone_repository(self, repo: str, target: Path) -> None:
         try:
             subprocess.run(

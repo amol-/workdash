@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import subprocess
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -315,6 +316,11 @@ def _run_workdash(
                 item.number, (str(Path(workdir) / "owner_repo_1"),)
             )[0]
         ),
+    )
+    monkeypatch.setattr(
+        control_module,
+        "analysis_worktree",
+        lambda *args, **kwargs: nullcontext(control_module.ensure_worktree(*args, **kwargs)),
     )
     monkeypatch.setattr(
         workdash_module.launcher.zellij,

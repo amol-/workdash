@@ -233,9 +233,16 @@ def test_ensure_worktree_clones_and_creates_for_issue(
 ) -> None:
     """Main repo missing, issue item: clone, fetch, worktree add with issue-N branch."""
     calls: list[list[str]] = []
+    linked = False
 
     def fake_run(*args, **kwargs):
+        nonlocal linked
         cmd = args[0]
+        if cmd[:3] == ["gh", "issue", "develop"]:
+            linked = True
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:2] == ["git", "ls-remote"]:
+            return subprocess.CompletedProcess(cmd, 0 if linked else 2, stdout="", stderr="")
         calls.append(cmd)
         if cmd[0] == "gh" and cmd[1] == "repo" and cmd[2] == "clone":
             (tmp_path / "owner_repo").mkdir(exist_ok=True)
@@ -270,7 +277,7 @@ def test_ensure_worktree_clones_and_creates_for_issue(
     wt_add = [c for c in calls if c[0] == "git" and c[1] == "worktree" and c[2] == "add"][0]
     assert "-b" in wt_add
     assert "issue-42" in wt_add
-    assert "origin/HEAD" in wt_add
+    assert "origin/issue-42" in wt_add
     config_cmds = [c for c in calls if c[0] == "git" and c[1] == "config"]
     assert ["git", "config", "branch.issue-42.remote", "origin"] in config_cmds
     assert ["git", "config", "branch.issue-42.merge", "refs/heads/issue-42"] in config_cmds
@@ -329,11 +336,14 @@ def test_ensure_worktree_fetches_existing_main_for_issue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Main repo exists, worktree missing, issue: skip clone, fetch then worktree add."""
+    monkeypatch.setattr(GitHelper, "fetch_origin_branch", lambda *args, **kwargs: True)
     (tmp_path / "owner_repo").mkdir()
     calls: list[list[str]] = []
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
+        if cmd[:3] == ["gh", "issue", "develop"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         calls.append(cmd)
         if cmd == ["git", "rev-parse", "--show-toplevel"]:
             return _git_show_toplevel(cmd, kwargs["cwd"])
@@ -370,7 +380,7 @@ def test_ensure_worktree_fetches_existing_main_for_issue(
     assert not any(c[0] == "gh" and c[1] == "repo" for c in calls)
     wt_add = [c for c in calls if c[0] == "git" and c[1] == "worktree" and c[2] == "add"][0]
     assert "issue-42" in wt_add
-    assert "origin/HEAD" in wt_add
+    assert "origin/issue-42" in wt_add
 
 
 def test_existing_worktree_path_finds_the_targeted_todo_worktree_of_the_target_clone(
@@ -1093,7 +1103,7 @@ def test_ensure_worktree_pull_failure_is_silent(
 def test_ensure_worktree_pr_with_existing_local_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """PR with local branch already existing: branch -f then worktree add without -b."""
+    """A PR's existing local branch is checked out without resetting it."""
     (tmp_path / "owner_repo").mkdir()
     calls: list[list[str]] = []
 
@@ -1114,7 +1124,10 @@ def test_ensure_worktree_pr_with_existing_local_branch(
             return subprocess.CompletedProcess(cmd, 0, stdout="origin/main\n", stderr="")
         if cmd == ["git", "switch", "main"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        if cmd == ["git", "merge", "--ff-only", "origin/HEAD"]:
+        if cmd in (
+            ["git", "merge", "--ff-only", "origin/HEAD"],
+            ["git", "merge", "--ff-only", "origin/feature-branch"],
+        ):
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "prune":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -1137,9 +1150,7 @@ def test_ensure_worktree_pr_with_existing_local_branch(
 
     assert result == str(tmp_path / "owner_repo_42")
     branch_cmds = [c for c in calls if c[0] == "git" and c[1] == "branch" and c[2] == "-f"]
-    assert len(branch_cmds) == 1
-    assert "feature-branch" in branch_cmds[0]
-    assert "origin/feature-branch" in branch_cmds[0]
+    assert not branch_cmds
     wt_add = [c for c in calls if c[0] == "git" and c[1] == "worktree" and c[2] == "add"][0]
     assert "-b" not in wt_add
     assert "feature-branch" in wt_add
@@ -1188,10 +1199,13 @@ def test_ensure_worktree_creates_workdir_if_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The workdir base directory is created automatically if it doesn't exist."""
+    monkeypatch.setattr(GitHelper, "fetch_origin_branch", lambda *args, **kwargs: True)
     nested_workdir = str(tmp_path / "deep" / "wrk")
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
+        if cmd[:3] == ["gh", "issue", "develop"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "gh" and cmd[1] == "repo" and cmd[2] == "clone":
             Path(nested_workdir, "owner_repo").mkdir(exist_ok=True)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -1403,8 +1417,11 @@ def test_github_issue_reuses_repository_with_differently_cased_origin(
         monkeypatch.setattr(GitHelper, "find_worktree_for_branch", lambda self, path, branch: None)
         monkeypatch.setattr(GitHelper, "fetch_remote", lambda self, path, remote: None)
         monkeypatch.setattr(GitHelper, "fast_forward_default_branch", lambda self, path: None)
+        monkeypatch.setattr(GitHelper, "fetch_origin_branch", lambda *args, **kwargs: True)
         monkeypatch.setattr(GitHelper, "create_worktree", lambda self, *args: None)
-        assert ensure_worktree(str(tmp_path), item) == str(tmp_path / "Owner_Repo_42")
+        assert ensure_worktree(str(tmp_path), item, github_client=MagicMock()) == str(
+            tmp_path / "Owner_Repo_42"
+        )
 
 
 def test_same_repo_pr_reused_with_differently_cased_directory(tmp_path, monkeypatch):
@@ -1782,6 +1799,9 @@ def test_fake_git_prepares_and_reuses_review_worktree_with_merge_base(monkeypatc
         def ensure_upstream_remote(self, main, repo):
             assert repo == "owner/repo"
 
+        def local_branch_exists(self, main, branch):
+            return False
+
         def create_worktree(self, main, path, branch, start):
             assert branch == "feature"
             assert start == "origin/feature"
@@ -1851,3 +1871,404 @@ def test_fake_git_prepares_and_reuses_review_worktree_with_merge_base(monkeypatc
     assert response.status_int == 200
     assert response.text == "Review findings"
     git_factory.assert_called_once_with()
+
+
+def test_existing_local_branch_and_upstream_are_preserved(tmp_path: Path) -> None:
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=tmp_path, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git("init", "-b", "main")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    git("commit", "--allow-empty", "-m", "base")
+    git("branch", "issue-42")
+    git("config", "branch.issue-42.remote", "custom")
+    git("config", "branch.issue-42.merge", "refs/heads/custom-branch")
+    git("commit", "--allow-empty", "-m", "new default")
+    original = git("rev-parse", "issue-42")
+
+    GitHelper().create_worktree(tmp_path, tmp_path / "checkout", "issue-42", "HEAD")
+
+    assert git("rev-parse", "issue-42") == original
+    assert git("config", "branch.issue-42.remote") == "custom"
+    assert git("config", "branch.issue-42.merge") == "refs/heads/custom-branch"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "local",
+        "local_offline",
+        "remote",
+        "linked",
+        "fallback",
+        "fallback_no_refresh",
+        "fallback_offline",
+        "race",
+        "single_fallback",
+        "single_remote",
+        "single_linked",
+        "single_retry",
+        "stale_remote",
+    ],
+)
+def test_issue_branch_selection_with_real_git(tmp_path, monkeypatch, case):
+    origin = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    workdir = tmp_path / "work"
+    main = workdir / "owner_repo"
+
+    def git(cwd, *args):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git(tmp_path, "init", "--bare", str(origin))
+    git(tmp_path, "init", "-b", "main", str(seed))
+    git(seed, "config", "user.name", "Test")
+    git(seed, "config", "user.email", "test@example.com")
+    git(seed, "commit", "--allow-empty", "-m", "base")
+    git(seed, "remote", "add", "origin", str(origin))
+    git(seed, "push", "origin", "main")
+    git(origin, "symbolic-ref", "HEAD", "refs/heads/main")
+    workdir.mkdir()
+    git(
+        workdir,
+        "clone",
+        *(["--single-branch"] if case.startswith("single_") else []),
+        str(origin),
+        str(main),
+    )
+    git(main, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{origin}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/owner/repo.git")
+    expected = git(seed, "rev-parse", "HEAD")
+    if case in {"local", "local_offline"}:
+        git(main, "config", "user.name", "Test")
+        git(main, "config", "user.email", "test@example.com")
+        git(main, "switch", "-c", "issue-42")
+        git(main, "commit", "--allow-empty", "-m", "local work")
+        expected = git(main, "rev-parse", "HEAD")
+        git(main, "switch", "main")
+        git(main, "config", "branch.issue-42.remote", "custom")
+        git(main, "config", "branch.issue-42.merge", "refs/heads/custom")
+        if case == "local_offline":
+            origin.rename(tmp_path / "unavailable.git")
+    if case in {"remote", "single_remote"}:
+        git(seed, "switch", "-c", "issue-42")
+        git(seed, "commit", "--allow-empty", "-m", "remote work")
+        expected = git(seed, "rev-parse", "HEAD")
+        git(seed, "push", "origin", "issue-42")
+    if case == "stale_remote":
+        git(seed, "switch", "-c", "issue-42")
+        git(seed, "commit", "--allow-empty", "-m", "deleted remote work")
+        git(seed, "push", "origin", "issue-42")
+        git(main, "fetch", "origin", "refs/heads/issue-42:refs/remotes/origin/issue-42")
+        git(seed, "push", "origin", "--delete", "issue-42")
+        git(main, "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")
+        assert git(main, "rev-parse", "origin/issue-42") != expected
+    github = MagicMock()
+    if case == "race":
+        git(seed, "switch", "-c", "issue-42")
+        git(seed, "commit", "--allow-empty", "-m", "concurrent work")
+        expected = git(seed, "rev-parse", "HEAD")
+
+        def create_then_fail(*args):
+            git(seed, "push", "origin", "issue-42")
+            raise RuntimeError("link failed")
+
+        github.create_issue_branch.side_effect = create_then_fail
+    elif case == "fallback_offline":
+
+        def go_offline(*args):
+            origin.rename(tmp_path / "unavailable.git")
+            raise RuntimeError("link failed")
+
+        github.create_issue_branch.side_effect = go_offline
+    elif case in {"linked", "single_linked", "single_retry", "stale_remote"}:
+        github.create_issue_branch.side_effect = lambda *args: git(
+            seed, "push", "origin", "main:issue-42"
+        )
+    elif case in {"fallback", "single_fallback"}:
+        git(seed, "switch", "-c", "new-default")
+        git(seed, "commit", "--allow-empty", "-m", "new default")
+        expected = git(seed, "rev-parse", "HEAD")
+        git(seed, "push", "origin", "new-default")
+        git(origin, "symbolic-ref", "HEAD", "refs/heads/new-default")
+        github.create_issue_branch.side_effect = RuntimeError("link failed")
+    elif case == "fallback_no_refresh":
+        git(origin, "symbolic-ref", "HEAD", "refs/heads/missing")
+        assert (
+            subprocess.run(
+                ["git", "remote", "set-head", "origin", "--auto"],
+                cwd=main,
+                capture_output=True,
+                text=True,
+            ).returncode
+            != 0
+        )
+        github.create_issue_branch.side_effect = RuntimeError("link failed")
+
+    if case == "single_retry":
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                GitHelper, "create_worktree", MagicMock(side_effect=RuntimeError("setup failed"))
+            )
+            with pytest.raises(RuntimeError, match="setup failed"):
+                ensure_worktree(str(workdir), make_issue(), github_client=github)
+        git(seed, "switch", "issue-42")
+        git(seed, "commit", "--allow-empty", "-m", "work after setup failed")
+        git(seed, "push", "origin", "issue-42")
+        expected = git(seed, "rev-parse", "HEAD")
+
+    worktree = Path(ensure_worktree(str(workdir), make_issue(), github_client=github))
+    assert git(worktree, "branch", "--show-current") == "issue-42"
+    assert git(worktree, "rev-parse", "HEAD") == expected
+    if case in {"local", "local_offline"}:
+        assert git(main, "config", "branch.issue-42.remote") == "custom"
+        assert git(main, "config", "branch.issue-42.merge") == "refs/heads/custom"
+    elif case in {
+        "remote",
+        "linked",
+        "race",
+        "single_remote",
+        "single_linked",
+        "single_retry",
+        "stale_remote",
+    }:
+        assert git(worktree, "config", "branch.issue-42.remote") == "origin"
+        assert git(worktree, "config", "branch.issue-42.merge") == "refs/heads/issue-42"
+        assert git(worktree, "rev-parse", "--abbrev-ref", "@{upstream}") == "origin/issue-42"
+    if case in {"fallback", "fallback_no_refresh", "fallback_offline", "single_fallback"}:
+        assert (
+            subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "@{upstream}"],
+                cwd=worktree,
+                capture_output=True,
+            ).returncode
+            != 0
+        )
+    if case in {"local", "local_offline", "remote", "single_remote"}:
+        github.create_issue_branch.assert_not_called()
+    else:
+        github.create_issue_branch.assert_called_once_with("owner/repo", 42, "issue-42")
+    if case in {"remote", "linked", "single_remote", "single_linked", "single_retry"}:
+        git(seed, "push", "origin", "--delete", "issue-42")
+        git(main, "fetch", "--prune", "origin")
+        assert git(worktree, "rev-parse", "HEAD") == expected
+
+
+def test_origin_branch_lookup_does_not_treat_remote_failure_as_missing(tmp_path, monkeypatch):
+    def fail(command, **kwargs):
+        return subprocess.CompletedProcess(command, 128, stdout="", stderr="access denied")
+
+    monkeypatch.setattr(subprocess, "run", fail)
+    with pytest.raises(RuntimeError, match="access denied"):
+        GitHelper().fetch_origin_branch(tmp_path, "issue-42", missing_ok=True)
+
+
+@pytest.mark.parametrize("divergent", [False, True])
+def test_existing_pr_branch_fast_forwards_without_losing_local_work(
+    tmp_path, monkeypatch, divergent
+):
+    origin = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    workdir = tmp_path / "work"
+    main = workdir / "owner_repo"
+
+    def git(cwd, *args):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git(tmp_path, "init", "--bare", str(origin))
+    git(tmp_path, "init", "-b", "main", str(seed))
+    git(seed, "config", "user.name", "Test")
+    git(seed, "config", "user.email", "test@example.com")
+    git(seed, "commit", "--allow-empty", "-m", "base")
+    git(seed, "remote", "add", "origin", str(origin))
+    git(seed, "push", "origin", "main")
+    git(origin, "symbolic-ref", "HEAD", "refs/heads/main")
+    git(seed, "switch", "-c", "feature")
+    git(seed, "push", "origin", "feature")
+    workdir.mkdir()
+    git(workdir, "clone", str(origin), str(main))
+    git(main, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{origin}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/owner/repo.git")
+    git(main, "config", "user.name", "Test")
+    git(main, "config", "user.email", "test@example.com")
+    git(main, "switch", "-c", "feature")
+    if divergent:
+        git(main, "commit", "--allow-empty", "-m", "local work")
+    local = git(main, "rev-parse", "HEAD")
+    git(main, "switch", "main")
+    git(main, "config", "branch.feature.remote", "custom")
+    git(main, "config", "branch.feature.merge", "refs/heads/custom")
+    git(seed, "commit", "--allow-empty", "-m", "remote work")
+    git(seed, "push", "origin", "feature")
+    remote = git(seed, "rev-parse", "HEAD")
+    github = MagicMock()
+    github.fetch_worktree_head.return_value = ("feature", "owner/repo")
+
+    worktree = Path(ensure_worktree(str(workdir), make_pr(), github_client=github))
+
+    assert git(worktree, "rev-parse", "HEAD") == (local if divergent else remote)
+    assert git(main, "config", "branch.feature.remote") == "origin"
+    assert git(main, "config", "branch.feature.merge") == "refs/heads/feature"
+
+
+def test_analysis_existing_clone_without_origin_head(tmp_path, monkeypatch):
+    from workdash.repo_worktree import analysis_worktree
+
+    origin = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    workdir = tmp_path / "work"
+    main = workdir / "owner_repo"
+
+    def git(cwd, *args):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git(tmp_path, "init", "--bare", str(origin))
+    git(tmp_path, "init", "-b", "main", str(seed))
+    git(seed, "config", "user.name", "Test")
+    git(seed, "config", "user.email", "test@example.com")
+    (seed / "source.py").write_text("latest source\n")
+    git(seed, "add", "source.py")
+    git(seed, "commit", "-m", "base")
+    git(seed, "remote", "add", "origin", str(origin))
+    git(seed, "push", "origin", "main")
+    git(origin, "symbolic-ref", "HEAD", "refs/heads/main")
+    workdir.mkdir()
+    git(workdir, "clone", str(origin), str(main))
+    git(main, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+    git(main, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{origin}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/owner/repo.git")
+    (seed / "source.py").write_text("updated source\n")
+    git(seed, "commit", "-am", "update")
+    git(seed, "push", "origin", "main")
+    github = MagicMock()
+
+    with analysis_worktree(
+        str(workdir), make_issue(), git=GitHelper(), github_client=github
+    ) as path:
+        assert (Path(path) / "source.py").read_text() == "updated source\n"
+        assert git(path, "rev-parse", "HEAD") == git(seed, "rev-parse", "HEAD")
+        assert git(path, "branch", "--show-current") == ""
+    assert not Path(path).exists()
+    github.create_issue_branch.assert_not_called()
+
+
+@pytest.mark.parametrize("single_branch", [False, True])
+def test_analysis_refreshes_changed_remote_default(tmp_path, monkeypatch, single_branch):
+    from workdash.repo_worktree import analysis_worktree
+
+    def git(cwd, *args):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    origin, seed, workdir = tmp_path / "origin.git", tmp_path / "seed", tmp_path / "work"
+    git(tmp_path, "init", "--bare", str(origin))
+    git(tmp_path, "init", "-b", "main", str(seed))
+    git(seed, "config", "user.name", "Test")
+    git(seed, "config", "user.email", "test@example.com")
+    (seed / "source").write_text("old default")
+    git(seed, "add", "source")
+    git(seed, "commit", "-m", "old")
+    git(seed, "remote", "add", "origin", str(origin))
+    git(seed, "push", "origin", "main")
+    git(origin, "symbolic-ref", "HEAD", "refs/heads/main")
+    workdir.mkdir()
+    main = workdir / "owner_repo"
+    git(workdir, "clone", *(["--single-branch"] if single_branch else []), str(origin), str(main))
+    git(main, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{origin}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/owner/repo.git")
+    git(seed, "switch", "-c", "new-default")
+    (seed / "source").write_text("new default")
+    git(seed, "commit", "-am", "new")
+    git(seed, "push", "origin", "new-default")
+    git(origin, "symbolic-ref", "HEAD", "refs/heads/new-default")
+
+    with analysis_worktree(
+        str(workdir), make_issue(), git=GitHelper(), github_client=MagicMock()
+    ) as path:
+        assert (Path(path) / "source").read_text() == "new default"
+        assert git(path, "rev-parse", "HEAD") == git(seed, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("divergent", [False, True])
+def test_local_issue_branch_updates_from_its_upstream(tmp_path, monkeypatch, divergent):
+    def git(cwd, *args):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    origin, seed, workdir = tmp_path / "origin.git", tmp_path / "seed", tmp_path / "work"
+    git(tmp_path, "init", "--bare", str(origin))
+    git(tmp_path, "init", "-b", "main", str(seed))
+    git(seed, "config", "user.name", "Test")
+    git(seed, "config", "user.email", "test@example.com")
+    git(seed, "commit", "--allow-empty", "-m", "base")
+    git(seed, "remote", "add", "origin", str(origin))
+    git(seed, "push", "origin", "main")
+    git(origin, "symbolic-ref", "HEAD", "refs/heads/main")
+    git(seed, "switch", "-c", "shared")
+    git(seed, "push", "origin", "shared")
+    workdir.mkdir()
+    main = workdir / "owner_repo"
+    git(workdir, "clone", str(origin), str(main))
+    git(main, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{origin}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/owner/repo.git")
+    git(main, "config", "user.name", "Test")
+    git(main, "config", "user.email", "test@example.com")
+    git(main, "switch", "-c", "issue-42", "--track", "origin/shared")
+    if divergent:
+        git(main, "commit", "--allow-empty", "-m", "local")
+    local = git(main, "rev-parse", "HEAD")
+    git(main, "switch", "main")
+    git(seed, "commit", "--allow-empty", "-m", "remote")
+    git(seed, "push", "origin", "shared")
+    remote = git(seed, "rev-parse", "HEAD")
+
+    github = MagicMock()
+    worktree = Path(ensure_worktree(str(workdir), make_issue(), github_client=github))
+    assert git(worktree, "rev-parse", "HEAD") == (local if divergent else remote)
+    assert git(worktree, "rev-parse", "--abbrev-ref", "@{upstream}") == "origin/shared"
+    github.create_issue_branch.assert_not_called()
+
+
+@pytest.mark.parametrize("target", [None, "owner/repo"])
+def test_todo_worktrees_never_create_github_issue_branches(tmp_path, target):
+    item = make_targeted_todo()
+    item.todo_target = target
+    git = MagicMock(spec=GitHelper)
+    git.find_worktree_for_branch.return_value = None
+    git.local_branch_exists.return_value = False
+    git.fetch_origin_branch.return_value = False
+    github = MagicMock(spec=GitHubClient)
+    repo = target or item.repo
+    main = main_repo_path(str(tmp_path), repo)
+    main.mkdir()
+
+    result = ensure_worktree(
+        str(tmp_path), item, git=git, github_client=github, todo_repository="TESTUSER/TODOS"
+    )
+
+    branch = "wt-110" if target else "issue-110"
+    expected = worktree_path(str(tmp_path), repo, 110, todo=target is not None)
+    assert result == str(expected)
+    github.create_issue_branch.assert_not_called()
+    git.create_worktree.assert_called_once_with(main, expected, branch, "origin/HEAD")
