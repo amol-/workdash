@@ -23,8 +23,7 @@ def run_markdownview(path: str) -> int:
 
     class AnalysisViewer(MarkdownViewer):
         async def go(self, location: str | Path) -> None:
-            url = urlsplit(str(location))
-            if not url.scheme and not url.netloc:
+            if str(location).startswith("#"):
                 await super().go(location)
 
     class MarkdownApp(App):

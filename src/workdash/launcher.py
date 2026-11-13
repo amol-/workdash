@@ -1,5 +1,6 @@
 """External launcher helpers."""
 
+import html
 import json
 import os
 import re
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import markdown
+import nh3
 
 from .agent_context import render_github_context
 from .config import LOCAL_BIN_PATH
@@ -157,6 +159,7 @@ def open_in_browser(
 _HTML_TEMPLATE = """\
 <!DOCTYPE html>
 <html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <title>{title}</title>
 <style>
 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
@@ -173,7 +176,7 @@ table {{ border-collapse: collapse; }} th, td {{ border: 1px solid #d0d7de; padd
 
 def render_analysis_html(content: str, title: str = "Analysis") -> str:
     body = markdown.markdown(content, extensions=["fenced_code", "tables", "codehilite"])
-    return _HTML_TEMPLATE.format(title=title, body=body)
+    return _HTML_TEMPLATE.format(title=html.escape(title), body=nh3.clean(body))
 
 
 def open_markdown(

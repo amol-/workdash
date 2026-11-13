@@ -3,6 +3,7 @@ import shlex
 import sys
 import threading
 import time
+from html.parser import HTMLParser
 from unittest.mock import MagicMock
 
 import pytest
@@ -129,10 +130,14 @@ def test_analysis_endpoints_serve_markdown_and_rendered_html():
     assert "<strong>real content</strong>" in html.text
 
 
-def test_html_analysis_preserves_raw_html_and_images_locally_and_over_http(tmp_path, monkeypatch):
+def test_html_analysis_blocks_active_content_locally_and_over_http(tmp_path, monkeypatch):
     markdown = (
         "# Heading\n\n<div>raw HTML</div>\n\n<script>example()</script>"
-        "\n\n![diagram](http://images.example/diagram.png)"
+        '\n\n<img src=x onerror="alert(1)"><meta http-equiv="refresh" content="0;url=/api/v0/info">'
+        "\n\n![diagram](http://127.0.0.1:8765/api/v0/info)"
+        "\n\n[unsafe](javascript:alert(1))"
+        '\n\n<iframe src="http://127.0.0.1:8765/api/v0/info"></iframe>'
+        '\n\n<form action="http://127.0.0.1:8765/api/v0/info"><button>Send</button></form>'
         "\n\n```html\n<b>code</b>\n```"
     )
     path = tmp_path / "analysis.md"
@@ -146,16 +151,64 @@ def test_html_analysis_preserves_raw_html_and_images_locally_and_over_http(tmp_p
     session = MagicMock()
     session.backend.analysis_cache.load_analysis.return_value = markdown
     app = control._make_turbogears_app(session)
-    response = Request.blank("/api/items/owner/repo%23ISSUE-1/analysis/html").get_response(app)
+    raw = Request.blank("/api/items/owner/repo%23ISSUE-1/analysis").get_response(app)
+    assert raw.text == markdown
+    response = Request.blank(
+        "/api/items/owner/repo%23ISSUE-1/analysis/html", host="127.0.0.1:8765"
+    ).get_response(app)
     assert response.status_int == 200
+
+    class Tags(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.events = []
+
+        def handle_starttag(self, tag, attrs):
+            self.events.append((tag, dict(attrs)))
+
+        def handle_endtag(self, tag):
+            self.events.append((f"/{tag}", {}))
+
     for html in (local_html, response.text):
         assert "<h1>Heading</h1>" in html
         assert "<div>raw HTML</div>" in html
-        assert "<script>example()</script>" in html
-        assert '<img alt="diagram" src="http://images.example/diagram.png"' in html
+        assert "<script>" not in html
+        assert "onerror=" not in html
+        assert 'http-equiv="refresh"' not in html
+        assert "javascript:" not in html
+        assert "<iframe" not in html
+        assert "<form" not in html
+        assert '<img alt="diagram" src="http://127.0.0.1:8765/api/v0/info"' in html
         assert "<b>code</b>" not in html
-        assert "Content-Security-Policy" not in html
-    assert "Content-Security-Policy" not in response.headers
+
+        parser = Tags()
+        parser.feed(html)
+        events = parser.events
+        head = next(i for i, (tag, _) in enumerate(events) if tag == "head")
+        end_head = next(i for i, (tag, _) in enumerate(events) if tag == "/head")
+        csp = next(
+            i
+            for i, (tag, attrs) in enumerate(events)
+            if tag == "meta" and attrs.get("http-equiv", "").lower() == "content-security-policy"
+        )
+        image = next(i for i, (tag, _) in enumerate(events) if tag == "img")
+        assert head < csp < end_head < image
+        assert all(tag not in {"style", "link", "script", "img"} for tag, _ in events[:csp])
+        directives = {}
+        for directive in events[csp][1]["content"].split(";"):
+            words = directive.split()
+            if words:
+                directives.setdefault(words[0].lower(), words[1:])
+        for name in ("script-src", "img-src", "connect-src", "frame-src", "object-src"):
+            assert directives.get(name, directives.get("default-src")) == ["'none'"]
+        assert directives["base-uri"] == ["'none'"]
+        assert directives["form-action"] == ["'none'"]
+    assert (
+        launcher.render_analysis_html("content", "</title><script>alert(1)</script>").count(
+            "<script>"
+        )
+        == 0
+    )
 
 
 def test_markdownview_command_works_without_dashboard_setup(monkeypatch, tmp_path):
@@ -220,6 +273,65 @@ def test_markdown_viewer_loads_plain_file_path(tmp_path, monkeypatch):
     monkeypatch.setattr(App, "run", run)
     assert run_markdownview(str(path)) == 0
     assert "Local" in rendered[0] and "heading" in rendered[0] and "body" in rendered[0]
+
+
+@pytest.mark.parametrize("target", ["missing-file.md", "existing-file.md"])
+def test_markdown_viewer_relative_link_keeps_analysis_open(tmp_path, monkeypatch, target):
+    import asyncio
+
+    from textual.app import App
+    from textual.widgets import Markdown
+
+    from workdash.markdownview import run_markdownview
+
+    path = tmp_path / "analysis.md"
+    path.write_text(f"# Analysis\n\n[Source]({target})\n", encoding="utf-8")
+    (tmp_path / "existing-file.md").write_text("# Replacement", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    def run(app):
+        async def exercise():
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                await pilot.click(Markdown, offset=(2, 4))
+                await pilot.pause()
+                assert app.is_running
+                screenshot = app.export_screenshot()
+                assert "Analysis" in screenshot
+                assert "Replacement" not in screenshot
+
+        asyncio.run(exercise())
+
+    monkeypatch.setattr(App, "run", run)
+    assert run_markdownview(str(path)) == 0
+
+
+def test_markdown_viewer_fragment_navigates_within_analysis(tmp_path, monkeypatch):
+    import asyncio
+
+    from textual.app import App
+    from textual.widgets import Markdown
+
+    from workdash.markdownview import run_markdownview
+
+    path = tmp_path / "analysis.md"
+    path.write_text(
+        "# Analysis\n\n[Jump](#destination)\n\n" + "Paragraph\n\n" * 30 + "# Destination\n"
+    )
+
+    def run(app):
+        async def exercise():
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                await pilot.click(Markdown, offset=(2, 4))
+                await pilot.pause()
+                assert app.is_running
+                assert "Destination" in app.export_screenshot()
+
+        asyncio.run(exercise())
+
+    monkeypatch.setattr(App, "run", run)
+    assert run_markdownview(str(path)) == 0
 
 
 def test_markdown_viewer_external_link_keeps_analysis_open(tmp_path, monkeypatch):
