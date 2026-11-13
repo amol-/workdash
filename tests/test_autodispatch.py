@@ -64,6 +64,8 @@ def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
             "item_id": "owner/repo#ISSUE-1",
             "pane_id": "terminal_1",
             "session": "workdash",
+            "tab_name": "team",
+            "launch_reason": "fix_ci",
         },
     )
     panes = [{"id": 1, "title": "code_test", "exited": False}]
@@ -103,6 +105,10 @@ def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
         "pi",
         "owner/repo#ISSUE-1",
     )
+    assert entry["selected_group"] == "team"
+    assert entry["stage"] == "developing"
+    assert entry["iteration"] == 1
+    assert entry["launch_reason"] == "fix_ci"
     status, stopped = request("autodispatch_stop", {"id": session_id})
     assert status == 200 and stopped["result"]["status"] == "stopped"
     thread = session._autodispatch[session_id].thread
@@ -834,7 +840,11 @@ def test_info_reports_automatic_group_without_none(capsys):
                     "status": "running",
                     "scope": "owner/repo",
                     "group": None,
+                    "selected_group": None,
                     "current_item": None,
+                    "stage": "checking",
+                    "launch_reason": None,
+                    "iteration": 1,
                     "elapsed_seconds": 1,
                 }
             ],
@@ -1735,3 +1745,88 @@ def test_server_log_records_request_failures(monkeypatch, tmp_path):
     finally:
         server.stop()
     assert logging.getLogger("workdash.autodispatch").level == autodispatch_level
+
+
+@pytest.mark.parametrize(
+    "scope,item,same,stage,expected,absent",
+    [
+        (
+            "https://github.com/owner/repo/issues/0042",
+            "owner/repo#ISSUE-42",
+            True,
+            "developing",
+            ["scope=owner/repo#42", "fix ci"],
+            ["item="],
+        ),
+        (
+            "owner/repo",
+            "owner/other#ISSUE-7",
+            False,
+            "reviewing",
+            ["scope=owner/repo", "item=owner/other#7"],
+            ["fix ci"],
+        ),
+        ("owner/repo", None, False, "checking", ["group=automatic"], ["item=", "fix ci"]),
+        (
+            "https://github.com/owner/todos/issues/42",
+            "owner/target#ISSUE-WT42",
+            True,
+            "developing",
+            ["scope=owner/todos#42"],
+            ["item="],
+        ),
+    ],
+)
+def test_info_progress_and_json(monkeypatch, capsys, scope, item, same, stage, expected, absent):
+    from workdash.workdash import main
+
+    entry = {
+        "id": "abc",
+        "status": "failed",
+        "error": "failure details\nsecond line",
+        "scope": scope,
+        "group": None,
+        "selected_group": None if stage == "checking" else "project",
+        "current_item": item,
+        "scope_is_current_item": same,
+        "stage": stage,
+        "launch_reason": "fix_ci",
+        "iteration": 3,
+        "elapsed_seconds": 15,
+    }
+    info = {"session": "workdash", "panes": [], "autodispatch_sessions": [entry]}
+    client = MagicMock()
+    client.request.return_value = info
+    monkeypatch.setattr("workdash.workdash.WorkdashControlClient", lambda *a, **kw: client)
+    assert main(["info"]) == 0
+    output = capsys.readouterr().out
+    for value in [
+        "failed",
+        "failure details\nsecond line",
+        f"stage={stage}",
+        "iteration=3",
+        "elapsed=15s",
+        *expected,
+    ]:
+        assert value in output
+    for value in absent:
+        assert value not in output
+    assert main(["info", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["autodispatch_sessions"][0] == entry
+
+
+def test_snapshot_identifies_targeted_todo_as_scope():
+    from workdash.autodispatch import _AutodispatchSession
+
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="owner/todos"),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    dispatch = _AutodispatchSession(session, "https://github.com/owner/todos/issues/42", None, None)
+    dispatch.current_item = "owner/target#ISSUE-WT42"
+    assert dispatch.snapshot()["scope_is_current_item"] is True
+    dispatch.current_item = "owner/other#ISSUE-42"
+    assert dispatch.snapshot()["scope_is_current_item"] is False

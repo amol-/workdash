@@ -733,3 +733,41 @@ def previous_replaced(autodispatch_state):
     session = autodispatch_state["session"]
     assert autodispatch_state["previous"].status == "stopped"
     assert [entry["id"] for entry in session.autodispatch_sessions()] == [autodispatch_state["id"]]
+
+
+@given("an autodispatch session developing an issue in a selected group")
+def info_developing_session(monkeypatch):
+    client = MagicMock()
+    client.request.return_value = {
+        "session": "workdash",
+        "panes": [],
+        "autodispatch_sessions": [
+            {
+                "id": "session-1",
+                "status": "running",
+                "group": None,
+                "selected_group": "project",
+                "scope": "owner/repo",
+                "current_item": "owner/repo#ISSUE-42",
+                "stage": "developing",
+                "launch_reason": "fix_ci",
+                "iteration": 2,
+                "elapsed_seconds": 31,
+            }
+        ],
+    }
+    monkeypatch.setattr("workdash.workdash.WorkdashControlClient", lambda *a, **kw: client)
+
+
+@when("the user runs workdash info for that session")
+def run_info_for_session(capsys):
+    from workdash.workdash import main
+
+    assert main(["info"]) == 0
+
+
+@then("info shows the group, scope, current item, stage, launch reason, iteration and elapsed time")
+def info_shows_progress(capsys):
+    output = capsys.readouterr().out
+    for value in ("project", "owner/repo", "42", "developing", "fix ci", "2", "31s"):
+        assert value in output
