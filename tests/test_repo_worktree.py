@@ -2129,9 +2129,16 @@ def test_existing_pr_branch_fast_forwards_without_losing_local_work(
     github = MagicMock()
     github.fetch_worktree_head.return_value = ("feature", "owner/repo")
 
-    worktree = Path(ensure_worktree(str(workdir), make_pr(), github_client=github))
+    if divergent:
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match=r"feature.*origin/feature"):
+                ensure_worktree(str(workdir), make_pr(), github_client=github)
+            assert git(main, "rev-parse", "feature") == local
+            assert not (workdir / "owner_repo_42").exists()
+        return
 
-    assert git(worktree, "rev-parse", "HEAD") == (local if divergent else remote)
+    worktree = Path(ensure_worktree(str(workdir), make_pr(), github_client=github))
+    assert git(worktree, "rev-parse", "HEAD") == remote
     assert git(main, "config", "branch.feature.remote") == "origin"
     assert git(main, "config", "branch.feature.merge") == "refs/heads/feature"
 

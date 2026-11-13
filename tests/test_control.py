@@ -1058,20 +1058,26 @@ def test_autostart_prefers_the_users_own_pull_request_among_several(monkeypatch,
     assert "has failing checks: tests" in _launched_prompt(launch_agent)
 
 
-def test_autostart_implements_a_targeted_todo_without_a_pull_request(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("autostart", [False, True])
+@pytest.mark.parametrize("target", [None, "owner/other"])
+def test_coding_a_todo_protects_its_identity(monkeypatch, tmp_path, autostart, target) -> None:
     github = install_fake_github(monkeypatch)
     github.add_issue("testuser/todos#7", body=todo_body("owner/other"))
     session, _worktree, _ensure, launch_agent, prepare = _authored_session(monkeypatch, tmp_path)
     session.config = replace(session.config, todo_repository="testuser/todos")
     todo = _work_item(number=7, title="Todo")
     todo.repo = session.config.todo_repository
-    todo.todo_target = "owner/other"
+    todo.todo_target = target
     session.work_items.append(todo)
 
-    session.code(target=format_work_item_id(todo), agent="pi", autostart=True)
+    session.code(target=format_work_item_id(todo), agent="pi", autostart=autostart)
 
     assert prepare.call_args.args[0] is todo
-    assert "Continue the assigned issue" in _launched_prompt(launch_agent)
+    prompt = _launched_prompt(launch_agent)
+    assert "This work originates from a todo" in prompt
+    assert "never disclose or reference the todo in the pull request" in prompt
+    assert "Fixes testuser/todos#7" not in prompt
+    assert "Fixes owner/other#7" not in prompt
 
 
 def test_autostarting_a_review_reads_no_github_state_and_stays_review_only(
@@ -2520,6 +2526,8 @@ def test_dispatch_resumes_targeted_todo_pull_request(monkeypatch, tmp_path):
     assert (pr.item_type, pr.repo, pr.number) == (WorkItemType.PR, "owner/other", 51)
     assert prepare.call_args.args[0] is pr
     assert "has failing checks: tests" in _launched_prompt(launch)
+    assert "This work originates from a todo" in _launched_prompt(launch)
+    assert "never disclose or reference the todo in the pull request" in _launched_prompt(launch)
 
 
 @pytest.mark.parametrize("change", ["closed", "blocked", "descendant", "external_pr"])

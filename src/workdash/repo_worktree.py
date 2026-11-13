@@ -183,8 +183,27 @@ def ensure_worktree(
         git.create_worktree(main, wt, branch, f"origin/{branch}")
         if local_branch:
             git.set_branch_upstream(main, branch)
-            with contextlib.suppress(subprocess.CalledProcessError, OSError):
+            try:
                 git.fast_forward_branch(wt, f"origin/{branch}")
+            except (subprocess.CalledProcessError, OSError) as exc:
+                try:
+                    subprocess.run(
+                        ["git", "worktree", "remove", str(wt)],
+                        cwd=main,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                except (subprocess.CalledProcessError, OSError) as cleanup_exc:
+                    raise RuntimeError(
+                        f"Failed to update {branch} from origin/{branch}; "
+                        f"remove or resolve the worktree at {wt} before retrying. "
+                        f"Cleanup failed: {cleanup_exc}"
+                    ) from exc
+                raise RuntimeError(
+                    f"Failed to update {branch} from origin/{branch}; "
+                    "reconcile the local branch with the pull request head before retrying."
+                ) from exc
     elif todo_target is not None:
         git.create_worktree(main, wt, branch, "origin/HEAD")
     else:

@@ -611,6 +611,18 @@ class WorkdashSession:
                 merge_base=get_merge_base(repo_path, git=git),
                 github_client=self.backend.github_client,
             )
+            if (
+                analysis_item is not None
+                and analysis_item.item_type == WorkItemType.ISSUE
+                and (
+                    analysis_item.todo_target is not None
+                    or analysis_item.repo.lower() == self.config.todo_repository.lower()
+                )
+            ):
+                prompt += (
+                    "\n\nThis work originates from a todo; never disclose or reference the todo "
+                    "in the pull request."
+                )
             if autostart:
                 prompt = f"{prompt.rstrip()}\n\n{autostart_text}"
             if selected_agent == "vscode":
