@@ -57,6 +57,11 @@ class _AutodispatchSession:
                 "started_at": self.started_at,
                 "elapsed_seconds": int((self.ended or time.monotonic()) - self.started),
                 "current_item": self.current_item,
+                "scope_is_current_item": bool(
+                    self.current_item
+                    and self.owner._scope_identity(self.scope)
+                    == self.owner._scope_identity(self.current_item)
+                ),
                 "selected_group": self.selected_group,
                 "stage": self.stage,
                 "launch_reason": self.launch_reason,
