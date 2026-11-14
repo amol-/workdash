@@ -15,10 +15,10 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Collection, Sequence
 from concurrent.futures import Future
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from functools import partial
 from http import HTTPStatus
-from ipaddress import IPv4Address, ip_address
+from ipaddress import IPv4Address, ip_address, ip_network
 from pathlib import Path
 from socketserver import BaseServer
 from uuid import uuid4
@@ -989,11 +989,11 @@ class WorkdashSession:
             return scope
         return repo.lower(), number
 
-    def refresh_autodispatch_item(self, target: str) -> list[WorkItem]:
+    def refresh_autodispatch_item(self, target: str) -> tuple[list[WorkItem], Exception | None]:
         """Refresh an existing row without discovering new work."""
         identity = self._scope_identity(target)
         if isinstance(identity, str):
-            return []
+            return [], None
         while True:
             with self._lock:
                 item = next(
@@ -1011,44 +1011,40 @@ class WorkdashSession:
                     ),
                     None,
                 )
-                items = (
-                    [item]
-                    if item is not None
-                    else [
-                        item
-                        for item in self.work_items
-                        if item.item_type == WorkItemType.PR
-                        and (
-                            (
-                                item.repo.lower() == identity[0]
-                                and identity[1] in item.closing_issue_numbers
-                            )
-                            or any(
-                                (repo.lower(), number) == identity
-                                for repo, number in item.linked_issues
-                            )
+                items = ([item] if item is not None else []) + [
+                    pr
+                    for pr in self.work_items
+                    if pr.item_type == WorkItemType.PR
+                    and (
+                        (pr.repo.lower() == identity[0] and identity[1] in pr.closing_issue_numbers)
+                        or any(
+                            (repo.lower(), number) == identity for repo, number in pr.linked_issues
                         )
-                    ]
-                )
+                    )
+                ]
             refreshed = []
+            error = None
             for item in items:
                 repo = self.config.todo_repository if item.todo_target else item.repo
-                fresh = self.backend.github_client.fetch_item(
-                    repo,
-                    item.number,
-                    github_username=self.config.github_username,
-                    todo_repository=self.config.todo_repository,
-                )
-                if fresh is None:
-                    raise RuntimeError(f"Cannot refresh {repo}#{item.number}")
-                linked_issues = (
-                    self.backend.github_client.fetch_linked_issues_for_pull_request(
-                        repo, item.number
+                try:
+                    fresh = self.backend.github_client.fetch_item(
+                        repo,
+                        item.number,
+                        github_username=self.config.github_username,
+                        todo_repository=self.config.todo_repository,
                     )
-                    if item.item_type == WorkItemType.PR
-                    else None
-                )
-                refreshed.append((item, repo, fresh, linked_issues))
+                    if fresh is None:
+                        raise RuntimeError(f"Cannot refresh {repo}#{item.number}")
+                    linked_issues = (
+                        self.backend.github_client.fetch_linked_issues_for_pull_request(
+                            repo, item.number
+                        )
+                        if item.item_type == WorkItemType.PR
+                        else None
+                    )
+                    refreshed.append((item, repo, fresh, linked_issues))
+                except Exception as exc:
+                    error = exc
             with self._lock:
                 if any(not any(current is item for current in self.work_items) for item in items):
                     continue
@@ -1057,14 +1053,16 @@ class WorkdashSession:
                         item.analysis = None
                         item.analyzed_at = None
                     item.title = fresh.title
+                    item.todo_target = fresh.todo_target
                     item.updated_at = fresh.updated_at
                     item.state = fresh.state
                     item.has_sub_issues = fresh.has_sub_issues
                     item.sub_issue_total = fresh.sub_issue_total
-                    item.ci_state = fresh.ci_state
-                    item.review_decision = fresh.review_decision
-                    item.review_requested = fresh.review_requested
-                    item.has_unresolved_comments = fresh.has_unresolved_comments
+                    if item.kind == WorkItemKind.AUTHORED_PR:
+                        item.ci_state = fresh.ci_state
+                        item.review_decision = fresh.review_decision
+                        item.review_requested = fresh.review_requested
+                        item.has_unresolved_comments = fresh.has_unresolved_comments
                     if linked_issues is not None:
                         item.linked_issues = tuple(linked_issues)
                         item.closing_issue_numbers = tuple(
@@ -1074,7 +1072,7 @@ class WorkdashSession:
                                 if linked_repo == repo
                             )
                         )
-            return items
+            return [item for item, _, _, _ in refreshed], error
 
     def completed_autodispatch_item(self, item: str | None) -> None:
         if item:
@@ -2036,7 +2034,10 @@ def _source_and_header_guarded_wsgi_app(app, accepted_ips: Collection[str] = ())
     clients can send it.
     """
 
-    allowed = {ip_address(ip) for ip in accepted_ips} | {ip_address("127.0.0.1"), ip_address("::1")}
+    allowed: set[ip_network] = {ip_network("127.0.0.1"), ip_network("::1")}
+    for entry in accepted_ips:
+        with suppress(ValueError):
+            allowed.add(ip_network(entry, strict=False))
 
     def guarded(environ, start_response):
         def reject(message: str):
@@ -2048,7 +2049,8 @@ def _source_and_header_guarded_wsgi_app(app, accepted_ips: Collection[str] = ())
             return [body]
 
         try:
-            accepted = ip_address(environ.get("REMOTE_ADDR", "")) in allowed
+            remote = ip_address(environ.get("REMOTE_ADDR", ""))
+            accepted = any(remote in net for net in allowed)
         except ValueError:
             accepted = False
         if not accepted:

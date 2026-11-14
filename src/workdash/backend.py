@@ -41,6 +41,7 @@ class IncludeResult:
     transient_failure: bool = False
     duplicate_identity: ItemIdentity | None = None
     fetched_item: WorkItem | None = None
+    linked_issues_unavailable: bool = False
 
 
 _SUGGESTION_MARKER = "*"
@@ -286,8 +287,21 @@ class WorkdashBackend:
             return IncludeResult(transient_failure=True)
         if item is None:
             return IncludeResult(invalid=True)
+        linked_issues_unavailable = False
+        if item.item_type == WorkItemType.PR:
+            try:
+                linked = self.github_client.fetch_linked_issues_for_pull_request(
+                    item.repo, item.number
+                )
+            except RuntimeError:
+                linked_issues_unavailable = True
+            else:
+                item.linked_issues = tuple(linked)
+                item.closing_issue_numbers = tuple(
+                    sorted(number for repo, number in linked if repo == item.repo)
+                )
         self.included_items_store.add(parsed.canonical_url)
-        return IncludeResult(fetched_item=item)
+        return IncludeResult(fetched_item=item, linked_issues_unavailable=linked_issues_unavailable)
 
     def resolve_analyze_command_tokens(self, tool: str) -> list[str]:
         return self.config.analyze_agent_command_tokens(tool)

@@ -1626,6 +1626,19 @@ def test_type_width_tracks_widest_visible_item_after_search() -> None:
     asyncio.run(run_smoke())
 
 
+def test_workdash_app_search_matches_displayed_state_suffix() -> None:
+    work_items = _search_work_items()
+    work_items[0].state = "CLOSED"
+    app = WorkdashApp(work_items=work_items, now_utc=_SEARCH_NOW_UTC)
+
+    async def run() -> None:
+        async with app.run_test() as pilot:
+            await _submit_search(app, pilot, "parser (closed)")
+            assert _listed_titles(app) == ["Fix the parser (closed)"]
+
+    asyncio.run(run())
+
+
 def test_workdash_app_search_matches_the_owner_cut_from_the_repo_column() -> None:
     work_items = _search_work_items()
     work_items[0].repo = "a-very-long-owner-name/some-repository"
@@ -2292,6 +2305,140 @@ def test_autodispatch_updates_known_linked_pull_request_status() -> None:
     asyncio.run(run())
 
 
+def test_autodispatch_refresh_updates_filtered_linked_pr_status() -> None:
+    from dataclasses import replace
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    issue = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=1,
+        title="Issue",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/issues/1",
+    )
+    pr = replace(
+        issue,
+        kind=WorkItemKind.AUTHORED_PR,
+        item_type=WorkItemType.PR,
+        number=9,
+        title="Pull request",
+        closing_issue_numbers=(1,),
+        ci_state="SUCCESS",
+    )
+    backend = MagicMock()
+    backend.github_client.fetch_item.side_effect = lambda repo, number, **kwargs: (
+        replace(issue, title="Updated issue") if number == 1 else replace(pr, ci_state="FAILURE")
+    )
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=[issue, pr],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    entry = {
+        "id": "s",
+        "status": "running",
+        "scope": "owner/repo",
+        "current_item": "owner/repo#ISSUE-1",
+        "selected_group": None,
+        "stage": "developing",
+        "launch_reason": None,
+        "iteration": 1,
+        "elapsed_seconds": 0,
+        "error": None,
+    }
+    session.autodispatch_sessions = MagicMock(return_value=[entry])
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test() as pilot:
+            await _submit_search(app, pilot, "Pull request")
+            table = app.query_one("#work-items", DataTable)
+            assert table.row_count == 1
+            assert table.get_row("pr:owner/repo#9")[2].style == "bold magenta"
+            assert str(table.get_row("pr:owner/repo#9")[0]).startswith("✓")
+            entry["status"] = "stopped"
+            session.completed_autodispatch_item("owner/repo#ISSUE-1")
+            app._update_autodispatch_progress()
+            for _ in range(100):
+                await pilot.pause(0.02)
+                if str(table.get_row("pr:owner/repo#9")[0]).startswith("✗"):
+                    break
+            assert str(table.get_row("pr:owner/repo#9")[0]).startswith("✗")
+            assert table.get_row("pr:owner/repo#9")[2].style == "bold"
+            assert issue.title == "Updated issue"
+            assert app._selected_item() is pr
+
+    asyncio.run(run())
+
+
+def test_autodispatch_progress_preserves_scroll_away_from_selection() -> None:
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    items = [
+        WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE,
+            item_type=WorkItemType.ISSUE,
+            repo="owner/repo",
+            number=n,
+            title=f"Issue {n}",
+            created_at=now,
+            updated_at=now,
+            url=f"https://github.com/owner/repo/issues/{n}",
+        )
+        for n in range(1, 51)
+    ]
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=MagicMock(),
+        work_items=items,
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    entries = []
+    session.autodispatch_sessions = MagicMock(return_value=entries)
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test(size=(80, 12)) as pilot:
+            table = app.query_one("#work-items", DataTable)
+            await pilot.pause()
+            table.scroll_to(y=25, animate=False, force=True)
+            await pilot.pause()
+            assert table.cursor_row == 0 and table.scroll_y == 25
+            entries.append(
+                {
+                    "id": "s",
+                    "status": "running",
+                    "scope": "owner/repo#1",
+                    "current_item": None,
+                    "selected_group": None,
+                    "stage": "developing",
+                    "launch_reason": None,
+                    "iteration": 1,
+                    "elapsed_seconds": 0,
+                    "error": None,
+                }
+            )
+            app._update_autodispatch_progress()
+            await pilot.pause()
+            assert table.cursor_row == 0 and table.scroll_y == 25
+            entries.clear()
+            app._update_autodispatch_progress()
+            await pilot.pause()
+            assert table.cursor_row == 0 and table.scroll_y == 25
+            await pilot.resize_terminal(80, 10)
+            await pilot.pause()
+            assert table.scroll_y == 0
+            await pilot.press(*(["down"] * 49))
+            assert table.cursor_row == 49 and table.scroll_y > 0
+
+    asyncio.run(run())
+
+
 def test_autodispatch_refresh_preserves_scroll_away_from_selection() -> None:
     from dataclasses import replace
 
@@ -2335,6 +2482,54 @@ def test_autodispatch_refresh_preserves_scroll_away_from_selection() -> None:
             assert str(table.get_row("issue:owner/repo#1")[2]) == "Updated issue"
             assert app._selected_item().number == selected.number
             assert table.scroll_y == 25
+
+    asyncio.run(run())
+
+
+def test_autodispatch_refresh_keeps_visible_search_selection_on_screen() -> None:
+    from dataclasses import replace
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    items = [
+        WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE,
+            item_type=WorkItemType.ISSUE,
+            repo="owner/repo",
+            number=n,
+            title="Hidden" if n == 1 else f"Match {n}",
+            created_at=now,
+            updated_at=now,
+            url=f"https://github.com/owner/repo/issues/{n}",
+        )
+        for n in range(1, 31)
+    ]
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = replace(items[0], title="Match added")
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=items,
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test(size=(80, 12)) as pilot:
+            await pilot.press("/", "m", "a", "t", "c", "h", "enter")
+            table = app.query_one("#work-items", DataTable)
+            table.move_cursor(row=15)
+            await pilot.pause()
+            selected = app._selected_item()
+            scroll = table.scroll_y
+            assert table._get_row_region(table.cursor_row).y - scroll == table.size.height - 1
+            session.completed_autodispatch_item("owner/repo#ISSUE-1")
+            app._pending_autodispatch.add("owner/repo#ISSUE-1")
+            await app._refresh_autodispatch_items()
+            await pilot.pause()
+            assert app._selected_item() == selected
+            assert table.scroll_y == scroll + 1
+            assert table._get_row_region(table.cursor_row).y - table.scroll_y < table.size.height
 
     asyncio.run(run())
 
@@ -2688,7 +2883,7 @@ def test_autodispatch_highlights_linked_prs_when_issue_row_is_absent() -> None:
     app = WorkdashApp(session=session, now_utc=now)
 
     async def run():
-        async with app.run_test():
+        async with app.run_test() as pilot:
             table = app.query_one("#work-items", DataTable)
             assert table.get_row("pr:owner/repo#9")[2].style == "bold magenta"
             assert table.get_row("pr:other/repo#10")[2].style == "bold magenta"
@@ -2696,6 +2891,16 @@ def test_autodispatch_highlights_linked_prs_when_issue_row_is_absent() -> None:
             session.work_items.append(issue)
             app.refresh_from_session()
             assert table.get_row("issue:owner/repo#1")[2].style == "bold magenta"
+            assert table.get_row("pr:owner/repo#9")[2].style == "bold"
+            await _submit_search(app, pilot, "Same repo")
+            assert table.get_row("pr:owner/repo#9")[2].style == "bold magenta"
+            entry["status"] = "stopped"
+            app._update_autodispatch_progress()
+            assert table.get_row("pr:owner/repo#9")[2].style == "bold"
+            entry["status"] = "running"
+            app._update_autodispatch_progress()
+            assert table.get_row("pr:owner/repo#9")[2].style == "bold magenta"
+            await pilot.press("/")
             assert table.get_row("pr:owner/repo#9")[2].style == "bold"
             session.work_items.remove(issue)
             app.refresh_from_session()
@@ -2729,7 +2934,6 @@ def test_autodispatch_retries_all_pr_rows_after_fetch_failure() -> None:
     backend.github_client.fetch_item.side_effect = [
         replace(prs[0], title="New 2"),
         RuntimeError("unavailable"),
-        replace(prs[0], title="New 2"),
         replace(prs[1], title="New 3"),
     ]
     backend.github_client.fetch_linked_issues_for_pull_request.return_value = []
@@ -2760,9 +2964,9 @@ def test_autodispatch_retries_all_pr_rows_after_fetch_failure() -> None:
                 if delays:
                     break
             assert delays == [30]
-            assert [pr.title for pr in session.work_items] == ["Old 2", "Old 3"]
+            assert [pr.title for pr in session.work_items] == ["New 2", "Old 3"]
             assert [str(table.get_row(f"pr:owner/repo#{n}")[2]) for n in (2, 3)] == [
-                "Old 2",
+                "New 2",
                 "Old 3",
             ]
             for _ in range(150):
@@ -2928,3 +3132,193 @@ def test_loaded_linked_pr_tracks_autodispatch_stop() -> None:
         session.stop_autodispatch_sessions()
         for entry in session._autodispatch.values():
             entry.thread.join(timeout=2)
+
+
+def test_autodispatch_refresh_displays_successes_and_retries_failed_rows() -> None:
+    from dataclasses import replace
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    issue = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=1,
+        title="Old issue",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/issues/1",
+    )
+    prs = [
+        WorkItem(
+            kind=WorkItemKind.TRACKED_PR,
+            item_type=WorkItemType.PR,
+            repo="owner/repo",
+            number=n,
+            title=f"Old {n}",
+            created_at=now,
+            updated_at=now,
+            url=f"https://github.com/owner/repo/pull/{n}",
+            closing_issue_numbers=(1,),
+        )
+        for n in (2, 3)
+    ]
+    backend = MagicMock()
+    failed = True
+
+    def fetch(repo, number, **kwargs):
+        if number == 2 and failed:
+            return None
+        return replace({1: issue, 2: prs[0], 3: prs[1]}[number], title=f"Updated {number}")
+
+    backend.github_client.fetch_item.side_effect = fetch
+    backend.github_client.fetch_linked_issues_for_pull_request.return_value = [("owner/repo", 1)]
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=[issue, *prs],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        nonlocal failed
+        async with app.run_test(size=(80, 12)) as pilot:
+            app._pending_autodispatch.add("owner/repo#ISSUE-1")
+            await app._refresh_autodispatch_items()
+            await pilot.pause()
+            table = app.query_one("#work-items", DataTable)
+            assert {str(table.get_row_at(i)[2]) for i in range(3)} == {
+                "Updated 1",
+                "Old 2",
+                "Updated 3",
+            }
+            assert "Cannot refresh owner/repo#2" in app._status_message
+            failed = False
+            app._pending_autodispatch.add("owner/repo#ISSUE-1")
+            await app._refresh_autodispatch_items()
+            await pilot.pause()
+            assert {str(table.get_row_at(i)[2]) for i in range(3)} == {
+                "Updated 1",
+                "Updated 2",
+                "Updated 3",
+            }
+
+    asyncio.run(run())
+
+
+def test_included_pull_request_highlights_running_autodispatch() -> None:
+    from workdash.backend import WorkdashBackend
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    pr = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=2,
+        title="Included PR",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/pull/2",
+        included=True,
+    )
+    github = MagicMock()
+    github.fetch_item_by_url.return_value = pr
+    github.fetch_linked_issues_for_pull_request.return_value = [("owner/repo", 1)]
+    backend = WorkdashBackend(
+        github_client=github,
+        analysis_cache=MagicMock(),
+        included_items_store=MagicMock(),
+        config=_DEFAULT_TUI_CONFIG,
+    )
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    session.autodispatch_sessions = MagicMock(
+        return_value=[
+            {
+                "id": "s",
+                "status": "running",
+                "scope": "owner/repo",
+                "current_item": "owner/repo#ISSUE-1",
+                "selected_group": None,
+                "stage": "developing",
+                "launch_reason": None,
+                "iteration": 1,
+                "elapsed_seconds": 0,
+                "error": None,
+            }
+        ]
+    )
+    app = WorkdashApp(
+        session=session,
+        now_utc=now,
+        include_callback=lambda url, _: session.include_item_by_url(url),
+    )
+
+    async def run():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await app._perform_include(pr.url)
+            await pilot.pause()
+            assert (
+                app.query_one("#work-items", DataTable).get_row("pr:owner/repo#2")[2].style
+                == "bold magenta"
+            )
+
+    asyncio.run(run())
+
+
+def test_include_pull_request_warns_when_linked_issues_unavailable(tmp_path) -> None:
+    from workdash.backend import WorkdashBackend
+    from workdash.included_items import IncludedItemsStore
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    pr = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=2,
+        title="Included PR",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/pull/2",
+        included=True,
+    )
+    github = MagicMock()
+    github.fetch_item_by_url.return_value = pr
+    github.fetch_linked_issues_for_pull_request.side_effect = RuntimeError("unavailable")
+    store = IncludedItemsStore(tmp_path / "included.json")
+    backend = WorkdashBackend(
+        github_client=github,
+        analysis_cache=MagicMock(),
+        included_items_store=store,
+        config=_DEFAULT_TUI_CONFIG,
+    )
+    app = WorkdashApp(
+        work_items=[],
+        suggestion_markers={},
+        now_utc=now,
+        include_callback=backend.include_item_by_url,
+    )
+    notifications = []
+    app.notify = lambda message, **kwargs: notifications.append((message, kwargs.get("severity")))
+
+    async def run():
+        async with app.run_test() as pilot:
+            await app._perform_include(pr.url)
+            await pilot.pause()
+            assert "Included PR" in str(app.query_one("#work-items", DataTable).get_row_at(0)[2])
+            assert store.load() == [pr.url]
+            assert any(
+                "linked" in message.lower()
+                and "refresh" in message.lower()
+                and severity == "warning"
+                for message, severity in notifications
+            )
+
+    asyncio.run(run())

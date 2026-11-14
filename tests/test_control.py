@@ -86,14 +86,16 @@ def test_session_refresh_schedules_tui_repaint_through_callback() -> None:
     assert repainted_item_ids == [["owner/repo#CHECK-2"]]
 
 
-def test_autodispatch_refresh_prefers_issue_over_linked_pr() -> None:
+def test_autodispatch_refresh_updates_issue_and_linked_pr() -> None:
     issue = _work_item(number=1, title="Old issue")
     pr = replace(
         _work_item(number=2, title="Linked PR", item_type=WorkItemType.PR),
         closing_issue_numbers=(1,),
     )
     backend = MagicMock()
-    backend.github_client.fetch_item.return_value = replace(issue, title="Updated issue")
+    backend.github_client.fetch_item.side_effect = lambda repo, number, **kwargs: replace(
+        issue if number == 1 else pr, title="Updated issue" if number == 1 else "Updated PR"
+    )
     session = WorkdashSession(
         config=WorkdashConfig(),
         backend=backend,
@@ -104,8 +106,78 @@ def test_autodispatch_refresh_prefers_issue_over_linked_pr() -> None:
 
     session.refresh_autodispatch_item("owner/repo#ISSUE-1")
 
-    assert [item.title for item in session.work_items] == ["Linked PR", "Updated issue"]
-    assert backend.github_client.fetch_item.call_args.args[:2] == ("owner/repo", 1)
+    assert [item.title for item in session.work_items] == ["Updated PR", "Updated issue"]
+    assert {call.args[:2] for call in backend.github_client.fetch_item.call_args_list} == {
+        ("owner/repo", 1),
+        ("owner/repo", 2),
+    }
+
+
+@pytest.mark.parametrize("target", ["new/repo", None])
+def test_autodispatch_refresh_uses_changed_todo_target(target, monkeypatch) -> None:
+    item = replace(_work_item(number=1, title="Todo"), repo="owner/todos", todo_target="old/repo")
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = replace(item, todo_target=target)
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="owner/todos"),
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    ensure = MagicMock(return_value=Path("/worktree"))
+    monkeypatch.setattr(control_module, "ensure_worktree", ensure)
+    monkeypatch.setattr(
+        control_module,
+        "launch_terminal_context",
+        MagicMock(
+            return_value=SimpleNamespace(
+                session=None, cwd="/worktree", pane_title="term", pane_id=1
+            )
+        ),
+    )
+
+    session.refresh_autodispatch_item("old/repo#ISSUE-WT1")
+
+    expected_id = "new/repo#ISSUE-WT1" if target else "owner/todos#ISSUE-1"
+    assert session.list_items()["items"][0]["id"] == expected_id
+    assert session.terminal(target=expected_id)["item_id"] == expected_id
+    assert ensure.call_args.args[1].todo_target == target
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        (WorkItemKind.AUTHORED_PR, "✓✓PR 2"),
+        (WorkItemKind.REVIEW_REQUESTED_PR, "  RV 2"),
+        (WorkItemKind.TRACKED_PR, "  VR 2"),
+    ],
+)
+def test_autodispatch_refresh_keeps_status_symbols_for_authored_prs_only(kind, expected) -> None:
+    from workdash.tui import _type_column
+
+    pr = replace(
+        _work_item(number=2, title="Linked PR", item_type=WorkItemType.PR),
+        kind=kind,
+        closing_issue_numbers=(1,),
+    )
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = replace(
+        pr, ci_state="SUCCESS", review_decision="APPROVED", title="Updated"
+    )
+    backend.github_client.fetch_linked_issues_for_pull_request.return_value = [("owner/repo", 1)]
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=backend,
+        work_items=[pr],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    session.refresh_autodispatch_item("owner/repo#ISSUE-1")
+
+    assert pr.title == "Updated"
+    assert _type_column(pr, bold=False).plain == expected
 
 
 def test_autodispatch_refresh_clears_stale_analysis() -> None:
@@ -219,9 +291,9 @@ def test_autodispatch_refresh_updates_pr_links() -> None:
     assert pr.linked_issues == (("owner/repo", 3), ("other/repo", 4))
     assert pr.closing_issue_numbers == (3,)
     assert accepted_worktree_numbers(pr) == (3, 2)
-    assert session.refresh_autodispatch_item("owner/repo#ISSUE-1") == []
+    assert session.refresh_autodispatch_item("owner/repo#ISSUE-1") == ([], None)
     backend.github_client.fetch_linked_issues_for_pull_request.return_value = []
-    assert session.refresh_autodispatch_item("other/repo#ISSUE-4") == [pr]
+    assert session.refresh_autodispatch_item("other/repo#ISSUE-4") == ([pr], None)
     assert pr.linked_issues == ()
     assert pr.closing_issue_numbers == ()
     assert accepted_worktree_numbers(pr) == (2,)
@@ -1525,7 +1597,7 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
         session,
         listeners=(
             (hosts[0], ("127.0.0.5",)),
-            (hosts[1], (hosts[2],)),
+            (hosts[1], ("127.0.0.0/29",)),
             (hosts[2], (hosts[1],)),
         ),
     )
@@ -1534,7 +1606,7 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
     try:
         # Both explicit sources can use every listener, including the default.
         for host in hosts:
-            for source in (*hosts[1:], "127.0.0.5"):
+            for source in (*hosts[1:], "127.0.0.5", "127.0.0.6"):
                 connection = HTTPConnection(host, port, timeout=2, source_address=(source, 0))
                 try:
                     connection.request(
@@ -1550,7 +1622,7 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
                     )
                 finally:
                     connection.close()
-            denied = HTTPConnection(host, port, timeout=2, source_address=("127.0.0.4", 0))
+            denied = HTTPConnection(host, port, timeout=2, source_address=("127.0.0.9", 0))
             try:
                 denied.request(
                     "POST",

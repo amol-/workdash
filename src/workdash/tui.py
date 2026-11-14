@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, TypeVar
 
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.screen import ModalScreen
@@ -398,23 +399,42 @@ class SearchDialog(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class WorkItemsTable(DataTable):
+    def on_resize(self, event: events.Resize) -> None:
+        old_height = getattr(self, "_previous_height", 0)
+        old_app_size = getattr(self, "_previous_app_size", None)
+        self._previous_height = event.size.height
+        self._previous_app_size = self.app.size
+        row_y = self._get_row_region(self.cursor_row).y - self.scroll_y if self.row_count else -1
+        if old_app_size != self.app.size or self.header_height <= row_y < old_height:
+            self.call_after_refresh(self.move_cursor)
+        self.call_after_refresh(self.app._reserve_table_space)
+
+    def watch_show_horizontal_scrollbar(self) -> None:
+        self.call_after_refresh(self.app._reserve_table_space)
+
+
 class WorkdashApp(App[None]):
     """Main Textual app shell."""
 
     TITLE = "workdash"
     DEFAULT_CSS = """
-        #autodispatch-progress {
+        #autodispatch-scroll {
             display: none;
+            height: auto;
+        }
+        #autodispatch-progress {
             height: auto;
             padding: 0 1;
         }
+        #work-items {
+            height: 1fr;
+        }
         #status-footer {
-            dock: bottom;
             height: 1;
             padding: 0 1;
         }
         #command-footer {
-            dock: bottom;
             height: 1;
             padding: 0 1;
         }
@@ -434,6 +454,15 @@ class WorkdashApp(App[None]):
         ("w", "capture_todo", "Todo"),
         ("q", "quit_app", "Quit"),
     ]
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._reserve_table_space()
+
+    def _reserve_table_space(self) -> None:
+        table = self.query_one("#work-items", DataTable)
+        self.query_one("#autodispatch-scroll", VerticalScroll).styles.max_height = max(
+            0, self.size.height - 4 - int(table.show_horizontal_scrollbar)
+        )
 
     def __init__(
         self,
@@ -488,12 +517,14 @@ class WorkdashApp(App[None]):
         self._row_keys: dict[tuple[WorkItemType, str, int], str] = {}
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="autodispatch-progress", markup=False)
-        yield DataTable(id="work-items")
+        with VerticalScroll(id="autodispatch-scroll"):
+            yield Static("", id="autodispatch-progress", markup=False)
+        yield WorkItemsTable(id="work-items")
         yield Static(self._status_message, id="status-footer", markup=False)
         yield Static(self._command_hint(), id="command-footer")
 
     def on_mount(self) -> None:
+        self.query_one("#work-items", DataTable).focus()
         if self._session is not None:
             self.set_interval(1, self._update_autodispatch_progress)
             self._update_autodispatch_progress()
@@ -517,7 +548,7 @@ class WorkdashApp(App[None]):
             table = self.query_one("#work-items", DataTable)
             issue_rows = {
                 self._item_identity(item)
-                for item in self._work_items
+                for item in self._sorted_work_items
                 if item.item_type == WorkItemType.ISSUE
             }
             current_without_rows = current - issue_rows
@@ -539,7 +570,7 @@ class WorkdashApp(App[None]):
             )
         entries = running + failed[-3:]
         widget = self.query_one("#autodispatch-progress", Static)
-        widget.display = bool(entries)
+        self.query_one("#autodispatch-scroll", VerticalScroll).display = bool(entries)
 
         def short(value: str) -> str:
             parsed = parse_github_item_url(value)
@@ -581,7 +612,7 @@ class WorkdashApp(App[None]):
                 )
                 line = f"{entry['selected_group'] or 'automatic'}  {target}  {entry['stage']}{reason}  {entry['iteration']}/{entry['elapsed_seconds']}s"
             text = Text(" ".join(line.splitlines()))
-            text.truncate(max(0, self.size.width - 2), overflow="ellipsis")
+            text.truncate(max(0, self.size.width - 4), overflow="ellipsis")
             rows.append(text)
         widget.update(Text("\n").join(rows))
 
@@ -597,7 +628,7 @@ class WorkdashApp(App[None]):
                 str(_type_column(item, bold=False))[2:],
                 f"{format_type_label(item)}#{item.number}",
                 display_repo(item),
-                item.title,
+                item.title if item.state == "OPEN" else f"{item.title} ({item.state.lower()})",
             )
         )
 
@@ -623,12 +654,22 @@ class WorkdashApp(App[None]):
             while self._pending_autodispatch:
                 target = self._pending_autodispatch.pop()
                 try:
-                    items = await asyncio.to_thread(self._session.refresh_autodispatch_item, target)
+                    items, error = await asyncio.to_thread(
+                        self._session.refresh_autodispatch_item, target
+                    )
                     if not items:
+                        if error:
+                            raise error
                         continue
                     table = self.query_one("#work-items", DataTable)
                     selected_item = self._selected_item()
                     scroll_x, scroll_y = table.scroll_x, table.scroll_y
+                    row_y = (
+                        table._get_row_region(table.cursor_row).y - scroll_y
+                        if selected_item
+                        else -1
+                    )
+                    selection_visible = table.header_height <= row_y < table.size.height
                     for item in items:
                         for index, old in enumerate(self._work_items):
                             if (old.item_type, old.repo, old.number) == (
@@ -643,7 +684,9 @@ class WorkdashApp(App[None]):
                     table.call_after_refresh(
                         table.scroll_to, x=scroll_x, y=scroll_y, animate=False, force=True
                     )
-                    table.call_after_refresh(table.move_cursor, scroll=False)
+                    table.call_after_refresh(table.move_cursor, scroll=selection_visible)
+                    if error:
+                        raise error
                 except Exception as error:
                     self._update_status(f"Autodispatch refresh failed: {error}")
                     self.set_timer(30, lambda target=target: self._pending_autodispatch.add(target))
@@ -702,7 +745,7 @@ class WorkdashApp(App[None]):
         issue_rows = (
             {
                 self._item_identity(item)
-                for item in self._work_items
+                for item in matched_items
                 if item.item_type == WorkItemType.ISSUE
             }
             if self._session is not None and self._current_autodispatch
@@ -1199,6 +1242,10 @@ class WorkdashApp(App[None]):
         self._update_status(
             f"Included {fetched_item.item_type.value} {fetched_item.repo}#{fetched_item.number}."
         )
+        if result.linked_issues_unavailable:
+            message = "Linked issues unavailable; refresh the dashboard to retry."
+            self._update_status(message)
+            self.notify(message, severity="warning", timeout=10)
 
     async def action_capture_todo(self) -> None:
         if self._todo_callback is None:

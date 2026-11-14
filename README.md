@@ -287,9 +287,8 @@ alone and the pull request gets its own pull-request-numbered worktree instead.
 Worktree directories created before this behavior existed are still named
 after the pull request number; they are not migrated and keep working, so the
 pull request stays in the checkout it already has and only a pull request with no
-checkout yet gets an issue-numbered one. The link between a pull request and the
-issue it closes is resolved while the dashboard refreshes, so a pull request
-added by URL only shares the issue's worktree from the next refresh onwards.
+checkout yet gets an issue-numbered one. The link between a pull request and the issue it closes is resolved when the
+dashboard refreshes or the pull request is added by URL.
 
 ## Local control server
 
@@ -453,7 +452,7 @@ seconds for its pane to disappear, then synchronously reviews the linked open PR
 
 `workdash info` and `workdash info --json` report sessions, their current task,
 status, elapsed time and any failure. The TUI shows running sessions and the three
-most recently started failed sessions, including failure details, above the work table. Stop a session with
+most recently started failed sessions, including failure details, above the work table. Press Shift+Tab to focus progress and use the arrow keys or End to scroll it; press Tab to return to the work table. Stop a session with
 `workdash autodispatch-stop SESSION_ID`; stopping does not close its agent pane.
 A dispatch already in progress may still finish launching its pane after stopping.
 Pane disappearance is not proof that the work was merged or completed.
