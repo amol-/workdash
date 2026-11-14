@@ -374,10 +374,39 @@ def test_main_passes_configured_agent_choices_and_separate_viewers_to_tui(
     if needs_pane:
         prefix = ["/usr/bin/zellij", "--session", "workdash-selected", "action"]
         assert commands == [
-            [*prefix, "new-pane", "--", *viewer_argv, item.url],
-            [*prefix, "toggle-fullscreen", "-p", "terminal_17"],
-            [*prefix, "new-pane", "--close-on-exit", "--", "analysis-viewer", html_path.as_uri()],
-            [*prefix, "toggle-fullscreen", "-p", "terminal_17"],
+            [
+                *prefix,
+                "new-pane",
+                "-f",
+                "-x",
+                "0",
+                "-y",
+                "0",
+                "--width",
+                "100%",
+                "--height",
+                "100%",
+                "--",
+                *viewer_argv,
+                item.url,
+            ],
+            [
+                *prefix,
+                "new-pane",
+                "-f",
+                "-x",
+                "0",
+                "-y",
+                "0",
+                "--width",
+                "100%",
+                "--height",
+                "100%",
+                "--close-on-exit",
+                "--",
+                "analysis-viewer",
+                html_path.as_uri(),
+            ],
         ]
     else:
         assert commands == [[*viewer_argv, item.url], ["analysis-viewer", html_path.as_uri()]]
