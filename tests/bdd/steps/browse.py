@@ -104,12 +104,26 @@ def _url_opened(scenario_state: dict[str, Any]) -> None:
     assert invocations[0][1] == scenario_state["selected_item"].url
 
 
-@then("the selected URL opens fullscreen in the current session")
+@then("the selected URL opens in a full-size floating pane in the current session")
 def _terminal_url_opened(scenario_state: dict[str, Any]) -> None:
     prefix = ["/usr/bin/zellij", "--session", "workdash-current", "action"]
     assert scenario_state["open_invocations"] == [
-        [*prefix, "new-pane", "--", "xdg-open", scenario_state["selected_item"].url],
-        [*prefix, "toggle-fullscreen", "-p", "terminal_19"],
+        [
+            *prefix,
+            "new-pane",
+            "-f",
+            "-x",
+            "0",
+            "-y",
+            "0",
+            "--width",
+            "100%",
+            "--height",
+            "100%",
+            "--",
+            "xdg-open",
+            scenario_state["selected_item"].url,
+        ],
     ]
 
 

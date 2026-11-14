@@ -9,8 +9,8 @@ Feature: Open a work item in the browser
     - Pressing "o" in the TUI opens the selected work item's GitHub URL with the configured viewer.
     - The viewer receives the URL literally after any configured arguments, without shell expansion.
     - Legacy configurations without a viewer terminal choice open directly; direct viewers do not require Zellij.
-    - A viewer requiring its own terminal opens fullscreen in the current session, without creating a session or preparing a worktree.
-    - Launch and fullscreen failures report the configured viewer command; viewer child errors remain visible in its terminal.
+    - A viewer requiring its own terminal opens in a full-size floating pane in the current session, without creating a session or preparing a worktree.
+    - Launch failures report the configured viewer command; viewer child errors remain visible in its terminal.
     - The TUI reports the outcome of the open action to the user.
     - If the browser command fails, the system closes the progress overlay and reports the error details to the user.
     - If the browser command does not respond promptly, the system closes the progress overlay and reports that opening a browser may not be supported from this session.
@@ -31,11 +31,11 @@ Feature: Open a work item in the browser
     And no dialog or progress overlay remains
 
   @id:F-BROWSE-OPEN-S004
-  Scenario: Terminal viewer opens fullscreen in the current session
+  Scenario: Terminal viewer opens in a full-size floating pane in the current session
     Given the TUI has a work item selected
     And the configured viewer requires its own terminal
     When the user presses "o"
-    Then the selected URL opens fullscreen in the current session
+    Then the selected URL opens in a full-size floating pane in the current session
 
   @id:F-BROWSE-OPEN-S003
   Scenario: Unresponsive browser command reports that browser opening may not be supported

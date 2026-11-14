@@ -100,9 +100,9 @@ For a missing or invalid `open_needs_pane`, the wizard asks
 Explicit boolean choices are preserved. Legacy configurations without this flag
 continue to open directly. Direct viewers do not require Zellij and must finish
 within four seconds. Set the flag to `true` for a terminal viewer: Workdash launches
-it fullscreen in the current/selected active Zellij session, without creating a
-session or worktree. Launch/fullscreen failures report the configured command;
-viewer child errors stay visible in the pane.
+it in a full-size floating pane in the current/selected active Zellij session,
+without creating a session or worktree. Launch failures report the configured
+command; viewer child errors stay visible in the pane.
 
 Re-running `--configure` otherwise only prompts for empty fields, except for
 Zellij and GitHub CLI: the wizard always checks for global binaries first and
