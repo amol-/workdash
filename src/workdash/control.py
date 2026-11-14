@@ -15,10 +15,10 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Collection, Sequence
 from concurrent.futures import Future
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from functools import partial
 from http import HTTPStatus
-from ipaddress import IPv4Address, ip_address
+from ipaddress import IPv4Address, ip_address, ip_network
 from pathlib import Path
 from socketserver import BaseServer
 from uuid import uuid4
@@ -1927,7 +1927,10 @@ def _source_and_header_guarded_wsgi_app(app, accepted_ips: Collection[str] = ())
     clients can send it.
     """
 
-    allowed = {ip_address(ip) for ip in accepted_ips} | {ip_address("127.0.0.1"), ip_address("::1")}
+    allowed: set[ip_network] = {ip_network("127.0.0.1"), ip_network("::1")}
+    for entry in accepted_ips:
+        with suppress(ValueError):
+            allowed.add(ip_network(entry, strict=False))
 
     def guarded(environ, start_response):
         def reject(message: str):
@@ -1939,7 +1942,8 @@ def _source_and_header_guarded_wsgi_app(app, accepted_ips: Collection[str] = ())
             return [body]
 
         try:
-            accepted = ip_address(environ.get("REMOTE_ADDR", "")) in allowed
+            remote = ip_address(environ.get("REMOTE_ADDR", ""))
+            accepted = any(remote in net for net in allowed)
         except ValueError:
             accepted = False
         if not accepted:
