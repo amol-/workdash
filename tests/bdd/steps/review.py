@@ -306,7 +306,7 @@ def list_during_review(review_state):
     request = Request(
         f"http://{control.server_address()[0]}:{control.server_address()[1]}/api/v0/list",
         data=b"{}",
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "X-Workdash": "1"},
     )
     with urlopen(request, timeout=2) as response:
         review_state["list"] = json.load(response)["result"]

@@ -1,5 +1,6 @@
 """External launcher helpers."""
 
+import html
 import json
 import os
 import re
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import markdown
+import nh3
 
 from .agent_context import render_github_context
 from .config import LOCAL_BIN_PATH
@@ -65,6 +67,8 @@ def _run_browser_open(
     kind: str,
     needs_pane: bool = False,
     zellij_session: str | None = None,
+    close_on_exit: bool = False,
+    direct_nonblocking: bool = False,
 ) -> None:
     try:
         command_tokens = (
@@ -82,7 +86,14 @@ def _run_browser_open(
                 f"Failed to open {kind} via {command_name}: viewer requires an active Zellij session."
             )
         try:
-            zellij.open_viewer(session, [*command_tokens, target])
+            if command_tokens == ["workdash", "mdview"]:
+                executable = shutil.which(command_tokens[0])
+                if executable:
+                    command_tokens[0] = os.path.abspath(executable)
+            if close_on_exit:
+                zellij.open_viewer(session, [*command_tokens, target], close_on_exit=True)
+            else:
+                zellij.open_viewer(session, [*command_tokens, target])
         except subprocess.CalledProcessError as error:
             details = (error.stderr or "").strip() or (error.stdout or "").strip()
             raise RuntimeError(
@@ -92,6 +103,23 @@ def _run_browser_open(
             raise RuntimeError(f"Failed to open {kind} via {command_name}: {error}") from error
         return
     try:
+        if direct_nonblocking:
+            process = subprocess.Popen(
+                [*command_tokens, target],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                returncode = process.wait(timeout=0.25)
+            except subprocess.TimeoutExpired:
+                threading.Thread(target=process.wait, daemon=True).start()
+            else:
+                if returncode:
+                    raise RuntimeError(
+                        f"Failed to open {kind} via {command_name}: exit code {returncode}"
+                    )
+            return
         subprocess.run(
             [*command_tokens, target],
             check=True,
@@ -131,6 +159,7 @@ def open_in_browser(
 _HTML_TEMPLATE = """\
 <!DOCTYPE html>
 <html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src http: https:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <title>{title}</title>
 <style>
 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
@@ -145,27 +174,37 @@ table {{ border-collapse: collapse; }} th, td {{ border: 1px solid #d0d7de; padd
 """
 
 
+def render_analysis_html(content: str, title: str = "Analysis") -> str:
+    body = markdown.markdown(content, extensions=["fenced_code", "tables", "codehilite"])
+    return _HTML_TEMPLATE.format(title=html.escape(title), body=nh3.clean(body))
+
+
 def open_markdown(
     path: str,
     command: str | None = None,
     *,
     needs_pane: bool = False,
     zellij_session: str | None = None,
+    format: str = "html",
 ) -> None:
-    """Render a markdown file to HTML and open it in the browser."""
+    """Open a local analysis in the requested format."""
 
     if not isinstance(path, str) or not path.strip():
         raise ValueError("Path must be a non-empty string.")
     md_path = Path(path)
-    md_content = md_path.read_text(encoding="utf-8")
-    html_body = markdown.markdown(md_content, extensions=["fenced_code", "tables", "codehilite"])
-    html = _HTML_TEMPLATE.format(title=md_path.stem, body=html_body)
-    html_path = md_path.with_suffix(".html")
-    html_path.write_text(html, encoding="utf-8")
+    if format == "html":
+        md_content = md_path.read_text(encoding="utf-8")
+        html = render_analysis_html(md_content, md_path.stem)
+        html_path = md_path.with_suffix(".html")
+        html_path.write_text(html, encoding="utf-8")
+    else:
+        html_path = md_path
     _run_browser_open(
-        str(html_path),
+        html_path.resolve().as_uri(),
         command=command,
         kind="file",
+        close_on_exit=True,
+        direct_nonblocking=True,
         needs_pane=needs_pane,
         zellij_session=zellij_session,
     )
@@ -544,9 +583,18 @@ def _read_zellij_panes(session: str) -> list[dict[str, object]]:
 class Zellij:
     """All Zellij interactions must go through this object."""
 
-    def open_viewer(self, session: str, command: list[str]) -> None:
+    def open_viewer(self, session: str, command: list[str], *, close_on_exit: bool = False) -> None:
         completed = subprocess.run(
-            [_resolve_zellij_binary(), "--session", session, "action", "new-pane", "--", *command],
+            [
+                _resolve_zellij_binary(),
+                "--session",
+                session,
+                "action",
+                "new-pane",
+                *(["--close-on-exit"] if close_on_exit else []),
+                "--",
+                *command,
+            ],
             check=True,
             capture_output=True,
             text=True,

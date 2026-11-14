@@ -63,6 +63,11 @@ def _config_has_no_agent(scenario_state: dict[str, Any]) -> None:
     scenario_state["_incomplete_config"] = WorkdashConfig(
         github_username="testuser",
         open_command="xdg-open",
+        analysis_viewer={
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
         repositories=("owner/repo",),
         workdir="~/wrk",
         todo_repository="testuser/todos",
@@ -74,6 +79,11 @@ def _config_has_malformed_agent_command(scenario_state: dict[str, Any]) -> None:
     scenario_state["_malformed_config"] = WorkdashConfig(
         github_username="testuser",
         open_command="xdg-open",
+        analysis_viewer={
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
         agents={
             "codex": AgentConfig(analyze="codex exec", launch="codex"),
             "claude": AgentConfig(analyze="claude -p", launch="claude"),
@@ -127,6 +137,11 @@ def _run_system(
             lambda: WorkdashConfig(
                 github_username="testuser",
                 open_command="xdg-open",
+                analysis_viewer={
+                    "command": "workdash mdview",
+                    "format": "markdown",
+                    "needs_pane": True,
+                },
                 agents={
                     "codex": AgentConfig(analyze="codex exec", launch="codex"),
                     "claude": AgentConfig(analyze="claude -p", launch="claude"),
@@ -152,6 +167,11 @@ def _run_system(
             lambda: WorkdashConfig(
                 github_username="testuser",
                 open_command="xdg-open",
+                analysis_viewer={
+                    "command": "workdash mdview",
+                    "format": "markdown",
+                    "needs_pane": True,
+                },
                 agents={
                     "codex": AgentConfig(analyze="codex exec", launch="codex"),
                     "claude": AgentConfig(analyze="claude -p", launch="claude"),
@@ -222,6 +242,11 @@ def _install_direct_start_fakes(
         lambda: WorkdashConfig(
             github_username="testuser",
             open_command="xdg-open",
+            analysis_viewer={
+                "command": "workdash mdview",
+                "format": "markdown",
+                "needs_pane": True,
+            },
             agents={
                 "codex": AgentConfig(analyze="codex exec", launch="codex"),
                 "claude": AgentConfig(analyze="claude -p", launch="claude"),
@@ -409,6 +434,11 @@ def _user_starts_list_command(
         lambda: WorkdashConfig(
             github_username="testuser",
             open_command="xdg-open",
+            analysis_viewer={
+                "command": "workdash mdview",
+                "format": "markdown",
+                "needs_pane": True,
+            },
             agents={
                 "codex": AgentConfig(analyze="codex exec", launch="codex"),
                 "claude": AgentConfig(analyze="claude -p", launch="claude"),

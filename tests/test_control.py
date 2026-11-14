@@ -1271,7 +1271,7 @@ def test_api_rejects_non_localhost_remote_addr() -> None:
         response.append((status, dict(headers)))
 
     body = b"".join(
-        control_module._source_filtered_wsgi_app(unexpected_app)(
+        control_module._source_and_header_guarded_wsgi_app(unexpected_app)(
             {"REMOTE_ADDR": "203.0.113.1"}, start_response
         )
     )
@@ -1328,7 +1328,10 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
                 connection = HTTPConnection(host, port, timeout=2, source_address=(source, 0))
                 try:
                     connection.request(
-                        "POST", "/api/v0/list", "{}", {"Content-Type": "application/json"}
+                        "POST",
+                        "/api/v0/list",
+                        "{}",
+                        {"Content-Type": "application/json", "X-Workdash": "1"},
                     )
                     response = connection.getresponse()
                     assert response.status == 200
@@ -1536,6 +1539,7 @@ def test_client_names_selected_host_for_invalid_responses(monkeypatch, body) -> 
         control_module.WorkdashControlClient("dashboard.lan").request("list", {"refresh": True})
     assert error.value.code == "invalid_response"
     request = urlopen.call_args.args[0]
+    assert request.get_header("X-workdash") == "1"
     assert request.full_url == "http://dashboard.lan:8765/api/v0/list"
     assert json.loads(request.data) == {"refresh": True}
 
@@ -1841,10 +1845,12 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
         "existing_worktree_path",
         lambda *args, pinned, git: _pin_test_worktree(pinned, worktree_path),
     )
-    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
 
     def get(path, method="GET", peer="127.0.0.1"):
-        request = Request.blank(path, method=method)
+        request = Request.blank(path, method=method, headers={"X-Workdash": "1"})
         request.environ["REMOTE_ADDR"] = peer
         return request.get_response(app)
 
@@ -1929,7 +1935,9 @@ def test_item_files_reject_symlink_substitution(tmp_path, monkeypatch, component
         "existing_worktree_path",
         lambda *args, pinned, git: _pin_test_worktree(pinned, worktree),
     )
-    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
 
     original_open = control_module.os.open
     original_read = Path.read_bytes
@@ -1985,7 +1993,9 @@ def test_item_files_reject_symlink_substitution(tmp_path, monkeypatch, component
         "listing": "",
         "alias-target": ".workdash/alias",
     }.get(component, ".workdash/nested/review.md")
-    request = Request.blank(f"/api/items/owner/repo%23ISSUE-1/files/{suffix}")
+    request = Request.blank(
+        f"/api/items/owner/repo%23ISSUE-1/files/{suffix}", headers={"X-Workdash": "1"}
+    )
     request.environ["REMOTE_ADDR"] = "127.0.0.1"
     response = request.get_response(app)
     assert replaced
@@ -2025,8 +2035,12 @@ def test_item_files_reject_worktree_symlink_substitution(tmp_path, monkeypatch, 
         lambda *args, pinned, git: _pin_test_worktree(pinned, worktree),
     )
     monkeypatch.setattr(control_module.os, "open", open_with_replacement)
-    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
-    request = Request.blank(f"/api/items/owner/repo%23ISSUE-1/files/{suffix}")
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    request = Request.blank(
+        f"/api/items/owner/repo%23ISSUE-1/files/{suffix}", headers={"X-Workdash": "1"}
+    )
     request.environ["REMOTE_ADDR"] = "127.0.0.1"
     response = request.get_response(app)
     assert response.status_int in (200, 404)
@@ -2065,8 +2079,10 @@ def test_item_files_listing_validates_pinned_entries_after_replacement(tmp_path,
         return original_listdir(fd)
 
     monkeypatch.setattr(control_module.os, "listdir", list_with_replacement)
-    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
-    request = Request.blank("/api/items/owner/repo%23ISSUE-1/files/")
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    request = Request.blank("/api/items/owner/repo%23ISSUE-1/files/", headers={"X-Workdash": "1"})
     request.environ["REMOTE_ADDR"] = "127.0.0.1"
     response = request.get_response(app)
     assert response.status_int == 404 or response.json["result"]["entries"] == ["safe"]
@@ -2106,8 +2122,10 @@ def test_item_files_listing_rejects_directory_substitution(tmp_path, monkeypatch
         return original_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(control_module.os, "open", open_with_replacement)
-    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
-    request = Request.blank("/api/items/owner/repo%23ISSUE-1/files/")
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    request = Request.blank("/api/items/owner/repo%23ISSUE-1/files/", headers={"X-Workdash": "1"})
     request.environ["REMOTE_ADDR"] = "127.0.0.1"
     response = request.get_response(app)
     assert replaced
@@ -2161,9 +2179,13 @@ def test_item_files_resolve_shared_pr_and_targeted_todo_worktrees(
         suggestion_markers={},
         zellij_session=None,
     )
-    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
     for item_id, expected in (("owner/repo%23PR-2", "shared"), ("owner/repo%23ISSUE-WT3", "todo")):
-        request = Request.blank(f"/api/items/{item_id}/files/.workdash/artifact.txt")
+        request = Request.blank(
+            f"/api/items/{item_id}/files/.workdash/artifact.txt", headers={"X-Workdash": "1"}
+        )
         request.environ["REMOTE_ADDR"] = "127.0.0.1"
         response = request.get_response(app)
         assert response.status_int == 200
@@ -2215,8 +2237,12 @@ def test_item_files_reject_worktree_replacement_after_resolution(tmp_path, monke
         return result
 
     monkeypatch.setattr(control_module, "existing_worktree_path", replace_after_resolution)
-    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
-    request = Request.blank(f"/api/items/owner/repo%23ISSUE-1/files/{suffix}")
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    request = Request.blank(
+        f"/api/items/owner/repo%23ISSUE-1/files/{suffix}", headers={"X-Workdash": "1"}
+    )
     request.environ["REMOTE_ADDR"] = "127.0.0.1"
     response = request.get_response(app)
     assert response.status_int in (200, 404)
@@ -2266,8 +2292,12 @@ def test_item_files_pins_worktree_before_git_validation(tmp_path, monkeypatch):
         suggestion_markers={},
         zellij_session=None,
     )
-    app = control_module._source_filtered_wsgi_app(control_module._make_turbogears_app(session))
-    request = Request.blank("/api/items/owner/repo%23ISSUE-1/files/.workdash/artifact.txt")
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    request = Request.blank(
+        "/api/items/owner/repo%23ISSUE-1/files/.workdash/artifact.txt", headers={"X-Workdash": "1"}
+    )
     request.environ["REMOTE_ADDR"] = "127.0.0.1"
     response = request.get_response(app)
     assert response.status_int in (200, 404)
@@ -4025,6 +4055,76 @@ def test_terminal_pane_lookup_returns_nothing_without_a_zellij_session(monkeypat
         monkeypatch, tmp_path, [], zellij_session=None
     )
     assert session.get_terminal_panes_for_item(session.work_items[0]) == []
+
+
+def test_control_boundary_requires_header_except_analysis_documents():
+    session = MagicMock()
+    session.show_config.return_value = {"ok": "yes"}
+    session.backend.analysis_cache.load_analysis.return_value = (
+        "![diagram](https://example.com/image.png)"
+    )
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+
+    def call(path, method="GET", headers=None, peer="127.0.0.1"):
+        req = Request.blank(path, method=method, headers=headers or {})
+        req.environ["REMOTE_ADDR"] = peer
+        return req.get_response(app)
+
+    control = "/api/v0/show-config"
+    artifact = "/api/items/owner/repo%23ISSUE-1/files/"
+    analysis = "/api/items/owner/repo%23ISSUE-1/analysis"
+    short_item = "/api/items"
+    for path, method in (
+        (control, "POST"),
+        (artifact, "GET"),
+        (analysis, "POST"),
+        (short_item, "GET"),
+    ):
+        assert call(path, method).status_int == 403
+        assert call(path, method, {"X-Workdash": "wrong"}).status_int == 403
+    session.show_config.assert_not_called()
+    assert call(control, "POST", {"X-Workdash": "1"}).status_int == 200
+    for path in (analysis, analysis + "/html"):
+        assert call(path).status_int == 200
+        assert call(path, peer="192.0.2.1").status_int == 403
+    preflight = call(
+        control,
+        "OPTIONS",
+        {
+            "Origin": "https://evil.example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "x-workdash",
+        },
+    )
+    assert preflight.status_int == 403
+    assert "Access-Control-Allow-Origin" not in preflight.headers
+    assert "Access-Control-Allow-Headers" not in preflight.headers
+
+
+def test_control_boundary_allows_trailing_slash_analysis_documents():
+    session = MagicMock()
+    session.backend.analysis_cache.load_analysis.return_value = "# Analysis"
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+
+    def call(path, method="GET"):
+        req = Request.blank(path, method=method)
+        req.environ["REMOTE_ADDR"] = "127.0.0.1"
+        return req.get_response(app)
+
+    item = "/api/items/owner/repo%23ISSUE-1"
+    for path in (f"{item}/analysis/", f"{item}/analysis/html/"):
+        assert call(path).status_int == 200, path
+    assert call(f"{item}/analysis/").body == b"# Analysis"
+    for path, method in (
+        (f"{item}/files/", "GET"),
+        (f"{item}/analysis/extra/", "GET"),
+        ("/api/v0/show-config/", "POST"),
+    ):
+        assert call(path, method).status_int == 403, path
 
 
 @pytest.mark.parametrize("fail", [False, True])

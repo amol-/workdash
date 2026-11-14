@@ -11,6 +11,7 @@ import stat
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Collection, Sequence
 from concurrent.futures import Future
@@ -1297,7 +1298,9 @@ class WorkdashControlServer:
         }
         host = primary_host
         try:
-            app = _source_filtered_wsgi_app(_make_turbogears_app(self._session), accepted_ips)
+            app = _source_and_header_guarded_wsgi_app(
+                _make_turbogears_app(self._session), accepted_ips
+            )
             for host in [
                 primary_host,
                 *(host for host, _ips in self._listeners if host != primary_host),
@@ -1372,7 +1375,11 @@ class WorkdashControlClient:
         request = urllib.request.Request(
             f"http://{self._address}/api/v0/{endpoint}",
             data=body,
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-Workdash": "1",
+            },
             method="POST",
         )
         try:
@@ -1610,12 +1617,32 @@ def _make_turbogears_app(session: WorkdashSession):
             return _handle_json_request(
                 request,
                 response,
-                lambda payload: self._session.analyze(
-                    target=_required_text(payload, "target"),
-                    agent=_optional_text(payload, "agent"),
-                    **({"group": _required_text(payload, "group")} if "group" in payload else {}),
-                ),
+                lambda payload: self._analyze(payload),
             )
+
+        def _analyze(self, payload):
+            host = request.host
+            match = re.fullmatch(r"([A-Za-z0-9._-]+)(?::([0-9]{1,5}))?", host)
+            if (
+                not match
+                or len(match.group(1)) > 253
+                or any(
+                    not re.fullmatch(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?", label)
+                    for label in match.group(1).removesuffix(".").split(".")
+                )
+                or (match.group(2) and not 1 <= int(match.group(2)) <= 65535)
+            ):
+                raise WorkdashControlError("bad_request", "Invalid request host.", status=400)
+            result = self._session.analyze(
+                target=_required_text(payload, "target"),
+                agent=_optional_text(payload, "agent"),
+                **({"group": _required_text(payload, "group")} if "group" in payload else {}),
+            )
+            path = urllib.parse.urlsplit(result["url"]).path
+            result["url"] = f"http://{host}{path}"
+            result["markdown_url"] = result["url"]
+            result["html_url"] = result["url"] + "/html"
+            return result
 
         @expose("json")
         def review(self):
@@ -1732,7 +1759,11 @@ def _make_turbogears_app(session: WorkdashSession):
                     raise WorkdashControlError(
                         "method_not_allowed", "Only GET is supported.", status=405
                     )
-                if len(path) == 3 and path[2] == "analysis":
+                if (
+                    len(path) in (3, 4)
+                    and path[2] == "analysis"
+                    and (len(path) == 3 or path[3] == "html")
+                ):
                     return self._serve_analysis(path)
                 if len(path) < 3 or path[2] != "files":
                     raise WorkdashControlError("not_found", "Unknown endpoint.", status=404)
@@ -1832,6 +1863,9 @@ def _make_turbogears_app(session: WorkdashSession):
                 raise WorkdashControlError(
                     "not_found", "No cached analysis for this item.", status=404
                 )
+            if len(path) == 4:
+                response.content_type = "text/html; charset=utf-8"
+                return launcher.render_analysis_html(analysis).encode("utf-8")
             response.content_type = "text/markdown; charset=utf-8"
             return analysis.encode("utf-8")
 
@@ -1885,26 +1919,46 @@ def _handle_json_request(request, response, action) -> dict[str, object]:
         raise
 
 
-def _source_filtered_wsgi_app(app, accepted_ips: Collection[str] = ()):
+def _source_and_header_guarded_wsgi_app(app, accepted_ips: Collection[str] = ()):
+    """Wrap ``app`` so only accepted source IPs and X-Workdash requests reach it.
+
+    Analysis documents skip the header check because browsers cannot attach it to
+    images or cross-origin requests. The header is not authentication: non-browser
+    clients can send it.
+    """
+
     allowed = {ip_address(ip) for ip in accepted_ips} | {ip_address("127.0.0.1"), ip_address("::1")}
 
-    def source_filtered(environ, start_response):
-        try:
-            accepted = ip_address(environ.get("REMOTE_ADDR", "")) in allowed
-        except ValueError:
-            accepted = False
-        if not accepted:
-            body = json.dumps(
-                _error_envelope("forbidden", "Workdash server does not accept this source IP.")
-            ).encode("utf-8")
+    def guarded(environ, start_response):
+        def reject(message: str):
+            body = json.dumps(_error_envelope("forbidden", message)).encode("utf-8")
             start_response(
                 "403 Forbidden",
                 [("Content-Type", "application/json"), ("Content-Length", str(len(body)))],
             )
             return [body]
+
+        try:
+            accepted = ip_address(environ.get("REMOTE_ADDR", "")) in allowed
+        except ValueError:
+            accepted = False
+        if not accepted:
+            return reject("Workdash server does not accept this source IP.")
+        # The analysis route shape below mirrors ItemsController._default; keep both in sync.
+        # TurboGears serves these documents with or without a trailing slash.
+        path = environ.get("PATH_INFO", "").rstrip("/").split("/")
+        analysis_document = (
+            environ.get("REQUEST_METHOD") == "GET"
+            and path[1:3] == ["api", "items"]
+            and path[5:] in (["analysis"], ["analysis", "html"])
+        )
+        if environ.get("REQUEST_METHOD") == "OPTIONS" or (
+            not analysis_document and environ.get("HTTP_X_WORKDASH") != "1"
+        ):
+            return reject("X-Workdash: 1 is required.")
         return app(environ, start_response)
 
-    return source_filtered
+    return guarded
 
 
 def _client_error_from_body(error: urllib.error.HTTPError) -> WorkdashControlError:

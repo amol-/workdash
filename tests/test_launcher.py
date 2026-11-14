@@ -215,9 +215,9 @@ def test_open_markdown_uses_open_when_xdg_open_is_unavailable(
 
     def fake_run(*args, **kwargs):
         captured["command"] = args[0]
-        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+        return MagicMock(wait=MagicMock(return_value=0))
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_run)
     monkeypatch.setattr(
         shutil,
         "which",
@@ -226,7 +226,7 @@ def test_open_markdown_uses_open_when_xdg_open_is_unavailable(
 
     open_markdown(str(markdown_path))
 
-    assert captured["command"] == ["open", str(markdown_path.with_suffix(".html"))]
+    assert captured["command"] == ["open", markdown_path.with_suffix(".html").as_uri()]
 
 
 def test_workdash_local_bin_is_appended_to_path_without_displacing_global_bins() -> None:

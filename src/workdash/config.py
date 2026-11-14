@@ -99,6 +99,7 @@ class WorkdashConfig:
     github_username: str = ""
     open_command: str = ""
     open_needs_pane: bool = False
+    analysis_viewer: dict = field(default_factory=dict)
     agents: dict[str, AgentConfig] = field(default_factory=dict)
     repositories: tuple[str, ...] = ()
     workdir: str = ""
@@ -109,6 +110,16 @@ class WorkdashConfig:
         invalid = _invalid_config_command_fields(self)
         if not isinstance(self.open_needs_pane, bool):
             invalid.append("open_needs_pane: expected a boolean")
+        viewer = self.analysis_viewer
+        if viewer and (
+            not isinstance(viewer, dict)
+            or not _is_configured_command(viewer.get("command"))
+            or viewer.get("format") not in ("markdown", "html")
+            or not isinstance(viewer.get("needs_pane"), bool)
+        ):
+            invalid.append(
+                "analysis_viewer: expected command, format (markdown or html), and needs_pane boolean"
+            )
         # A hand-edited todo repository that is present but not owner/repo is
         # invalid rather than missing, so the message tells the user what to fix.
         if self.todo_repository and not is_repository_name(self.todo_repository):
@@ -160,6 +171,7 @@ def _config_to_json(config: WorkdashConfig) -> str:
                 "github_username": config.github_username,
                 "open": config.open_command,
                 "open_needs_pane": config.open_needs_pane,
+                "analysis_viewer": config.analysis_viewer,
                 "agents": {
                     name: {"analyze": agent.analyze, "launch": agent.launch}
                     for name, agent in config.agents.items()
@@ -209,6 +221,7 @@ def load_config(path: Path = CONFIG_PATH) -> WorkdashConfig:
         github_username=raw.get("github_username", ""),
         open_command=raw.get("open", ""),
         open_needs_pane=raw.get("open_needs_pane", False),
+        analysis_viewer=raw.get("analysis_viewer", {}),
         agents={
             name: AgentConfig(analyze=entry.get("analyze", ""), launch=entry.get("launch", ""))
             for name, entry in agents_raw.items()
@@ -237,6 +250,8 @@ def validate_config(config: WorkdashConfig) -> list[str]:
         isinstance(config.open_command, str) and not config.open_command.strip()
     ):
         missing.append("open")
+    if not config.analysis_viewer:
+        missing.append("analysis_viewer")
     if not config.repositories:
         missing.append("repositories")
     if not config.workdir:
@@ -567,6 +582,35 @@ def configure(
             print("Please answer yes or no.")
     print(f"For advanced viewer commands, edit 'open' and 'open_needs_pane' in {path}.")
 
+    analysis_viewer = config.analysis_viewer
+    if (
+        not isinstance(analysis_viewer, dict)
+        or not _is_configured_command(analysis_viewer.get("command"))
+        or analysis_viewer.get("format") not in ("markdown", "html")
+        or not isinstance(analysis_viewer.get("needs_pane"), bool)
+    ):
+        command = input_fn("Analysis viewer [workdash mdview]: ").strip() or "workdash mdview"
+        while not _is_configured_command(command):
+            command = input_fn("Analysis viewer command (required): ").strip()
+        if command == "workdash mdview":
+            analysis_viewer = {"command": command, "format": "markdown", "needs_pane": True}
+        else:
+            fmt = input_fn("Analysis format (markdown/html): ").strip().lower()
+            while fmt not in ("markdown", "html"):
+                fmt = input_fn("Analysis format (markdown/html): ").strip().lower()
+            pane = (
+                input_fn("Does the analysis viewer require its own terminal window? [y/N] ")
+                .strip()
+                .lower()
+            )
+            while pane not in ("", "y", "yes", "n", "no"):
+                pane = input_fn("Please answer yes or no: ").strip().lower()
+            analysis_viewer = {
+                "command": command,
+                "format": fmt,
+                "needs_pane": pane in ("y", "yes"),
+            }
+
     agents = config.agents
     if not _has_agent(agents):
         agents = {}
@@ -610,6 +654,7 @@ def configure(
         github_username=github_username,
         open_command=open_command,
         open_needs_pane=open_needs_pane,
+        analysis_viewer=analysis_viewer,
         agents=agents,
         repositories=repositories,
         workdir=workdir,

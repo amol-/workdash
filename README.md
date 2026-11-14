@@ -72,19 +72,19 @@ The wizard fills in:
 
 ### URL and analysis viewer
 
-The same viewer opens selected issue/PR URLs (`o`) and rendered analysis HTML
-(fresh or cached). Configure it with `workdash --configure`, or edit
+Separate viewers open selected issue/PR URLs (`o`) and analyses (fresh or cached). Configure it with `workdash --configure`, or edit
 `~/.config/workdash/config.json` for advanced commands:
 
 ```json
 {
   "open": "term-copy --quiet",
-  "open_needs_pane": false
+  "open_needs_pane": false,
+  "analysis_viewer": {"command": "workdash mdview", "format": "markdown", "needs_pane": true}
 }
 ```
 
 `open` remains a command string. Quoted arguments are supported; Workdash appends
-one literal URL or HTML file path as the final argument. There are no templates,
+one literal URL as the final argument. There are no templates,
 shell expansion, or implicit shell commands. Explicit executable paths are allowed;
 quote paths containing spaces. A missing `open` command prevents startup and tells
 you to run `--configure`; there is no runtime default.
@@ -107,6 +107,15 @@ viewer child errors stay visible in the pane.
 Re-running `--configure` otherwise only prompts for empty fields, except for
 Zellij and GitHub CLI: the wizard always checks for global binaries first and
 downloads fresh local copies when none are available.
+
+The analysis viewer is required and defaults to `workdash mdview` in the
+wizard. Existing configurations using `workdash markdownview` must be edited to
+use `workdash mdview`; the old command is no longer available. Choose `markdown`
+or `html` for a custom command and whether it needs
+a terminal pane. Direct analysis viewers run without blocking Workdash or a time limit.
+Analyses are passed as local file URLs; the HTTP server is not
+required. `workdash mdview PATH` also accepts file, HTTP and HTTPS URLs;
+it intentionally does not verify HTTPS certificates.
 
 ### Agents
 
@@ -211,7 +220,7 @@ The `repositories` list in `config.json` accepts:
 - `r` — refresh the list from GitHub.
 - `a` — analyze the selected item. Opens a dialog to open the cached analysis
   (if any), or run a fresh analysis with any configured analysis agent. Fresh
-  analyses are cached and rendered as HTML with your configured viewer.
+  analyses are cached and opened with your configured analysis viewer.
 - `c` — open the code menu for the selected item. Choose a numbered coding
   agent, `(e) edit` for VSCode Copilot, `(d) branchdiff`, `(t) terminal`, or
   `(r) auto review`, which asks which analysis agent reviews the item, shows a
@@ -307,14 +316,22 @@ To list an item's `.workdash/` artifacts or retrieve one, URL-encode the `#` in
 its Workdash ID (otherwise it is interpreted as a URL fragment):
 
 ```bash
-curl 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/'
-curl 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/.workdash/PR_REVIEW.md'
+curl -H 'X-Workdash: 1' 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/'
+curl -H 'X-Workdash: 1' 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/.workdash/PR_REVIEW.md'
 ```
 
 The listing is a JSON success envelope with `result.entries`, a sorted array of
 names. Files are returned as `text/plain`; only files inside the existing
 worktree's `.workdash/` directory are available. These endpoints are read-only
 and use the same peer access checks as the control API.
+
+Control API requests, including artifact GETs, require `X-Workdash: 1`; the CLI
+sends it automatically. GETs of analysis Markdown and HTML documents are exempt
+for direct browser viewing, but still require an allowed source IP. Cross-origin
+preflight requests are denied. The header prevents browser images and cross-origin
+JavaScript from invoking control APIs; it is not authentication and non-browser
+clients can send it. HTML analyses block scripts but can load HTTP(S) images,
+which can request other URLs, including the read-only analysis documents.
 
 **Trusted LAN only:** the API is intentionally unauthenticated plain HTTP.
 Allowed clients can execute dashboard actions; do not expose it to untrusted
@@ -476,11 +493,8 @@ runs the selected configured analysis agent in a Zellij pane named
 tab named after the code repository's basename. A fresh analysis needs a known
 Zellij session; a cached analysis works without one.
 
-The server analyze response includes `content_type` (`text/markdown`), `file_name`,
-and base64 `file_content` so clients do not need filesystem access to the server
-cache. The CLI writes that content to a secure temporary local file and reports it
-as `analysis_path`. `--json` emits the same client-side result without the raw
-base64 content.
+The server analyze response includes Markdown and rendered HTML URLs using the
+request host. The CLI reports the Markdown URL; `--json` omits file content.
 
 ## Review command
 
@@ -685,11 +699,20 @@ This applies to agents and humans alike. A change that lands code without a matc
 
 ## Tests
 
-From the repository root:
+From the repository root, run the default suite:
 
 ```bash
 PYTHONPATH=src pytest
 ```
+
+The browser security test is excluded by default. To run it, install Chromium
+(or Chrome) and Node.js with built-in WebSocket support, then run:
+
+```bash
+PYTHONPATH=src pytest -m browser
+```
+
+Set `CHROME_BIN` to the browser executable if it is not on `PATH`.
 
 ### BDD suite
 

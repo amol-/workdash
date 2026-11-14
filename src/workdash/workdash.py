@@ -64,6 +64,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "terminal",
     }:
         return _run_server_backed_command(commands, options)
+    if options.command == "mdview":
+        from .markdownview import run_markdownview
+
+        return run_markdownview(options.target)
     if options.command == "branchdiff":
         from .branchdiff import run_branchdiff
 
@@ -459,8 +463,9 @@ class WorkdashCommands:
             ),
             open_markdown_callback=lambda path: open_markdown(
                 path,
-                config.open_command,
-                needs_pane=config.open_needs_pane,
+                config.analysis_viewer["command"],
+                format=config.analysis_viewer["format"],
+                needs_pane=config.analysis_viewer["needs_pane"],
                 zellij_session=zellij_session,
             ),
             refresh_callback=lambda: (
@@ -931,6 +936,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         default=argparse.SUPPRESS,
         help="Emit machine-readable JSON.",
     )
+    mdview_parser = subparsers.add_parser("mdview", help="View a Markdown document.")
+    mdview_parser.add_argument("target", metavar="PATH")
     branchdiff_parser = subparsers.add_parser(
         "branchdiff",
         help="Show side-by-side diff of current branch vs upstream.",

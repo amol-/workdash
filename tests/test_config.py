@@ -43,6 +43,11 @@ def test_load_config_reads_existing_config(tmp_path):
             {
                 "github_username": "octocat",
                 "open": "xdg-open",
+                "analysis_viewer": {
+                    "command": "workdash mdview",
+                    "format": "markdown",
+                    "needs_pane": True,
+                },
                 "agents": {
                     "pi": {"analyze": "pi -p", "launch": "pi"},
                     "aider": {"analyze": "aider --yes"},
@@ -101,6 +106,11 @@ def test_save_config_creates_parent_dirs_and_writes_json(tmp_path):
     config = WorkdashConfig(
         github_username="octocat",
         open_command="xdg-open",
+        analysis_viewer={
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
         agents={
             "codex": AgentConfig(analyze="codex exec", launch="codex"),
             "claude": AgentConfig(analyze="claude -p", launch="claude"),
@@ -119,6 +129,11 @@ def test_save_config_creates_parent_dirs_and_writes_json(tmp_path):
         "github_username": "octocat",
         "open": "xdg-open",
         "open_needs_pane": False,
+        "analysis_viewer": {
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
         "agents": {
             "claude": {"analyze": "claude -p", "launch": "claude"},
             "codex": {"analyze": "codex exec", "launch": "codex"},
@@ -134,6 +149,11 @@ def test_validate_config_returns_empty_for_complete_config():
     config = WorkdashConfig(
         github_username="octocat",
         open_command="xdg-open",
+        analysis_viewer={
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
         agents={
             "codex": AgentConfig(analyze="codex exec", launch="codex"),
             "claude": AgentConfig(analyze="claude -p", launch="claude"),
@@ -152,6 +172,11 @@ def test_require_valid_accepts_partial_agent_config():
     config = WorkdashConfig(
         github_username="octocat",
         open_command="xdg-open",
+        analysis_viewer={
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
         agents={
             "codex": AgentConfig(analyze="codex exec"),
         },
@@ -227,6 +252,11 @@ def test_require_valid_rejects_malformed_command_strings():
     config = WorkdashConfig(
         github_username="octocat",
         open_command="xdg-open",
+        analysis_viewer={
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
         agents={
             "codex": AgentConfig(analyze="codex 'broken", launch="codex"),
             "claude": AgentConfig(analyze="claude -p", launch="claude"),
@@ -271,6 +301,11 @@ def test_require_valid_rejects_non_string_command_values():
     config = WorkdashConfig(
         github_username="octocat",
         open_command="xdg-open",
+        analysis_viewer={
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
         agents={
             "codex": AgentConfig(analyze=["codex", "exec"], launch="codex"),
             "claude": AgentConfig(analyze="claude -p", launch="claude"),
@@ -291,6 +326,11 @@ def test_require_valid_rejects_blank_command_tokens(command: str):
     config = WorkdashConfig(
         github_username="octocat",
         open_command="xdg-open",
+        analysis_viewer={
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
         agents={
             "codex": AgentConfig(analyze="codex exec", launch=command),
         },
@@ -309,6 +349,7 @@ def test_validate_config_returns_all_missing_fields():
     expected_missing = [
         "github_username",
         "open",
+        "analysis_viewer",
         "repositories",
         "workdir",
         "todo_repository",
@@ -328,6 +369,11 @@ def test_require_valid_rejects_a_todo_repository_that_is_not_owner_slash_repo():
     config = WorkdashConfig(
         github_username="octocat",
         open_command="xdg-open",
+        analysis_viewer={
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
         agents={
             "claude": AgentConfig(analyze="claude -p", launch="claude"),
         },
@@ -349,6 +395,11 @@ def test_an_agent_without_any_command_does_not_count_as_an_agent():
     config = WorkdashConfig(
         github_username="octocat",
         open_command="xdg-open",
+        analysis_viewer={
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
         agents={"pi": AgentConfig(analyze="", launch=" ")},
         repositories=("owner/repo",),
         workdir="~/src",
@@ -365,6 +416,11 @@ def test_require_valid_rejects_reserved_agent_names(name: str):
     config = WorkdashConfig(
         github_username="octocat",
         open_command="xdg-open",
+        analysis_viewer={
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
         agents={
             "pi": AgentConfig(launch="pi"),
             name: AgentConfig(analyze="aider --yes"),
@@ -389,7 +445,13 @@ def test_validate_config_returns_subset_of_missing_fields():
         },
     )
 
-    assert validate_config(config) == ["open", "repositories", "workdir", "todo_repository"]
+    assert validate_config(config) == [
+        "open",
+        "analysis_viewer",
+        "repositories",
+        "workdir",
+        "todo_repository",
+    ]
 
 
 def _scripted_input(*answers: str):
@@ -400,6 +462,8 @@ def _scripted_input(*answers: str):
 
     def input_fn(prompt: str) -> str:
         prompts.append(prompt)
+        if prompt.startswith("Analysis viewer ["):
+            return ""
         return next(remaining)
 
     return input_fn, prompts
@@ -486,6 +550,11 @@ def test_configure_reprompts_for_an_invalid_open_command(tmp_path):
             {
                 "github_username": "octocat",
                 "open": "open 'broken",
+                "analysis_viewer": {
+                    "command": "workdash mdview",
+                    "format": "markdown",
+                    "needs_pane": True,
+                },
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},
                     "codex": {"analyze": "codex exec", "launch": "codex"},
@@ -523,6 +592,11 @@ def test_configure_repairs_viewer_executable_and_preserves_other_settings(
     original = WorkdashConfig(
         github_username="octocat",
         open_command="missing-viewer --quiet",
+        analysis_viewer={
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
         agents={
             "claude": AgentConfig(analyze="claude -p", launch="claude"),
             "codex": AgentConfig(analyze="codex exec", launch="codex"),
@@ -757,6 +831,11 @@ def test_configure_asks_about_agents_when_the_only_entry_has_no_commands(tmp_pat
             {
                 "github_username": "octocat",
                 "open": "xdg-open",
+                "analysis_viewer": {
+                    "command": "workdash mdview",
+                    "format": "markdown",
+                    "needs_pane": True,
+                },
                 "agents": {"pi": {"analyze": "", "launch": ""}},
                 "repositories": ["specific/repo"],
                 "workdir": "~/src",
@@ -797,6 +876,11 @@ def test_configure_fills_only_missing_fields(tmp_path):
             {
                 "github_username": "existing-user",
                 "open": "existing-open",
+                "analysis_viewer": {
+                    "command": "workdash mdview",
+                    "format": "markdown",
+                    "needs_pane": True,
+                },
                 "open_needs_pane": True,
                 "agents": {
                     "claude": {
@@ -817,7 +901,7 @@ def test_configure_fills_only_missing_fields(tmp_path):
 
     config = configure(
         config_path,
-        input_fn=lambda prompt: next(inputs),
+        input_fn=lambda prompt: "" if prompt.startswith("Analysis viewer [") else next(inputs),
         which_fn=lambda cmd: (
             f"/opt/homebrew/bin/{cmd}" if cmd in ("zellij", "gh", "existing-open") else None
         ),
@@ -841,6 +925,11 @@ def test_configure_reprompts_for_a_malformed_todo_repository(tmp_path):
             {
                 "github_username": "octocat",
                 "open": "xdg-open",
+                "analysis_viewer": {
+                    "command": "workdash mdview",
+                    "format": "markdown",
+                    "needs_pane": True,
+                },
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},
                     "codex": {"analyze": "codex exec", "launch": "codex"},
@@ -881,6 +970,11 @@ def test_configure_preserves_existing_repositories(tmp_path):
             {
                 "github_username": "octocat",
                 "open": "xdg-open",
+                "analysis_viewer": {
+                    "command": "workdash mdview",
+                    "format": "markdown",
+                    "needs_pane": True,
+                },
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},
                     "codex": {"analyze": "codex exec", "launch": "codex"},
@@ -912,6 +1006,11 @@ def test_configure_tells_where_to_edit_agents_even_when_agents_are_configured(tm
             {
                 "github_username": "octocat",
                 "open": "xdg-open",
+                "analysis_viewer": {
+                    "command": "workdash mdview",
+                    "format": "markdown",
+                    "needs_pane": True,
+                },
                 "open_needs_pane": False,
                 "agents": {"claude": {"analyze": "claude -p", "launch": "claude"}},
                 "repositories": ["specific/repo"],
@@ -954,7 +1053,7 @@ def test_configure_installs_zellij_when_not_on_path(tmp_path, capsys):
 
     configure(
         config_path,
-        input_fn=lambda prompt: next(inputs),
+        input_fn=lambda prompt: "" if prompt.startswith("Analysis viewer [") else next(inputs),
         which_fn=lambda cmd: (
             f"/usr/bin/{cmd}" if cmd in ("gh", "claude", "codex", "xdg-open") else None
         ),
@@ -975,6 +1074,11 @@ def test_configure_redownloads_zellij_when_no_global_binary_exists(tmp_path):
             {
                 "github_username": "octocat",
                 "open": "xdg-open",
+                "analysis_viewer": {
+                    "command": "workdash mdview",
+                    "format": "markdown",
+                    "needs_pane": True,
+                },
                 "open_needs_pane": False,
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},
@@ -1028,7 +1132,7 @@ def test_configure_installs_gh_when_not_on_path(tmp_path, capsys):
 
     configure(
         config_path,
-        input_fn=lambda prompt: next(inputs),
+        input_fn=lambda prompt: "" if prompt.startswith("Analysis viewer [") else next(inputs),
         which_fn=lambda cmd: f"/usr/bin/{cmd}" if cmd in ("zellij", "xdg-open", "claude") else None,
         install_gh_fn=fake_install,
     )
@@ -1047,6 +1151,11 @@ def test_configure_redownloads_gh_when_no_global_binary_exists(tmp_path):
             {
                 "github_username": "octocat",
                 "open": "xdg-open",
+                "analysis_viewer": {
+                    "command": "workdash mdview",
+                    "format": "markdown",
+                    "needs_pane": True,
+                },
                 "open_needs_pane": False,
                 "agents": {
                     "claude": {"analyze": "claude -p", "launch": "claude"},

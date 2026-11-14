@@ -92,6 +92,11 @@ def make_valid_config(agents: dict[str, AgentConfig] | None = None) -> WorkdashC
     return WorkdashConfig(
         github_username="testuser",
         open_command="xdg-open",
+        analysis_viewer={
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
         agents=agents
         or {
             "claude": AgentConfig(analyze="claude -p", launch="claude"),
@@ -147,6 +152,7 @@ def run_app(
     now_utc: datetime = NOW_UTC,
     open_callback=None,
     open_url_callback=None,
+    open_markdown_callback=None,
     refresh_callback=None,
     analyze_callback=None,
     launch_callback=None,
@@ -182,6 +188,7 @@ def run_app(
         suggestion_markers=markers,
         open_callback=open_callback,
         open_url_callback=open_url_callback,
+        open_markdown_callback=open_markdown_callback,
         refresh_callback=refresh_callback,
         analyze_callback=analyze_callback,
         launch_callback=launch_callback,
@@ -370,6 +377,11 @@ def api_config(tmp_path: Path) -> WorkdashConfig:
     return WorkdashConfig(
         github_username="testuser",
         open_command="xdg-open",
+        analysis_viewer={
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
         agents={
             "codex": AgentConfig(analyze="codex exec", launch="codex"),
             "claude": AgentConfig(analyze="claude -p", launch="claude"),

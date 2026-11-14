@@ -116,6 +116,35 @@ def _empty_defaults_then_username(scenario_state: dict[str, Any]) -> None:
     ]
 
 
+@given("the user accepts the default analysis viewer")
+def _default_analysis_viewer(scenario_state: dict[str, Any]) -> None:
+    scenario_state["analysis_answers"] = [""]
+
+
+@given("the user chooses a custom HTML analysis viewer requiring a terminal pane")
+def _custom_analysis_viewer(scenario_state: dict[str, Any]) -> None:
+    scenario_state["on_path_tools"].add("term-view")
+    scenario_state["analysis_answers"] = ["term-view --quiet", "html", "y"]
+
+
+@then("the saved analysis viewer uses Markdown in a terminal pane")
+def _default_analysis_saved(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["written_config"].analysis_viewer == {
+        "command": "workdash mdview",
+        "format": "markdown",
+        "needs_pane": True,
+    }
+
+
+@then("the saved analysis viewer uses that command and HTML in a terminal pane")
+def _custom_analysis_saved(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["written_config"].analysis_viewer == {
+        "command": "term-view --quiet",
+        "format": "html",
+        "needs_pane": True,
+    }
+
+
 @given("the platform opener is available")
 def _platform_opener_available(scenario_state: dict[str, Any]) -> None:
     scenario_state.setdefault("on_path_tools", set()).add(config_module._default_open_command())
@@ -203,10 +232,13 @@ def _run_configure_with_fakes(
     # By default the user ends both agent sections without adding agents.
     agent_answers = iter(scenario_state.get("agent_answers", ["", ""]))
     prompts: list[str] = []
+    analysis_answers = iter(scenario_state.get("analysis_answers", [""]))
 
     def input_fn(prompt: str) -> str:
         prompts.append(prompt)
         print(prompt)
+        if prompt.startswith(("Analysis viewer [", "Analysis format", "Does the analysis viewer")):
+            return next(analysis_answers)
         if prompt.startswith(("Agents for", "Agent name")):
             try:
                 return next(agent_answers)
@@ -350,10 +382,11 @@ def _tells_user_what_was_set(scenario_state: dict[str, Any]) -> None:
 @then("the system only prompts for fields that were empty")
 def _only_prompts_empty(scenario_state: dict[str, Any]) -> None:
     prompts = scenario_state["prompts"]
-    # Only the workdir and the todo repository were empty in the partial configuration.
-    assert len(prompts) == 2, prompts
-    assert "Work directory" in prompts[0]
-    assert "Todo repository" in prompts[1]
+    # The viewer, workdir and todo repository were empty.
+    assert len(prompts) == 3, prompts
+    assert "Analysis viewer" in prompts[0]
+    assert "Work directory" in prompts[1]
+    assert "Todo repository" in prompts[2]
 
 
 @then("previously set fields are preserved in the saved configuration")
@@ -600,3 +633,41 @@ def _saved_configuration_keeps_agents_in_order(scenario_state: dict[str, Any]) -
     written = scenario_state["written_config"]
     assert list(written.agents.items()) == list(scenario_state["prior_config"].agents.items())
     assert list(written.agents) == ["pi", "aider", "claude"]
+
+
+@given("the user has an existing configuration missing the analysis viewer")
+def _existing_config_without_analysis_viewer(scenario_state, config_path):
+    _configuration_with_agents(scenario_state, config_path)
+    scenario_state["original_settings"] = json.loads(config_path.read_text())
+
+
+@when("the user starts Workdash and then runs the configuration wizard")
+def _start_then_configure(scenario_state, config_path, monkeypatch, capsys):
+    with monkeypatch.context() as patch:
+        patch.setenv("ZELLIJ", "0")
+        patch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
+        patch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
+        scenario_state["startup_exit"] = workdash_module.main([])
+        captured = capsys.readouterr()
+        scenario_state["startup_output"] = captured.out + captured.err
+    _run_configure_with_fakes(scenario_state, config_path, monkeypatch, capsys)
+
+
+@then("startup directs the user to run --configure")
+def _startup_directs_configure(scenario_state):
+    assert scenario_state["startup_exit"] != 0
+    assert "analysis_viewer" in scenario_state["startup_output"]
+    assert "--configure" in scenario_state["startup_output"]
+
+
+@then("the wizard asks for an analysis viewer and saves the default")
+def _wizard_saves_default_viewer(scenario_state):
+    assert scenario_state["prompts"] == ["Analysis viewer [workdash mdview]: "]
+    _default_analysis_saved(scenario_state)
+
+
+@then("the other configuration settings are preserved")
+def _other_settings_preserved(scenario_state, config_path):
+    saved = json.loads(config_path.read_text())
+    for key, value in scenario_state["original_settings"].items():
+        assert saved[key] == value
