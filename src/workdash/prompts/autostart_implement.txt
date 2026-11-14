@@ -15,7 +15,11 @@ permission.
 
 Use the development practices, skills, and coordination workflows you have been
 configured to follow, and choose and apply the approach best suited to the task's
-complexity.
+complexity. Act as the coordinator and decision-maker: do not stop to ask questions,
+request human confirmation, or leave partial work for human review. When facing
+ambiguities, trade-offs, or multiple possible designs, make the decision yourself
+and choose the simplest, most robust solution that satisfies the requirements
+(simple is robust).
 
 Existing work comes first: continue valid partial work and preserve what is
 good. Replace or discard it only for a clear technical reason such as defects,
