@@ -253,18 +253,21 @@ without `.git`), `ssh://`, `git://`, and scp-like `git@host:owner/repo.git` URLs
 are supported. URL targets are cloned with Git automatically; no manual clone
 or worktree preparation is needed. The issue still
 lives in the todo repository, but the item is listed under its target and its
-coding, terminal, and analysis actions run in a worktree of the target checked
-out on a `wt-<number>` branch. URL targets display as their final `owner/repo`
+coding and terminal actions run in a worktree of the target checked
+out on a `wt-<number>` branch. Analysis uses an existing worktree or a temporary
+checkout of the target's default branch. URL targets display as their final `owner/repo`
 path segments, while metadata keeps the original URL. Targets with the same
 `owner/repo` on different hosts can have the same item ID; conflicting local
 directories are reported rather than reused.
 
 ## Worktrees
 
-Coding and analysis actions operate on a per-item git worktree rooted under the
+Coding actions operate on a per-item git worktree rooted under the
 configured `workdir`. Each tracked repository gets a local clone, and each work
 item gets its own worktree alongside it, so you can hop between items without
-disturbing other in-progress work.
+disturbing other in-progress work. When an existing local branch is checked out
+into a new worktree, Workdash preserves its commits. Issue branches keep their
+upstream configuration; pull request branches track the pull request head.
 
 A pull request you authored that closes an issue in the same repository is the
 implementation of that issue, so it shares the issue's worktree directory (named
@@ -465,8 +468,10 @@ or a GitHub issue/PR URL. The item does not need to be on the dashboard: the
 server looks up any issue or pull request it can access on GitHub, without adding
 it to `workdash list` or to the included items. `workdash terminal` accepts the
 same items. It reuses a
-fresh cached analysis when available, otherwise the server prepares the item's
-worktree and runs the selected configured analysis agent in a Zellij pane named
+fresh cached analysis when available. Otherwise, the server reuses the item's
+existing worktree, or analyzes an issue in a disposable detached worktree of the
+code repository's default branch. Pull requests use their head worktree. The server
+runs the selected configured analysis agent in a Zellij pane named
 `analyse_<worktree>`. The pane opens in the tab named by `--group`, or else in the
 tab named after the code repository's basename. A fresh analysis needs a known
 Zellij session; a cached analysis works without one.

@@ -4,6 +4,7 @@ import re
 import shlex
 import subprocess
 import threading
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -418,6 +419,11 @@ def test_main_tui_analyze_callback_uses_worktree_and_backend(
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
     monkeypatch.setattr(control_module, "ensure_worktree", fake_ensure_worktree)
+    monkeypatch.setattr(
+        control_module,
+        "analysis_worktree",
+        lambda *args, **kwargs: nullcontext(fake_ensure_worktree(*args, **kwargs)),
+    )
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-selected")
 

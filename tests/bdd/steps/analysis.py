@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from contextlib import nullcontext
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
@@ -438,7 +439,8 @@ def _run_generate_fresh(
         zellij_session=None if scenario_state.get("no_zellij_session") else "workdash-main",
     )
     monkeypatch.setattr(
-        "workdash.control.ensure_worktree", lambda workdir, item, **_kwargs: worktree_callback(item)
+        "workdash.control.analysis_worktree",
+        lambda workdir, item, **_kwargs: nullcontext(worktree_callback(item)),
     )
 
     def analyze_callback(item: WorkItem, tool: str = "codex") -> str | None:
@@ -679,6 +681,89 @@ def _fresh_agent_has_source_and_discussion(scenario_state, tmp_path):
     assert "Issue discussion" in scenario_state["agent_prompt"]
     assert "Inspect the local source code" in scenario_state["agent_prompt"]
     assert "file path and line number without a URL" in scenario_state["agent_prompt"]
+
+
+@given("an issue has no existing worktree or linked branch")
+def _issue_without_worktree(scenario_state, work_items):
+    item = make_work_item(number=52)
+    work_items.append(item)
+    scenario_state["selected_item"] = item
+
+
+@given("its repository's default branch contains the current source code")
+def _default_branch_source(scenario_state, tmp_path, monkeypatch):
+    def git(cwd, *args):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    origin, seed, workdir = tmp_path / "origin.git", tmp_path / "seed", tmp_path / "work"
+    git(tmp_path, "init", "--bare", str(origin))
+    git(tmp_path, "init", "-b", "main", str(seed))
+    git(seed, "config", "user.name", "Test")
+    git(seed, "config", "user.email", "test@example.com")
+    (seed / "source.py").write_text("old source\n")
+    git(seed, "add", "source.py")
+    git(seed, "commit", "-m", "initial")
+    git(seed, "remote", "add", "origin", str(origin))
+    git(seed, "push", "origin", "main")
+    git(origin, "symbolic-ref", "HEAD", "refs/heads/main")
+    workdir.mkdir()
+    main = workdir / "owner_repo"
+    git(workdir, "clone", str(origin), str(main))
+    git(main, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{origin}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/owner/repo.git")
+    (seed / "source.py").write_text("current default source\n")
+    git(seed, "commit", "-am", "update")
+    git(seed, "push", "origin", "main")
+    scenario_state.update(git=git, main=main, workdir=workdir, target_source={"source.py": ""})
+    assert git(main, "branch", "--list", "issue-52") == ""
+    assert len(git(main, "worktree", "list", "--porcelain").split("worktree ")) == 2
+
+
+@when("the user requests a fresh analysis of the issue")
+def _analyze_issue_without_worktree(scenario_state, work_items, tmp_path, monkeypatch):
+    _install_analysis_agent(scenario_state, monkeypatch, tmp_path)
+    config = WorkdashConfig(
+        github_username="testuser",
+        agents=scenario_state["agents"],
+        repositories=("owner/repo",),
+        workdir=str(scenario_state["workdir"]),
+    )
+    backend = WorkdashBackend(config=config, cache_root=tmp_path / "cache")
+    monkeypatch.setattr(backend.github_client, "create_issue_branch", MagicMock())
+    session = WorkdashSession(
+        config=config,
+        backend=backend,
+        work_items=work_items,
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+    result = session.analyze(target=format_work_item_id(work_items[0]), prefer_cache=False)
+    scenario_state["result"] = result
+    scenario_state["github"] = backend.github_client
+    _record_agent_run(scenario_state)
+
+
+@then("the analysis observes the current default-branch source code")
+def _analysis_observes_default_source(scenario_state):
+    assert scenario_state["agent_sources"]["source.py"] == "current default source\n"
+    assert Path(scenario_state["result"]["path"]).read_text() == (
+        "# Analysis\nSource inspection complete."
+    )
+
+
+@then("the successful analysis leaves no issue worktree or linked branch")
+def _analysis_leaves_no_issue_worktree(scenario_state):
+    git, main = scenario_state["git"], scenario_state["main"]
+    assert not scenario_state["agent_cwd"].exists()
+    assert not (scenario_state["workdir"] / "owner_repo_52").exists()
+    assert len(git(main, "worktree", "list", "--porcelain").split("worktree ")) == 2
+    assert git(main, "branch", "--list", "issue-52") == ""
+    assert git(main, "branch", "-r", "--list", "origin/issue-52") == ""
+    scenario_state["github"].create_issue_branch.assert_not_called()
 
 
 @given(parsers.parse("the selected work item's code is hosted at `{repository}`"))

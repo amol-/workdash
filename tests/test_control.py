@@ -3,6 +3,7 @@ import json
 import shlex
 import subprocess
 import sys
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -451,7 +452,9 @@ def test_ready_reads_github_outside_the_session_lock_and_panes_inside_it(
     assert {held for call, held in lock_held if call == "panes"} == {True}
 
 
-def test_session_analyze_returns_cached_analysis_without_configured_agents(tmp_path) -> None:
+def test_session_analyze_returns_cached_analysis_without_configured_agents(
+    tmp_path, monkeypatch
+) -> None:
     item = _work_item(number=1, title="Cached")
     item.analysis = "# cached analysis"
     cached_path = tmp_path / "cached-analysis.md"
@@ -473,8 +476,19 @@ def test_session_analyze_returns_cached_analysis_without_configured_agents(tmp_p
         zellij_session=None,
     )
 
+    monkeypatch.setattr(
+        control_module,
+        "analysis_worktree",
+        MagicMock(side_effect=AssertionError("prepared worktree")),
+    )
+    monkeypatch.setattr(
+        control_module,
+        "ensure_worktree",
+        MagicMock(side_effect=AssertionError("prepared worktree")),
+    )
     result = session.analyze(target="owner/repo#ISSUE-1")
 
+    assert not (tmp_path / "owner_repo_1").exists()
     assert result == {
         "item_id": "owner/repo#ISSUE-1",
         "path": str(cached_path),
@@ -1044,20 +1058,26 @@ def test_autostart_prefers_the_users_own_pull_request_among_several(monkeypatch,
     assert "has failing checks: tests" in _launched_prompt(launch_agent)
 
 
-def test_autostart_implements_a_targeted_todo_without_a_pull_request(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("autostart", [False, True])
+@pytest.mark.parametrize("target", [None, "owner/other"])
+def test_coding_a_todo_protects_its_identity(monkeypatch, tmp_path, autostart, target) -> None:
     github = install_fake_github(monkeypatch)
     github.add_issue("testuser/todos#7", body=todo_body("owner/other"))
     session, _worktree, _ensure, launch_agent, prepare = _authored_session(monkeypatch, tmp_path)
     session.config = replace(session.config, todo_repository="testuser/todos")
     todo = _work_item(number=7, title="Todo")
     todo.repo = session.config.todo_repository
-    todo.todo_target = "owner/other"
+    todo.todo_target = target
     session.work_items.append(todo)
 
-    session.code(target=format_work_item_id(todo), agent="pi", autostart=True)
+    session.code(target=format_work_item_id(todo), agent="pi", autostart=autostart)
 
     assert prepare.call_args.args[0] is todo
-    assert "Continue the assigned issue" in _launched_prompt(launch_agent)
+    prompt = _launched_prompt(launch_agent)
+    assert "This work originates from a todo" in prompt
+    assert "never disclose or reference the todo in the pull request" in prompt
+    assert "Fixes testuser/todos#7" not in prompt
+    assert "Fixes owner/other#7" not in prompt
 
 
 def test_autostarting_a_review_reads_no_github_state_and_stays_review_only(
@@ -2506,6 +2526,8 @@ def test_dispatch_resumes_targeted_todo_pull_request(monkeypatch, tmp_path):
     assert (pr.item_type, pr.repo, pr.number) == (WorkItemType.PR, "owner/other", 51)
     assert prepare.call_args.args[0] is pr
     assert "has failing checks: tests" in _launched_prompt(launch)
+    assert "This work originates from a todo" in _launched_prompt(launch)
+    assert "never disclose or reference the todo in the pull request" in _launched_prompt(launch)
 
 
 @pytest.mark.parametrize("change", ["closed", "blocked", "descendant", "external_pr"])
@@ -3716,6 +3738,9 @@ def test_session_analyzes_and_launches_coding_agent_with_real_executor(
     )
     panes = []
     monkeypatch.setattr(control_module, "ensure_worktree", lambda *_, **kwargs: str(worktree))
+    monkeypatch.setattr(
+        control_module, "analysis_worktree", lambda *_, **kwargs: nullcontext(str(worktree))
+    )
     monkeypatch.setattr(control_module, "existing_worktree_path", lambda *_, **kwargs: worktree)
     monkeypatch.setattr(control_module, "get_merge_base", lambda *_, **kwargs: None)
     monkeypatch.setattr("workdash.github_client.GitHubClient.fetch_analysis_context", lambda *_: {})
@@ -4000,3 +4025,243 @@ def test_terminal_pane_lookup_returns_nothing_without_a_zellij_session(monkeypat
         monkeypatch, tmp_path, [], zellij_session=None
     )
     assert session.get_terminal_panes_for_item(session.work_items[0]) == []
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_issue_analysis_uses_disposable_default_branch_worktree(tmp_path, monkeypatch, fail):
+    source = tmp_path / "source"
+    source.mkdir()
+
+    def git(*args, cwd=source):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git("init", "-b", "main")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    (source / "code.txt").write_text("default code")
+    git("add", ".")
+    git("commit", "-m", "initial")
+    item = _work_item(number=1, title="Issue")
+    backend = MagicMock()
+    paths = []
+    output = tmp_path / "analysis.md"
+    output.write_text("analysis")
+
+    def analyze(requested_item, *, tool, **kwargs):
+        if tool == "cached":
+            return None
+        path = Path(kwargs["cwd"])
+        paths.append(path)
+        assert (path / "code.txt").read_text() == "default code"
+        assert git("rev-parse", "--abbrev-ref", "HEAD", cwd=path) == "HEAD"
+        (path / "agent-created").write_text("untracked")
+        if fail:
+            raise RuntimeError("agent failed")
+        return str(output)
+
+    backend.analyze_item.side_effect = analyze
+
+    def clone(repo, target):
+        subprocess.run(["git", "clone", str(source), str(target)], check=True, capture_output=True)
+
+    backend.github_client.clone_repository.side_effect = clone
+    session = WorkdashSession(
+        config=WorkdashConfig(
+            workdir=str(tmp_path / "work"), agents={"pi": AgentConfig(analyze="pi")}
+        ),
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="test",
+    )
+    if fail:
+        with pytest.raises(RuntimeError, match="agent failed"):
+            session.analyze(target="owner/repo#ISSUE-1")
+    else:
+        assert session.analyze(target="owner/repo#ISSUE-1")["status"] == "generated"
+    assert len(paths) == 1 and not paths[0].exists()
+    main = tmp_path / "work" / "owner_repo"
+    assert len(git("worktree", "list", "--porcelain", cwd=main).split("worktree ")) == 2
+    assert "issue-1" not in git("branch", "--list", cwd=main)
+    backend.github_client.create_issue_branch.assert_not_called()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_targeted_todo_analysis_uses_target_default_branch(tmp_path, fail):
+    repos = {"owner/todos": tmp_path / "todos", "owner/target": tmp_path / "target"}
+
+    def git(cwd, *args):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    for name, source in repos.items():
+        source.mkdir()
+        git(source, "init", "-b", "main")
+        git(source, "config", "user.email", "test@example.com")
+        git(source, "config", "user.name", "Test")
+        (source / "code.txt").write_text(f"{name} default")
+        git(source, "add", ".")
+        git(source, "commit", "-m", "default")
+    target = repos["owner/target"]
+    git(target, "switch", "-c", "other")
+    (target / "code.txt").write_text("target other branch")
+    git(target, "commit", "-am", "other branch")
+    git(target, "switch", "main")
+
+    item = replace(
+        _work_item(number=1, title="Todo"), repo="owner/todos", todo_target="owner/target"
+    )
+    backend = MagicMock()
+    paths = []
+    output = tmp_path / "analysis.md"
+    output.write_text("analysis")
+
+    def analyze(requested_item, *, tool, **kwargs):
+        if tool == "cached":
+            return None
+        path = Path(kwargs["cwd"])
+        paths.append(path)
+        assert requested_item == item
+        assert (path / "code.txt").read_text() == "owner/target default"
+        (path / "agent-created").write_text("untracked")
+        if fail:
+            raise RuntimeError("agent failed")
+        return str(output)
+
+    backend.analyze_item.side_effect = analyze
+    backend.github_client.clone_repository.side_effect = lambda repo, dest: git(
+        tmp_path, "clone", str(repos[repo]), str(dest)
+    )
+    session = WorkdashSession(
+        config=WorkdashConfig(
+            workdir=str(tmp_path / "work"),
+            todo_repository="owner/todos",
+            agents={"pi": AgentConfig(analyze="pi")},
+        ),
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="test",
+    )
+    if fail:
+        with pytest.raises(RuntimeError, match="agent failed"):
+            session.analyze(target="owner/target#ISSUE-WT1")
+    else:
+        assert session.analyze(target="owner/target#ISSUE-WT1")["status"] == "generated"
+    assert len(paths) == 1 and not paths[0].exists()
+    main = tmp_path / "work" / "owner_target"
+    assert len(git(main, "worktree", "list", "--porcelain").split("worktree ")) == 2
+    assert "wt-1" not in git(main, "branch", "--list")
+    backend.github_client.clone_repository.assert_called_once_with("owner/target", main)
+    backend.github_client.create_issue_branch.assert_not_called()
+
+
+def test_issue_analysis_reuses_existing_worktree_with_local_changes(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+
+    def git(*args, cwd=source):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git("init", "-b", "main")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    (source / "code.txt").write_text("base")
+    git("add", ".")
+    git("commit", "-m", "initial")
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    main = workdir / "owner_repo"
+    git("clone", str(source), str(main))
+    git("remote", "set-url", "origin", "https://github.com/owner/repo.git", cwd=main)
+    worktree = workdir / "owner_repo_1"
+    git("worktree", "add", "-b", "issue-1", str(worktree), cwd=main)
+    (worktree / "code.txt").write_text("local work")
+    item = _work_item(number=1, title="Issue")
+    output = tmp_path / "analysis.md"
+    output.write_text("analysis")
+    backend = MagicMock()
+
+    def analyze(requested_item, *, tool, **kwargs):
+        if tool == "cached":
+            return None
+        assert Path(kwargs["cwd"]) == worktree
+        assert (worktree / "code.txt").read_text() == "local work"
+        return str(output)
+
+    backend.analyze_item.side_effect = analyze
+    session = WorkdashSession(
+        config=WorkdashConfig(workdir=str(workdir), agents={"pi": AgentConfig(analyze="pi")}),
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="test",
+    )
+    assert session.analyze(target="owner/repo#ISSUE-1")["status"] == "generated"
+    assert (worktree / "code.txt").read_text() == "local work"
+    backend.github_client.create_issue_branch.assert_not_called()
+
+
+@pytest.mark.parametrize("upstream", ["none", "different"])
+def test_code_creates_worktree_for_existing_pr_branch(monkeypatch, tmp_path, upstream):
+    import workdash.repo_worktree as repo_worktree
+
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#1",),
+        checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+    )
+    session, placeholder, _, launch, _ = _authored_session(monkeypatch, tmp_path)
+    placeholder.rmdir()
+    origin = tmp_path / "origin.git"
+    main = tmp_path / "owner_repo"
+
+    def git(cwd, *args):
+        return subprocess.run(
+            ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git(tmp_path, "init", "--bare", "-b", "main", str(origin))
+    git(tmp_path, "init", "-b", "main", str(main))
+    git(main, "config", "user.email", "test@example.com")
+    git(main, "config", "user.name", "Test")
+    git(main, "commit", "--allow-empty", "-m", "base")
+    git(main, "remote", "add", "origin", "https://github.com/owner/repo.git")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{origin}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/owner/repo.git")
+    git(main, "push", "origin", "main")
+    git(main, "switch", "-c", "selected-pr-branch")
+    git(main, "push", "origin", "selected-pr-branch")
+    git(main, "commit", "--allow-empty", "-m", "local work")
+    local = git(main, "rev-parse", "HEAD")
+    git(main, "switch", "main")
+    if upstream == "different":
+        git(main, "config", "branch.selected-pr-branch.remote", "origin")
+        git(main, "config", "branch.selected-pr-branch.merge", "refs/heads/main")
+    monkeypatch.setattr(
+        control_module, "existing_worktree_path", repo_worktree.existing_worktree_path
+    )
+    monkeypatch.setattr(control_module, "ensure_worktree", repo_worktree.ensure_worktree)
+    head = MagicMock(return_value=("selected-pr-branch", "owner/repo"))
+    monkeypatch.setattr(session.backend.github_client, "fetch_worktree_head", head)
+    session.git = repo_worktree.GitHelper()
+    verify = MagicMock(wraps=session.git.branch_tracks_repository)
+    monkeypatch.setattr(session.git, "branch_tracks_repository", verify)
+
+    result = session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+
+    worktree = Path(result["cwd"])
+    assert result["status"] == "launched"
+    launch.assert_called_once()
+    assert git(worktree, "rev-parse", "HEAD") == local
+    assert git(worktree, "rev-parse", "--abbrev-ref", "@{upstream}") == "origin/selected-pr-branch"
+    head.assert_called()
+    verify.assert_called_with(worktree, "selected-pr-branch", "owner/repo")

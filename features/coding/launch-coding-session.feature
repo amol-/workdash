@@ -42,9 +42,10 @@ Feature: Launch a coding session
     - VSCode Copilot is not an agent pane, so it holds no claim; it is still not opened while an agent pane is live in the worktree.
     - Coding is plan-first by default: the TUI never asks for autonomous work, so its agent proposes a plan and waits before implementing, and nothing commits, pushes, or opens a pull request without the user's instruction.
     - A coding request may ask for autostart. The briefing of a newly launched agent then ends with an autonomous appendix, once, saying to start without routine confirmation and overriding the plan-first pause. The pane stays an ordinary interactive agent session.
-    - The implementation appendix tells the agent to use the development practices, skills, and coordination workflows it is configured to follow, whatever the task needs (implementing an issue, or fixing CI, merge conflicts, or review feedback of a pull request), without naming a skill or mandating coordination; the review-only appendix and the plan-first briefing do not. It also tells the agent to inspect the checkout, branch, commits and uncommitted changes, continue valid partial work and replace it only for demonstrable defects, commit and push, and open a pull request that closes the issue. It tells the agent never to merge or close the issue, and to report the pull request URL, head SHA and actual CI status when done.
+    - The implementation appendix tells the agent to use the development practices, skills, and coordination workflows it is configured to follow, whatever the task needs (implementing an issue, or fixing CI, merge conflicts, or review feedback of a pull request), without naming a skill or mandating coordination; the review-only appendix and the plan-first briefing do not. It also tells the agent to inspect the checkout, branch, commits and uncommitted changes, continue valid partial work and replace it only for demonstrable defects, commit and push, and open a pull request closing an ordinary issue with `Fixes #NUMBER` without a repository prefix. It tells the agent never to merge or close the issue, and to report the pull request URL, head SHA and actual CI status when done.
     - Autonomous implementation explicitly permits commits and pushes and permits force-pushing only the pull request branch, preferably with a lease and subject to repository restrictions. Other destructive actions still require explicit permission.
     - The agent may report completion only when the pull request's current head is `passing` or `no_checks` and GitHub reports it as mergeable. `no_checks` is reported as no checks required or reported, never as CI passed; `pending` is waited for; `unknown` is reported as incomplete.
+    - A coding session for a todo tells the agent never to disclose or reference the todo in the pull request; it may link a relevant issue in the implementation repository instead.
     - After the appendix the agent is given what the GitHub work state says the work needs, from the same classification `workdash ready` uses: implement an issue, fix failing CI, resolve merge conflicts, or address review feedback. Several needs are all included, most urgent first: review feedback, then merge conflicts, then CI.
     - An autostarted issue, including a targeted todo, that an open pull request of the user's already closes works on that pull request's branch and updates it, never a second pull request. Before launching on an authored pull request, the system verifies that the checkout tracks the pull request's head branch in its head repository, including a differently named local branch. If the checkout cannot be verified, it asks the user to configure the PR-head upstream without changing tracking, switching branches, or launching. A pull request of somebody else closing the issue does not change the issue's implementation briefing.
     - A pull request that is waiting for CI, review, or merge, or is already finished, is described as it is, with its CI status told apart as passing, still running, no required or observed checks, or unknown; its briefing carries no order to start working, and the agent is told not to invent work or open another pull request.
@@ -284,6 +285,12 @@ Feature: Launch a coding session
     And the agent is told to wait for the current head's CI or confirm that no checks are required or reported
     And the agent is told never to merge the pull request or close the issue
     And the agent is told to stay in its interactive session after reporting
+
+  @id:F-CODING-LAUNCH-S044
+  Scenario: A coding session keeps a todo confidential in the pull request
+    Given the dashboard includes a todo issue number 110 with target `owner/repo`
+    When the user launches a coding session for that item
+    Then the agent is told never to disclose or reference the todo in the pull request
 
   @id:F-CODING-LAUNCH-S030
   Scenario: Autostart on an issue without a pull request is told to implement it

@@ -7,7 +7,9 @@ Feature: Generate an analysis
 
   Rules:
     - A fresh analysis can be generated with any agent configured for analysis.
-    - Before generating an analysis, the system prepares the work item's worktree and starts the analysis agent inside it.
+    - A fresh issue analysis reuses an existing matching worktree, or runs in a temporary detached worktree based on the target repository's current default branch, even if it has changed and the old default was deleted; the temporary worktree is removed even if analysis fails.
+    - Issue analysis does not create or link an issue branch; pull request analysis uses the pull request's head repository and branch.
+    - Cached analysis is returned without preparing a worktree.
     - The agent can inspect the local source code alongside the supplied issue or pull request discussion.
     - Source citations link to the code repository's own hosting service, including GitHub, GitLab, and Codeberg.
     - When the source-link format is not immediately obvious, the agent cites the file path and line number without inventing a URL.
@@ -59,6 +61,14 @@ Feature: Generate an analysis
     And the user has the analyze dialog open on a work item
     When the user chooses to generate a fresh analysis with a configured analysis agent
     Then the system reports that analysis requires a Zellij session
+
+  @id:F-ANALYSIS-GENERATE-S007
+  Scenario: An issue without a worktree is analyzed without leaving one behind
+    Given an issue has no existing worktree or linked branch
+    And its repository's default branch contains the current source code
+    When the user requests a fresh analysis of the issue
+    Then the analysis observes the current default-branch source code
+    And the successful analysis leaves no issue worktree or linked branch
 
   @id:F-ANALYSIS-GENERATE-S004
   Scenario Outline: Analysis source citations follow the code repository's hosting service

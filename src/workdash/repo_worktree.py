@@ -4,6 +4,7 @@ import contextlib
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .git import GitHelper
@@ -110,7 +111,12 @@ def existing_worktree_for_branch(
 
 
 def ensure_worktree(
-    workdir: str, item: WorkItem, *, git: GitHelper | None = None, github_client=None
+    workdir: str,
+    item: WorkItem,
+    *,
+    git: GitHelper | None = None,
+    github_client=None,
+    todo_repository: str = "",
 ) -> str:
     """Ensure a worktree exists for the given work item and return its path.
 
@@ -149,22 +155,132 @@ def ensure_worktree(
             git.fetch_remote(main, "upstream")
         return str(git_existing)
 
+    if wt.exists():
+        raise RuntimeError(f"Worktree path {wt} is already occupied.")
+
     Path(workdir).expanduser().mkdir(parents=True, exist_ok=True)
     if not main.exists():
         if todo_target is not None and ":" in repo:
             git.clone_repository(repo, main)
         else:
             git.clone_github_repository(repo, main, github_client=github)
+    if (
+        item.item_type != WorkItemType.PR
+        and todo_target is None
+        and git.local_branch_exists(main, branch)
+    ):
+        git.create_worktree(main, wt, branch, "origin/HEAD")
+        with contextlib.suppress(subprocess.CalledProcessError, OSError):
+            git.pull_ff_only(wt)
+        return str(wt)
     git.fetch_remote(main, "origin")
     git.fast_forward_default_branch(main)
     if item.item_type == WorkItemType.PR:
         if repo.lower() != item.repo.lower():
             git.ensure_upstream_remote(main, item.repo)
             git.fetch_remote(main, "upstream")
+        local_branch = git.local_branch_exists(main, branch)
         git.create_worktree(main, wt, branch, f"origin/{branch}")
-    else:
+        if local_branch:
+            git.set_branch_upstream(main, branch)
+            try:
+                git.fast_forward_branch(wt, f"origin/{branch}")
+            except (subprocess.CalledProcessError, OSError) as exc:
+                try:
+                    subprocess.run(
+                        ["git", "worktree", "remove", str(wt)],
+                        cwd=main,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                except (subprocess.CalledProcessError, OSError) as cleanup_exc:
+                    raise RuntimeError(
+                        f"Failed to update {branch} from origin/{branch}; "
+                        f"remove or resolve the worktree at {wt} before retrying. "
+                        f"Cleanup failed: {cleanup_exc}"
+                    ) from exc
+                raise RuntimeError(
+                    f"Failed to update {branch} from origin/{branch}; "
+                    "reconcile the local branch with the pull request head before retrying."
+                ) from exc
+    elif todo_target is not None:
         git.create_worktree(main, wt, branch, "origin/HEAD")
+    else:
+        if not git.fetch_origin_branch(main, branch, missing_ok=True):
+            if item.repo.lower() == todo_repository.lower():
+                git.create_worktree(main, wt, branch, "origin/HEAD")
+                return str(wt)
+            try:
+                github.create_issue_branch(repo, item.number, branch)
+            except RuntimeError:
+                found = False
+                with contextlib.suppress(OSError, RuntimeError):
+                    found = git.fetch_origin_branch(main, branch, missing_ok=True)
+                if not found:
+                    with contextlib.suppress(subprocess.CalledProcessError, OSError, RuntimeError):
+                        _refresh_origin_head(main)
+                    git.create_worktree(main, wt, branch, "origin/HEAD")
+                    return str(wt)
+            else:
+                git.fetch_origin_branch(main, branch)
+        git.create_worktree(main, wt, branch, f"origin/{branch}")
     return str(wt)
+
+
+@contextlib.contextmanager
+def analysis_worktree(
+    workdir: str, item: WorkItem, *, git: GitHelper, github_client, todo_repository: str = ""
+):
+    """Reuse item work or temporarily check out the target's default branch."""
+    if item.item_type == WorkItemType.PR:
+        yield ensure_worktree(
+            workdir, item, git=git, github_client=github_client, todo_repository=todo_repository
+        )
+        return
+    if existing_worktree_path(workdir, item, git=git) is not None:
+        yield ensure_worktree(
+            workdir, item, git=git, github_client=github_client, todo_repository=todo_repository
+        )
+        return
+
+    repo, branch = worktree_branch(item, github_client=github_client)
+    main = main_repo_path(workdir, repo)
+    wt = worktree_path(workdir, repo, worktree_item_number(item), todo=item.todo_target is not None)
+    _require_repository_paths(repo, main, wt, git=git)
+    if existing_worktree_for_branch(workdir, repo, branch, git=git) is not None:
+        yield ensure_worktree(
+            workdir, item, git=git, github_client=github_client, todo_repository=todo_repository
+        )
+        return
+    if wt.exists():
+        raise RuntimeError(f"Worktree path {wt} is already occupied.")
+    main.parent.mkdir(parents=True, exist_ok=True)
+    if not main.exists():
+        if item.todo_target is not None and ":" in repo:
+            git.clone_repository(repo, main)
+        else:
+            git.clone_github_repository(repo, main, github_client=github_client)
+    _refresh_origin_head(main, configure_fetch=False)
+    with tempfile.TemporaryDirectory(prefix="workdash-analysis-") as directory:
+        path = Path(directory) / wt.name
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(path), "origin/HEAD"],
+            cwd=main,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        try:
+            yield str(path)
+        finally:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(path)],
+                cwd=main,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
 
 def get_merge_base(worktree: str, *, git: GitHelper | None = None) -> str | None:
@@ -179,6 +295,62 @@ def issue_branch_number(branch: str) -> int | None:
     """Return the issue number of a branch named the way ``ensure_worktree`` names an issue's."""
     match = _ISSUE_BRANCH_RE.match(branch)
     return int(match.group(1)) if match else None
+
+
+def _refresh_origin_head(main: Path, *, configure_fetch: bool = True) -> None:
+    remote_head = subprocess.run(
+        ["git", "ls-remote", "--symref", "origin", "HEAD"],
+        cwd=main,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    default_ref = next(
+        (line.split()[1] for line in remote_head.splitlines() if line.startswith("ref: ")),
+        None,
+    )
+    if default_ref is None or not default_ref.startswith("refs/heads/"):
+        raise RuntimeError("Failed to determine origin's default branch.")
+    branch = default_ref.removeprefix("refs/heads/")
+    fetch_spec = f"+{default_ref}:refs/remotes/origin/{branch}"
+    if configure_fetch:
+        fetch_specs = subprocess.run(
+            ["git", "config", "--get-all", "remote.origin.fetch"],
+            cwd=main,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        if (
+            fetch_spec not in fetch_specs
+            and "+refs/heads/*:refs/remotes/origin/*" not in fetch_specs
+        ):
+            subprocess.run(
+                [
+                    "git",
+                    "config",
+                    "--add",
+                    "remote.origin.fetch",
+                    "+refs/heads/*:refs/remotes/origin/*",
+                ],
+                cwd=main,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+    subprocess.run(
+        ["git", "fetch", "origin", fetch_spec],
+        cwd=main,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "remote", "set-head", "origin", branch],
+        cwd=main,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _worktree_candidates(base: Path, item: WorkItem) -> list[Path]:

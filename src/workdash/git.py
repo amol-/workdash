@@ -455,6 +455,73 @@ class GitHelper:
                 f"Failed to fetch {remote}: {stderr or f'exit code {exc.returncode}'}"
             ) from exc
 
+    def fetch_origin_branch(
+        self, main_path: Path, branch: str, *, missing_ok: bool = False
+    ) -> bool:
+        ref = f"refs/heads/{branch}"
+        result = subprocess.run(
+            ["git", "ls-remote", "--exit-code", "--heads", "origin", ref],
+            cwd=main_path,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 2 and missing_ok:
+            return False
+        if result.returncode:
+            raise RuntimeError(
+                f"Failed to find origin/{branch}: {result.stderr.strip() or 'branch not found'}"
+            )
+        refspec = f"{ref}:refs/remotes/origin/{branch}"
+        try:
+            subprocess.run(
+                ["git", "fetch", "origin", f"+{refspec}"],
+                cwd=main_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            fetch_specs = subprocess.run(
+                ["git", "config", "--get-all", "remote.origin.fetch"],
+                cwd=main_path,
+                capture_output=True,
+                text=True,
+            ).stdout.splitlines()
+            issue_spec = "+refs/heads/issue-*:refs/remotes/origin/issue-*"
+            if (
+                issue_spec not in fetch_specs
+                and "+refs/heads/*:refs/remotes/origin/*" not in fetch_specs
+            ):
+                subprocess.run(
+                    ["git", "config", "--add", "remote.origin.fetch", issue_spec],
+                    cwd=main_path,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"Failed to fetch origin/{branch}: {(exc.stderr or '').strip()}"
+            ) from exc
+        return True
+
+    def resolve_origin_head(self, main_path: Path) -> str:
+        command = ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]
+        try:
+            return subprocess.run(
+                command, cwd=main_path, check=True, capture_output=True, text=True
+            ).stdout.strip()
+        except subprocess.CalledProcessError:
+            subprocess.run(
+                ["git", "remote", "set-head", "origin", "--auto"],
+                cwd=main_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return subprocess.run(
+                command, cwd=main_path, check=True, capture_output=True, text=True
+            ).stdout.strip()
+
     def fast_forward_default_branch(self, main_path: Path) -> None:
         """Switch the root clone to its default branch and fast-forward it.
 
@@ -462,23 +529,7 @@ class GitHelper:
         on the default branch; item branches live in dedicated worktrees.
         """
         try:
-            head_command = ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]
-            try:
-                origin_head = subprocess.run(
-                    head_command, cwd=main_path, check=True, capture_output=True, text=True
-                ).stdout.strip()
-            except subprocess.CalledProcessError:
-                subprocess.run(
-                    ["git", "remote", "set-head", "origin", "--auto"],
-                    cwd=main_path,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                origin_head = subprocess.run(
-                    head_command, cwd=main_path, check=True, capture_output=True, text=True
-                ).stdout.strip()
-            default_branch = origin_head.partition("/")[2]
+            default_branch = self.resolve_origin_head(main_path).partition("/")[2]
             subprocess.run(
                 ["git", "switch", default_branch],
                 cwd=main_path,
@@ -547,11 +598,6 @@ class GitHelper:
             )
             if self.local_branch_exists(main_path, branch):
                 subprocess.run(
-                    ["git", "branch", "-f", branch, start_point],
-                    cwd=main_path,
-                    capture_output=True,
-                )
-                subprocess.run(
                     ["git", "worktree", "add", str(wt_path), branch],
                     cwd=main_path,
                     check=True,
@@ -566,6 +612,7 @@ class GitHelper:
                     capture_output=True,
                     text=True,
                 )
+                self.set_branch_upstream(main_path, branch)
         except FileNotFoundError as exc:
             raise RuntimeError(
                 f"Failed to create worktree for branch {branch}: "
@@ -574,11 +621,27 @@ class GitHelper:
         except subprocess.CalledProcessError as exc:
             stderr = (exc.stderr or "").strip()
             raise RuntimeError(f"Failed to create worktree for branch {branch}: {stderr}") from exc
-        self.set_branch_upstream(main_path, branch)
+
+    def fast_forward_branch(self, worktree: Path, remote_branch: str) -> None:
+        subprocess.run(
+            ["git", "merge", "--ff-only", remote_branch],
+            cwd=worktree,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
     def local_branch_exists(self, main_path: Path, branch: str) -> bool:
         result = subprocess.run(
             ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            cwd=main_path,
+            capture_output=True,
+        )
+        return result.returncode == 0
+
+    def remote_branch_exists(self, main_path: Path, branch: str) -> bool:
+        result = subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{branch}"],
             cwd=main_path,
             capture_output=True,
         )

@@ -7,6 +7,7 @@ Feature: Pull request worktree
 
   Rules:
     - A pull request's worktree is checked out on the pull request's head branch when the system creates that worktree.
+    - When creating a worktree for an existing local pull request branch, the system preserves local commits, tracks the pull request head, and fast-forwards to it when possible. If the update fails, the action reports how to resolve it rather than using the branch as the pull request head. The new worktree is removed so retries do not silently reuse it; if removal fails, the user is told to resolve or remove it before retrying.
     - When the system creates the worktree for a pull request that originates in a fork, it clones the fork's repository rather than the upstream one.
     - A fork clone the system creates has an `upstream` remote pointing at the pull request's base repository.
     - A pull request whose head and base GitHub repository names differ only in casing is treated as same-repository when creating or reusing its worktree; no fork upstream is configured or fetched.
