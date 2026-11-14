@@ -311,14 +311,22 @@ To list an item's `.workdash/` artifacts or retrieve one, URL-encode the `#` in
 its Workdash ID (otherwise it is interpreted as a URL fragment):
 
 ```bash
-curl 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/'
-curl 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/.workdash/PR_REVIEW.md'
+curl -H 'X-Workdash: 1' 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/'
+curl -H 'X-Workdash: 1' 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/.workdash/PR_REVIEW.md'
 ```
 
 The listing is a JSON success envelope with `result.entries`, a sorted array of
 names. Files are returned as `text/plain`; only files inside the existing
 worktree's `.workdash/` directory are available. These endpoints are read-only
 and use the same peer access checks as the control API.
+
+Control API requests, including artifact GETs, require `X-Workdash: 1`; the CLI
+sends it automatically. GETs of analysis Markdown and HTML documents are exempt
+for direct browser viewing, but still require an allowed source IP. Cross-origin
+preflight requests are denied. The header prevents browser images and cross-origin
+JavaScript from invoking control APIs; it is not authentication and non-browser
+clients can send it. HTML analyses block scripts but can load HTTP(S) images,
+which can request other URLs, including the read-only analysis documents.
 
 **Trusted LAN only:** the API is intentionally unauthenticated plain HTTP.
 Allowed clients can execute dashboard actions; do not expose it to untrusted
@@ -684,11 +692,20 @@ This applies to agents and humans alike. A change that lands code without a matc
 
 ## Tests
 
-From the repository root:
+From the repository root, run the default suite:
 
 ```bash
 PYTHONPATH=src pytest
 ```
+
+The browser security test is excluded by default. To run it, install Chromium
+(or Chrome) and Node.js with built-in WebSocket support, then run:
+
+```bash
+PYTHONPATH=src pytest -m browser
+```
+
+Set `CHROME_BIN` to the browser executable if it is not on `PATH`.
 
 ### BDD suite
 

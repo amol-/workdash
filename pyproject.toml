@@ -59,6 +59,8 @@ where = ["src"]
 workdash = ["prompts/*.txt"]
 
 [tool.pytest.ini_options]
+addopts = "-m 'not browser'"
+markers = ["browser: end-to-end tests requiring Chromium and Node.js"]
 bdd_features_base_dir = "features"
 filterwarnings = [
   "ignore::DeprecationWarning:gherkin.gherkin_line",

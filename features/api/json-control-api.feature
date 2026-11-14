@@ -16,7 +16,8 @@ Feature: Local JSON control API
     - All listeners share the union of accepted source IPs, automatically including localhost and the primary server IP. A `--listen` matching the primary IP adds its source IPs without binding a second listener.
     - Actual peer source IPs determine access, never forwarding headers; unlisted peers receive a forbidden JSON error without executing actions.
     - If any listener cannot bind, including a repeated non-primary listener address, startup fails without leaving other listeners active; exiting the TUI stops every listener.
-    - The API is intentionally unauthenticated plain HTTP for trusted LAN use only.
+    - Control requests, including artifact GETs, require `X-Workdash: 1`; the CLI supplies it. Only GET requests for analysis Markdown and HTML documents are exempt for direct viewing. Cross-origin preflights are denied.
+    - The API is intentionally unauthenticated plain HTTP for trusted LAN use only; the header is not authentication.
     - V0 exposes JSON APIs only, not an HTML browser UI.
     - V0 API requests and responses use JSON objects; item file GET responses contain file bytes or a JSON directory listing.
     - `GET /api/items/{item_id}/files/` lists the item's `.workdash` directory as a JSON success envelope containing a sorted `entries` array of names; `GET /api/items/{item_id}/files/.workdash/{path}` serves a file within it. Symlinked worktree paths and symlinks resolving inside `.workdash` are available; paths and symlinks escaping `.workdash` and missing worktrees are not served or listed. The same source IP access rules apply, and no writes are supported.
@@ -42,6 +43,19 @@ Feature: Local JSON control API
     - Pane actions accept pane IDs exactly as emitted by `workdash info`.
     - Analyze responses include `url`, the HTTP URL under which the analysis markdown is served, plus `content_type`, `file_name`, and base64 `file_content`; there is no `content_encoding` field because content is always base64.
     - CLI analyze reports the server's analysis `url` and does not write or fall back to any local or server file path; a missing `url` is an invalid server response.
+
+  @id:F-API-JSON-CONTROL-S038
+  Scenario: Control requests require the Workdash header
+    Given a server-backed Workdash session has an item with a worktree artifact and an alias inside .workdash
+    When a client requests the list API and the item's artifact with and without the Workdash header
+    Then only requests with `X-Workdash: 1` succeed
+    And a cross-origin preflight is denied
+
+  @id:F-API-JSON-CONTROL-S039
+  Scenario: Analysis documents can be viewed without the Workdash header
+    Given a server-backed Workdash session has an item with a cached analysis
+    When a browser requests the Markdown and HTML analysis documents without the Workdash header
+    Then both documents contain the cached analysis
 
   @id:F-API-JSON-CONTROL-S034
   Scenario: A client reads and lists worktree artifacts

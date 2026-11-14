@@ -20,7 +20,11 @@ import workdash.control as control_module
 import workdash.github_client as github_client_module
 from workdash.analysis_cache import AnalysisCache
 from workdash.backend import compute_suggestion_markers
-from workdash.control import _make_turbogears_app, _source_filtered_wsgi_app, format_work_item_id
+from workdash.control import (
+    _make_turbogears_app,
+    _source_and_header_guarded_wsgi_app,
+    format_work_item_id,
+)
 from workdash.models import WorkItem, WorkItemKind, WorkItemType, worktree_item_number
 from workdash.repo_worktree import worktree_path
 
@@ -44,7 +48,7 @@ def _call_api(
     endpoint: str,
     payload: dict[str, object] | None = None,
 ) -> None:
-    app = _source_filtered_wsgi_app(
+    app = _source_and_header_guarded_wsgi_app(
         _make_turbogears_app(ensure_api_session(scenario_state, work_items, tmp_path)),
         scenario_state.get("accepted_ips", ()),
     )
@@ -54,6 +58,7 @@ def _call_api(
         content_type="application/json",
         body=json.dumps(payload or {}).encode("utf-8"),
     )
+    request.headers["X-Workdash"] = "1"
     request.environ["REMOTE_ADDR"] = scenario_state.get("remote_addr", "127.0.0.1")
     request.headers.update(scenario_state.get("forwarding_headers", {}))
     response = request.get_response(app)
@@ -1046,7 +1051,12 @@ def _source_can_access_custom_server(scenario_state):
             "127.0.0.1", scenario_state["custom_port"], source_address=(source, 0)
         )
         try:
-            connection.request("POST", "/api/v0/list", "{}", {"Content-Type": "application/json"})
+            connection.request(
+                "POST",
+                "/api/v0/list",
+                "{}",
+                {"Content-Type": "application/json", "X-Workdash": "1"},
+            )
             response = connection.getresponse()
             assert response.status == status
             if status == 200:
@@ -1167,7 +1177,9 @@ def _primary_requests_list(scenario_state):
     host, port = scenario_state["primary_address"]
     connection = HTTPConnection(host, port, source_address=(host, 0), timeout=3)
     try:
-        connection.request("POST", "/api/v0/list", "{}", {"Content-Type": "application/json"})
+        connection.request(
+            "POST", "/api/v0/list", "{}", {"Content-Type": "application/json", "X-Workdash": "1"}
+        )
         response = connection.getresponse()
         scenario_state["api_status"] = response.status
         scenario_state["api_payload"] = json.loads(response.read())
@@ -1182,7 +1194,9 @@ def _unlisted_source_cannot_access_primary(scenario_state):
     host, port = scenario_state["primary_address"]
     connection = HTTPConnection(host, port, source_address=("127.0.0.3", 0), timeout=3)
     try:
-        connection.request("POST", "/api/v0/list", "{}", {"Content-Type": "application/json"})
+        connection.request(
+            "POST", "/api/v0/list", "{}", {"Content-Type": "application/json", "X-Workdash": "1"}
+        )
         response = connection.getresponse()
         assert response.status == 403
         assert json.loads(response.read())["error"]["code"] == "forbidden"
@@ -1480,12 +1494,14 @@ def _artifact_item(scenario_state, work_items, tmp_path, monkeypatch):
 
 @when("a client lists and reads the item's worktree artifacts")
 def _get_artifacts(scenario_state, work_items, tmp_path):
-    app = _source_filtered_wsgi_app(
+    app = _source_and_header_guarded_wsgi_app(
         _make_turbogears_app(ensure_api_session(scenario_state, work_items, tmp_path))
     )
     responses = []
     for suffix in ("", ".workdash/PR_REVIEW.md", ".workdash/alias.md"):
-        req = Request.blank(f"/api/items/owner/repo%23ISSUE-1/files/{suffix}")
+        req = Request.blank(
+            f"/api/items/owner/repo%23ISSUE-1/files/{suffix}", headers={"X-Workdash": "1"}
+        )
         req.environ["REMOTE_ADDR"] = "127.0.0.1"
         response = req.get_response(app)
         _ = response.body
@@ -1500,6 +1516,79 @@ def _check_artifacts(scenario_state):
     assert listing.json["result"]["entries"] == ["PR_REVIEW.md", "alias.md"]
     assert artifact.status_int == alias.status_int == 200
     assert artifact.text == alias.text == "Review contents"
+
+
+@when("a client requests the list API and the item's artifact with and without the Workdash header")
+def _request_control_with_and_without_header(scenario_state, work_items, tmp_path):
+    app = _source_and_header_guarded_wsgi_app(
+        _make_turbogears_app(ensure_api_session(scenario_state, work_items, tmp_path))
+    )
+    responses = {}
+    for method, path in (
+        ("POST", "/api/v0/list"),
+        ("GET", "/api/items/owner/repo%23ISSUE-1/files/.workdash/PR_REVIEW.md"),
+    ):
+        for header in (None, "wrong", "1"):
+            request = Request.blank(path, method=method)
+            request.environ["REMOTE_ADDR"] = "127.0.0.1"
+            if header is not None:
+                request.headers["X-Workdash"] = header
+            if method == "POST":
+                request.content_type = "application/json"
+                request.body = b"{}"
+            response = request.get_response(app)
+            _ = response.body
+            responses[method, header] = response
+    request = Request.blank(
+        "/api/v0/list",
+        method="OPTIONS",
+        headers={"Origin": "https://example.com", "Access-Control-Request-Method": "POST"},
+    )
+    request.environ["REMOTE_ADDR"] = "127.0.0.1"
+    scenario_state["preflight"] = request.get_response(app)
+    scenario_state["header_responses"] = responses
+
+
+@then("only requests with `X-Workdash: 1` succeed")
+def _check_control_header(scenario_state):
+    responses = scenario_state["header_responses"]
+    for method in ("POST", "GET"):
+        assert responses[method, None].status_int == 403
+        assert responses[method, "wrong"].status_int == 403
+        assert responses[method, "1"].status_int == 200
+    assert responses["POST", "1"].json["ok"] is True
+    assert responses["GET", "1"].text == "Review contents"
+
+
+@then("a cross-origin preflight is denied")
+def _check_preflight_denied(scenario_state):
+    assert scenario_state["preflight"].status_int == 403
+
+
+@when("a browser requests the Markdown and HTML analysis documents without the Workdash header")
+def _request_browser_analysis(scenario_state, work_items, tmp_path):
+    app = _source_and_header_guarded_wsgi_app(
+        _make_turbogears_app(ensure_api_session(scenario_state, work_items, tmp_path))
+    )
+    responses = []
+    for suffix in ("", "/html"):
+        request = Request.blank(f"/api/items/owner/repo%23ISSUE-1/analysis{suffix}")
+        request.environ["REMOTE_ADDR"] = "127.0.0.1"
+        response = request.get_response(app)
+        _ = response.body
+        responses.append(response)
+    scenario_state["browser_analysis_responses"] = responses
+
+
+@then("both documents contain the cached analysis")
+def _check_browser_analysis(scenario_state):
+    markdown, html = scenario_state["browser_analysis_responses"]
+    assert markdown.status_int == html.status_int == 200
+    assert markdown.content_type == "text/markdown"
+    assert html.content_type == "text/html"
+    assert "# cached analysis\nbody" in markdown.text
+    assert "<h1>cached analysis</h1>" in html.text
+    assert "body" in html.text
 
 
 @given("a server-backed Workdash session has an item with a cached analysis")
@@ -1523,11 +1612,12 @@ def _request_analysis_through_host(scenario_state, work_items, tmp_path, monkeyp
     monkeypatch.setattr(
         session.backend, "analyze_item", lambda item, **kwargs: str(cache.build_analysis_path(item))
     )
-    app = _source_filtered_wsgi_app(_make_turbogears_app(session))
+    app = _source_and_header_guarded_wsgi_app(_make_turbogears_app(session))
     req = Request.blank(
         "/api/v0/analyze",
         method="POST",
         host="dashboard.test:9876",
+        headers={"X-Workdash": "1"},
         content_type="application/json",
         body=b'{"target":"owner/repo#ISSUE-1"}',
     )
@@ -1559,7 +1649,7 @@ def _analysis_formats_served(scenario_state):
 
 @when("a client requests the item's analysis URL")
 def _request_analysis_url(scenario_state, work_items, tmp_path):
-    app = _source_filtered_wsgi_app(
+    app = _source_and_header_guarded_wsgi_app(
         _make_turbogears_app(ensure_api_session(scenario_state, work_items, tmp_path))
     )
     req = Request.blank("/api/items/owner/repo%23ISSUE-1/analysis")

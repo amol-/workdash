@@ -1275,7 +1275,9 @@ class WorkdashControlServer:
         }
         host = primary_host
         try:
-            app = _source_filtered_wsgi_app(_make_turbogears_app(self._session), accepted_ips)
+            app = _source_and_header_guarded_wsgi_app(
+                _make_turbogears_app(self._session), accepted_ips
+            )
             for host in [
                 primary_host,
                 *(host for host, _ips in self._listeners if host != primary_host),
@@ -1350,7 +1352,11 @@ class WorkdashControlClient:
         request = urllib.request.Request(
             f"http://{self._address}/api/v0/{endpoint}",
             data=body,
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-Workdash": "1",
+            },
             method="POST",
         )
         try:
@@ -1890,26 +1896,46 @@ def _handle_json_request(request, response, action) -> dict[str, object]:
         raise
 
 
-def _source_filtered_wsgi_app(app, accepted_ips: Collection[str] = ()):
+def _source_and_header_guarded_wsgi_app(app, accepted_ips: Collection[str] = ()):
+    """Wrap ``app`` so only accepted source IPs and X-Workdash requests reach it.
+
+    Analysis documents skip the header check because browsers cannot attach it to
+    images or cross-origin requests. The header is not authentication: non-browser
+    clients can send it.
+    """
+
     allowed = {ip_address(ip) for ip in accepted_ips} | {ip_address("127.0.0.1"), ip_address("::1")}
 
-    def source_filtered(environ, start_response):
-        try:
-            accepted = ip_address(environ.get("REMOTE_ADDR", "")) in allowed
-        except ValueError:
-            accepted = False
-        if not accepted:
-            body = json.dumps(
-                _error_envelope("forbidden", "Workdash server does not accept this source IP.")
-            ).encode("utf-8")
+    def guarded(environ, start_response):
+        def reject(message: str):
+            body = json.dumps(_error_envelope("forbidden", message)).encode("utf-8")
             start_response(
                 "403 Forbidden",
                 [("Content-Type", "application/json"), ("Content-Length", str(len(body)))],
             )
             return [body]
+
+        try:
+            accepted = ip_address(environ.get("REMOTE_ADDR", "")) in allowed
+        except ValueError:
+            accepted = False
+        if not accepted:
+            return reject("Workdash server does not accept this source IP.")
+        # The analysis route shape below mirrors ItemsController._default; keep both in sync.
+        # TurboGears serves these documents with or without a trailing slash.
+        path = environ.get("PATH_INFO", "").rstrip("/").split("/")
+        analysis_document = (
+            environ.get("REQUEST_METHOD") == "GET"
+            and path[1:3] == ["api", "items"]
+            and path[5:] in (["analysis"], ["analysis", "html"])
+        )
+        if environ.get("REQUEST_METHOD") == "OPTIONS" or (
+            not analysis_document and environ.get("HTTP_X_WORKDASH") != "1"
+        ):
+            return reject("X-Workdash: 1 is required.")
         return app(environ, start_response)
 
-    return source_filtered
+    return guarded
 
 
 def _client_error_from_body(error: urllib.error.HTTPError) -> WorkdashControlError:

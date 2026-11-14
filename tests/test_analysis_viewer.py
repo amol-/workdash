@@ -135,6 +135,7 @@ def test_html_analysis_blocks_active_content_locally_and_over_http(tmp_path, mon
         "# Heading\n\n<div>raw HTML</div>\n\n<script>example()</script>"
         '\n\n<img src=x onerror="alert(1)"><meta http-equiv="refresh" content="0;url=/api/v0/info">'
         "\n\n![diagram](http://127.0.0.1:8765/api/v0/info)"
+        "\n\n![remote](https://example.com/diagram.png)"
         "\n\n[unsafe](javascript:alert(1))"
         '\n\n<iframe src="http://127.0.0.1:8765/api/v0/info"></iframe>'
         '\n\n<form action="http://127.0.0.1:8765/api/v0/info"><button>Send</button></form>'
@@ -179,6 +180,7 @@ def test_html_analysis_blocks_active_content_locally_and_over_http(tmp_path, mon
         assert "<iframe" not in html
         assert "<form" not in html
         assert '<img alt="diagram" src="http://127.0.0.1:8765/api/v0/info"' in html
+        assert '<img alt="remote" src="https://example.com/diagram.png"' in html
         assert "<b>code</b>" not in html
 
         parser = Tags()
@@ -199,7 +201,8 @@ def test_html_analysis_blocks_active_content_locally_and_over_http(tmp_path, mon
             words = directive.split()
             if words:
                 directives.setdefault(words[0].lower(), words[1:])
-        for name in ("script-src", "img-src", "connect-src", "frame-src", "object-src"):
+        assert directives["img-src"] == ["http:", "https:"]
+        for name in ("script-src", "connect-src", "frame-src", "object-src"):
             assert directives.get(name, directives.get("default-src")) == ["'none'"]
         assert directives["base-uri"] == ["'none'"]
         assert directives["form-action"] == ["'none'"]
