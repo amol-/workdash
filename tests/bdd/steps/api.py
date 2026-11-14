@@ -985,6 +985,13 @@ def _listeners_accept_sources(scenario_state, work_items, tmp_path) -> None:
     ensure_api_session(scenario_state, work_items, tmp_path)
 
 
+@given(parsers.parse("listeners accept source subnet `{subnet}`"))
+def _listeners_accept_source_subnet(subnet, scenario_state, work_items, tmp_path) -> None:
+    seed_dashboard_item(work_items, scenario_state)
+    scenario_state["accepted_ips"] = (subnet,)
+    ensure_api_session(scenario_state, work_items, tmp_path)
+
+
 @when(parsers.parse("a client at `{source}` requests the list API"))
 def _source_requests_list(source, scenario_state, work_items, tmp_path) -> None:
     scenario_state["remote_addr"] = source

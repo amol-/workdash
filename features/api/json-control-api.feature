@@ -11,9 +11,9 @@ Feature: Local JSON control API
     - The API server runs in the background and stops when the TUI process exits.
     - Multiple server-backed sessions can run on different addresses; a dashboard started inside Zellij uses its current session regardless of its name. If the current session is unknown, startup fails rather than selecting another session.
     - The server listens on `WORKDASH_HOST` (IPv4 address or IPv4 address:port), defaulting to `127.0.0.1:8765`; repeatable `--listen HOST@IP1,IP2` adds listeners and requires `--server`.
-    - Each listener requires a nonempty list of exact source IPs, not hostnames or subnets; missing, malformed, or empty entries are rejected.
+    - Each listener requires a nonempty list of exact source IPs or CIDR subnets, not hostnames; missing, malformed, or empty entries are rejected.
     - Listener hosts may be IPs or DNS hostnames; wildcard binds and ports in `--listen` are not supported. Extra listeners use the selected server port.
-    - All listeners share the union of accepted source IPs, automatically including localhost and the primary server IP. A `--listen` matching the primary IP adds its source IPs without binding a second listener.
+    - All listeners share the union of accepted source IPs and CIDR subnets, automatically including localhost and the primary server IP. A `--listen` matching the primary IP adds its source IPs without binding a second listener.
     - Actual peer source IPs determine access, never forwarding headers; unlisted peers receive a forbidden JSON error without executing actions.
     - If any listener cannot bind, including a repeated non-primary listener address, startup fails without leaving other listeners active; exiting the TUI stops every listener.
     - Control requests, including artifact GETs, require `X-Workdash: 1`; the CLI supplies it. Only GET requests for analysis Markdown and HTML documents are exempt for direct viewing. Cross-origin preflights are denied.
@@ -247,6 +247,14 @@ Feature: Local JSON control API
     Given listeners accept source IPs `192.0.2.10` and `192.0.2.11`
     When a client at `192.0.2.11` requests the list API
     Then the API returns the current in-memory work items
+
+  @id:F-API-JSON-CONTROL-S040
+  Scenario: CIDR subnets can be specified for accepted sources
+    Given listeners accept source subnet `192.0.2.0/24`
+    When a client at `192.0.2.42` requests the list API
+    Then the API returns the current in-memory work items
+    When a client at `192.0.3.42` requests the list API
+    Then the API returns a forbidden error
 
   @id:F-API-JSON-CONTROL-S022
   Scenario: Forwarding headers cannot grant access

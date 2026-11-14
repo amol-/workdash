@@ -1315,7 +1315,7 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
         session,
         listeners=(
             (hosts[0], ("127.0.0.5",)),
-            (hosts[1], (hosts[2],)),
+            (hosts[1], ("127.0.0.0/29",)),
             (hosts[2], (hosts[1],)),
         ),
     )
@@ -1324,7 +1324,7 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
     try:
         # Both explicit sources can use every listener, including the default.
         for host in hosts:
-            for source in (*hosts[1:], "127.0.0.5"):
+            for source in (*hosts[1:], "127.0.0.5", "127.0.0.6"):
                 connection = HTTPConnection(host, port, timeout=2, source_address=(source, 0))
                 try:
                     connection.request(
@@ -1340,7 +1340,7 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
                     )
                 finally:
                     connection.close()
-            denied = HTTPConnection(host, port, timeout=2, source_address=("127.0.0.4", 0))
+            denied = HTTPConnection(host, port, timeout=2, source_address=("127.0.0.9", 0))
             try:
                 denied.request(
                     "POST",

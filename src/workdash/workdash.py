@@ -10,7 +10,7 @@ import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from ipaddress import ip_address
+from ipaddress import ip_network
 
 from . import __version__, launcher
 from .backend import SuggestionMarkers, WorkdashBackend
@@ -680,7 +680,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         action="append",
         default=[],
         metavar="HOST@IP1,IP2",
-        help="Add a trusted LAN listener with exact accepted source IPs (requires --server).",
+        help="Add a trusted LAN listener with accepted source IPs or subnets (requires --server).",
     )
     parser.add_argument(
         "--json",
@@ -991,7 +991,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         try:
             if host == "0.0.0.0":
                 raise ValueError("wildcard listener binds are not allowed")
-            ips = tuple(str(ip_address(source)) for source in sources.split(","))
+            ips = tuple(
+                str(net.network_address)
+                if (net := ip_network(source, strict=False)).num_addresses == 1
+                else str(net)
+                for source in sources.split(",")
+            )
         except ValueError as error:
             parser.error(f"Invalid --listen {listener!r}: {error}")
         listeners.append((host, ips))
