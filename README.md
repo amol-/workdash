@@ -79,7 +79,7 @@ Separate viewers open selected issue/PR URLs (`o`) and analyses (fresh or cached
 {
   "open": "term-copy --quiet",
   "open_needs_pane": false,
-  "analysis_viewer": {"command": "workdash markdownview", "format": "markdown", "needs_pane": true}
+  "analysis_viewer": {"command": "workdash mdview", "format": "markdown", "needs_pane": true}
 }
 ```
 
@@ -108,11 +108,13 @@ Re-running `--configure` otherwise only prompts for empty fields, except for
 Zellij and GitHub CLI: the wizard always checks for global binaries first and
 downloads fresh local copies when none are available.
 
-The analysis viewer is required and defaults to `workdash markdownview` in the
-wizard. Choose `markdown` or `html` for a custom command and whether it needs
+The analysis viewer is required and defaults to `workdash mdview` in the
+wizard. Existing configurations using `workdash markdownview` must be edited to
+use `workdash mdview`; the old command is no longer available. Choose `markdown`
+or `html` for a custom command and whether it needs
 a terminal pane. Direct analysis viewers run without blocking Workdash or a time limit.
 Analyses are passed as local file URLs; the HTTP server is not
-required. `workdash markdownview PATH` also accepts file, HTTP and HTTPS URLs;
+required. `workdash mdview PATH` also accepts file, HTTP and HTTPS URLs;
 it intentionally does not verify HTTPS certificates.
 
 ### Agents

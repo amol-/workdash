@@ -225,8 +225,17 @@ def test_markdownview_command_works_without_dashboard_setup(monkeypatch, tmp_pat
     document.write_text("# analysis")
     view = MagicMock(return_value=0)
     monkeypatch.setattr(markdownview, "run_markdownview", view)
-    assert workdash.main(["markdownview", str(document)]) == 0
+    assert workdash.main(["mdview", str(document)]) == 0
     view.assert_called_once_with(str(document))
+
+
+def test_old_markdownview_command_is_not_available(capsys):
+    from workdash import workdash
+
+    with pytest.raises(SystemExit) as error:
+        workdash.main(["markdownview", "analysis.md"])
+    assert error.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("scheme", ["http", "https"])

@@ -130,7 +130,7 @@ def _custom_analysis_viewer(scenario_state: dict[str, Any]) -> None:
 @then("the saved analysis viewer uses Markdown in a terminal pane")
 def _default_analysis_saved(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["written_config"].analysis_viewer == {
-        "command": "workdash markdownview",
+        "command": "workdash mdview",
         "format": "markdown",
         "needs_pane": True,
     }
@@ -633,3 +633,41 @@ def _saved_configuration_keeps_agents_in_order(scenario_state: dict[str, Any]) -
     written = scenario_state["written_config"]
     assert list(written.agents.items()) == list(scenario_state["prior_config"].agents.items())
     assert list(written.agents) == ["pi", "aider", "claude"]
+
+
+@given("the user has an existing configuration missing the analysis viewer")
+def _existing_config_without_analysis_viewer(scenario_state, config_path):
+    _configuration_with_agents(scenario_state, config_path)
+    scenario_state["original_settings"] = json.loads(config_path.read_text())
+
+
+@when("the user starts Workdash and then runs the configuration wizard")
+def _start_then_configure(scenario_state, config_path, monkeypatch, capsys):
+    with monkeypatch.context() as patch:
+        patch.setenv("ZELLIJ", "0")
+        patch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
+        patch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
+        scenario_state["startup_exit"] = workdash_module.main([])
+        captured = capsys.readouterr()
+        scenario_state["startup_output"] = captured.out + captured.err
+    _run_configure_with_fakes(scenario_state, config_path, monkeypatch, capsys)
+
+
+@then("startup directs the user to run --configure")
+def _startup_directs_configure(scenario_state):
+    assert scenario_state["startup_exit"] != 0
+    assert "analysis_viewer" in scenario_state["startup_output"]
+    assert "--configure" in scenario_state["startup_output"]
+
+
+@then("the wizard asks for an analysis viewer and saves the default")
+def _wizard_saves_default_viewer(scenario_state):
+    assert scenario_state["prompts"] == ["Analysis viewer [workdash mdview]: "]
+    _default_analysis_saved(scenario_state)
+
+
+@then("the other configuration settings are preserved")
+def _other_settings_preserved(scenario_state, config_path):
+    saved = json.loads(config_path.read_text())
+    for key, value in scenario_state["original_settings"].items():
+        assert saved[key] == value

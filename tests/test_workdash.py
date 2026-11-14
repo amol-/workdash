@@ -22,7 +22,7 @@ from workdash.workdash import _print_work_items, _print_work_items_result
 _VALID_CONFIG = WorkdashConfig(
     github_username="testuser",
     open_command="xdg-open",
-    analysis_viewer={"command": "workdash markdownview", "format": "markdown", "needs_pane": True},
+    analysis_viewer={"command": "workdash mdview", "format": "markdown", "needs_pane": True},
     agents={
         "codex": AgentConfig(analyze="codex exec", launch="codex"),
         "claude": AgentConfig(analyze="claude -p", launch="claude"),

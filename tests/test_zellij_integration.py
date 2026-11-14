@@ -88,7 +88,7 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
         "control.prepare_launch_agent_prompt = lambda *_args, **_kwargs: 'test prompt'\n"
         "cli.GitHubClient.check_authentication = lambda self: None\n"
         "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
-        "analysis_viewer={'command': 'workdash markdownview', 'format': 'markdown', 'needs_pane': True}, "
+        "analysis_viewer={'command': 'workdash mdview', 'format': 'markdown', 'needs_pane': True}, "
         f"agents={{'agent': AgentConfig(launch={shlex.quote(str(agent))!r})}}, repositories=('owner/repo',), "
         f"workdir={str(tmp_path)!r}, todo_repository='test/todos')\n"
         "cli.WorkdashBackend.load_items = lambda self, progress_callback=None: ([item], {})\n"
@@ -307,7 +307,7 @@ def test_persistent_dashboard_quit_and_restart_in_real_zellij(tmp_path, repeat):
         "from workdash.config import WorkdashConfig, AgentConfig\n"
         'cli.GitHubClient.check_authentication = lambda self: ("expired" if os.getenv("TEST_EXPIRED") else None)\n'
         "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
-        "analysis_viewer={'command': 'workdash markdownview', 'format': 'markdown', 'needs_pane': True}, "
+        "analysis_viewer={'command': 'workdash mdview', 'format': 'markdown', 'needs_pane': True}, "
         "agents={'agent': AgentConfig(launch='sh')}, repositories=('owner/repo',), "
         "workdir='/tmp', todo_repository='test/todos')\n"
         "cli.WorkdashBackend.load_items = lambda self, progress_callback=None: ([], {})\n"
@@ -560,7 +560,7 @@ def test_analysis_viewer_renders_and_closes_fullscreen_pane(tmp_path, monkeypatc
         initial_ids = {p["id"] for p in initial if not p["is_plugin"]}
         launcher.open_markdown(
             str(document),
-            "workdash markdownview",
+            "workdash mdview",
             format="markdown",
             needs_pane=True,
             zellij_session=name,

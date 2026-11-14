@@ -44,7 +44,7 @@ def test_load_config_reads_existing_config(tmp_path):
                 "github_username": "octocat",
                 "open": "xdg-open",
                 "analysis_viewer": {
-                    "command": "workdash markdownview",
+                    "command": "workdash mdview",
                     "format": "markdown",
                     "needs_pane": True,
                 },
@@ -107,7 +107,7 @@ def test_save_config_creates_parent_dirs_and_writes_json(tmp_path):
         github_username="octocat",
         open_command="xdg-open",
         analysis_viewer={
-            "command": "workdash markdownview",
+            "command": "workdash mdview",
             "format": "markdown",
             "needs_pane": True,
         },
@@ -130,7 +130,7 @@ def test_save_config_creates_parent_dirs_and_writes_json(tmp_path):
         "open": "xdg-open",
         "open_needs_pane": False,
         "analysis_viewer": {
-            "command": "workdash markdownview",
+            "command": "workdash mdview",
             "format": "markdown",
             "needs_pane": True,
         },
@@ -150,7 +150,7 @@ def test_validate_config_returns_empty_for_complete_config():
         github_username="octocat",
         open_command="xdg-open",
         analysis_viewer={
-            "command": "workdash markdownview",
+            "command": "workdash mdview",
             "format": "markdown",
             "needs_pane": True,
         },
@@ -173,7 +173,7 @@ def test_require_valid_accepts_partial_agent_config():
         github_username="octocat",
         open_command="xdg-open",
         analysis_viewer={
-            "command": "workdash markdownview",
+            "command": "workdash mdview",
             "format": "markdown",
             "needs_pane": True,
         },
@@ -253,7 +253,7 @@ def test_require_valid_rejects_malformed_command_strings():
         github_username="octocat",
         open_command="xdg-open",
         analysis_viewer={
-            "command": "workdash markdownview",
+            "command": "workdash mdview",
             "format": "markdown",
             "needs_pane": True,
         },
@@ -302,7 +302,7 @@ def test_require_valid_rejects_non_string_command_values():
         github_username="octocat",
         open_command="xdg-open",
         analysis_viewer={
-            "command": "workdash markdownview",
+            "command": "workdash mdview",
             "format": "markdown",
             "needs_pane": True,
         },
@@ -327,7 +327,7 @@ def test_require_valid_rejects_blank_command_tokens(command: str):
         github_username="octocat",
         open_command="xdg-open",
         analysis_viewer={
-            "command": "workdash markdownview",
+            "command": "workdash mdview",
             "format": "markdown",
             "needs_pane": True,
         },
@@ -370,7 +370,7 @@ def test_require_valid_rejects_a_todo_repository_that_is_not_owner_slash_repo():
         github_username="octocat",
         open_command="xdg-open",
         analysis_viewer={
-            "command": "workdash markdownview",
+            "command": "workdash mdview",
             "format": "markdown",
             "needs_pane": True,
         },
@@ -396,7 +396,7 @@ def test_an_agent_without_any_command_does_not_count_as_an_agent():
         github_username="octocat",
         open_command="xdg-open",
         analysis_viewer={
-            "command": "workdash markdownview",
+            "command": "workdash mdview",
             "format": "markdown",
             "needs_pane": True,
         },
@@ -417,7 +417,7 @@ def test_require_valid_rejects_reserved_agent_names(name: str):
         github_username="octocat",
         open_command="xdg-open",
         analysis_viewer={
-            "command": "workdash markdownview",
+            "command": "workdash mdview",
             "format": "markdown",
             "needs_pane": True,
         },
@@ -551,7 +551,7 @@ def test_configure_reprompts_for_an_invalid_open_command(tmp_path):
                 "github_username": "octocat",
                 "open": "open 'broken",
                 "analysis_viewer": {
-                    "command": "workdash markdownview",
+                    "command": "workdash mdview",
                     "format": "markdown",
                     "needs_pane": True,
                 },
@@ -593,7 +593,7 @@ def test_configure_repairs_viewer_executable_and_preserves_other_settings(
         github_username="octocat",
         open_command="missing-viewer --quiet",
         analysis_viewer={
-            "command": "workdash markdownview",
+            "command": "workdash mdview",
             "format": "markdown",
             "needs_pane": True,
         },
@@ -832,7 +832,7 @@ def test_configure_asks_about_agents_when_the_only_entry_has_no_commands(tmp_pat
                 "github_username": "octocat",
                 "open": "xdg-open",
                 "analysis_viewer": {
-                    "command": "workdash markdownview",
+                    "command": "workdash mdview",
                     "format": "markdown",
                     "needs_pane": True,
                 },
@@ -877,7 +877,7 @@ def test_configure_fills_only_missing_fields(tmp_path):
                 "github_username": "existing-user",
                 "open": "existing-open",
                 "analysis_viewer": {
-                    "command": "workdash markdownview",
+                    "command": "workdash mdview",
                     "format": "markdown",
                     "needs_pane": True,
                 },
@@ -926,7 +926,7 @@ def test_configure_reprompts_for_a_malformed_todo_repository(tmp_path):
                 "github_username": "octocat",
                 "open": "xdg-open",
                 "analysis_viewer": {
-                    "command": "workdash markdownview",
+                    "command": "workdash mdview",
                     "format": "markdown",
                     "needs_pane": True,
                 },
@@ -971,7 +971,7 @@ def test_configure_preserves_existing_repositories(tmp_path):
                 "github_username": "octocat",
                 "open": "xdg-open",
                 "analysis_viewer": {
-                    "command": "workdash markdownview",
+                    "command": "workdash mdview",
                     "format": "markdown",
                     "needs_pane": True,
                 },
@@ -1007,7 +1007,7 @@ def test_configure_tells_where_to_edit_agents_even_when_agents_are_configured(tm
                 "github_username": "octocat",
                 "open": "xdg-open",
                 "analysis_viewer": {
-                    "command": "workdash markdownview",
+                    "command": "workdash mdview",
                     "format": "markdown",
                     "needs_pane": True,
                 },
@@ -1075,7 +1075,7 @@ def test_configure_redownloads_zellij_when_no_global_binary_exists(tmp_path):
                 "github_username": "octocat",
                 "open": "xdg-open",
                 "analysis_viewer": {
-                    "command": "workdash markdownview",
+                    "command": "workdash mdview",
                     "format": "markdown",
                     "needs_pane": True,
                 },
@@ -1152,7 +1152,7 @@ def test_configure_redownloads_gh_when_no_global_binary_exists(tmp_path):
                 "github_username": "octocat",
                 "open": "xdg-open",
                 "analysis_viewer": {
-                    "command": "workdash markdownview",
+                    "command": "workdash mdview",
                     "format": "markdown",
                     "needs_pane": True,
                 },

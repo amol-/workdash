@@ -589,12 +589,10 @@ def configure(
         or analysis_viewer.get("format") not in ("markdown", "html")
         or not isinstance(analysis_viewer.get("needs_pane"), bool)
     ):
-        command = (
-            input_fn("Analysis viewer [workdash markdownview]: ").strip() or "workdash markdownview"
-        )
+        command = input_fn("Analysis viewer [workdash mdview]: ").strip() or "workdash mdview"
         while not _is_configured_command(command):
             command = input_fn("Analysis viewer command (required): ").strip()
-        if command == "workdash markdownview":
+        if command == "workdash mdview":
             analysis_viewer = {"command": command, "format": "markdown", "needs_pane": True}
         else:
             fmt = input_fn("Analysis format (markdown/html): ").strip().lower()

@@ -64,7 +64,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "terminal",
     }:
         return _run_server_backed_command(commands, options)
-    if options.command == "markdownview":
+    if options.command == "mdview":
         from .markdownview import run_markdownview
 
         return run_markdownview(options.target)
@@ -936,8 +936,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         default=argparse.SUPPRESS,
         help="Emit machine-readable JSON.",
     )
-    markdownview_parser = subparsers.add_parser("markdownview", help="View a Markdown document.")
-    markdownview_parser.add_argument("target", metavar="PATH")
+    mdview_parser = subparsers.add_parser("mdview", help="View a Markdown document.")
+    mdview_parser.add_argument("target", metavar="PATH")
     branchdiff_parser = subparsers.add_parser(
         "branchdiff",
         help="Show side-by-side diff of current branch vs upstream.",

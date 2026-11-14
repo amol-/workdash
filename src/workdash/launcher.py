@@ -86,7 +86,7 @@ def _run_browser_open(
                 f"Failed to open {kind} via {command_name}: viewer requires an active Zellij session."
             )
         try:
-            if command_tokens == ["workdash", "markdownview"]:
+            if command_tokens == ["workdash", "mdview"]:
                 executable = shutil.which(command_tokens[0])
                 if executable:
                     command_tokens[0] = os.path.abspath(executable)

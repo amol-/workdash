@@ -14,6 +14,7 @@ Feature: First-time configuration
     - The configuration lives at ~/.config/workdash/config.json.
     - Required configuration fields are the GitHub username, open command, at least one repository selector, the work directory, the todo repository, and at least one agent.
     - Every required field must be present for the system to start; the wizard backfills missing required fields, using a default when one exists.
+    - The analysis viewer is required; the wizard defaults to `workdash mdview` for Markdown in a terminal pane.
     - When the open command is missing, malformed, or its executable is unavailable, the wizard prompts until a valid executable command is supplied, allowing arguments and explicit executable paths.
     - The wizard suggests only an available platform opener: `xdg-open` on Linux or `open` on macOS, explicitly explaining that Enter accepts it. Without a suggestion, empty input is rejected.
     - For a missing or invalid viewer terminal choice, the wizard asks "Does the viewer require its own terminal window? [y/N]", defaulting to No and preserving explicit boolean choices.
@@ -198,6 +199,14 @@ Feature: First-time configuration
     When the user runs the system with "--configure"
     Then the system writes default values for configurable fields
     And the system prompts again for the GitHub username
+
+  @id:F-SETUP-CONFIGURE-S022
+  Scenario: Repair an existing configuration missing its analysis viewer
+    Given the user has an existing configuration missing the analysis viewer
+    When the user starts Workdash and then runs the configuration wizard
+    Then startup directs the user to run --configure
+    And the wizard asks for an analysis viewer and saves the default
+    And the other configuration settings are preserved
 
   @id:F-SETUP-CONFIGURE-S020
   Scenario: Accept the default analysis viewer
