@@ -2797,3 +2797,81 @@ def _container_title_style(work_items: list[WorkItem]) -> None:
         assert not isinstance(pull, Text) or pull.style != "bold cyan"
 
     run_app(work_items=work_items, interactions=interactions)
+
+
+@given("the dashboard contains a parent issue and a leaf issue being worked on by autodispatch")
+def _autodispatch_rows(work_items: list[WorkItem]) -> None:
+    parent = make_work_item(number=1, title="Parent")
+    parent.has_sub_issues = True
+    work_items.extend([parent, make_work_item(number=2, title="Leaf")])
+    work_items.extend(make_work_item(number=n, title=f"Other {n}") for n in range(3, 53))
+
+
+@when("autodispatch stops working on the leaf issue after its title changes")
+def _autodispatch_stops(work_items: list[WorkItem], scenario_state: dict[str, Any]) -> None:
+    from dataclasses import replace
+    from unittest.mock import MagicMock
+
+    backend = MagicMock()
+    updated = replace(work_items[1], title="Finished leaf", state="CLOSED")
+    backend.github_client.fetch_item.return_value = updated
+    backend.github_client.fetch_item_by_url.return_value = None
+    session = WorkdashSession(
+        config=api_config(Path("/tmp")),
+        backend=backend,
+        work_items=work_items,
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    session.prepare_autodispatch = MagicMock()
+    session.dispatch_once = MagicMock(
+        return_value={
+            "status": "launched",
+            "item_id": "owner/repo#ISSUE-2",
+            "pane_id": "terminal_1",
+            "session": "test",
+        }
+    )
+
+    async def interactions(app, pilot):
+        entry = session.start_autodispatch(scope="owner/repo#ISSUE-1")
+        table = app.query_one("#work-items", DataTable)
+        for _ in range(150):
+            await pilot.pause(0.02)
+            if "magenta" in str(getattr(table.get_row("issue:owner/repo#2")[2], "style", "")):
+                break
+        assert table.get_row("issue:owner/repo#1")[2].style == "bold cyan"
+        assert "magenta" in table.get_row("issue:owner/repo#2")[2].style
+        table.move_cursor(row=35)
+        await pilot.pause()
+        position = table.scroll_offset
+        selected = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+        assert position.y > 0
+        session.stop_autodispatch(str(entry["id"]))
+        for _ in range(150):
+            await pilot.pause(0.02)
+            if session.work_items[1].title == "Finished leaf":
+                break
+        row = table.get_row("issue:owner/repo#2")
+        scenario_state["updated"] = (
+            session.work_items[1].state == "CLOSED"
+            and "Finished leaf" in str(row[2])
+            and "closed" in str(row[2]).lower()
+            and "magenta" not in str(row[2].style)
+        )
+        scenario_state["selection_preserved"] = (
+            table.coordinate_to_cell_key(table.cursor_coordinate).row_key == selected
+            and table.scroll_offset == position
+        )
+
+    run_app(work_items=work_items, interactions=interactions, session=session)
+
+
+@then("the leaf issue shows its updated title without the working highlight")
+def _autodispatch_updated(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["updated"]
+
+
+@then("the selected row and scroll position remain unchanged")
+def _autodispatch_selection_preserved(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["selection_preserved"]

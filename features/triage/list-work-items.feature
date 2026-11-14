@@ -19,13 +19,22 @@ Feature: List work items
     - An authored pull request's Type column carries a second one-character symbol for its review state, independent of the CI symbol: a green checkmark when the review is approved, a red cross when changes are requested, a yellow question mark when a reviewer is requested but has not yet reviewed, a blue question mark when a reviewer left review comments nobody has resolved yet without approving or requesting changes, and a blank when neither applies. Approval and requested changes win over unresolved comments.
     - The Repo column is capped at 15 characters, leaving the title more room. A longer repository is truncated on its left so the repository name itself stays readable, and the leading character is replaced with an ellipsis to show the owner was cut.
     - Issue titles with native sub-issues are visually distinguished, whether the sub-issues are open or closed; leaf issues and pull requests retain their usual style. This also applies to filtered and newly included items. If sub-issue information is unavailable, issues remain listed with their usual title style.
-    - Entries are sorted by last update, most recently updated first.
+    - The current issue of each running autodispatch session has a distinct title color, taking precedence over the parent-issue color; if its row is absent, its displayed linked pull requests have that color instead. The session scope alone is not highlighted.
+    - When autodispatch moves on or stops, the affected item or all its displayed linked pull requests, including those in another repository, show updated details without reordering the list, changing the selected item or scroll position even when the selected item is off screen, or making the terminal unresponsive. Previous analysis is no longer offered if the item has changed. If GitHub is temporarily unavailable, the update is retried. An active search shows or hides the item according to its updated details; if the selected item no longer matches, another matching row is selected. New pull requests appear on manual refresh.
+    - Entries are sorted by last update, most recently updated first, when the list is loaded or manually refreshed.
     - The same GitHub issue or pull request never appears twice in the list.
     - When the same item qualifies for multiple sources, the strongest relationship wins in this order: authored pull request, then REVIEW pull request, then assigned issue, then plain tracked item.
     - When GitHub does not return a repository or item while loading a specific work source, either because further repository authorization is required or because GitHub can no longer resolve it, the system warns the user, skips that inaccessible repository or item, and keeps loading other work. This includes an inaccessible repository found while searching authored pull requests across repositories.
     - When no work items match, the system reports that no work items were found.
     - Scrolling the TUI list keeps each visual row tied to the same GitHub issue or pull request; included items may show a "+" type suffix but must not create stale, duplicate, or empty visual rows.
     - The dashboard is keyboard-driven: it never captures mouse input, so mouse behavior (text selection, wheel scrolling) stays with the terminal.
+
+  @id:F-TRIAGE-LIST-S011
+  Scenario: Autodispatch highlights its current issue and updates it when work stops
+    Given the dashboard contains a parent issue and a leaf issue being worked on by autodispatch
+    When autodispatch stops working on the leaf issue after its title changes
+    Then the leaf issue shows its updated title without the working highlight
+    And the selected row and scroll position remain unchanged
 
   @id:F-TRIAGE-LIST-S010
   Scenario: Issues with sub-issues stand out in the dashboard

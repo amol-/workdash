@@ -192,6 +192,7 @@ class WorkdashBackend:
                 progress_callback=report_progress,
             )
             for item in pull_request_items:
+                item.linked_issues = tuple(linked_issues.get((item.repo, item.number), []))
                 # Only an issue in the pull request's own repository can name the
                 # pull request's worktree, so a foreign closing issue is not one
                 # of its closing issue numbers even though it is still hidden below.

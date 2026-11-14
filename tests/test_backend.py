@@ -566,6 +566,7 @@ def test_load_items_hides_every_issue_a_pull_request_closes(
     assert {(item.repo, item.number) for item in work_items} == expected_visible
     pull_request = next(item for item in work_items if item.item_type == WorkItemType.PR)
     assert pull_request.closing_issue_numbers == expected_closing_issue_numbers
+    assert pull_request.linked_issues == tuple(closing_issues)
 
 
 def test_load_items_hides_an_included_issue_that_a_listed_pull_request_closes(

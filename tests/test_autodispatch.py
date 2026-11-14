@@ -114,6 +114,7 @@ def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
     thread = session._autodispatch[session_id].thread
     thread.join(timeout=1)
     assert not thread.is_alive()
+    assert session.take_completed_autodispatch_items() == {"owner/repo#ISSUE-1"}
     assert panes == [{"id": 1, "title": "code_test", "exited": False}]
     close_pane.assert_not_called()
 
@@ -944,6 +945,81 @@ def test_autodispatch_reviews_in_its_group(monkeypatch):
     assert entry.status == "finished"
     # The pull request review and the retry on the issue both stay in the group.
     assert reviews == [("owner/repo#PR-2", "epic"), ("owner/repo#ISSUE-1", "epic")]
+
+
+def test_stopping_during_dispatch_queues_launched_item_for_refresh(monkeypatch):
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    entered, release = threading.Event(), threading.Event()
+
+    def dispatch(**kwargs):
+        entered.set()
+        assert release.wait(3)
+        return {"status": "launched", "item_id": "owner/repo#ISSUE-1", "pane_id": "terminal_1"}
+
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    started = session.start_autodispatch(scope="owner/repo")
+    entry = session._autodispatch[started["id"]]
+    try:
+        assert entered.wait(3)
+        session.stop_autodispatch(started["id"])
+        assert session.take_completed_autodispatch_items() == set()
+    finally:
+        release.set()
+        entry.thread.join(timeout=3)
+    assert not entry.thread.is_alive()
+    assert entry.status == "stopped"
+    assert session.take_completed_autodispatch_items() == {"owner/repo#ISSUE-1"}
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_stopping_during_review_queues_refresh_after_review_ends(monkeypatch, fails):
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    dispatch = MagicMock(
+        return_value={
+            "status": "launched",
+            "item_id": "owner/repo#ISSUE-1",
+            "pane_id": "terminal_1",
+            "session": "workdash",
+        }
+    )
+    entered, release = threading.Event(), threading.Event()
+
+    def review(**kwargs):
+        entered.set()
+        assert release.wait(3)
+        if fails:
+            raise RuntimeError("review failed")
+        return {"status": "started"}
+
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    monkeypatch.setattr(session, "review", review)
+    monkeypatch.setattr("workdash.launcher.zellij", MagicMock(load_zellij_panes=lambda _: []))
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.001)
+    started = session.start_autodispatch(scope="owner/repo")
+    entry = session._autodispatch[started["id"]]
+    try:
+        assert entered.wait(3)
+        session.stop_autodispatch(started["id"])
+        assert session.take_completed_autodispatch_items() == {"owner/repo#ISSUE-1"}
+    finally:
+        release.set()
+        entry.thread.join(timeout=3)
+    assert not entry.thread.is_alive()
+    assert session.take_completed_autodispatch_items() == {"owner/repo#ISSUE-1"}
+    assert entry.status == "stopped"
+    assert dispatch.call_count == 1
 
 
 def test_autodispatch_fails_on_review_error(monkeypatch):

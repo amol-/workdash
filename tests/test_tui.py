@@ -515,6 +515,9 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
         def autodispatch_sessions(self):
             return []
 
+        def take_completed_autodispatch_items(self):
+            return set()
+
     session = Session()
     app = WorkdashApp(
         work_items=[initial_item],
@@ -2091,11 +2094,837 @@ def test_refresh_renders_sub_issue_parents_from_github(monkeypatch, tmp_path) ->
                 and parent[2].style == "bold cyan"
             )
             assert str(leaf[0]).endswith("IS 41") and str(leaf[1]) == "beta/two"
-            assert str(leaf[2]).endswith("Leaf") and isinstance(leaf[2], str)
+            assert str(leaf[2]).endswith("Leaf") and not leaf[2].style
             assert (
                 str(pr[0]).endswith("VR 42")
                 and str(pr[2]).endswith("Pull request")
-                and isinstance(pr[2], str)
+                and not pr[2].style
             )
 
     asyncio.run(run())
+
+
+def test_autodispatch_refresh_coalesces_transitions_without_blocking() -> None:
+    from dataclasses import replace
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    first = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=1,
+        title="First",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/issues/1",
+        has_sub_issues=True,
+    )
+    second = replace(first, number=2, title="Second", has_sub_issues=False)
+    started, release = threading.Event(), threading.Event()
+    backend = MagicMock()
+
+    def fetch(repo, number, **kwargs):
+        if number == 1:
+            started.set()
+            assert release.wait(5)
+            return replace(first, title="Finished")
+        return replace(second, title="Also finished")
+
+    backend.github_client.fetch_item.side_effect = fetch
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=[first, second],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    entry = {
+        "id": "s",
+        "status": "running",
+        "scope": "owner/repo#ISSUE-2",
+        "current_item": "owner/repo#ISSUE-1",
+        "selected_group": None,
+        "stage": "developing",
+        "launch_reason": None,
+        "iteration": 1,
+        "elapsed_seconds": 0,
+        "error": None,
+    }
+    session.autodispatch_sessions = MagicMock(return_value=[entry])
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test() as pilot:
+            table = app.query_one("#work-items", DataTable)
+            assert table.get_row("issue:owner/repo#1")[2].style == "bold magenta"
+            assert table.get_row("issue:owner/repo#2")[2].style == "bold"
+            session.completed_autodispatch_item(entry["current_item"])
+            entry["current_item"] = "owner/repo#ISSUE-2"
+            app._update_autodispatch_progress()
+            for _ in range(100):
+                await pilot.pause(0.01)
+                if started.is_set():
+                    break
+            assert started.is_set()
+            await pilot.press("down")
+            assert table.cursor_row == 1
+            assert table.get_row("issue:owner/repo#1")[2].style == "bold cyan"
+            assert table.get_row("issue:owner/repo#2")[2].style == "bold magenta"
+            session.completed_autodispatch_item(entry["current_item"])
+            entry["status"] = "stopped"
+            app._update_autodispatch_progress()
+            release.set()
+            for _ in range(150):
+                await pilot.pause(0.02)
+                if str(table.get_row("issue:owner/repo#2")[2]) == "Also finished":
+                    break
+            assert str(table.get_row("issue:owner/repo#1")[2]) == "Finished"
+            assert str(table.get_row("issue:owner/repo#2")[2]) == "Also finished"
+            assert table.cursor_row == 1
+
+    try:
+        asyncio.run(run())
+    finally:
+        release.set()
+
+
+def test_autodispatch_refresh_retries_after_failure_without_blocking() -> None:
+    from dataclasses import replace
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=1,
+        title="Before",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/issues/1",
+    )
+    backend = MagicMock()
+    backend.github_client.fetch_item.side_effect = [
+        RuntimeError("unavailable"),
+        replace(item, title="After"),
+    ]
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=[item, replace(item, number=2, title="Other")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    session.autodispatch_sessions = MagicMock(return_value=[])
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test() as pilot:
+            original_set_timer = app.set_timer
+            delays = []
+
+            def shorten_retry(delay, callback):
+                delays.append(delay)
+                return original_set_timer(0.1, callback)
+
+            app.set_timer = shorten_retry
+            session.completed_autodispatch_item("owner/repo#ISSUE-1")
+            app._update_autodispatch_progress()
+            for _ in range(100):
+                await pilot.pause(0.01)
+                if backend.github_client.fetch_item.call_count:
+                    break
+            assert backend.github_client.fetch_item.call_count == 1
+            assert delays == [30]
+            await pilot.press("down")
+            table = app.query_one("#work-items", DataTable)
+            assert table.cursor_row == 1
+            for _ in range(150):
+                await pilot.pause(0.02)
+                if str(table.get_row("issue:owner/repo#1")[2]) == "After":
+                    break
+            assert str(table.get_row("issue:owner/repo#1")[2]) == "After"
+            assert backend.github_client.fetch_item.call_count == 2
+
+    asyncio.run(run())
+
+
+def test_autodispatch_updates_known_linked_pull_request_status() -> None:
+    from dataclasses import replace
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    pr = WorkItem(
+        kind=WorkItemKind.AUTHORED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=9,
+        title="Pull request",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/pull/9",
+        closing_issue_numbers=(1,),
+        ci_state="SUCCESS",
+    )
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = replace(pr, ci_state="FAILURE")
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=[pr],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test() as pilot:
+            table = app.query_one("#work-items", DataTable)
+            assert str(table.get_row("pr:owner/repo#9")[0]).startswith("✓")
+            session.completed_autodispatch_item("owner/repo#ISSUE-1")
+            app._update_autodispatch_progress()
+            for _ in range(100):
+                await pilot.pause(0.02)
+                if str(table.get_row("pr:owner/repo#9")[0]).startswith("✗"):
+                    break
+            assert str(table.get_row("pr:owner/repo#9")[0]).startswith("✗")
+            backend.load_items.assert_not_called()
+            assert backend.github_client.fetch_item.call_args.args[:2] == ("owner/repo", 9)
+
+    asyncio.run(run())
+
+
+def test_autodispatch_refresh_preserves_scroll_away_from_selection() -> None:
+    from dataclasses import replace
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    items = [
+        WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE,
+            item_type=WorkItemType.ISSUE,
+            repo="owner/repo",
+            number=n,
+            title=f"Issue {n}",
+            created_at=now,
+            updated_at=now,
+            url=f"https://github.com/owner/repo/issues/{n}",
+        )
+        for n in range(1, 51)
+    ]
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = replace(items[0], title="Updated issue")
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=items,
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test(size=(80, 12)) as pilot:
+            table = app.query_one("#work-items", DataTable)
+            await pilot.pause()
+            selected = app._selected_item()
+            table.scroll_to(y=25, animate=False, force=True)
+            await pilot.pause()
+            assert table.scroll_y == 25
+            session.completed_autodispatch_item("owner/repo#ISSUE-1")
+            app._pending_autodispatch.add("owner/repo#ISSUE-1")
+            await app._refresh_autodispatch_items()
+            await pilot.pause()
+            assert str(table.get_row("issue:owner/repo#1")[2]) == "Updated issue"
+            assert app._selected_item().number == selected.number
+            assert table.scroll_y == 25
+
+    asyncio.run(run())
+
+
+def test_autodispatch_refresh_updates_search_membership() -> None:
+    from dataclasses import replace
+    from datetime import timedelta
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    items = [
+        WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE,
+            item_type=WorkItemType.ISSUE,
+            repo="owner/repo",
+            number=n,
+            title=f"Match {n}" if n != 21 else "Hidden",
+            created_at=now,
+            updated_at=now,
+            url=f"https://github.com/owner/repo/issues/{n}",
+        )
+        for n in range(1, 22)
+    ]
+    backend = MagicMock()
+    backend.github_client.fetch_item.side_effect = lambda repo, number, **kwargs: replace(
+        items[number - 1],
+        title="Hidden" if number == 1 else "Match added",
+        updated_at=now + timedelta(days=1) if number == 21 else now,
+    )
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=items,
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test(size=(80, 12)) as pilot:
+            await pilot.press("/", "m", "a", "t", "c", "h", "enter")
+            await pilot.pause()
+            table = app.query_one("#work-items", DataTable)
+            table.move_cursor(row=10)
+            await pilot.pause()
+            selected = app._selected_item()
+            scroll = table.scroll_y
+            assert scroll > 0
+            for number in (1, 21):
+                session.completed_autodispatch_item(f"owner/repo#ISSUE-{number}")
+                app._pending_autodispatch.add(f"owner/repo#ISSUE-{number}")
+                await app._refresh_autodispatch_items()
+                await pilot.pause()
+                assert app._selected_item() == selected
+                assert table.scroll_y == scroll
+            assert table.row_count == 20
+            assert all(str(table.get_row_at(i)[2]).startswith("Match") for i in range(20))
+            assert str(table.get_row_at(19)[2]) == "Match added"
+            await pilot.press("/")
+            assert table.row_count == 21
+            assert str(table.get_row("issue:owner/repo#1")[2]) == "Hidden"
+
+    asyncio.run(run())
+
+
+def test_autodispatch_refresh_updates_all_displayed_linked_pull_requests() -> None:
+    from dataclasses import replace
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    items = [
+        WorkItem(
+            kind=WorkItemKind.TRACKED_PR,
+            item_type=WorkItemType.PR,
+            repo="owner/repo",
+            number=n,
+            title=f"Old {n}",
+            created_at=now,
+            updated_at=now,
+            url=f"https://github.com/owner/repo/pull/{n}",
+            closing_issue_numbers=(1,),
+        )
+        for n in (2, 3)
+    ]
+    backend = MagicMock()
+    backend.github_client.fetch_item.side_effect = lambda repo, number, **kwargs: replace(
+        items[number - 2], title=f"Updated {number}"
+    )
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=items,
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test(size=(80, 12)) as pilot:
+            app._pending_autodispatch.add("owner/repo#ISSUE-1")
+            await app._refresh_autodispatch_items()
+            await pilot.pause()
+            table = app.query_one("#work-items", DataTable)
+            assert {str(table.get_row_at(i)[2]) for i in range(2)} == {"Updated 2", "Updated 3"}
+            assert {item["title"] for item in session.list_items()["items"]} == {
+                "Updated 2",
+                "Updated 3",
+            }
+
+    asyncio.run(run())
+
+
+def test_autodispatch_refresh_preserves_order_selection_and_scroll() -> None:
+    from dataclasses import replace
+    from datetime import timedelta
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    items = [
+        WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE,
+            item_type=WorkItemType.ISSUE,
+            repo="owner/repo",
+            number=n,
+            title=f"Issue {n}",
+            created_at=now,
+            updated_at=now - timedelta(days=n),
+            url=f"https://github.com/owner/repo/issues/{n}",
+        )
+        for n in range(1, 21)
+    ]
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = replace(items[-1], updated_at=now)
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=items,
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test(size=(80, 12)) as pilot:
+            table = app.query_one("#work-items", DataTable)
+            table.move_cursor(row=10)
+            await pilot.pause()
+            table.move_cursor(row=9)
+            await pilot.pause()
+            selected = app._selected_item()
+            scroll = table.scroll_y
+            assert scroll > 0
+            session.completed_autodispatch_item("owner/repo#ISSUE-20")
+            app._pending_autodispatch.add("owner/repo#ISSUE-20")
+            await app._refresh_autodispatch_items()
+            await pilot.pause()
+            assert [str(table.get_row_at(i)[2]) for i in range(20)] == [
+                f"Issue {n}" for n in range(1, 21)
+            ]
+            assert app._selected_item() == selected
+            assert table.scroll_y == scroll
+            app.refresh_from_session()
+            assert str(table.get_row_at(0)[2]) == "Issue 20"
+
+    asyncio.run(run())
+
+
+def test_autodispatch_refresh_preserves_scrolled_selection_when_timestamp_changes() -> None:
+    from dataclasses import replace
+    from datetime import timedelta
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    items = [
+        WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE,
+            item_type=WorkItemType.ISSUE,
+            repo="owner/repo",
+            number=n,
+            title=f"Issue {n}",
+            created_at=now,
+            updated_at=now - timedelta(days=n),
+            url=f"https://github.com/owner/repo/issues/{n}",
+        )
+        for n in range(1, 21)
+    ]
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = replace(items[-1], updated_at=now)
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=items,
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test(size=(80, 12)) as pilot:
+            table = app.query_one("#work-items", DataTable)
+            table.move_cursor(row=19)
+            await pilot.pause()
+            scroll = table.scroll_y
+            assert scroll > 0
+            session.completed_autodispatch_item("owner/repo#ISSUE-20")
+            app._update_autodispatch_progress()
+            for _ in range(100):
+                await pilot.pause(0.02)
+                if app._selected_item().updated_at == now:
+                    break
+            assert app._selected_item().number == 20
+            assert app._selected_item().updated_at == now
+            assert table.cursor_row == 19
+            assert table.scroll_y == scroll
+
+    asyncio.run(run())
+
+
+def test_autodispatch_lifecycle_refreshes_completed_issue_and_highlights_next(monkeypatch) -> None:
+    from dataclasses import replace
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    first = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=1,
+        title="First",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/issues/1",
+    )
+    second = replace(first, number=2, title="Second", url="https://github.com/owner/repo/issues/2")
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = replace(first, state="CLOSED")
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=[first, second],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    session.prepare_autodispatch = MagicMock()
+    session.dispatch_once = MagicMock(
+        side_effect=[
+            {
+                "status": "launched",
+                "item_id": "owner/repo#ISSUE-1",
+                "pane_id": "terminal_1",
+                "session": "workdash",
+            },
+            {
+                "status": "launched",
+                "item_id": "owner/repo#ISSUE-2",
+                "pane_id": "terminal_2",
+                "session": "workdash",
+            },
+        ]
+    )
+    session.review = MagicMock(return_value={"status": "nothing_to_review"})
+    finished = threading.Event()
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(
+        "workdash.launcher.zellij.load_zellij_panes",
+        lambda _: [{"id": 2} if finished.is_set() else {"id": 1}],
+    )
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test() as pilot:
+            session.start_autodispatch(scope="owner/repo", agent="claude")
+            for _ in range(100):
+                await pilot.pause(0.02)
+                if table_style(1) == "bold magenta":
+                    break
+            assert table_style(1) == "bold magenta"
+            finished.set()
+            for _ in range(150):
+                await pilot.pause(0.02)
+                table = app.query_one("#work-items", DataTable)
+                if (
+                    str(table.get_row("issue:owner/repo#1")[2]) == "First (closed)"
+                    and table_style(2) == "bold magenta"
+                ):
+                    break
+            assert str(table.get_row("issue:owner/repo#1")[2]) == "First (closed)"
+            assert table_style(1) == "bold"
+            assert table_style(2) == "bold magenta"
+
+    def table_style(number):
+        return (
+            app.query_one("#work-items", DataTable).get_row(f"issue:owner/repo#{number}")[2].style
+        )
+
+    try:
+        asyncio.run(run())
+    finally:
+        for entry in session._autodispatch.values():
+            entry.stop()
+            entry.thread.join(timeout=2)
+
+
+def test_autodispatch_highlights_linked_prs_when_issue_row_is_absent() -> None:
+    from dataclasses import replace
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    pr = WorkItem(
+        kind=WorkItemKind.AUTHORED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=9,
+        title="Same repo",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/pull/9",
+        closing_issue_numbers=(1,),
+    )
+    cross = replace(
+        pr,
+        repo="other/repo",
+        number=10,
+        title="Cross repo",
+        closing_issue_numbers=(),
+        linked_issues=(("OWNER/repo", 1),),
+    )
+    scope = replace(pr, number=11, title="Scope", closing_issue_numbers=(2,))
+    issue = replace(
+        pr,
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        number=1,
+        title="Issue",
+        closing_issue_numbers=(),
+    )
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=MagicMock(),
+        work_items=[pr, cross, scope],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    entry = {
+        "id": "s",
+        "status": "running",
+        "scope": "owner/repo#ISSUE-2",
+        "current_item": "owner/repo#ISSUE-1",
+        "selected_group": None,
+        "stage": "developing",
+        "launch_reason": None,
+        "iteration": 1,
+        "elapsed_seconds": 0,
+        "error": None,
+    }
+    session.autodispatch_sessions = MagicMock(return_value=[entry])
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test():
+            table = app.query_one("#work-items", DataTable)
+            assert table.get_row("pr:owner/repo#9")[2].style == "bold magenta"
+            assert table.get_row("pr:other/repo#10")[2].style == "bold magenta"
+            assert table.get_row("pr:owner/repo#11")[2].style == "bold"
+            session.work_items.append(issue)
+            app.refresh_from_session()
+            assert table.get_row("issue:owner/repo#1")[2].style == "bold magenta"
+            assert table.get_row("pr:owner/repo#9")[2].style == "bold"
+            session.work_items.remove(issue)
+            app.refresh_from_session()
+            entry["status"] = "stopped"
+            app._update_autodispatch_progress()
+            assert table.get_row("pr:owner/repo#9")[2].style == "bold"
+            assert table.get_row("pr:other/repo#10")[2].style == "bold"
+
+    asyncio.run(run())
+
+
+def test_autodispatch_retries_all_pr_rows_after_fetch_failure() -> None:
+    from dataclasses import replace
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    prs = [
+        WorkItem(
+            kind=WorkItemKind.TRACKED_PR,
+            item_type=WorkItemType.PR,
+            repo="owner/repo",
+            number=n,
+            title=f"Old {n}",
+            created_at=now,
+            updated_at=now,
+            url=f"https://github.com/owner/repo/pull/{n}",
+            closing_issue_numbers=(1,),
+        )
+        for n in (2, 3)
+    ]
+    backend = MagicMock()
+    backend.github_client.fetch_item.side_effect = [
+        replace(prs[0], title="New 2"),
+        RuntimeError("unavailable"),
+        replace(prs[0], title="New 2"),
+        replace(prs[1], title="New 3"),
+    ]
+    backend.github_client.fetch_linked_issues_for_pull_request.return_value = []
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=prs,
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test() as pilot:
+            original_set_timer = app.set_timer
+            delays = []
+
+            def shorten_retry(delay, callback):
+                delays.append(delay)
+                return original_set_timer(0.5, callback)
+
+            app.set_timer = shorten_retry
+            table = app.query_one("#work-items", DataTable)
+            session.completed_autodispatch_item("owner/repo#ISSUE-1")
+            app._update_autodispatch_progress()
+            for _ in range(100):
+                await pilot.pause(0.01)
+                if delays:
+                    break
+            assert delays == [30]
+            assert [pr.title for pr in session.work_items] == ["Old 2", "Old 3"]
+            assert [str(table.get_row(f"pr:owner/repo#{n}")[2]) for n in (2, 3)] == [
+                "Old 2",
+                "Old 3",
+            ]
+            for _ in range(150):
+                await pilot.pause(0.02)
+                if str(table.get_row("pr:owner/repo#3")[2]) == "New 3":
+                    break
+            assert [pr.title for pr in session.work_items] == ["New 2", "New 3"]
+            assert [str(table.get_row(f"pr:owner/repo#{n}")[2]) for n in (2, 3)] == [
+                "New 2",
+                "New 3",
+            ]
+
+    asyncio.run(run())
+
+
+def test_autodispatch_refresh_removes_selected_nonmatching_search_result() -> None:
+    from dataclasses import replace
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/repo",
+        number=1,
+        title="Match first",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/repo/issues/1",
+    )
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = replace(item, title="Changed")
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=[item, replace(item, number=2, title="Match second")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test() as pilot:
+            await pilot.press("/", "m", "a", "t", "c", "h", "enter")
+            assert app._selected_item().number == 1
+            session.completed_autodispatch_item("owner/repo#ISSUE-1")
+            app._update_autodispatch_progress()
+            for _ in range(100):
+                await pilot.pause(0.02)
+                if app.query_one("#work-items", DataTable).row_count == 1:
+                    break
+            table = app.query_one("#work-items", DataTable)
+            assert table.row_count == 1
+            assert app._selected_item().number == 2
+            assert str(table.get_row_at(0)[2]) == "Match second"
+
+    asyncio.run(run())
+
+
+def test_loaded_linked_pr_tracks_autodispatch_stop() -> None:
+    from dataclasses import replace
+    from datetime import timedelta
+
+    from workdash.backend import WorkdashBackend
+
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    github = MagicMock()
+    raw = {
+        "repo": "owner/repo",
+        "number": 1,
+        "title": "Issue",
+        "url": "https://github.com/owner/repo/issues/1",
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+    }
+    github.list_open_assigned_issues.return_value = [
+        {
+            **raw,
+            "number": n,
+            "title": f"Issue {n}",
+            "updated_at": (now - timedelta(days=n)).isoformat(),
+        }
+        for n in range(1, 22)
+    ]
+    github.list_open_authored_prs.return_value = [
+        {
+            **raw,
+            "number": 99,
+            "title": "Linked PR",
+            "url": "https://github.com/owner/repo/pull/99",
+            "ci_state": "SUCCESS",
+            "review_decision": None,
+            "review_requested": False,
+            "has_unresolved_comments": False,
+        }
+    ]
+    for method in (
+        "list_open_review_requested_prs",
+        "list_open_reviewed_prs",
+        "list_recent_tracked_items",
+        "list_open_todo_issues",
+    ):
+        getattr(github, method).return_value = []
+    github.fetch_linked_issues.return_value = {("owner/repo", 99): [("owner/repo", 1)]}
+    github.fetch_linked_issues_for_pull_request.return_value = [("owner/repo", 1)]
+    cache, store = MagicMock(), MagicMock()
+    cache.load_analysis.return_value = cache.load_analysis_date.return_value = None
+    store.load.return_value = []
+    backend = WorkdashBackend(
+        github_client=github,
+        analysis_cache=cache,
+        included_items_store=store,
+        config=_DEFAULT_TUI_CONFIG,
+    )
+    items, markers = backend.load_items()
+    assert not any(item.item_type == WorkItemType.ISSUE and item.number == 1 for item in items)
+    pr = next(item for item in items if item.item_type == WorkItemType.PR)
+    github.fetch_item.return_value = replace(pr, ci_state="FAILURE")
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=backend,
+        work_items=items,
+        suggestion_markers=markers,
+        zellij_session="workdash",
+    )
+    session.prepare_autodispatch = MagicMock()
+    session.dispatch_once = MagicMock(
+        return_value={
+            "status": "launched",
+            "item_id": "owner/repo#ISSUE-1",
+            "pane_id": "terminal_1",
+            "session": "workdash",
+        }
+    )
+    app = WorkdashApp(session=session, now_utc=now)
+
+    async def run():
+        async with app.run_test(size=(80, 12)) as pilot:
+            entry = session.start_autodispatch(scope="owner/repo", agent="claude")
+            table = app.query_one("#work-items", DataTable)
+            for _ in range(100):
+                await pilot.pause(0.02)
+                if table.get_row("pr:owner/repo#99")[2].style == "bold magenta":
+                    break
+            assert table.get_row("pr:owner/repo#99")[2].style == "bold magenta"
+            assert str(table.get_row("pr:owner/repo#99")[0]).startswith("✓")
+            table.move_cursor(row=10)
+            await pilot.pause()
+            selected, scroll = app._selected_item(), table.scroll_y
+            assert scroll > 0
+            session.stop_autodispatch(str(entry["id"]))
+            for _ in range(100):
+                await pilot.pause(0.02)
+                if str(table.get_row("pr:owner/repo#99")[0]).startswith("✗"):
+                    break
+            assert str(table.get_row("pr:owner/repo#99")[0]).startswith("✗")
+            assert table.get_row("pr:owner/repo#99")[2].style == "bold"
+            assert app._selected_item() == selected
+            assert table.scroll_y == scroll
+
+    try:
+        asyncio.run(run())
+    finally:
+        session.stop_autodispatch_sessions()
+        for entry in session._autodispatch.values():
+            entry.thread.join(timeout=2)

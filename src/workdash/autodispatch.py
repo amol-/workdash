@@ -76,6 +76,7 @@ class _AutodispatchSession:
             if self.status == self.Status.RUNNING:
                 self.status = self.Status.STOPPED
                 self.ended = time.monotonic()
+                self.owner.completed_autodispatch_item(self.current_item)
 
     def run(self) -> None:
         stage = "configuration"
@@ -100,6 +101,7 @@ class _AutodispatchSession:
                 with self.lock:
                     self.iteration += 1
                     self.stage = "checking"
+                    self.owner.completed_autodispatch_item(self.current_item)
                     self.current_item = None
                     self.launch_reason = None
                 stage = "dispatch"
@@ -108,6 +110,8 @@ class _AutodispatchSession:
                 )
                 with self.lock:
                     if self.stop_event.is_set():
+                        if result["status"] == "launched":
+                            self.owner.completed_autodispatch_item(str(result["item_id"]))
                         return
                     if result["status"] == "no_ready_task":
                         logger.info("Session %s finished", self.id)
@@ -156,6 +160,11 @@ class _AutodispatchSession:
                     self.status = self.Status.FAILED
                     self.error = str(error)
                     self.ended = time.monotonic()
+                    self.owner.completed_autodispatch_item(self.current_item)
+        finally:
+            with self.lock:
+                if stage == "review" and self.stop_event.is_set():
+                    self.owner.completed_autodispatch_item(self.current_item)
 
 
 def _format_pane_id(pane_id: object) -> str:

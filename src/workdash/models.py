@@ -49,8 +49,10 @@ class WorkItem:
     review_requested: bool = False
     has_unresolved_comments: bool = False
     closing_issue_numbers: tuple[int, ...] = ()
+    linked_issues: tuple[tuple[str, int], ...] = ()
     has_sub_issues: bool = False
     sub_issue_total: int | None = None
+    state: str = "OPEN"
 
 
 _TYPE_LABELS = {

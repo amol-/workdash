@@ -2257,3 +2257,37 @@ def test_linked_open_pull_request_none_and_replaceable(monkeypatch):
     client.linked_open_pull_request = MagicMock(return_value=("fork/repo", 7))
     assert client.linked_open_pull_request(item) == ("fork/repo", 7)
     client.linked_open_pull_request.assert_called_once_with(item)
+
+
+def test_fetch_item_refreshes_issue_state_and_pull_request_status(monkeypatch):
+    issue = _item_lookup_payload(
+        "owner/repo", {"__typename": "Issue", "state": "CLOSED", "subIssuesSummary": {"total": 0}}
+    )
+    pull = _item_lookup_payload(
+        "owner/repo",
+        {
+            "__typename": "PullRequest",
+            "state": "OPEN",
+            "reviewDecision": "CHANGES_REQUESTED",
+            "reviewRequests": {"totalCount": 0},
+            "reviewThreads": {"nodes": []},
+            "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE"}}}]},
+            "closingIssuesReferences": {"nodes": []},
+        },
+    )
+    for payload in (issue, pull):
+
+        def run(command, **kwargs):
+            query = command[-1]
+            assert "state" in query and "statusCheckRollup" in query and "reviewDecision" in query
+            return _item_lookup_run(payload)(command, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", run)
+        item = GitHubClient().fetch_item(
+            "owner/repo", 5, github_username="TestUser", todo_repository="u/t"
+        )
+        if payload is issue:
+            assert item.state == "CLOSED"
+        else:
+            assert item.ci_state == "FAILURE"
+            assert item.review_decision == "CHANGES_REQUESTED"
