@@ -453,7 +453,7 @@ seconds for its pane to disappear, then synchronously reviews the linked open PR
 
 `workdash info` and `workdash info --json` report sessions, their current task,
 status, elapsed time and any failure. The TUI shows running sessions and the three
-most recently started failed sessions, including failure details, above the work table. Stop a session with
+most recently started failed sessions, including failure details, above the work table. Press Shift+Tab to focus progress and use the arrow keys or End to scroll it; press Tab to return to the work table. Stop a session with
 `workdash autodispatch-stop SESSION_ID`; stopping does not close its agent pane.
 A dispatch already in progress may still finish launching its pane after stopping.
 Pane disappearance is not proof that the work was merged or completed.

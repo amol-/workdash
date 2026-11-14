@@ -732,6 +732,38 @@ def test_tui_limits_old_failures_without_hiding_running_sessions():
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("width", [40, 80])
+def test_tui_short_dashboard_scrolls_progress_and_keeps_table_visible(width):
+    session = _tui_session(_visible_task())
+    session.autodispatch_sessions.return_value = [
+        {
+            "id": str(i),
+            "status": "failed",
+            "scope": f"owner/failure-{i}",
+            "group": None,
+            "current_item": None,
+            "elapsed_seconds": 1,
+            "error": "dispatch failed",
+        }
+        for i in range(3)
+    ]
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test(size=(width, 6)) as pilot:
+            await pilot.pause()
+            assert app.query_one("#work-items", DataTable).region.height >= 2
+            assert any("IS 42" in strip.text for strip in app.screen._compositor.render_strips())
+            assert "owner/failure-0" in app.export_screenshot()
+            assert "owner/failure-2" not in app.export_screenshot()
+            await pilot.press("shift+tab", "end")
+            await pilot.pause()
+            assert "owner/failure-2" in app.export_screenshot()
+            assert any("IS 42" in strip.text for strip in app.screen._compositor.render_strips())
+
+    asyncio.run(exercise())
+
+
 def test_tui_long_failures_leave_room_for_work_items():
     session = _tui_session(_visible_task())
     error = "dispatch failed " + "long error " * 80 + "\nmore details"
@@ -1830,3 +1862,125 @@ def test_snapshot_identifies_targeted_todo_as_scope():
     assert dispatch.snapshot()["scope_is_current_item"] is True
     dispatch.current_item = "owner/other#ISSUE-42"
     assert dispatch.snapshot()["scope_is_current_item"] is False
+
+
+def test_tui_short_pane_keeps_a_work_item_visible_with_progress():
+    items = [_issue_item(i) for i in range(1, 11)]
+    for item in items:
+        item.updated_at = items[0].updated_at
+    session = _tui_session(*items)
+    session.autodispatch_sessions.return_value = [
+        {
+            "id": "running",
+            "status": "running",
+            "scope": "owner/repo",
+            "current_item": None,
+            "selected_group": None,
+            "stage": "checking",
+            "launch_reason": None,
+            "iteration": 1,
+            "elapsed_seconds": 0,
+        },
+        *[
+            {"id": str(i), "status": "failed", "scope": "owner/repo", "error": "failed"}
+            for i in range(3)
+        ],
+    ]
+    opened = []
+    app = WorkdashApp(session=session, open_callback=opened.append)
+
+    async def exercise():
+        async with app.run_test(size=(40, 7)) as pilot:
+            table = app.query_one("#work-items", DataTable)
+            progress = app.query_one("#autodispatch-progress", Static)
+            status = app.query_one("#status-footer", Static)
+            assert progress.region.height > 0
+            assert table.region.height >= 2
+            await pilot.press(*(["down"] * 9))
+            await pilot.pause()
+            rows = [strip.text for strip in app.screen._compositor.render_strips()]
+            assert any("IS 10" in row for row in rows[table.region.y : status.region.y])
+            await pilot.press("o")
+            assert opened[-1].number == 10
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("with_progress", [False, True])
+def test_tui_selected_item_remains_visible_after_resize(with_progress):
+    items = [_issue_item(i) for i in range(1, 41)]
+    for item in items:
+        item.updated_at = items[0].updated_at
+    session = _tui_session(*items)
+    session.autodispatch_sessions.return_value = (
+        [{"id": "1", "status": "failed", "scope": "owner/repo", "error": "failed"}]
+        if with_progress
+        else []
+    )
+    opened = []
+    app = WorkdashApp(session=session, open_callback=opened.append)
+
+    async def exercise():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.press(*(["down"] * 39))
+            await pilot.resize_terminal(80, 10)
+            await pilot.pause()
+            rows = [strip.text for strip in app.screen._compositor.render_strips()]
+            assert any("IS 40" in row for row in rows)
+            await pilot.press("o")
+            assert opened[-1].number == 40
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("size", [(80, 24), (40, 7)])
+def test_tui_scrolling_remains_visible_when_progress_changes(size):
+    items = [_issue_item(i) for i in range(1, 41)]
+    for item in items:
+        item.updated_at = items[0].updated_at
+    session = _tui_session(*items)
+    session.autodispatch_sessions.return_value = []
+    opened = []
+    app = WorkdashApp(session=session, open_callback=opened.append)
+
+    async def exercise():
+        async with app.run_test(size=size) as pilot:
+            table = app.query_one("#work-items", DataTable)
+            progress = app.query_one("#autodispatch-progress", Static)
+            status = app.query_one("#status-footer", Static)
+            footer = app.query_one("#command-footer", Static)
+            await pilot.press(*(["down"] * 39))
+            for entries in (
+                [],
+                [{"id": "1", "status": "failed", "scope": "owner/repo", "error": "failed"}],
+                [],
+            ):
+                session.autodispatch_sessions.return_value = entries
+                app._update_autodispatch_progress()
+                await pilot.pause()
+                assert not entries or progress.region.y == 0
+                assert table.region.bottom <= status.region.y < footer.region.y
+                await pilot.press("o")
+                assert opened[-1].number == 40
+                row_y = (
+                    table.region.y + table._get_row_region(table.cursor_row).y - int(table.scroll_y)
+                )
+                assert table.region.y <= row_y < status.region.y
+                rows = [strip.text for strip in app.screen._compositor.render_strips()]
+                assert any("Failed owner/repo" in row for row in rows) == bool(entries)
+                assert "IS 40" in rows[row_y]
+                for key, numbers in (("up", range(39, 0, -1)), ("down", range(2, 41))):
+                    for number in numbers:
+                        await pilot.press(key)
+                        row_y = (
+                            table.region.y
+                            + table._get_row_region(table.cursor_row).y
+                            - int(table.scroll_y)
+                        )
+                        assert table.region.y <= row_y < status.region.y
+                        rows = [strip.text for strip in app.screen._compositor.render_strips()]
+                        assert f"IS {number} " in rows[row_y]
+                    await pilot.press("o")
+                assert [item.number for item in opened[-2:]] == [1, 40]
+
+    asyncio.run(exercise())
