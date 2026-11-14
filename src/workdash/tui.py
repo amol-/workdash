@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, TypeVar
 
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.screen import ModalScreen
@@ -398,23 +399,36 @@ class SearchDialog(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class WorkItemsTable(DataTable):
+    def on_resize(self, event: events.Resize) -> None:
+        self.call_after_refresh(self.move_cursor)
+        self.call_after_refresh(self.app._reserve_table_space)
+
+    def watch_show_horizontal_scrollbar(self) -> None:
+        self.call_after_refresh(self.app._reserve_table_space)
+
+
 class WorkdashApp(App[None]):
     """Main Textual app shell."""
 
     TITLE = "workdash"
     DEFAULT_CSS = """
-        #autodispatch-progress {
+        #autodispatch-scroll {
             display: none;
+            height: auto;
+        }
+        #autodispatch-progress {
             height: auto;
             padding: 0 1;
         }
+        #work-items {
+            height: 1fr;
+        }
         #status-footer {
-            dock: bottom;
             height: 1;
             padding: 0 1;
         }
         #command-footer {
-            dock: bottom;
             height: 1;
             padding: 0 1;
         }
@@ -434,6 +448,15 @@ class WorkdashApp(App[None]):
         ("w", "capture_todo", "Todo"),
         ("q", "quit_app", "Quit"),
     ]
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._reserve_table_space()
+
+    def _reserve_table_space(self) -> None:
+        table = self.query_one("#work-items", DataTable)
+        self.query_one("#autodispatch-scroll", VerticalScroll).styles.max_height = max(
+            0, self.size.height - 4 - int(table.show_horizontal_scrollbar)
+        )
 
     def __init__(
         self,
@@ -484,12 +507,14 @@ class WorkdashApp(App[None]):
         self._status_message = "Ready."
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="autodispatch-progress", markup=False)
-        yield DataTable(id="work-items")
+        with VerticalScroll(id="autodispatch-scroll"):
+            yield Static("", id="autodispatch-progress", markup=False)
+        yield WorkItemsTable(id="work-items")
         yield Static(self._status_message, id="status-footer", markup=False)
         yield Static(self._command_hint(), id="command-footer")
 
     def on_mount(self) -> None:
+        self.query_one("#work-items", DataTable).focus()
         if self._session is not None:
             self.set_interval(1, self._update_autodispatch_progress)
             self._update_autodispatch_progress()
@@ -513,7 +538,7 @@ class WorkdashApp(App[None]):
             )
         entries = running + failed[-3:]
         widget = self.query_one("#autodispatch-progress", Static)
-        widget.display = bool(entries)
+        self.query_one("#autodispatch-scroll", VerticalScroll).display = bool(entries)
 
         def short(value: str) -> str:
             parsed = parse_github_item_url(value)
@@ -555,9 +580,12 @@ class WorkdashApp(App[None]):
                 )
                 line = f"{entry['selected_group'] or 'automatic'}  {target}  {entry['stage']}{reason}  {entry['iteration']}/{entry['elapsed_seconds']}s"
             text = Text(" ".join(line.splitlines()))
-            text.truncate(max(0, self.size.width - 2), overflow="ellipsis")
+            text.truncate(max(0, self.size.width - 4), overflow="ellipsis")
             rows.append(text)
         widget.update(Text("\n").join(rows))
+        if widget.size.height != len(rows):
+            table = self.query_one("#work-items", DataTable)
+            table.call_after_refresh(table.move_cursor)
 
     def refresh_from_session(self) -> None:
         if self._session is None:
