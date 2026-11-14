@@ -21,7 +21,7 @@ Feature: Generate an analysis
     - Opening a cached analysis also uses the configured analysis viewer without requiring the HTTP server.
     - The analysis URL is passed literally after configured viewer arguments; opening an analysis does not prepare a worktree.
     - Direct analysis viewers continue running until closed by the user without blocking Workdash; an early viewer failure is reported to the user.
-    - Pane-based analysis viewers open fullscreen and close when the viewer exits.
+    - Pane-based analysis viewers open in a full-size floating pane and close when the viewer exits.
     - The built-in Markdown viewer renders Markdown from local paths, file URLs, and HTTP or HTTPS URLs.
     - Activating a link in the built-in Markdown viewer leaves the analysis open; links to headings within the analysis navigate to those headings.
     - The analysis API returns Markdown and HTML URLs based on the validated request host, including hostnames containing underscores and fully qualified DNS names ending in a dot; the CLI reports the Markdown URL.

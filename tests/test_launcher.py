@@ -83,7 +83,7 @@ def test_open_in_browser_uses_configured_command(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.parametrize("session", [None, "workdash-selected"])
-def test_viewer_fullscreens_its_returned_pane_in_current_or_selected_session(monkeypatch, session):
+def test_viewer_opens_full_size_floating_pane_in_current_or_selected_session(monkeypatch, session):
     commands = []
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-current")
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/zellij")
@@ -97,8 +97,24 @@ def test_viewer_fullscreens_its_returned_pane_in_current_or_selected_session(mon
     open_in_browser(url, 'viewer --label "two words"', needs_pane=True, zellij_session=session)
     prefix = ["/usr/bin/zellij", "--session", session or "workdash-current", "action"]
     assert commands == [
-        [*prefix, "new-pane", "--", "viewer", "--label", "two words", url],
-        [*prefix, "toggle-fullscreen", "-p", "terminal_23"],
+        [
+            *prefix,
+            "new-pane",
+            "-f",
+            "-x",
+            "0",
+            "-y",
+            "0",
+            "--width",
+            "100%",
+            "--height",
+            "100%",
+            "--",
+            "viewer",
+            "--label",
+            "two words",
+            url,
+        ],
     ]
 
 
@@ -120,14 +136,25 @@ def test_direct_viewer_does_not_require_zellij(monkeypatch):
     assert len(commands) == 1
 
 
-@pytest.mark.parametrize("failure", ["new-pane", "toggle-fullscreen"])
-def test_viewer_pane_errors_include_command_and_details(monkeypatch, failure):
+def test_viewer_rejects_zero_exit_for_missing_session(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/zellij")
+    run = MagicMock(
+        return_value=subprocess.CompletedProcess(
+            [], 0, stdout="workdash-live [Created 1m ago]\n", stderr="Session not found\n"
+        )
+    )
+    monkeypatch.setattr(subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match="viewer.*Session not found"):
+        open_in_browser("https://example.com", "viewer", needs_pane=True, zellij_session="missing")
+    assert run.call_count == 1
+
+
+def test_viewer_pane_errors_include_command_and_details(monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/zellij")
 
     def run(command, **kwargs):
-        if failure in command:
-            raise subprocess.CalledProcessError(1, command, stderr="session operation failed")
-        return subprocess.CompletedProcess(command, 0, stdout="terminal_23\n", stderr="")
+        raise subprocess.CalledProcessError(1, command, stderr="session operation failed")
 
     monkeypatch.setattr(subprocess, "run", run)
     with pytest.raises(RuntimeError, match="viewer --quiet.*session operation failed"):
@@ -1455,7 +1482,6 @@ def test_independent_zellij_uses_its_own_operations(monkeypatch: pytest.MonkeyPa
     instance.load_zellij_panes = MagicMock(
         side_effect=[[], [{"id": 1, "tab_name": "group", "tab_id": 2}], [{"id": 3}]]
     )
-    instance._toggle_zellij_pane_fullscreen = MagicMock()
     monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
     monkeypatch.setattr(
         subprocess,
@@ -1476,20 +1502,6 @@ def test_independent_zellij_uses_its_own_operations(monkeypatch: pytest.MonkeyPa
     )
     assert instance.load_zellij_panes.call_count == 3
     assert result.pane_id == "terminal_3"
-
-    instance.open_viewer("session", ["viewer"])
-    instance._toggle_zellij_pane_fullscreen.assert_called_once_with("session", "terminal_3")
-
-    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "session")
-    monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
-    instance.load_zellij_panes.side_effect = [
-        [{"id": 3, "is_fullscreen": False}],
-        [{"id": 3, "is_fullscreen": True}],
-    ]
-    instance._toggle_zellij_pane_fullscreen.reset_mock()
-    with instance.zellij_fullscreen_pane():
-        pass
-    assert instance._toggle_zellij_pane_fullscreen.call_count == 2
 
 
 def test_terminal_launch_uses_public_zellij_operation(monkeypatch):

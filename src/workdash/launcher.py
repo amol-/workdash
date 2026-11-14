@@ -591,6 +591,15 @@ class Zellij:
                 session,
                 "action",
                 "new-pane",
+                "-f",
+                "-x",
+                "0",
+                "-y",
+                "0",
+                "--width",
+                "100%",
+                "--height",
+                "100%",
                 *(["--close-on-exit"] if close_on_exit else []),
                 "--",
                 *command,
@@ -599,10 +608,10 @@ class Zellij:
             capture_output=True,
             text=True,
         )
-        pane_id = completed.stdout.strip()
-        if not pane_id.startswith("terminal_"):
-            raise RuntimeError("Zellij did not return the viewer pane ID.")
-        self._toggle_zellij_pane_fullscreen(session, pane_id)
+        if not completed.stdout.strip().startswith("terminal_"):
+            raise RuntimeError(
+                completed.stderr.strip() or "Zellij did not return the viewer pane ID."
+            )
 
     @staticmethod
     def exec_zellij_wrapped_workdash(
@@ -813,8 +822,24 @@ class Zellij:
             yield
             return
 
+        def toggle_fullscreen() -> None:
+            zellij = _resolve_zellij_binary()
+            try:
+                subprocess.run(
+                    [zellij, "--session", session, "action", "toggle-fullscreen", "-p", pane_id],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as error:
+                details = (error.stderr or "").strip() or (error.stdout or "").strip()
+                raise RuntimeError(
+                    f"Failed to toggle fullscreen for Zellij pane {pane_id} in {session}: "
+                    f"{details or error.returncode}"
+                ) from error
+
         try:
-            self._toggle_zellij_pane_fullscreen(session, pane_id)
+            toggle_fullscreen()
         except RuntimeError:
             yield
             return
@@ -825,7 +850,7 @@ class Zellij:
             with suppress(RuntimeError):
                 pane = self._find_zellij_pane(session, pane_id)
                 if pane is not None and pane.get("is_fullscreen"):
-                    self._toggle_zellij_pane_fullscreen(session, pane_id)
+                    toggle_fullscreen()
 
     @staticmethod
     def dump_zellij_pane(session: str, pane_id: str, *, full: bool = False) -> str:
@@ -1106,25 +1131,6 @@ class Zellij:
             ),
             None,
         )
-
-    @staticmethod
-    def _toggle_zellij_pane_fullscreen(session: str, pane_id: str) -> None:
-        """Toggle fullscreen for a Zellij pane by its ID."""
-
-        zellij = _resolve_zellij_binary()
-        try:
-            subprocess.run(
-                [zellij, "--session", session, "action", "toggle-fullscreen", "-p", pane_id],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError as error:
-            details = (error.stderr or "").strip() or (error.stdout or "").strip()
-            raise RuntimeError(
-                f"Failed to toggle fullscreen for Zellij pane {pane_id} in {session}: "
-                f"{details or error.returncode}"
-            ) from error
 
 
 zellij = Zellij()

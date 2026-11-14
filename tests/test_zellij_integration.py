@@ -498,7 +498,7 @@ def test_persistent_dashboard_quit_and_restart_in_real_zellij(tmp_path, repeat):
 
 
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
-def test_analysis_viewer_renders_and_closes_fullscreen_pane(tmp_path, monkeypatch):
+def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, monkeypatch):
     from workdash import launcher
 
     zellij = shutil.which("zellij")
@@ -567,11 +567,14 @@ def test_analysis_viewer_renders_and_closes_fullscreen_pane(tmp_path, monkeypatc
         )
         panes = wait_for(
             lambda panes: any(
-                not p["is_plugin"] and p["id"] not in initial_ids and p["is_fullscreen"]
+                not p["is_plugin"] and p["id"] not in initial_ids and p["is_floating"]
                 for p in panes
             )
         )
         viewer = next(p for p in panes if not p["is_plugin"] and p["id"] not in initial_ids)
+        original = next(p for p in initial if not p["is_plugin"])
+        for field in ("pane_x", "pane_y", "pane_columns", "pane_rows"):
+            assert viewer[field] == original[field], (field, viewer, original)
         pane_id = f"terminal_{viewer['id']}"
         deadline = time.monotonic() + 15
         screen = ""
