@@ -3,11 +3,13 @@ import json
 import shlex
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -31,7 +33,7 @@ from workdash.backend import IncludeResult, WorkdashBackend
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashControlError, WorkdashSession, format_work_item_id
 from workdash.github_client import GitHubClient
-from workdash.models import WorkItem, WorkItemKind, WorkItemType
+from workdash.models import WorkItem, WorkItemKind, WorkItemType, accepted_worktree_numbers
 from workdash.work_instruction import render_work_instruction
 
 
@@ -82,6 +84,286 @@ def test_session_refresh_schedules_tui_repaint_through_callback() -> None:
     assert [format_work_item_id(item) for item in session.work_items] == ["owner/repo#CHECK-2"]
     assert session.suggestion_markers == marker
     assert repainted_item_ids == [["owner/repo#CHECK-2"]]
+
+
+def test_autodispatch_refresh_updates_issue_and_linked_pr() -> None:
+    issue = _work_item(number=1, title="Old issue")
+    pr = replace(
+        _work_item(number=2, title="Linked PR", item_type=WorkItemType.PR),
+        closing_issue_numbers=(1,),
+    )
+    backend = MagicMock()
+    backend.github_client.fetch_item.side_effect = lambda repo, number, **kwargs: replace(
+        issue if number == 1 else pr, title="Updated issue" if number == 1 else "Updated PR"
+    )
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=backend,
+        work_items=[pr, issue],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    session.refresh_autodispatch_item("owner/repo#ISSUE-1")
+
+    assert [item.title for item in session.work_items] == ["Updated PR", "Updated issue"]
+    assert {call.args[:2] for call in backend.github_client.fetch_item.call_args_list} == {
+        ("owner/repo", 1),
+        ("owner/repo", 2),
+    }
+
+
+@pytest.mark.parametrize("target", ["new/repo", None])
+def test_autodispatch_refresh_uses_changed_todo_target(target, monkeypatch) -> None:
+    item = replace(_work_item(number=1, title="Todo"), repo="owner/todos", todo_target="old/repo")
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = replace(item, todo_target=target)
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="owner/todos"),
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    ensure = MagicMock(return_value=Path("/worktree"))
+    monkeypatch.setattr(control_module, "ensure_worktree", ensure)
+    monkeypatch.setattr(
+        control_module,
+        "launch_terminal_context",
+        MagicMock(
+            return_value=SimpleNamespace(
+                session=None, cwd="/worktree", pane_title="term", pane_id=1
+            )
+        ),
+    )
+
+    session.refresh_autodispatch_item("old/repo#ISSUE-WT1")
+
+    expected_id = "new/repo#ISSUE-WT1" if target else "owner/todos#ISSUE-1"
+    assert session.list_items()["items"][0]["id"] == expected_id
+    assert session.terminal(target=expected_id)["item_id"] == expected_id
+    assert ensure.call_args.args[1].todo_target == target
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        (WorkItemKind.AUTHORED_PR, "✓✓PR 2"),
+        (WorkItemKind.REVIEW_REQUESTED_PR, "  RV 2"),
+        (WorkItemKind.TRACKED_PR, "  VR 2"),
+    ],
+)
+def test_autodispatch_refresh_keeps_status_symbols_for_authored_prs_only(kind, expected) -> None:
+    from workdash.tui import _type_column
+
+    pr = replace(
+        _work_item(number=2, title="Linked PR", item_type=WorkItemType.PR),
+        kind=kind,
+        closing_issue_numbers=(1,),
+    )
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = replace(
+        pr, ci_state="SUCCESS", review_decision="APPROVED", title="Updated"
+    )
+    backend.github_client.fetch_linked_issues_for_pull_request.return_value = [("owner/repo", 1)]
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=backend,
+        work_items=[pr],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    session.refresh_autodispatch_item("owner/repo#ISSUE-1")
+
+    assert pr.title == "Updated"
+    assert _type_column(pr, bold=False).plain == expected
+
+
+def test_autodispatch_refresh_clears_stale_analysis() -> None:
+    item = _work_item(number=1, title="Old")
+    item.analysis = "old analysis"
+    item.analyzed_at = item.updated_at
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = replace(item)
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    session.refresh_autodispatch_item("owner/repo#ISSUE-1")
+    assert session.work_items[0].analysis == "old analysis"
+    assert session.work_items[0].analyzed_at == item.updated_at
+
+    backend.github_client.fetch_item.return_value = replace(
+        item, title="New", updated_at=_work_item(number=2, title="").updated_at
+    )
+    session.refresh_autodispatch_item("owner/repo#ISSUE-1")
+
+    assert session.work_items[0].analysis is None
+    assert session.work_items[0].analyzed_at is None
+    assert not session.list_items()["items"][0]["analysis_available"]
+
+
+def test_analysis_survives_metadata_refresh_after_item_resolution(tmp_path, monkeypatch) -> None:
+    item = _work_item(number=1, title="Old")
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = replace(item, title="Updated")
+    path = tmp_path / "analysis.md"
+    path.write_text("Analysis", encoding="utf-8")
+
+    def analyze(requested_item, *, tool, **kwargs):
+        if tool == "cached":
+            return None
+        requested_item.analysis = "Analysis"
+        return str(path)
+
+    backend.analyze_item.side_effect = analyze
+    monkeypatch.setattr(
+        control_module, "analysis_worktree", lambda *args, **kwargs: nullcontext(tmp_path)
+    )
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(analyze="pi")}),
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="test",
+    )
+    require_item = session._require_item
+
+    def resolve_then_refresh(target):
+        resolved = require_item(target)
+        session.refresh_autodispatch_item(target)
+        return resolved
+
+    monkeypatch.setattr(session, "_require_item", resolve_then_refresh)
+    session.analyze(target="owner/repo#ISSUE-1")
+
+    assert session.work_items[0].title == "Updated"
+    assert session.work_items[0].analysis == "Analysis"
+    assert session.list_items()["items"][0]["analysis_available"]
+
+
+def test_autodispatch_refresh_finds_cross_repository_linked_pr() -> None:
+    pr = _work_item(number=2, title="Old", item_type=WorkItemType.PR)
+    pr.linked_issues = (("other/repo", 1),)
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = replace(pr, title="New")
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=backend,
+        work_items=[pr],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    session.refresh_autodispatch_item("OTHER/repo#ISSUE-1")
+
+    assert session.work_items[0].title == "New"
+    assert backend.github_client.fetch_item.call_args.args[:2] == ("owner/repo", 2)
+
+
+def test_autodispatch_refresh_updates_pr_links() -> None:
+    pr = replace(
+        _work_item(number=2, title="PR", item_type=WorkItemType.PR),
+        kind=WorkItemKind.AUTHORED_PR,
+        linked_issues=(("owner/repo", 1),),
+        closing_issue_numbers=(1,),
+    )
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = replace(pr)
+    backend.github_client.fetch_linked_issues_for_pull_request.return_value = [
+        ("owner/repo", 3),
+        ("other/repo", 4),
+    ]
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=backend,
+        work_items=[pr],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    session.refresh_autodispatch_item("owner/repo#ISSUE-1")
+    assert pr.linked_issues == (("owner/repo", 3), ("other/repo", 4))
+    assert pr.closing_issue_numbers == (3,)
+    assert accepted_worktree_numbers(pr) == (3, 2)
+    assert session.refresh_autodispatch_item("owner/repo#ISSUE-1") == ([], None)
+    backend.github_client.fetch_linked_issues_for_pull_request.return_value = []
+    assert session.refresh_autodispatch_item("other/repo#ISSUE-4") == ([pr], None)
+    assert pr.linked_issues == ()
+    assert pr.closing_issue_numbers == ()
+    assert accepted_worktree_numbers(pr) == (2,)
+
+
+def test_analysis_lookup_does_not_block_dashboard_and_uses_current_item(tmp_path, monkeypatch):
+    item = _work_item(number=1, title="Fetched")
+    current = replace(item, title="Dashboard")
+    entered, release = Event(), Event()
+    backend = MagicMock()
+
+    def fetch(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return item
+
+    backend.github_client.fetch_item.side_effect = fetch
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(analyze="pi")}),
+        backend=backend,
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    path = tmp_path / "analysis.md"
+    path.write_text("Analysis")
+
+    def analyze(requested_item, **kwargs):
+        requested_item.analysis = "Analysis"
+        return str(path)
+
+    monkeypatch.setattr(session, "_analyze_item", analyze)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        analysis = pool.submit(session.analyze, target="owner/repo#ISSUE-1")
+        try:
+            assert entered.wait(5)
+            listing = pool.submit(session.list_items)
+            assert listing.result(timeout=1)["items"] == []
+            with session._lock:
+                session.work_items.append(current)
+        finally:
+            release.set()
+        analysis.result(timeout=5)
+    assert current.analysis == "Analysis"
+    assert item.analysis != "Analysis"
+
+
+def test_autodispatch_refresh_retries_after_concurrent_full_refresh() -> None:
+    item = _work_item(number=1, title="Old")
+    backend = MagicMock()
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    backend.load_items.return_value = ([replace(item, title="Full refresh")], {})
+
+    def fetch(*args, **kwargs):
+        if backend.github_client.fetch_item.call_count == 1:
+            session.list_items(refresh=True)
+            return replace(item, title="Stale fetch")
+        return replace(item, title="After completion")
+
+    backend.github_client.fetch_item.side_effect = fetch
+    session.refresh_autodispatch_item("owner/repo#ISSUE-1")
+
+    assert session.list_items()["items"][0]["title"] == "After completion"
+    assert backend.github_client.fetch_item.call_count == 2
 
 
 def test_session_list_payload_keeps_copy_paste_id_plain_and_display_type_included() -> None:

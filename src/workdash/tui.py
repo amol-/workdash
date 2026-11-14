@@ -401,7 +401,13 @@ class SearchDialog(ModalScreen[str | None]):
 
 class WorkItemsTable(DataTable):
     def on_resize(self, event: events.Resize) -> None:
-        self.call_after_refresh(self.move_cursor)
+        old_height = getattr(self, "_previous_height", 0)
+        old_app_size = getattr(self, "_previous_app_size", None)
+        self._previous_height = event.size.height
+        self._previous_app_size = self.app.size
+        row_y = self._get_row_region(self.cursor_row).y - self.scroll_y if self.row_count else -1
+        if old_app_size != self.app.size or self.header_height <= row_y < old_height:
+            self.call_after_refresh(self.move_cursor)
         self.call_after_refresh(self.app._reserve_table_space)
 
     def watch_show_horizontal_scrollbar(self) -> None:
@@ -483,7 +489,7 @@ class WorkdashApp(App[None]):
     ) -> None:
         super().__init__()
         self._session = session
-        self._work_items = list(work_items or ())
+        self._work_items = sorted(work_items or (), key=lambda item: item.updated_at, reverse=True)
         self._sorted_work_items: list[WorkItem] = []
         # Cleared whenever the loaded list changes so new items are never hidden.
         self._search_filter = ""
@@ -505,6 +511,10 @@ class WorkdashApp(App[None]):
         self._focus_callback = focus_callback
         self._dispatch_session_id: str | None = None
         self._status_message = "Ready."
+        self._current_autodispatch: set[tuple[str, int] | str] = set()
+        self._pending_autodispatch: set[str] = set()
+        self._autodispatch_refreshing = False
+        self._row_keys: dict[tuple[WorkItemType, str, int], str] = {}
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="autodispatch-scroll"):
@@ -527,6 +537,28 @@ class WorkdashApp(App[None]):
             return
         sessions = self._session.autodispatch_sessions()
         running = [entry for entry in sessions if entry["status"] == "running"]
+        current = {
+            self._session._scope_identity(str(entry["current_item"]))
+            for entry in running
+            if entry["current_item"]
+        }
+        changed = current ^ self._current_autodispatch
+        self._current_autodispatch = current
+        if changed and self._sorted_work_items:
+            table = self.query_one("#work-items", DataTable)
+            issue_rows = {
+                self._item_identity(item)
+                for item in self._sorted_work_items
+                if item.item_type == WorkItemType.ISSUE
+            }
+            current_without_rows = current - issue_rows
+            for item in self._sorted_work_items:
+                key = self._row_keys[(item.item_type, item.repo, item.number)]
+                table.update_cell(key, "title", self._title_cell(item, current_without_rows))
+        self._pending_autodispatch.update(self._session.take_completed_autodispatch_items())
+        if self._pending_autodispatch and not self._autodispatch_refreshing:
+            self._autodispatch_refreshing = True
+            asyncio.create_task(self._refresh_autodispatch_items())
         failed = [entry for entry in sessions if entry["status"] == "failed"]
         started_failure = next(
             (entry for entry in failed if entry["id"] == self._dispatch_session_id), None
@@ -583,15 +615,91 @@ class WorkdashApp(App[None]):
             text.truncate(max(0, self.size.width - 4), overflow="ellipsis")
             rows.append(text)
         widget.update(Text("\n").join(rows))
-        if widget.size.height != len(rows):
-            table = self.query_one("#work-items", DataTable)
-            table.call_after_refresh(table.move_cursor)
+
+    def _item_identity(self, item: WorkItem) -> tuple[str, int]:
+        repo = self._session.config.todo_repository if item.todo_target else item.repo
+        return repo.lower(), item.number
+
+    def _matches_filter(self, item: WorkItem) -> bool:
+        needle = self._search_filter.lower()
+        return any(
+            needle in value.lower()
+            for value in (
+                str(_type_column(item, bold=False))[2:],
+                f"{format_type_label(item)}#{item.number}",
+                display_repo(item),
+                item.title if item.state == "OPEN" else f"{item.title} ({item.state.lower()})",
+            )
+        )
+
+    def _title_cell(self, item: WorkItem, current_without_rows: set[tuple[str, int] | str]) -> Text:
+        title = self._title_with_suggestion_marker(item)
+        if item.state != "OPEN":
+            title = f"{title} ({item.state.lower()})"
+        bold = _to_utc(item.updated_at) >= self._now_utc - timedelta(hours=24)
+        current = self._current_autodispatch
+        linked = {(repo.lower(), number) for repo, number in item.linked_issues}
+        linked.update((item.repo.lower(), number) for number in item.closing_issue_numbers)
+        if self._session is not None and (
+            (item.item_type == WorkItemType.ISSUE and self._item_identity(item) in current)
+            or (item.item_type == WorkItemType.PR and bool(linked & current_without_rows))
+        ):
+            return Text(title, style="bold magenta" if bold or item.has_sub_issues else "magenta")
+        if item.item_type == WorkItemType.ISSUE and item.has_sub_issues:
+            return Text(title, style="bold cyan")
+        return Text(title, style="bold" if bold else "")
+
+    async def _refresh_autodispatch_items(self) -> None:
+        try:
+            while self._pending_autodispatch:
+                target = self._pending_autodispatch.pop()
+                try:
+                    items, error = await asyncio.to_thread(
+                        self._session.refresh_autodispatch_item, target
+                    )
+                    if not items:
+                        if error:
+                            raise error
+                        continue
+                    table = self.query_one("#work-items", DataTable)
+                    selected_item = self._selected_item()
+                    scroll_x, scroll_y = table.scroll_x, table.scroll_y
+                    row_y = (
+                        table._get_row_region(table.cursor_row).y - scroll_y
+                        if selected_item
+                        else -1
+                    )
+                    selection_visible = table.header_height <= row_y < table.size.height
+                    for item in items:
+                        for index, old in enumerate(self._work_items):
+                            if (old.item_type, old.repo, old.number) == (
+                                item.item_type,
+                                item.repo,
+                                item.number,
+                            ):
+                                self._work_items[index] = item
+                                break
+                    self._render_table(focus_item=selected_item, preserve_view=True)
+                    table.scroll_to(x=scroll_x, y=scroll_y, animate=False, force=True)
+                    table.call_after_refresh(
+                        table.scroll_to, x=scroll_x, y=scroll_y, animate=False, force=True
+                    )
+                    table.call_after_refresh(table.move_cursor, scroll=selection_visible)
+                    if error:
+                        raise error
+                except Exception as error:
+                    self._update_status(f"Autodispatch refresh failed: {error}")
+                    self.set_timer(30, lambda target=target: self._pending_autodispatch.add(target))
+        finally:
+            self._autodispatch_refreshing = False
 
     def refresh_from_session(self) -> None:
         if self._session is None:
             return
         self._search_filter = ""
-        self._work_items = list(self._session.work_items)
+        self._work_items = sorted(
+            self._session.work_items, key=lambda item: item.updated_at, reverse=True
+        )
         self._suggestion_markers = dict(self._session.suggestion_markers)
         self._render_table()
 
@@ -609,7 +717,9 @@ class WorkdashApp(App[None]):
             hint.stylize("bold", 0, len(self.SEARCH_HINT_TEXT))
         return hint
 
-    def _render_table(self, *, focus_item: WorkItem | None = None) -> None:
+    def _render_table(
+        self, *, focus_item: WorkItem | None = None, preserve_view: bool = False
+    ) -> None:
         table = self.query_one("#work-items", DataTable)
         table.cursor_type = "row"
         previous_row = table.cursor_row if table.cursor_row is not None else 0
@@ -618,24 +728,10 @@ class WorkdashApp(App[None]):
         # would silently move the selection to a different work item.
         if focus_item is None:
             focus_item = self._selected_item()
-        needle = self._search_filter.lower()
-        # Match the rendered Type/Repo/Title text. The raw title and the
-        # unprefixed type label are used so neither the "* " suggestion marker
-        # nor the CI symbol is ever searchable.
-        matched_items = [
-            item
-            for item in self._work_items
-            if any(
-                needle in value.lower()
-                for value in (
-                    str(_type_column(item, bold=False))[2:],
-                    f"{format_type_label(item)}#{item.number}",
-                    display_repo(item),
-                    item.title,
-                )
-            )
-        ]
+        # Neither the suggestion marker nor the CI symbol is searchable.
+        matched_items = [item for item in self._work_items if self._matches_filter(item)]
         table.clear(columns=True)
+        self._row_keys.clear()
         type_width = max(
             (len(str(_type_column(item, bold=False))) for item in matched_items), default=4
         )
@@ -644,23 +740,28 @@ class WorkdashApp(App[None]):
         table.add_column("Title", key="title")
         table.add_column("Age", key="age")
         table.add_column("Last Update", key="last_update")
-        self._sorted_work_items = sorted(
-            matched_items,
-            key=lambda entry: entry.updated_at,
-            reverse=True,
-        )
+        self._sorted_work_items = matched_items
         cutoff = self._now_utc - timedelta(hours=24)
+        issue_rows = (
+            {
+                self._item_identity(item)
+                for item in matched_items
+                if item.item_type == WorkItemType.ISSUE
+            }
+            if self._session is not None and self._current_autodispatch
+            else set()
+        )
+        current_without_rows = self._current_autodispatch - issue_rows
         for item in self._sorted_work_items:
             age_days = max(0, (self._now_utc - _to_utc(item.created_at)).days)
             update_days = max(0, (self._now_utc - _to_utc(item.updated_at)).days)
-            title = self._title_with_suggestion_marker(item)
-            container = item.item_type == WorkItemType.ISSUE and item.has_sub_issues
             row_key = f"{item.item_type.value}:{item.repo}#{item.number}"
+            self._row_keys[(item.item_type, item.repo, item.number)] = row_key
             if _to_utc(item.updated_at) >= cutoff:
                 table.add_row(
                     _type_column(item, bold=True),
                     Text(_repo_column(item), style="bold"),
-                    Text(title, style="bold cyan" if container else "bold"),
+                    self._title_cell(item, current_without_rows),
                     Text(f"{age_days}d", style="bold"),
                     Text(f"{update_days}d", style="bold"),
                     key=row_key,
@@ -669,7 +770,7 @@ class WorkdashApp(App[None]):
                 table.add_row(
                     _type_column(item, bold=False),
                     _repo_column(item),
-                    Text(title, style="bold cyan") if container else title,
+                    self._title_cell(item, current_without_rows),
                     f"{age_days}d",
                     f"{update_days}d",
                     key=row_key,
@@ -685,7 +786,10 @@ class WorkdashApp(App[None]):
                     ):
                         target_row = index
                         break
-            table.move_cursor(row=min(max(target_row, 0), len(self._sorted_work_items) - 1))
+            table.move_cursor(
+                row=min(max(target_row, 0), len(self._sorted_work_items) - 1),
+                scroll=not preserve_view,
+            )
         self.query_one("#command-footer", Static).update(self._command_hint())
 
     def _selected_item(self) -> WorkItem | None:
@@ -784,6 +888,7 @@ class WorkdashApp(App[None]):
                 self._suggestion_markers = dict(refreshed[1])
             else:
                 self._work_items = list(refreshed)
+            self._work_items.sort(key=lambda item: item.updated_at, reverse=True)
             self._search_filter = ""
             self._render_table()
         except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
@@ -1127,6 +1232,7 @@ class WorkdashApp(App[None]):
         )
         if existing is None:
             self._work_items.append(fetched_item)
+            self._work_items.sort(key=lambda item: item.updated_at, reverse=True)
             # Suggestion markers depend on the full item set; recompute so any
             # newer/better candidate is highlighted correctly on the next render.
             self._suggestion_markers = compute_suggestion_markers(self._work_items)
@@ -1136,6 +1242,10 @@ class WorkdashApp(App[None]):
         self._update_status(
             f"Included {fetched_item.item_type.value} {fetched_item.repo}#{fetched_item.number}."
         )
+        if result.linked_issues_unavailable:
+            message = "Linked issues unavailable; refresh the dashboard to retry."
+            self._update_status(message)
+            self.notify(message, severity="warning", timeout=10)
 
     async def action_capture_todo(self) -> None:
         if self._todo_callback is None:

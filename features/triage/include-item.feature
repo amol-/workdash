@@ -18,6 +18,7 @@ Feature: Include a work item by URL
     - Including a URL that is already shown on the dashboard moves the cursor to that item without duplicating it.
     - Included items are a fetch-time source; downstream sorting, suggestion, and recent-activity rules treat them like any other item.
     - On every refresh the included-items store is re-read and its URLs are re-fetched; items that are no longer open are removed from the store.
+    - An accessible pull request can be included even if its linked-issue information is unavailable; the user is warned to refresh the dashboard to recover it.
     - Invalid URLs and non-GitHub URLs are reported to the user and not persisted.
     - A transient fetch failure during refresh retries the included item on the next refresh; a permanent fetch failure removes its URL from the store.
     - A missing or empty included-items store is not an error: the dashboard loads normally with no included items.

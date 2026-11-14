@@ -287,9 +287,8 @@ alone and the pull request gets its own pull-request-numbered worktree instead.
 Worktree directories created before this behavior existed are still named
 after the pull request number; they are not migrated and keep working, so the
 pull request stays in the checkout it already has and only a pull request with no
-checkout yet gets an issue-numbered one. The link between a pull request and the
-issue it closes is resolved while the dashboard refreshes, so a pull request
-added by URL only shares the issue's worktree from the next refresh onwards.
+checkout yet gets an issue-numbered one. The link between a pull request and the issue it closes is resolved when the
+dashboard refreshes or the pull request is added by URL.
 
 ## Local control server
 

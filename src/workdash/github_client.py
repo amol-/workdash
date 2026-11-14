@@ -1918,7 +1918,8 @@ class GitHubClient:
             f"query={{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
             f"{{ nameWithOwner issueOrPullRequest(number: {number}) {{ __typename "
             f"... on Issue {{ {_ISSUE_FIELDS} body }} "
-            f"... on PullRequest {{ {fields} {_CLOSING_ISSUES_SELECTION} }} }} }} }}",
+            f"... on PullRequest {{ {fields} state {_AUTHORED_CI_SELECTION} "
+            f"{_UNRESOLVED_THREADS_SELECTION} {_CLOSING_ISSUES_SELECTION} }} }} }} }}",
         ]
         failure_message_prefix = f"Failed to look up {subject} via gh"
         completed = _run_gh_command_with_retry(
@@ -1976,6 +1977,7 @@ class GitHubClient:
                 created_at=parse_github_datetime(created_at),
                 updated_at=parse_github_datetime(updated_at),
                 url=url,
+                state=node.get("state", "OPEN"),
                 sub_issue_total=total,
                 has_sub_issues=(total or 0) > 0,
                 todo_target=todo_target_from_body(node.get("body"))
@@ -1998,6 +2000,11 @@ class GitHubClient:
             created_at=parse_github_datetime(created_at),
             updated_at=parse_github_datetime(updated_at),
             url=url,
+            state=node.get("state", "OPEN"),
+            ci_state=_extract_ci_state(node),
+            review_decision=node.get("reviewDecision"),
+            review_requested=_extract_pending_review_request(node),
+            has_unresolved_comments=_extract_unresolved_comments(node),
             closing_issue_numbers=tuple(
                 sorted(
                     issue_number

@@ -8,7 +8,10 @@ Feature: Automatically dispatch ready work
   otherwise, before selecting more ready work. A pane counts as gone only once two
   consecutive checks miss it, so a listing that omits a live pane does not end
   supervision. It finishes when no ready work remains. A user can stop a session
-  without closing its agent pane. Autodispatch does not merge work.
+  without closing its agent pane. If a review is already running when stopped,
+  the dashboard refreshes the issue again after that review ends, including on failure.
+  If an in-progress dispatch launches after stopping, the dashboard refreshes its issue.
+  Autodispatch does not merge work.
   A tenth consecutive launch of the same issue fails without another launch;
   work claimed by another agent is skipped rather than counted. A target has at most
   one session: starting a session for a target that already has one stops and replaces
@@ -35,6 +38,7 @@ Feature: Automatically dispatch ready work
     - When GitHub cannot report a pull request's linked issues, the TUI reports that lookup failure instead of claiming the pull request has no linked issue.
     - Pressing "d" on a pull request that is not authored by you reports that dispatch is unavailable and starts no session.
     - The dashboard shows running sessions and the three most recently started failed sessions, with failure summaries kept to one line each; full details remain available through info.
+    - When an autodispatch refresh updates a pull request row, its current linked issues determine later refreshes and worktree selection.
 
   @id:F-AUTODISPATCH-S013
   Scenario: Start autodispatch from an issue in the dashboard

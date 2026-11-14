@@ -146,6 +146,8 @@ class WorkdashSession:
         ] = {}
         self._autodispatch_lock = threading.RLock()
         self._autodispatch: dict[str, _AutodispatchSession] = {}
+        self._completed_autodispatch_items: set[str] = set()
+        self._completed_autodispatch_lock = threading.Lock()
 
     @property
     def git(self) -> GitHelper:
@@ -271,6 +273,15 @@ class WorkdashSession:
         _validate_group(group)
         item = self._require_item(target)
         with self._lock:
+            item = next(
+                (
+                    current
+                    for current in self.work_items
+                    if (current.repo, current.number, current.item_type)
+                    == (item.repo, item.number, item.item_type)
+                ),
+                item,
+            )
             item_id = format_work_item_id(item)
             cache_used = item.analysis is not None and prefer_cache
             if agent == "cached":
@@ -977,6 +988,102 @@ class WorkdashSession:
         except WorkdashControlError:
             return scope
         return repo.lower(), number
+
+    def refresh_autodispatch_item(self, target: str) -> tuple[list[WorkItem], Exception | None]:
+        """Refresh an existing row without discovering new work."""
+        identity = self._scope_identity(target)
+        if isinstance(identity, str):
+            return [], None
+        while True:
+            with self._lock:
+                item = next(
+                    (
+                        item
+                        for item in self.work_items
+                        if (
+                            (
+                                self.config.todo_repository if item.todo_target else item.repo
+                            ).lower(),
+                            item.number,
+                        )
+                        == identity
+                        and item.item_type == WorkItemType.ISSUE
+                    ),
+                    None,
+                )
+                items = ([item] if item is not None else []) + [
+                    pr
+                    for pr in self.work_items
+                    if pr.item_type == WorkItemType.PR
+                    and (
+                        (pr.repo.lower() == identity[0] and identity[1] in pr.closing_issue_numbers)
+                        or any(
+                            (repo.lower(), number) == identity for repo, number in pr.linked_issues
+                        )
+                    )
+                ]
+            refreshed = []
+            error = None
+            for item in items:
+                repo = self.config.todo_repository if item.todo_target else item.repo
+                try:
+                    fresh = self.backend.github_client.fetch_item(
+                        repo,
+                        item.number,
+                        github_username=self.config.github_username,
+                        todo_repository=self.config.todo_repository,
+                    )
+                    if fresh is None:
+                        raise RuntimeError(f"Cannot refresh {repo}#{item.number}")
+                    linked_issues = (
+                        self.backend.github_client.fetch_linked_issues_for_pull_request(
+                            repo, item.number
+                        )
+                        if item.item_type == WorkItemType.PR
+                        else None
+                    )
+                    refreshed.append((item, repo, fresh, linked_issues))
+                except Exception as exc:
+                    error = exc
+            with self._lock:
+                if any(not any(current is item for current in self.work_items) for item in items):
+                    continue
+                for item, repo, fresh, linked_issues in refreshed:
+                    if item.updated_at != fresh.updated_at:
+                        item.analysis = None
+                        item.analyzed_at = None
+                    item.title = fresh.title
+                    item.todo_target = fresh.todo_target
+                    item.updated_at = fresh.updated_at
+                    item.state = fresh.state
+                    item.has_sub_issues = fresh.has_sub_issues
+                    item.sub_issue_total = fresh.sub_issue_total
+                    if item.kind == WorkItemKind.AUTHORED_PR:
+                        item.ci_state = fresh.ci_state
+                        item.review_decision = fresh.review_decision
+                        item.review_requested = fresh.review_requested
+                        item.has_unresolved_comments = fresh.has_unresolved_comments
+                    if linked_issues is not None:
+                        item.linked_issues = tuple(linked_issues)
+                        item.closing_issue_numbers = tuple(
+                            sorted(
+                                number
+                                for linked_repo, number in linked_issues
+                                if linked_repo == repo
+                            )
+                        )
+            return [item for item, _, _, _ in refreshed], error
+
+    def completed_autodispatch_item(self, item: str | None) -> None:
+        if item:
+            with self._completed_autodispatch_lock:
+                self._completed_autodispatch_items.add(item)
+
+    def take_completed_autodispatch_items(self) -> set[str]:
+        with self._completed_autodispatch_lock:
+            items = self._completed_autodispatch_items
+            self._completed_autodispatch_items = set()
+            return items
 
     def autodispatch_sessions(self) -> list[dict[str, object]]:
         with self._autodispatch_lock:

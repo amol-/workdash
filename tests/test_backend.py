@@ -566,6 +566,7 @@ def test_load_items_hides_every_issue_a_pull_request_closes(
     assert {(item.repo, item.number) for item in work_items} == expected_visible
     pull_request = next(item for item in work_items if item.item_type == WorkItemType.PR)
     assert pull_request.closing_issue_numbers == expected_closing_issue_numbers
+    assert pull_request.linked_issues == tuple(closing_issues)
 
 
 def test_load_items_hides_an_included_issue_that_a_listed_pull_request_closes(
@@ -1368,3 +1369,31 @@ def test_refresh_warns_when_sub_issue_lookup_fails(monkeypatch, tmp_path, source
         "Warning" in line and "sub-issue" in line and "summary unavailable" in line
         for line in progress
     )
+
+
+def test_include_pull_request_when_linked_issue_lookup_fails(tmp_path: Path) -> None:
+    github_client = MagicMock(spec=GitHubClient)
+    item = _make_fetched_item(2)
+    github_client.fetch_item_by_url.return_value = item
+    github_client.fetch_linked_issues_for_pull_request.side_effect = RuntimeError("unavailable")
+    backend, store = _make_include_backend(tmp_path, github_client)
+
+    result = backend.include_item_by_url(item.url, set())
+
+    assert result.fetched_item == item
+    assert store.load() == [item.url]
+
+
+def test_included_pull_request_loads_linked_issue_metadata(tmp_path: Path) -> None:
+    github_client = MagicMock(spec=GitHubClient)
+    github_client.fetch_item_by_url.return_value = _make_fetched_item(2)
+    github_client.fetch_linked_issues_for_pull_request.return_value = [
+        ("owner/repo", 1),
+        ("other/repo", 3),
+    ]
+    backend, _ = _make_include_backend(tmp_path, github_client)
+
+    item = backend.include_item_by_url("https://github.com/owner/repo/pull/2", set()).fetched_item
+
+    assert item.linked_issues == (("owner/repo", 1), ("other/repo", 3))
+    assert item.closing_issue_numbers == (1,)
