@@ -24,8 +24,15 @@ Feature: List work items
     - When the same item qualifies for multiple sources, the strongest relationship wins in this order: authored pull request, then REVIEW pull request, then assigned issue, then plain tracked item.
     - When GitHub does not return a repository or item while loading a specific work source, either because further repository authorization is required or because GitHub can no longer resolve it, the system warns the user, skips that inaccessible repository or item, and keeps loading other work. This includes an inaccessible repository found while searching authored pull requests across repositories.
     - When no work items match, the system reports that no work items were found.
-    - Scrolling the TUI list keeps each visual row tied to the same GitHub issue or pull request; included items may show a "+" type suffix but must not create stale, duplicate, or empty visual rows.
+    - Scrolling the TUI list keeps each visual row tied to the same GitHub issue or pull request; included items may show a "+" type suffix but must not create stale, duplicate, or empty visual rows. Resizing the dashboard keeps the selected item visible when there is room for a table row.
+    - When autodispatch progress is shown in a short dashboard, work items remain visible when there is room for a table row, and the user can scroll through all progress entries.
     - The dashboard is keyboard-driven: it never captures mouse input, so mouse behavior (text selection, wheel scrolling) stays with the terminal.
+
+  @id:F-TRIAGE-LIST-S017
+  Scenario: Scrolling keeps every work item visible above the action bar
+    Given the dashboard has more work items than fit on screen and autodispatch progress is shown
+    When the user scrolls through the work items
+    Then every work item can be seen and selected above the action bar
 
   @id:F-TRIAGE-LIST-S010
   Scenario: Issues with sub-issues stand out in the dashboard

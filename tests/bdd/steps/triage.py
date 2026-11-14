@@ -14,6 +14,7 @@ import subprocess
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from pytest_bdd import given, parsers, then, when
@@ -2797,3 +2798,52 @@ def _container_title_style(work_items: list[WorkItem]) -> None:
         assert not isinstance(pull, Text) or pull.style != "bold cyan"
 
     run_app(work_items=work_items, interactions=interactions)
+
+
+@given("the dashboard has more work items than fit on screen and autodispatch progress is shown")
+def _many_dashboard_items(work_items: list[WorkItem]) -> None:
+    work_items.extend(make_work_item(number=i, title=f"Work item {i}") for i in range(1, 41))
+
+
+@when("the user scrolls through the work items")
+def _scroll_work_items(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
+    visible = []
+    opened = []
+    session = MagicMock()
+    session.work_items = work_items
+    session.suggestion_markers = {}
+    session.autodispatch_sessions.return_value = [
+        {"id": "1", "status": "failed", "scope": "owner/repo", "error": "failed"}
+    ]
+
+    async def interactions(app, pilot) -> None:
+        table = app.query_one("#work-items", DataTable)
+        footer = app.query_one("#command-footer", Static)
+        progress = app.query_one("#autodispatch-progress", Static)
+        assert progress.region.height > 0
+        assert "Failed owner/repo: failed" in progress.render().plain
+        for index in range(table.row_count):
+            await pilot.press("o")
+            row_y = table.region.y + table._get_row_region(index).y - int(table.scroll_y)
+            rows = [strip.text for strip in app.screen._compositor.render_strips()]
+            visible.append(
+                table.region.y <= row_y < footer.region.y
+                and f"Work item {index + 1}  " in rows[row_y]
+            )
+            if index < table.row_count - 1:
+                await pilot.press("down")
+
+    run_app(
+        work_items=work_items,
+        interactions=interactions,
+        open_callback=opened.append,
+        session=session,
+    )
+    scenario_state["scroll_visible"] = visible
+    scenario_state["scroll_opened"] = opened
+
+
+@then("every work item can be seen and selected above the action bar")
+def _all_items_visible_and_selected(scenario_state: dict[str, Any]) -> None:
+    assert all(scenario_state["scroll_visible"])
+    assert [item.number for item in scenario_state["scroll_opened"]] == list(range(1, 41))
