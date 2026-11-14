@@ -60,14 +60,18 @@ def test_direct_analysis_viewer_keeps_running_without_blocking(tmp_path):
         assert returned.wait(5), "opening a persistent viewer blocked Workdash"
         assert not finished.exists()
         deadline = time.monotonic() + 5
-        while not started.exists() and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
+            if started.exists() and started.read_text() == path.as_uri():
+                break
             time.sleep(0.01)
         assert started.read_text() == path.as_uri()
     finally:
         release.touch()
         thread.join(timeout=5)
     deadline = time.monotonic() + 5
-    while not finished.exists() and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        if finished.exists() and finished.read_text() == "finished":
+            break
         time.sleep(0.01)
     assert finished.read_text() == "finished"
 
