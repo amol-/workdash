@@ -591,6 +591,13 @@ def _github_work_state_outage(scenario_state: dict[str, Any]) -> None:
     scenario_state["github"].failures["ReadyIssueTree"] = failure("HTTP 502: Bad Gateway")
 
 
+@then("the agent is told never to disclose or reference the todo in the pull request")
+def _agent_told_to_keep_todo_confidential(scenario_state: dict[str, Any]) -> None:
+    assert "never disclose or reference the todo in the pull request" in _launched_prompt(
+        scenario_state
+    )
+
+
 @then("the agent is told to propose a plan and not to start implementing")
 def _agent_told_to_plan_first(scenario_state: dict[str, Any]) -> None:
     prompt = _launched_prompt(scenario_state)
@@ -658,7 +665,7 @@ def _agent_told_to_publish(issue: str, scenario_state: dict[str, Any]) -> None:
     _assert_told(
         scenario_state,
         "committed, pushed, and represented by a GitHub pull request",
-        "create a pull request that closes it with GitHub's closing keyword",
+        "create a pull request that closes it with `Fixes #NUMBER`",
         f"https://github.com/{repo}/issues/{number}",
     )
 

@@ -25,6 +25,8 @@ Feature: Automatically dispatch ready work
   time. While checking for another task, it retains the last selected group until
   the next task selects a group. Issue URLs are shortened, and an issue shown as both scope and current
   item appears only once, even when the issue number has leading zeroes; different scope and current item are labeled.
+  Human-readable `workdash info` shows the same progress alongside session status and full failure details.
+  JSON and the control API retain the underlying progress fields.
 
   Rules:
     - Pressing "d" on an issue starts an autodispatch session scoped to that issue.
@@ -104,6 +106,12 @@ Feature: Automatically dispatch ready work
     Given an autodispatch session for a targeted todo issue URL in group `project`
     When the user views its progress while checking and developing
     Then the dashboard shows the group, stage, iteration and launch reason without repeating the issue
+
+  @id:F-AUTODISPATCH-S019
+  Scenario: Info reports autodispatch progress
+    Given an autodispatch session developing an issue in a selected group
+    When the user runs workdash info for that session
+    Then info shows the group, scope, current item, stage, launch reason, iteration and elapsed time
 
   @id:F-AUTODISPATCH-S003
   Scenario: An autodispatch session uses the implementation repository groups by default

@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import threading
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -81,6 +82,10 @@ def _install_fake_ensure_worktree(
         return str(worktree_path(workdir, repo, worktree_item_number(item), todo=todo))
 
     monkeypatch.setattr("workdash.control.ensure_worktree", ensure_worktree)
+    monkeypatch.setattr(
+        "workdash.control.analysis_worktree",
+        lambda *args, **kwargs: nullcontext(ensure_worktree(*args, **kwargs)),
+    )
 
 
 def _install_code_fakes(scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:

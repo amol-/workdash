@@ -1067,12 +1067,10 @@ def _analyze_targeted_todo(scenario_state, monkeypatch, tmp_path):
     run_source_analysis(scenario_state, monkeypatch, tmp_path)
 
 
-@then("the analysis agent starts inside the target repository's todo worktree")
+@then("the analysis agent runs on the target repository's code")
 def _analysis_in_target_worktree(scenario_state):
-    assert (
-        scenario_state["agent_cwd"]
-        == Path(scenario_state["api_session"].config.workdir) / "owner_repo_todo_110"
-    )
+    assert scenario_state["agent_cwd"].name == "owner_repo_todo_110"
+    assert not scenario_state["agent_cwd"].exists()
 
 
 @then(parsers.parse("the agent can inspect `{path}` in the target repository"))

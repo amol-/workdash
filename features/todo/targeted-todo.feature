@@ -102,7 +102,7 @@ Feature: Targeted todo work actions
     And the target repository contains a source file `src/cards.py`
     And the todo issue has a description and comments on GitHub
     When the user generates a fresh analysis for that item
-    Then the analysis agent starts inside the target repository's todo worktree
+    Then the analysis agent runs on the target repository's code
     And the agent can inspect `src/cards.py` in the target repository
     And the agent receives the todo issue's title, body, and comments from GitHub
 

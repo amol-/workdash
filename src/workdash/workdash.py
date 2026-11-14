@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -23,13 +24,13 @@ from .control import (
     server_address,
     show_config_payload,
 )
-from .github_client import GitHubClient
+from .github_client import GitHubClient, parse_github_item_url
 from .launcher import (
     inject_workdash_local_bin_into_path,
     open_in_browser,
     open_markdown,
 )
-from .models import WorkItem, format_type_label
+from .models import WorkItem, WorkItemType, format_type_label
 from .repo_worktree import ensure_worktree
 from .tui import WorkdashApp
 
@@ -472,7 +473,11 @@ class WorkdashCommands:
                 and (session.work_items, session.suggestion_markers)
             ),
             worktree_callback=lambda item: ensure_worktree(
-                config.workdir, item, git=session.git, github_client=backend.github_client
+                config.workdir,
+                item,
+                git=session.git,
+                github_client=backend.github_client,
+                todo_repository=config.todo_repository,
             ),
             analyze_callback=lambda item, tool: session.analyze(
                 target=format_work_item_id(item), agent=tool, prefer_cache=(tool == "cached")
@@ -1148,8 +1153,33 @@ def _print_pane_info(info: dict[str, object]) -> None:
     print(f"Session: {info['session']}")
     panes = info["panes"]
     for entry in info.get("autodispatch_sessions", []):
+
+        def short(value: str) -> str:
+            parsed = parse_github_item_url(value)
+            if parsed and parsed.item_type == WorkItemType.ISSUE:
+                return f"{parsed.repo}#{parsed.number}"
+            return re.sub(
+                r"#(?:ISSUE-)?(\d+)$",
+                lambda match: f"#{int(match.group(1))}",
+                value,
+                flags=re.IGNORECASE,
+            )
+
+        scope = short(entry["scope"])
+        item = short(entry["current_item"]) if entry["current_item"] else None
+        target = f"scope={scope}"
+        if item and item.lower() != scope.lower() and not entry.get("scope_is_current_item"):
+            target += f" item={item}"
+        reason = (
+            f" ({entry['launch_reason'].replace('_', ' ')})"
+            if entry["stage"] == "developing" and entry["launch_reason"]
+            else ""
+        )
         print(
-            f"Autodispatch {entry['id']} {entry['status']} group={entry['group'] or 'automatic'} scope={entry['scope']} item={entry['current_item'] or '-'} elapsed={entry['elapsed_seconds']}s"
+            f"Autodispatch {entry['id']} {entry['status']} "
+            f"group={entry['selected_group'] or 'automatic'} {target} "
+            f"stage={entry['stage']}{reason} iteration={entry['iteration']} "
+            f"elapsed={entry['elapsed_seconds']}s"
         )
         if entry.get("error"):
             print(f"  Error: {entry['error']}")

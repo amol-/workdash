@@ -9,10 +9,10 @@ before assessing code quality, test design, or code flow:
 
 Do not invent facts not present in the metadata, discussion, or diff file.
 
-If you have access to specialized agents or tools for code review, bug hunting,
-quality assurance, or test design, delegate the relevant parts of this review to
-them. Use whatever review capabilities are available to produce the most thorough
-and multi-perspective assessment possible.
+If you have access to specialized agents, skills or tools for code review, bug
+hunting, quality assurance, or test design, delegate the relevant parts of this
+review to them. Use whatever review capabilities are available to produce the
+most thorough analysis.
 
 TASK:
 

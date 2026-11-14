@@ -31,9 +31,10 @@ checks passing or GitHub reports no required or observed checks, and that merges
 cleanly into the CURRENT base branch. Unknown mergeability or unknown CI status is
 not proof of completion. A pull request existing is not completion either.
 
-For an issue, create a pull request that closes it with GitHub's closing keyword
-(`Fixes owner/repo#NUMBER`). For an existing pull request, update THAT pull
-request's head branch and never create a second one.
+For an ordinary issue, create a pull request that closes it with `Fixes #NUMBER`
+without a repository prefix. For a todo, never disclose or reference the todo in the pull request;
+link a relevant issue in the implementation repository if appropriate. For an existing
+pull request, update THAT pull request's head branch and never create a second one.
 
 After each push, classify the newest head SHA's CI from GitHub's check results and
 required-check rules for it as passing, failing, pending, no_checks, or unknown.
