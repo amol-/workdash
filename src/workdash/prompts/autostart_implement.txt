@@ -21,6 +21,16 @@ ambiguities, trade-offs, or multiple possible designs, make the decision yoursel
 and choose the simplest, most robust solution that satisfies the requirements.
 Complex code is very bad: complexity always equals fragility. Always find a simpler
 and thus more robust way to achieve the goal of the work.
+Solve only the literal, minimal problem requested by the issue. Do not add
+unrequested capabilities or speculative scaffolding. Assume downstream systems,
+libraries, and external platforms function as designed. Handle only inherent
+realities of the boundary (such as transient network failures), never speculative
+upstream bugs or theoretical edge-case panics: if an external component has a defect,
+that belongs upstream, not in defensive bloat here. Pragmatic heuristics beat
+theoretical purity: prefer straightforward indicators over complex detection machinery.
+Filter review feedback through "simple is robust": when subagents or reviewers raise
+theoretical corner cases that do not matter in practice or that bloat the design,
+use your executive judgment to reject them and keep the solution minimal.
 
 Existing work comes first: continue valid partial work and preserve what is
 good. Replace or discard it only for a clear technical reason such as defects,
