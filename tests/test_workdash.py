@@ -2168,3 +2168,43 @@ def test_interactive_diff_prepares_worktree_with_session_git(monkeypatch, tmp_pa
     git.create_worktree.assert_called_once_with(
         tmp_path / "owner_repo", worktree, "issue-1", "origin/HEAD"
     )
+
+
+def test_todo_close_json_uses_server(monkeypatch, capsys):
+    result = {
+        "item_id": "me/todos#ISSUE-42",
+        "status": "closed",
+        "url": "https://github.com/me/todos/issues/42",
+    }
+    requests = []
+
+    class Client:
+        def __init__(self, host):
+            assert host == "dashboard.lan"
+
+        def request(self, endpoint, payload):
+            requests.append((endpoint, payload))
+            return result
+
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", Client)
+    assert (
+        workdash_module.main(["todo", "--close", "#42", "--host", "dashboard.lan", "--json"]) == 0
+    )
+    assert requests == [("todo_close", {"item": "#42"})]
+    assert json.loads(capsys.readouterr().out) == result
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        [],
+        ["--close", "42", "text"],
+        ["--close", "42", "--target", "owner/repo"],
+        ["--close", "42", "--body", "details"],
+    ],
+)
+def test_todo_rejects_invalid_arguments(arguments, capsys):
+    with pytest.raises(SystemExit) as error:
+        workdash_module.main(["todo", *arguments])
+    assert error.value.code == 2
+    assert "todo requires TEXT or --close ITEM" in capsys.readouterr().err

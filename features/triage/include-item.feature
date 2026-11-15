@@ -16,6 +16,7 @@ Feature: Include a work item by URL
     - An included item's type follows the user's relationship to it, not the fact that it was included: a pull request the user authored reads "PR+", and one the user did not author reads "CHECK+" like any other pull request waiting to be looked at.
     - Including an issue that a listed pull request closes is not refused: the issue is added for the rest of the session, and the next refresh hides it again because the pull request already covers that work.
     - Including a URL that is already shown on the dashboard moves the cursor to that item without duplicating it.
+    - If a todo is closed while its URL is being included, the dashboard does not restore the closed todo.
     - Included items are a fetch-time source; downstream sorting, suggestion, and recent-activity rules treat them like any other item.
     - On every refresh the included-items store is re-read and its URLs are re-fetched; items that are no longer open are removed from the store.
     - An accessible pull request can be included even if its linked-issue information is unavailable; the user is warned to refresh the dashboard to recover it.
