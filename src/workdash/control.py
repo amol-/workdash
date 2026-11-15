@@ -254,14 +254,21 @@ class WorkdashSession:
                 body=body,
             )
             with self._lock:
-                if not any(
-                    current.item_type == item.item_type
-                    and current.repo.lower() == item.repo.lower()
-                    and current.number == item.number
-                    for current in self.work_items
-                ):
+                existing = next(
+                    (
+                        current
+                        for current in self.work_items
+                        if current.item_type == item.item_type
+                        and current.repo.lower() == item.repo.lower()
+                        and current.number == item.number
+                    ),
+                    None,
+                )
+                if existing is None:
                     self.work_items.append(item)
                     self.suggestion_markers = compute_suggestion_markers(self.work_items)
+                elif existing.todo_target is None:
+                    existing.todo_target = item.todo_target
         self._notify_items_changed()
         return {
             "item_id": format_work_item_id(item),
@@ -1326,7 +1333,7 @@ class WorkdashSession:
                 (item for item in self.work_items if (item.repo, item.number) == (repo, number)),
                 None,
             )
-        if item is None:
+        if item is None or (targeted_todo and item.todo_target is None):
             try:
                 item = self.backend.github_client.fetch_item(
                     repo,

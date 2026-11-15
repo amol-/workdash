@@ -4860,6 +4860,115 @@ def test_refresh_during_todo_creation_does_not_duplicate_item():
     ]
 
 
+def test_included_todo_during_capture_keeps_target_and_can_be_closed(monkeypatch):
+    import workdash.github_client as github_module
+    from workdash.github_client import parse_github_item_url
+
+    url = "https://github.com/testuser/todos/issues/110"
+    node = {
+        "state": "OPEN",
+        "title": "todo",
+        "url": url,
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-02T00:00:00Z",
+        "subIssuesSummary": {"total": 0},
+    }
+    monkeypatch.setattr(subprocess, "run", fake_gh_todo_run([]))
+    monkeypatch.setattr(
+        github_module,
+        "_run_gh_command_with_retry",
+        lambda *args, **kwargs: SimpleNamespace(
+            stdout=json.dumps({"data": {"repository": {"issue": node}}})
+        ),
+    )
+    github = GitHubClient()
+    create = github.create_todo
+    github.close_todo = MagicMock()
+    backend = MagicMock(github_client=github)
+    backend.include_item_by_url.side_effect = lambda url, identities: IncludeResult(
+        fetched_item=github.fetch_item_by_url(parse_github_item_url(url), "testuser")
+    )
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="testuser/todos"),
+        backend=backend,
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    def create_with_include(**kwargs):
+        item = create(**kwargs)
+        session.include_item_by_url(url)
+        return item
+
+    github.create_todo = create_with_include
+    result = session.todo(text="todo", target="owner/repo")
+    assert result["item_id"] == "owner/repo#ISSUE-WT110"
+    assert [row["id"] for row in session.list_items()["items"]] == [result["item_id"]]
+    assert session.work_items[0].included
+    assert session.close_todo(item=result["item_id"])["status"] == "closed"
+    github.close_todo.assert_called_once_with(todo_repository="testuser/todos", number=110)
+    assert session.work_items == []
+
+
+@pytest.mark.parametrize(
+    "reference, closes", [("owner/repo#ISSUE-WT110", True), ("wrong/repo#ISSUE-WT110", False)]
+)
+def test_close_targeted_todo_included_independently_by_url(reference, closes, monkeypatch):
+    import workdash.github_client as github_module
+    from workdash.github_client import parse_github_item_url
+
+    url = "https://github.com/testuser/todos/issues/110"
+    node = {
+        "state": "OPEN",
+        "title": "todo",
+        "url": url,
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-02T00:00:00Z",
+        "subIssuesSummary": {"total": 0},
+    }
+    monkeypatch.setattr(
+        github_module,
+        "_run_gh_command_with_retry",
+        lambda *args, **kwargs: SimpleNamespace(
+            stdout=json.dumps({"data": {"repository": {"issue": node}}})
+        ),
+    )
+    github = GitHubClient()
+    actual = _work_item(number=10, title="todo")
+    actual.number = 110
+    actual.repo = "testuser/todos"
+    actual.todo_target = "owner/repo"
+    github.fetch_item = MagicMock(return_value=actual)
+    github.close_todo = MagicMock()
+    backend = MagicMock(github_client=github)
+    backend.include_item_by_url.side_effect = lambda url, identities: IncludeResult(
+        fetched_item=github.fetch_item_by_url(parse_github_item_url(url), "testuser")
+    )
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="testuser/todos"),
+        backend=backend,
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    session.include_item_by_url(url)
+    response = Request.blank(
+        "/api/v0/todo_close",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps({"item": reference}).encode(),
+    ).get_response(control_module._make_turbogears_app(session))
+    assert response.status_int == (200 if closes else 404)
+    if closes:
+        assert json.loads(response.text)["result"]["item_id"] == reference
+        github.close_todo.assert_called_once_with(todo_repository="testuser/todos", number=110)
+        assert session.work_items == []
+    else:
+        github.close_todo.assert_not_called()
+        assert len(session.work_items) == 1
+
+
 def test_close_waits_for_inflight_todo_creation():
     item = _work_item(number=10, title="todo")
     item.repo = "testuser/todos"

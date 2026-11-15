@@ -1206,13 +1206,21 @@ class WorkdashApp(App[None]):
             self._update_status(message)
             self.notify(message, severity="error", timeout=10)
             return
+        if self._session is not None:
+            self.refresh_from_session()
         if result.duplicate_identity is not None:
             item_type, repo, number = result.duplicate_identity
             existing = next(
-                item
-                for item in self._work_items
-                if item.item_type == item_type and item.repo == repo and item.number == number
+                (
+                    item
+                    for item in self._work_items
+                    if item.item_type == item_type and item.repo == repo and item.number == number
+                ),
+                None,
             )
+            if existing is None:
+                self._update_status("Included item is no longer on the dashboard.")
+                return
             existing.included = True
             self._search_filter = ""
             self._render_table(focus_item=existing)
@@ -1233,6 +1241,15 @@ class WorkdashApp(App[None]):
             ),
             None,
         )
+        if existing is None and self._session is not None:
+            self._update_status("Included item is no longer on the dashboard.")
+            if result.linked_issues_unavailable:
+                self.notify(
+                    "Linked issues unavailable; refresh the dashboard to retry.",
+                    severity="warning",
+                    timeout=10,
+                )
+            return
         if existing is None:
             self._work_items.append(fetched_item)
             self._work_items.sort(key=lambda item: item.updated_at, reverse=True)

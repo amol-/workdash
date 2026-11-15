@@ -3367,3 +3367,76 @@ def test_refresh_does_not_restore_todo_closed_after_capture() -> None:
             assert session.list_items()["items"] == []
 
     asyncio.run(run_test())
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_include_closed_todo_is_pruned_on_refresh(tmp_path, duplicate: bool) -> None:
+    from workdash.backend import WorkdashBackend
+    from workdash.github_client import GitHubClient
+    from workdash.included_items import IncludedItemsStore
+
+    now = datetime.now(UTC)
+    item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/todos",
+        number=42,
+        title="Close me",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/todos/issues/42",
+    )
+    github = MagicMock(spec=GitHubClient)
+    for name in (
+        "list_open_authored_prs",
+        "list_open_review_requested_prs",
+        "list_open_reviewed_prs",
+        "list_open_assigned_issues",
+        "list_recent_tracked_items",
+        "list_open_todo_issues",
+    ):
+        getattr(github, name).return_value = []
+    github.fetch_item_by_url.side_effect = [None] if duplicate else [item, None]
+    store = IncludedItemsStore(tmp_path / "included.json")
+    config = WorkdashConfig(todo_repository="owner/todos")
+    backend = WorkdashBackend(
+        config=config,
+        github_client=github,
+        included_items_store=store,
+        cache_root=tmp_path / "cache",
+    )
+    session = WorkdashSession(
+        config=config,
+        backend=backend,
+        work_items=[item] if duplicate else [],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = WorkdashApp(
+        session=session,
+        include_callback=lambda url, _: session.include_item_by_url(url),
+        refresh_callback=lambda: session.list_items(refresh=True),
+    )
+    session.items_changed_callback = app.refresh_from_session
+
+    async def run_test() -> None:
+        async with app.run_test():
+
+            async def interrupted_include(*, message, callback):
+                captured = callback()
+                assert store.load() == [item.url]
+                session.close_todo(item="42")
+                return captured
+
+            app._run_with_busy_screen = interrupted_include
+            await app._perform_include(item.url)
+            assert app.query_one("#work-items", DataTable).row_count == 0
+            assert session.list_items()["items"] == []
+            session.list_items(refresh=True)
+            assert app.query_one("#work-items", DataTable).row_count == 0
+            assert session.list_items()["items"] == []
+            assert store.load() == []
+            github.close_todo.assert_called_once_with(todo_repository="owner/todos", number=42)
+            assert github.fetch_item_by_url.call_count == (1 if duplicate else 2)
+
+    asyncio.run(run_test())

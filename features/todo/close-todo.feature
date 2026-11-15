@@ -3,6 +3,8 @@ Feature: Close a todo
   A user can close an issue in the configured todo repository from the CLI or JSON API.
   Confirmation uses the targeted todo's Workdash ID when the todo is resolved;
   otherwise it uses the issue ID in the todo repository.
+  A targeted todo can be closed by its targeted ID even when it was included
+  independently by its issue URL; a different target must not close it.
 
   @id:F-TODO-CLOSE-S001
   Scenario Outline: Close a todo by reference
