@@ -197,12 +197,16 @@ class _AutodispatchSession:
                         if state.head_sha != head:
                             retry_head = True
                             continue
+                        if not state.review_threads_complete:
+                            raise RuntimeError("Cannot verify all pull request review feedback.")
                         if state.reasons:
                             if not state.head_writable:
                                 raise RuntimeError(
                                     "Pull request needs fixes but its head is not writable."
                                 )
                             break
+                        if state.changes_requested:
+                            raise RuntimeError("Pull request is waiting for a reviewer to respond.")
                         if state.mergeability != "mergeable" or state.ci_status not in {
                             "passing",
                             "no_checks",

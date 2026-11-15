@@ -71,7 +71,7 @@ _CHECK_CONTEXTS = f"""
     }}
 """
 # Per pull request feedback lists stop at GitHub's page size of 100, keeping the
-# newest entries: only feedback after the latest push can be actionable.
+# newest entries.
 _PULL_REQUEST_FRAGMENT = f"""
 fragment ReadyPullRequest on PullRequest {{
     number title url createdAt updatedAt state
@@ -95,10 +95,12 @@ fragment ReadyPullRequest on PullRequest {{
         nodes {{ requestedReviewer {{ __typename ... on User {{ login }} }} }}
     }}
     latestOpinionatedReviews(first: 100) {{
+        pageInfo {{ hasNextPage }}
         nodes {{ state url submittedAt isMinimized commit {{ oid }} {_ACTOR} }}
     }}
     reviews(last: 100) {{ nodes {{ state body url submittedAt isMinimized {_ACTOR} }} }}
     reviewThreads(last: 100) {{
+        pageInfo {{ hasPreviousPage }}
         nodes {{ isResolved isOutdated
             comments(last: 10) {{ nodes {{ url publishedAt isMinimized {_ACTOR} }} }}
         }}
@@ -2367,7 +2369,9 @@ class GitHubClient:
                 subject,
             )
             with _github_payload(subject):
-                nodes += [data[f"p{index}"]["pullRequest"] for index in range(len(batch))]
+                for index in range(len(batch)):
+                    node = data[f"p{index}"]["pullRequest"]
+                    nodes.append(node)
         return nodes
 
     def _issue_state(self, node: dict, todo_repository: str) -> IssueWorkState:
@@ -2471,6 +2475,20 @@ class GitHubClient:
                 ci_status=ci_status,
                 failing_checks=failing_checks,
                 feedback=_actionable_feedback(node),
+                changes_requested=node["reviewDecision"] == "CHANGES_REQUESTED"
+                or any(
+                    review["state"] == "CHANGES_REQUESTED"
+                    for review in node["latestOpinionatedReviews"]["nodes"]
+                ),
+                review_threads_complete=(
+                    not node["reviewThreads"]["pageInfo"]["hasPreviousPage"]
+                    and not node["latestOpinionatedReviews"]["pageInfo"]["hasNextPage"]
+                    and all(
+                        thread["isResolved"]
+                        or any(comment["publishedAt"] for comment in thread["comments"]["nodes"])
+                        for thread in node["reviewThreads"]["nodes"]
+                    )
+                ),
                 merged_at=parse_github_datetime(node["mergedAt"]) if node["mergedAt"] else None,
             )
 

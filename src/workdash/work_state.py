@@ -36,6 +36,8 @@ class PullRequestWorkState:
     failing_checks: tuple[str, ...]
     feedback: tuple[ReviewFeedback, ...]
     merged_at: datetime | None = None
+    changes_requested: bool = False
+    review_threads_complete: bool = True
 
     @property
     def reasons(self) -> tuple[str, ...]:

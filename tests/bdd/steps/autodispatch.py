@@ -1,10 +1,12 @@
 """Autodispatch behavior at the dispatch and pane boundaries."""
 
 import json
+import re
 import subprocess
 import threading
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -785,7 +787,13 @@ def automerge_session(autodispatch_state, monkeypatch, *, enabled=True, scope="o
     )
     autodispatch_state["merged"] = merged
     github.work_pull_request.return_value = SimpleNamespace(
-        state="OPEN", head_sha="head", reasons=(), mergeability="mergeable", ci_status="passing"
+        state="OPEN",
+        head_sha="head",
+        reasons=(),
+        changes_requested=False,
+        review_threads_complete=True,
+        mergeability="mergeable",
+        ci_status="passing",
     )
     dispatch = session.dispatch_once
     monkeypatch.setattr(
@@ -910,3 +918,64 @@ def automerge_head_changes(autodispatch_state):
 def automerge_head_reviewed(autodispatch_state):
     assert autodispatch_state["reviewed_heads"] == ["head", "new-head"]
     assert autodispatch_state["merged"] == {("owner/repo", 2)}
+
+
+@when("the review cannot post a major finding")
+def failed_review_posting(autodispatch_state, monkeypatch, tmp_path):
+    from workdash.review import review_pull_request
+
+    session = autodispatch_state["session"]
+    item = make_work_item(item_type=WorkItemType.PR, number=2)
+    git = MagicMock()
+    git.get_git_path.return_value = tmp_path / "exclude"
+
+    def agent(*, prompt, **kwargs):
+        Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
+            "Review outcome: failure\nGitHub rejected the major finding."
+        )
+        return ""
+
+    monkeypatch.setattr("workdash.agent_execution.executor.run_in_pane", agent)
+    monkeypatch.setattr(
+        session,
+        "review",
+        lambda **kwargs: review_pull_request(
+            item,
+            context={},
+            cwd=str(tmp_path),
+            tokens=["pi"],
+            document=tmp_path / "review.md",
+            git=git,
+            zellij_session="s",
+            group=None,
+        ),
+    )
+    autodispatch_state["panes"].clear()
+    wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "failed")
+
+
+@then("the session fails without merging the pull request")
+def review_failure_prevents_merge(autodispatch_state):
+    assert (
+        "review outcome not confirmed"
+        in autodispatch_state["session"].autodispatch_sessions()[0]["error"]
+    )
+    assert not autodispatch_state["merged"]
+
+
+@when("a reviewer has requested changes and has been asked to review again")
+def reviewer_awaited(autodispatch_state):
+    session = autodispatch_state["session"]
+    session.backend.github_client.work_pull_request.return_value.changes_requested = True
+    autodispatch_state["panes"].clear()
+    wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "failed")
+
+
+@then("the session fails without merging or dispatching again")
+def waiting_prevents_merge_and_dispatch(autodispatch_state):
+    assert (
+        "waiting for a reviewer"
+        in autodispatch_state["session"].autodispatch_sessions()[0]["error"]
+    )
+    assert not autodispatch_state["merged"]
+    assert len(autodispatch_state["calls"]) == 1

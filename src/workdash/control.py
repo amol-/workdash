@@ -485,6 +485,30 @@ class WorkdashSession:
             return started.copy() if background else future.result()
 
         def run_review():
+            def fetch_head():
+                branch, repo = self.backend.github_client.fetch_worktree_head(item)
+                if repo.lower() == item.repo.lower():
+                    self.git.fetch_origin_branch(Path(cwd), branch)
+                    return
+                remotes = subprocess.run(
+                    ["git", "remote"], cwd=cwd, check=True, capture_output=True, text=True
+                ).stdout.splitlines()
+                remote = next(
+                    (
+                        name
+                        for name in remotes
+                        if (self.git.remote_repo(Path(cwd), name) or "").lower() == repo.lower()
+                    ),
+                    f"https://github.com/{repo}.git",
+                )
+                subprocess.run(
+                    ["git", "fetch", remote, f"refs/heads/{branch}"],
+                    cwd=cwd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
             review_cwd = cwd
             try:
                 with ExitStack() as stack:
@@ -509,8 +533,7 @@ class WorkdashSession:
                             ).stdout.strip()
                             if self.git.has_unpublished_work(cwd, local_head):
                                 raise RuntimeError("Review worktree has unpublished work.")
-                            branch, _ = self.backend.github_client.fetch_worktree_head(item)
-                            self.git.fetch_origin_branch(Path(cwd), branch)
+                            fetch_head()
                             ancestor = subprocess.run(
                                 ["git", "merge-base", "--is-ancestor", local_head, state.head_sha],
                                 cwd=cwd,
@@ -523,8 +546,7 @@ class WorkdashSession:
                             use_detached = True
                         if use_detached:
                             if detached:
-                                branch, _ = self.backend.github_client.fetch_worktree_head(item)
-                                self.git.fetch_origin_branch(Path(cwd), branch)
+                                fetch_head()
                             directory = tempfile.mkdtemp(prefix="workdash-review-")
                             review_cwd = str(Path(directory) / "checkout")
                             try:

@@ -12,13 +12,17 @@ Feature: Automatically dispatch ready work
   the dashboard refreshes the issue again after that review ends, including on failure.
   If an in-progress dispatch launches after stopping, the dashboard refreshes its issue.
   Autodispatch leaves pull requests open by default; opt-in automerge merges a
-  pull request directly after a successful review, without scheduling a merge or
+  pull request directly after an explicitly successful review; failed or unconfirmed
+  review postings fail the session and prevent merging, without scheduling a merge or
   enabling GitHub auto-merge. It reviews the current pull request head and fails
   safely if the review checkout has unpublished work or does not match it before or
   after review; Workdash artifacts do not count as unpublished work. It merges only the unchanged reviewed
   head when feedback is resolved, checks pass or are absent, and GitHub reports it mergeable.
+  If the complete review feedback cannot be verified, or any review thread remains unresolved,
+  the session fails instead of merging unless actionable feedback is dispatched for repair.
   Actionable feedback, conflicts or failing checks are dispatched for repair;
-  pending or unknown state fails safely. A review without a known starting head
+  a changes-requested review awaiting the reviewer's response fails the session
+  without merging or dispatching again. Pending or unknown state fails safely. A review without a known starting head
   is followed by a fresh review if automerge was enabled during it. If the head
   changes during review or before the merge, including a force-push, the new head is
   reviewed before merging, with a bounded number of attempts. Existing local commits
@@ -197,6 +201,18 @@ Feature: Automatically dispatch ready work
     Given an autodispatch session with automerge enabled
     When its completed pull request has been reviewed successfully
     Then the pull request is merged
+
+  @id:F-AUTODISPATCH-S025
+  Scenario: A review finding cannot be posted
+    Given an autodispatch session with automerge enabled
+    When the review cannot post a major finding
+    Then the session fails without merging the pull request
+
+  @id:F-AUTODISPATCH-S026
+  Scenario: Wait for a reviewer who was asked to review again
+    Given an autodispatch session with automerge enabled
+    When a reviewer has requested changes and has been asked to review again
+    Then the session fails without merging or dispatching again
 
   @id:F-AUTODISPATCH-S024
   Scenario: Review changed work before merging

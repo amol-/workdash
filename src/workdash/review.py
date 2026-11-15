@@ -66,6 +66,11 @@ def review_pull_request(
             if document.is_file():
                 content = document.read_text(encoding="utf-8", errors="replace")
                 if content:
+                    if content.splitlines()[0] != "Review outcome: success":
+                        raise RuntimeError(
+                            f"Review failed for {item.repo}#{item.number}: "
+                            f"review outcome not confirmed; see {document}."
+                        )
                     return {
                         "status": "reviewed",
                         "item_id": f"{item.repo}#PR-{item.number}",

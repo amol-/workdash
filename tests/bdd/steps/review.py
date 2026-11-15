@@ -79,7 +79,7 @@ def review_state(monkeypatch, tmp_path, scenario_state):
             }
         )
         path = re.search(r"completion document at (\S+)", prompt).group(1)
-        Path(path).write_text("Outcome: approved\nInline comments: none")
+        Path(path).write_text("Review outcome: success\nOutcome: approved\nInline comments: none")
         return ""
 
     original_run = agent_execution.executor.run_in_pane
@@ -250,7 +250,7 @@ def running_review(review_state, scenario_state, monkeypatch):
         "while not release.exists(): time.sleep(0.01)\n"
         "posted.touch()\n"
         "path = re.search(r'completion document at (\\S+)', sys.argv[4]).group(1)\n"
-        "pathlib.Path(path).write_text('Outcome: approved\\nInline comments: none')\n"
+        "pathlib.Path(path).write_text('Review outcome: success\\nOutcome: approved\\nInline comments: none')\n"
     )
     review_state["session"].backend.resolve_analyze_command_tokens.return_value = [
         sys.executable,

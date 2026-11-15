@@ -118,7 +118,7 @@ def test_fresh_review_requires_checkout_at_github_head(setup_review, monkeypatch
     reviewer = MagicMock(return_value={"status": "reviewed"})
     monkeypatch.setattr(control, "review_pull_request", reviewer)
 
-    session.backend.github_client.fetch_worktree_head.return_value = ("main", head)
+    session.backend.github_client.fetch_worktree_head.return_value = ("main", "owner/repo")
     monkeypatch.setattr(session.git, "fetch_origin_branch", lambda *args: None)
     result = session.review(target="owner/repo#PR-2", require_fresh=True)
     assert result["head_sha"] == head
@@ -210,7 +210,7 @@ def test_detached_retry_preserves_reviewer_work(setup_review, monkeypatch, caplo
     session.backend.github_client.work_pull_request.return_value = SimpleNamespace(
         state="OPEN", head_sha=head
     )
-    session.backend.github_client.fetch_worktree_head.return_value = ("main", head)
+    session.backend.github_client.fetch_worktree_head.return_value = ("main", "owner/repo")
     monkeypatch.setattr(session.git, "fetch_origin_branch", lambda *args: None)
     checkout = None
 
@@ -338,7 +338,7 @@ def test_issue_resolves_pr_and_retries_with_existing_threads(setup_review, monke
         prompts.append(prompt)
         if len(prompts) == 2:
             Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-                "Outcome: comment-only review\nInline comments: none"
+                "Review outcome: success\nOutcome: comment-only review\nInline comments: none"
             )
         return ""
 
@@ -380,7 +380,7 @@ def test_issue_finds_open_pr_after_first_page(setup_review, monkeypatch):
     def run(*, item, prompt, command_tokens, cwd):
         assert item.number == 2
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-            "Outcome: approved\nInline comments: none"
+            "Review outcome: success\nOutcome: approved\nInline comments: none"
         )
         return ""
 
@@ -407,14 +407,14 @@ def test_review_runs_with_dirty_worktree_and_live_coding_pane(setup_review, monk
     def run(*, item, prompt, command_tokens, cwd):
         assert (Path(cwd) / "uncommitted.txt").read_text() == "local work"
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-            "Outcome: approved\nInline comments: none"
+            "Review outcome: success\nOutcome: approved\nInline comments: none"
         )
         return ""
 
     install_agent(monkeypatch, run)
     result = session.review(target="owner/repo#PR-2")
     assert result["status"] == "reviewed"
-    assert result["content"] == "Outcome: approved\nInline comments: none"
+    assert result["content"] == "Review outcome: success\nOutcome: approved\nInline comments: none"
     pane_lookup.assert_not_called()
     claim.assert_not_called()
 
@@ -428,14 +428,14 @@ def test_issue_resolves_pr_not_on_dashboard(setup_review, monkeypatch):
     def run(*, item, prompt, command_tokens, cwd):
         assert item is pr
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-            "Outcome: approved\nInline comments: none"
+            "Review outcome: success\nOutcome: approved\nInline comments: none"
         )
         return ""
 
     install_agent(monkeypatch, run)
     result = session.review(target="owner/repo#1")
     assert result["item_id"] == "owner/repo#PR-2"
-    assert result["content"] == "Outcome: approved\nInline comments: none"
+    assert result["content"] == "Review outcome: success\nOutcome: approved\nInline comments: none"
     session.backend.github_client.fetch_item.assert_called_once_with(
         "owner/repo", 2, github_username="me", todo_repository=session.config.todo_repository
     )
@@ -460,8 +460,16 @@ def test_missing_document_fails_after_one_retry(setup_review, monkeypatch):
     assert (tmp_path / ".workdash/reviews/old.md").read_text() == "user notes"
 
 
-@pytest.mark.parametrize("content", ["reviewed", "Outcome: approved", " "])
-def test_any_nonempty_document_succeeds(setup_review, monkeypatch, content):
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Review outcome: failure\nCould not post major finding",
+        "Review outcome: failure\nReview outcome: success",
+        "Outcome: approved",
+        " ",
+    ],
+)
+def test_unconfirmed_review_fails(setup_review, monkeypatch, content):
     session, _ = setup_review
     attempts = []
 
@@ -471,7 +479,8 @@ def test_any_nonempty_document_succeeds(setup_review, monkeypatch, content):
         return ""
 
     install_agent(monkeypatch, run)
-    assert session.review(target="owner/repo#PR-2")["content"] == content
+    with pytest.raises(RuntimeError, match="review outcome"):
+        session.review(target="owner/repo#PR-2")
     assert len(attempts) == 1
 
 
@@ -482,13 +491,20 @@ def test_empty_document_retries(setup_review, monkeypatch, eventually_succeeds):
 
     def run(*, item, prompt, command_tokens, cwd):
         attempts.append(prompt)
-        content = "reviewed" if eventually_succeeds and len(attempts) == 2 else ""
+        content = (
+            "Review outcome: success\nreviewed"
+            if eventually_succeeds and len(attempts) == 2
+            else ""
+        )
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(content)
         return ""
 
     install_agent(monkeypatch, run)
     if eventually_succeeds:
-        assert session.review(target="owner/repo#PR-2")["content"] == "reviewed"
+        assert (
+            session.review(target="owner/repo#PR-2")["content"]
+            == "Review outcome: success\nreviewed"
+        )
     else:
         with pytest.raises(RuntimeError, match="missing or empty"):
             session.review(target="owner/repo#PR-2")
@@ -512,7 +528,7 @@ def test_agent_failure_is_not_retried(setup_review, monkeypatch):
 
     def succeed(*, item, prompt, command_tokens, cwd):
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-            "Outcome: approved\nInline comments: none"
+            "Review outcome: success\nOutcome: approved\nInline comments: none"
         )
         return ""
 
@@ -531,7 +547,7 @@ def test_other_authors_get_formal_verdict_instructions(setup_review, monkeypatch
     def run(*, item, prompt, command_tokens, cwd):
         prompts.append(prompt)
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-            "Outcome: approved\nInline comments: none"
+            "Review outcome: success\nOutcome: approved\nInline comments: none"
         )
         return ""
 
@@ -582,7 +598,7 @@ def test_one_shot_command_gets_prompt_as_final_shell_argument(setup_review, monk
         "prompt = sys.argv[-1]\n"
         "with pathlib.Path('agent-cwd').open('a') as f: f.write(str(pathlib.Path.cwd()) + '\\n')\n"
         "path = pathlib.Path(re.search(r'completion document at (\\S+)', prompt).group(1))\n"
-        "path.write_text('Outcome: comment-only review\\nInline comments: none')\n"
+        "path.write_text('Review outcome: success\\nOutcome: comment-only review\\nInline comments: none')\n"
     )
     script.chmod(0o755)
     session.backend.resolve_analyze_command_tokens.return_value = [str(script), "-p"]
@@ -601,7 +617,7 @@ def test_review_runs_in_the_requested_group(setup_review, monkeypatch):
         "import pathlib, re, sys\n"
         "prompt = sys.argv[-1]\n"
         "path = pathlib.Path(re.search(r'completion document at (\\S+)', prompt).group(1))\n"
-        "path.write_text('Outcome: approved\\nInline comments: none')\n"
+        "path.write_text('Review outcome: success\\nOutcome: approved\\nInline comments: none')\n"
     )
     script.chmod(0o755)
     session.backend.resolve_analyze_command_tokens.return_value = [str(script)]
@@ -699,7 +715,7 @@ def test_review_prompt_instructs_agent_how_to_submit(setup_review, monkeypatch):
     def run(*, item, prompt, command_tokens, cwd):
         prompts.append(prompt)
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-            "Outcome: approved\nInline comments: none"
+            "Review outcome: success\nOutcome: approved\nInline comments: none"
         )
         return ""
 
@@ -726,6 +742,13 @@ def test_review_prompt_instructs_agent_how_to_submit(setup_review, monkeypatch):
         in prompt
     )
     assert "or stating that none were posted" in prompt
+    assert (
+        'first line of the completion document must be exactly "Review outcome: success"' in prompt
+    )
+    assert 'first line must be exactly "Review outcome: failure"' in prompt
+    assert "Never claim success when a GitHub operation failed" in prompt
+    assert "Workdash uses only the first line to decide whether the review succeeded" in prompt
+    assert "The rest of the document must be consistent with that outcome" in prompt
     assert "Use separate lines" not in prompt
 
 
@@ -754,8 +777,8 @@ def test_review_documents_are_not_staged_in_linked_worktree(setup_review, monkey
     monkeypatch.setattr(control, "ensure_worktree", lambda *args, **kwargs: str(worktree))
     (worktree / "real-change.txt").write_text("change")
     contents = [
-        "Outcome: changes requested\nInline comments: fix the race",
-        "Outcome: approved\nInline comments: none",
+        "Review outcome: success\nOutcome: changes requested\nInline comments: fix the race",
+        "Review outcome: success\nOutcome: approved\nInline comments: none",
     ]
     paths = []
 
@@ -839,7 +862,7 @@ def test_selected_agent_runs_in_prepared_pr_worktree(setup_review, monkeypatch, 
         "branch = subprocess.check_output(['git', 'branch', '--show-current'], text=True).strip()\n"
         "pathlib.Path('agent-ran').write_text(str(pathlib.Path.cwd()) + '\\n' + branch)\n"
         "path = pathlib.Path(re.search(r'completion document at (\\S+)', prompt).group(1))\n"
-        "path.write_text('Outcome: changes requested\\nInline comments: fix the race')\n"
+        "path.write_text('Review outcome: success\\nOutcome: changes requested\\nInline comments: fix the race')\n"
     )
     script.chmod(0o755)
     session.config = WorkdashConfig(
@@ -861,7 +884,10 @@ def test_selected_agent_runs_in_prepared_pr_worktree(setup_review, monkeypatch, 
     assert (cwd / "agent-ran").read_text().splitlines() == [str(cwd), "feature"]
     assert cwd != workdir / "owner_repo"
     assert result["agent"] == "selected"
-    assert result["content"] == "Outcome: changes requested\nInline comments: fix the race"
+    assert (
+        result["content"]
+        == "Review outcome: success\nOutcome: changes requested\nInline comments: fix the race"
+    )
 
 
 def test_real_agent_failure_after_writing_document_is_not_retried(
@@ -914,12 +940,15 @@ else:
     paths.write_text(paths.read_text() + "\\n" + str(previous))
     assert "Check existing review threads" in prompt
     document = Path(re.search(r"completion document at (\\S+)", prompt).group(1))
-    document.write_text("Outcome: comment-only review\\nInline comments: none")
+    document.write_text("Review outcome: success\\nOutcome: comment-only review\\nInline comments: none")
 """
     )
     session.backend.resolve_analyze_command_tokens.return_value = [sys.executable, str(script)]
     result = session.review(target="owner/repo#PR-2")
-    assert result["content"] == "Outcome: comment-only review\nInline comments: none"
+    assert (
+        result["content"]
+        == "Review outcome: success\nOutcome: comment-only review\nInline comments: none"
+    )
     assert all(
         not Path(path).exists() for path in (tmp_path / "agent-paths").read_text().splitlines()
     )
@@ -946,7 +975,7 @@ def test_concurrent_reviews_reuse_same_pr_but_allow_other_pr(setup_review, monke
             started.set()
             assert release.wait(5)
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-            "Outcome: approved\nInline comments: none"
+            "Review outcome: success\nOutcome: approved\nInline comments: none"
         )
         return ""
 
@@ -990,7 +1019,7 @@ def test_new_review_preserves_active_review_document(setup_review, monkeypatch):
     def run(*, item, prompt, command_tokens, cwd):
         path = Path(re.search(r"completion document at (\S+)", prompt).group(1))
         paths[item.number] = path
-        path.write_text(f"review {item.number}")
+        path.write_text(f"Review outcome: success\nreview {item.number}")
         if item.number == 2:
             running.set()
             assert release.wait(5)
@@ -1001,11 +1030,14 @@ def test_new_review_preserves_active_review_document(setup_review, monkeypatch):
         first = pool.submit(session.review, target="owner/repo#PR-2")
         try:
             assert running.wait(5)
-            assert session.review(target="owner/repo#PR-3")["content"] == "review 3"
-            assert paths[2].read_text() == "review 2"
+            assert (
+                session.review(target="owner/repo#PR-3")["content"]
+                == "Review outcome: success\nreview 3"
+            )
+            assert paths[2].read_text() == "Review outcome: success\nreview 2"
         finally:
             release.set()
-        assert first.result(5)["content"] == "review 2"
+        assert first.result(5)["content"] == "Review outcome: success\nreview 2"
 
 
 @pytest.mark.parametrize("failure", [False, True])
@@ -1072,7 +1104,7 @@ def test_review_api_returns_while_agent_is_blocked(setup_review, monkeypatch):
         started.set()
         assert release.wait(5)
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-            "Outcome: approved\nInline comments: none"
+            "Review outcome: success\nOutcome: approved\nInline comments: none"
         )
         completed.set()
         return ""
@@ -1101,7 +1133,9 @@ def test_review_api_returns_while_agent_is_blocked(setup_review, monkeypatch):
         release.set()
         thread.join(5)
     assert completed.wait(5)
-    assert document.read_text() == "Outcome: approved\nInline comments: none"
+    assert (
+        document.read_text() == "Review outcome: success\nOutcome: approved\nInline comments: none"
+    )
 
 
 def test_background_review_failure_is_logged(setup_review, monkeypatch, caplog):
@@ -1149,7 +1183,7 @@ def test_real_server_cli_returns_while_agent_is_blocked(setup_review, monkeypatc
         running.set()
         assert release.wait(10)
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-            "Outcome: approved\nInline comments: none"
+            "Review outcome: success\nOutcome: approved\nInline comments: none"
         )
         return ""
 
@@ -1192,3 +1226,64 @@ def test_real_server_cli_returns_while_agent_is_blocked(setup_review, monkeypatc
         server.stop()
     assert calls == [2, 2]
     assert not document.exists()
+
+
+@pytest.mark.parametrize("detached", [False, True])
+@pytest.mark.parametrize("configured_fork", [False, True])
+def test_fresh_review_fetches_fork_head(setup_review, monkeypatch, detached, configured_fork):
+    from types import SimpleNamespace
+
+    session, path = setup_review
+
+    def git(*args, cwd=path):
+        return subprocess.check_output(["git", *map(str, args)], cwd=cwd, text=True).strip()
+
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "base",
+    )
+    base = git("rev-parse", "HEAD")
+    fork = path.parent / f"{path.name}-fork.git"
+    git("clone", "--bare", path, fork)
+    fork_checkout = path.parent / f"{path.name}-fork"
+    git("clone", fork, fork_checkout)
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "fork head",
+        cwd=fork_checkout,
+    )
+    head = git("rev-parse", "HEAD", cwd=fork_checkout)
+    git("push", "origin", "HEAD:refs/heads/feature", cwd=fork_checkout)
+    git("remote", "add", "origin", str(path.parent / "missing-origin.git"))
+    if configured_fork:
+        git("remote", "add", "private-fork", "git@github.com:fork/repo.git")
+        git("config", f"url.{fork}.insteadOf", "git@github.com:fork/repo.git")
+    else:
+        git("config", f"url.{fork}.insteadOf", "https://github.com/fork/repo.git")
+    session.backend.github_client.work_pull_request.return_value = SimpleNamespace(
+        state="OPEN", head_sha=head
+    )
+    session.backend.github_client.fetch_worktree_head.return_value = ("feature", "fork/repo")
+
+    def review(*args, cwd, **kwargs):
+        assert git("rev-parse", "HEAD", cwd=cwd) == head
+        return {"status": "reviewed"}
+
+    reviewer = MagicMock(side_effect=review)
+    monkeypatch.setattr(control, "review_pull_request", reviewer)
+    result = session.review(target="owner/repo#PR-2", require_fresh=True, detached=detached)
+    assert result["head_sha"] == head
+    reviewer.assert_called_once()
+    assert git("rev-parse", "HEAD") == base

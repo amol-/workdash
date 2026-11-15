@@ -1217,7 +1217,7 @@ def test_autodispatch_waits_for_selected_pull_request_review(monkeypatch, tmp_pa
         entered.set()
         assert release.wait(3)
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-            "Outcome: approved\nInline comments: none"
+            "Review outcome: success\nOutcome: approved\nInline comments: none"
         )
         return ""
 
@@ -1245,7 +1245,9 @@ def test_autodispatch_waits_for_selected_pull_request_review(monkeypatch, tmp_pa
     assert dispatch.call_count == 2
 
 
-@pytest.mark.parametrize("outcome", ["no_pr", "success", "empty", "failed"])
+@pytest.mark.parametrize(
+    "outcome", ["no_pr", "success", "empty", "failed", "failure", "unconfirmed"]
+)
 def test_autodispatch_real_review_controls_merge(monkeypatch, tmp_path, outcome):
     now = datetime.now(UTC)
     items = [
@@ -1307,15 +1309,26 @@ def test_autodispatch_real_review_controls_merge(monkeypatch, tmp_path, outcome)
         ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True
     ).strip()
     session.backend.github_client.work_pull_request.return_value = SimpleNamespace(
-        state="OPEN", head_sha=head, reasons=(), mergeability="mergeable", ci_status="passing"
+        state="OPEN",
+        head_sha=head,
+        reasons=(),
+        changes_requested=False,
+        review_threads_complete=True,
+        mergeability="mergeable",
+        ci_status="passing",
     )
 
     def run_review(**kwargs):
         if outcome == "failed":
             raise RuntimeError("review failed")
-        if outcome == "success":
+        if outcome in {"success", "failure", "unconfirmed"}:
+            marker = {
+                "success": "Review outcome: success",
+                "failure": "Review outcome: failure",
+                "unconfirmed": "Outcome: approved",
+            }[outcome]
             Path(re.search(r"completion document at (\S+)", kwargs["prompt"]).group(1)).write_text(
-                "Outcome: approved\nInline comments: none"
+                f"{marker}\nInline comments: none"
             )
         return ""
 
@@ -1474,7 +1487,9 @@ def test_autodispatch_review_feedback_cycle(monkeypatch, tmp_path):
                 outcome = "Major finding posted inline"
             else:
                 outcome = "No major findings; no inline comments"
-            Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(outcome)
+            Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
+                "Review outcome: success\n" + outcome
+            )
             self.review_prompts.put(prompt)
             self.reviews.put((item.url, outcome))
             assert self.release_review.wait(3)
@@ -2145,7 +2160,13 @@ def test_automerge_after_review(monkeypatch, automerge, reviewed, merge_error):
     ]
     owner._require_item.return_value = MagicMock(repo="other/repo", number=2)
     owner.backend.github_client.work_pull_request.return_value = SimpleNamespace(
-        state="OPEN", head_sha="head", reasons=(), mergeability="mergeable", ci_status="passing"
+        state="OPEN",
+        head_sha="head",
+        reasons=(),
+        changes_requested=False,
+        review_threads_complete=True,
+        mergeability="mergeable",
+        ci_status="passing",
     )
     merge = owner.backend.github_client.merge_pull_request
     if merge_error:
@@ -2362,7 +2383,13 @@ def test_stopping_during_merge_refreshes_after_it_finishes(monkeypatch, merge_fa
     }
     owner._require_item.return_value = MagicMock(repo="owner/repo", number=2)
     owner.backend.github_client.work_pull_request.return_value = SimpleNamespace(
-        state="OPEN", head_sha="head", reasons=(), mergeability="mergeable", ci_status="passing"
+        state="OPEN",
+        head_sha="head",
+        reasons=(),
+        changes_requested=False,
+        review_threads_complete=True,
+        mergeability="mergeable",
+        ci_status="passing",
     )
     entered, release = threading.Event(), threading.Event()
 
@@ -2572,7 +2599,13 @@ def test_automerge_rereviews_head_when_needed(monkeypatch, change):
     ]
     github = owner.backend.github_client
     state = SimpleNamespace(
-        state="OPEN", head_sha="old", reasons=(), mergeability="mergeable", ci_status="passing"
+        state="OPEN",
+        head_sha="old",
+        reasons=(),
+        changes_requested=False,
+        review_threads_complete=True,
+        mergeability="mergeable",
+        ci_status="passing",
     )
     github.work_pull_request.return_value = state
     owner._require_item.return_value = MagicMock(repo="owner/repo", number=2)
@@ -2644,6 +2677,8 @@ def test_automerge_rechecks_readiness_after_review(
         state="OPEN",
         head_sha="head",
         reasons=reasons,
+        changes_requested=False,
+        review_threads_complete=True,
         head_writable=True,
         ci_status=ci,
         mergeability=mergeability,
@@ -2654,6 +2689,49 @@ def test_automerge_rechecks_readiness_after_review(
     entry.run()
     assert entry.status == expected
     assert owner.dispatch_once.call_count == (2 if reasons else 1)
+    owner.backend.github_client.merge_pull_request.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "changes_requested,review_threads_complete", [(True, True), (False, False)]
+)
+def test_automerge_fails_when_feedback_is_not_cleared(
+    monkeypatch, changes_requested, review_threads_complete
+):
+    from workdash.autodispatch import _AutodispatchSession
+
+    owner = MagicMock()
+    owner.config.configured_code_agents.return_value = ["pi"]
+    owner.config.configured_analyze_agents.return_value = ["pi"]
+    owner.dispatch_once.side_effect = [
+        {
+            "status": "launched",
+            "item_id": "owner/repo#ISSUE-1",
+            "pane_id": "terminal_1",
+            "session": "s",
+        },
+        {"status": "no_ready_task"},
+    ]
+    owner.review.return_value = {
+        "status": "reviewed",
+        "item_id": "owner/repo#PR-2",
+        "head_sha": "head",
+    }
+    owner.backend.github_client.work_pull_request.return_value = SimpleNamespace(
+        state="OPEN",
+        head_sha="head",
+        reasons=(),
+        changes_requested=changes_requested,
+        review_threads_complete=review_threads_complete,
+        mergeability="mergeable",
+        ci_status="passing",
+    )
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.001)
+    monkeypatch.setattr("workdash.autodispatch.launcher.zellij.load_zellij_panes", lambda _: [])
+    entry = _AutodispatchSession(owner, "owner/repo", None, None, automerge=True)
+    entry.run()
+    assert entry.status == "failed"
+    assert owner.dispatch_once.call_count == 1
     owner.backend.github_client.merge_pull_request.assert_not_called()
 
 
@@ -2751,6 +2829,8 @@ def test_automerge_reviews_changed_git_head_before_merge(monkeypatch, tmp_path, 
             state="OPEN",
             head_sha=head,
             reasons=(),
+            changes_requested=False,
+            review_threads_complete=True,
             head_writable=True,
             mergeability="mergeable",
             ci_status="passing",
@@ -2804,7 +2884,9 @@ def test_automerge_reviews_changed_git_head_before_merge(monkeypatch, tmp_path, 
             (source / "change.txt").write_text("new change")
             git(source, "commit", "-qam", "new")
             git(source, "push", "-q", "--force" if force_push else "--", "origin", "feature")
-        Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text("reviewed")
+        Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
+            "Review outcome: success\nreviewed"
+        )
         return ""
 
     monkeypatch.setattr("workdash.agent_execution.executor.run_in_pane", agent)
@@ -2823,3 +2905,46 @@ def test_automerge_reviews_changed_git_head_before_merge(monkeypatch, tmp_path, 
         assert git(worktree, "rev-parse", "HEAD") == local_heads[0]
         assert (worktree / "commit.txt").read_text() == "local commit"
         assert (worktree / "local.txt").read_text() == "unpublished"
+
+
+@pytest.mark.parametrize("incomplete", ["opinions", "thread"])
+def test_automerge_rejects_incomplete_github_feedback(monkeypatch, incomplete):
+    from gh_work_state_fake import AFTER_PUSH, review
+    from workdash.autodispatch import _AutodispatchSession
+
+    github = install_fake_github(monkeypatch)
+    pr = github.add_pull_request("owner/repo#2")
+    if incomplete == "opinions":
+        pr["reviews"] = [review(f"reviewer{i}", "APPROVED", created=AFTER_PUSH) for i in range(101)]
+    else:
+        pr["threads"] = [
+            thread(
+                comment("reviewer", created=AFTER_PUSH),
+                *[comment("author", created=AFTER_PUSH) | {"publishedAt": None} for _ in range(10)],
+            )
+        ]
+    state = GitHubClient().evaluate_pull_requests(
+        [("owner/repo", 2)], github_username="testuser", todo_repository="testuser/todos"
+    )[0]
+    owner = MagicMock()
+    owner.config.configured_code_agents.return_value = ["pi"]
+    owner.config.configured_analyze_agents.return_value = ["pi"]
+    owner.dispatch_once.return_value = {
+        "status": "launched",
+        "item_id": "owner/repo#ISSUE-1",
+        "pane_id": "terminal_1",
+        "session": "s",
+    }
+    owner.review.return_value = {
+        "status": "reviewed",
+        "item_id": "owner/repo#PR-2",
+        "head_sha": HEAD_SHA,
+    }
+    owner.backend.github_client.work_pull_request.return_value = state
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.001)
+    monkeypatch.setattr("workdash.autodispatch.launcher.zellij.load_zellij_panes", lambda _: [])
+    entry = _AutodispatchSession(owner, "owner/repo", None, None, automerge=True)
+    entry.run()
+    assert entry.status == "failed"
+    assert owner.dispatch_once.call_count == 1
+    owner.backend.github_client.merge_pull_request.assert_not_called()
