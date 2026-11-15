@@ -2413,10 +2413,8 @@ def test_stopping_during_merge_refreshes_after_it_finishes(monkeypatch, merge_fa
     owner.completed_autodispatch_item.assert_called_once_with("owner/repo#ISSUE-1")
 
 
-@pytest.mark.parametrize("after_review", [False, True])
-def test_merge_conflict_redispatches_real_ready_work_with_conflict_instruction(
-    monkeypatch, tmp_path, after_review
-):
+@pytest.mark.parametrize("problem", ["merge_conflict", "review_conflict", "pending_ci"])
+def test_automerge_redispatches_real_ready_work(monkeypatch, tmp_path, problem):
     from workdash.github_client import MergeConflictError
 
     github = install_fake_github(monkeypatch)
@@ -2443,7 +2441,7 @@ def test_merge_conflict_redispatches_real_ready_work_with_conflict_instruction(
         )
 
     def merge(repo, number, sha):
-        if len(prompts) == 1 and not after_review:
+        if len(prompts) == 1 and problem == "merge_conflict":
             pr["mergeable"] = "CONFLICTING"
             raise MergeConflictError("conflict")
         issue["state"] = "CLOSED"
@@ -2467,7 +2465,7 @@ def test_merge_conflict_redispatches_real_ready_work_with_conflict_instruction(
     session.git = MagicMock()
 
     def review(**_):
-        if after_review and len(prompts) == 1:
+        if problem == "review_conflict" and len(prompts) == 1:
             pr["mergeable"] = "CONFLICTING"
         return {"status": "reviewed", "item_id": "owner/repo#PR-51", "head_sha": HEAD_SHA}
 
@@ -2484,12 +2482,26 @@ def test_merge_conflict_redispatches_real_ready_work_with_conflict_instruction(
 
     try:
         wait_for(lambda: len(prompts) == 1 and entry.stage == "developing")
-        pr["checks"] = {HEAD_SHA: [check_run("tests")]}
+        pr["checks"] = {
+            HEAD_SHA: [
+                check_run("tests", None, status="IN_PROGRESS")
+                if problem == "pending_ci"
+                else check_run("tests")
+            ]
+        }
         panes.clear()
+        if problem == "pending_ci":
+            wait_for(lambda: entry.stage == "waiting")
+            assert len(prompts) == 1
+            pr["checks"] = {HEAD_SHA: [check_run("tests", "FAILURE")]}
         wait_for(lambda: len(prompts) == 2 and entry.stage == "developing")
-        assert "GitHub reports merge conflicts" in prompts[1]
-        assert "resolve the conflicting files" in prompts[1]
-        pr["mergeable"] = "MERGEABLE"
+        if problem == "pending_ci":
+            assert "has failing checks: tests" in prompts[1]
+            pr["checks"] = {HEAD_SHA: [check_run("tests")]}
+        else:
+            assert "GitHub reports merge conflicts" in prompts[1]
+            assert "resolve the conflicting files" in prompts[1]
+            pr["mergeable"] = "MERGEABLE"
         panes.clear()
         entry.thread.join(5)
         assert not entry.thread.is_alive()
@@ -2645,9 +2657,6 @@ def test_automerge_rereviews_head_when_needed(monkeypatch, change):
         (("address_review",), "passing", "mergeable", "finished"),
         (("fix_ci",), "failing", "mergeable", "finished"),
         (("fix_merge_conflicts",), "passing", "conflicting", "finished"),
-        ((), "pending", "mergeable", "failed"),
-        ((), "unknown", "mergeable", "failed"),
-        ((), "passing", "unknown", "failed"),
     ],
 )
 def test_automerge_rechecks_readiness_after_review(
@@ -2692,9 +2701,7 @@ def test_automerge_rechecks_readiness_after_review(
     owner.backend.github_client.merge_pull_request.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "changes_requested,review_threads_complete", [(True, True), (False, False)]
-)
+@pytest.mark.parametrize("changes_requested,review_threads_complete", [(False, False)])
 def test_automerge_fails_when_feedback_is_not_cleared(
     monkeypatch, changes_requested, review_threads_complete
 ):
@@ -2948,3 +2955,73 @@ def test_automerge_rejects_incomplete_github_feedback(monkeypatch, incomplete):
     assert entry.status == "failed"
     assert owner.dispatch_once.call_count == 1
     owner.backend.github_client.merge_pull_request.assert_not_called()
+
+
+@pytest.mark.parametrize("pending", ["ci", "unknown_ci", "mergeability", "review"])
+@pytest.mark.parametrize("outcome", ["merge", "fix", "head", "stop", "toggle"])
+def test_automerge_waits_for_readiness(monkeypatch, pending, outcome):
+    from workdash.autodispatch import _AutodispatchSession
+
+    owner = MagicMock()
+    owner.config.configured_code_agents.return_value = ["pi"]
+    owner.config.configured_analyze_agents.return_value = ["pi"]
+    owner.dispatch_once.side_effect = [
+        {
+            "status": "launched",
+            "item_id": "owner/repo#ISSUE-1",
+            "pane_id": "terminal_1",
+            "session": "s",
+        },
+        {"status": "no_ready_task"},
+    ]
+    state = SimpleNamespace(
+        state="OPEN",
+        head_sha="head",
+        reasons=(),
+        changes_requested=pending == "review",
+        review_threads_complete=True,
+        head_writable=True,
+        ci_status={"ci": "pending", "unknown_ci": "unknown"}.get(pending, "passing"),
+        mergeability="unknown" if pending == "mergeability" else "mergeable",
+    )
+    github = owner.backend.github_client
+    entry = _AutodispatchSession(owner, "owner/repo", None, None, automerge=True)
+    owner.review.side_effect = lambda **kwargs: {
+        "status": "reviewed",
+        "item_id": "owner/repo#PR-2",
+        "head_sha": state.head_sha,
+    }
+    calls = 0
+
+    def lookup(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1 and outcome == "stop":
+            entry.stop()
+        elif calls == 1 and outcome == "toggle":
+            entry.automerge = False
+        elif calls == 2:
+            assert entry.status == "running"
+            github.merge_pull_request.assert_not_called()
+            assert owner.dispatch_once.call_count == 1
+            state.ci_status = "passing"
+            state.mergeability = "mergeable"
+            state.changes_requested = False
+            if outcome == "fix":
+                state.reasons = ("fix_ci",)
+            elif outcome == "head":
+                state.head_sha = "new-head"
+        return state
+
+    github.work_pull_request.side_effect = lookup
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.001)
+    monkeypatch.setattr("workdash.autodispatch.launcher.zellij.load_zellij_panes", lambda _: [])
+    entry.run()
+    assert entry.status == ("stopped" if outcome == "stop" else "finished"), entry.error
+    if outcome in {"merge", "head"}:
+        assert github.merge_pull_request.call_args.args[2] == (
+            "new-head" if outcome == "head" else "head"
+        )
+        assert owner.review.call_count == (2 if outcome == "head" else 1)
+    else:
+        github.merge_pull_request.assert_not_called()

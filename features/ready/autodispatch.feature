@@ -21,8 +21,9 @@ Feature: Automatically dispatch ready work
   If the complete review feedback cannot be verified, or any review thread remains unresolved,
   the session fails instead of merging unless actionable feedback is dispatched for repair.
   Actionable feedback, conflicts or failing checks are dispatched for repair;
-  a changes-requested review awaiting the reviewer's response fails the session
-  without merging or dispatching again. Pending or unknown state fails safely. A review without a known starting head
+  while a requested re-review, checks or mergeability are pending or unknown, the
+  session remains active and rechecks until it can safely merge or dispatch repairs.
+  Stopping or disabling automerge ends this wait. A review without a known starting head
   is followed by a fresh review if automerge was enabled during it. If the head
   changes during review or before the merge, including a force-push, the new head is
   reviewed before merging, with a bounded number of attempts. Existing local commits
@@ -212,7 +213,9 @@ Feature: Automatically dispatch ready work
   Scenario: Wait for a reviewer who was asked to review again
     Given an autodispatch session with automerge enabled
     When a reviewer has requested changes and has been asked to review again
-    Then the session fails without merging or dispatching again
+    Then the session waits without merging or dispatching again
+    When the reviewer approves the pull request
+    Then the pull request is merged
 
   @id:F-AUTODISPATCH-S024
   Scenario: Review changed work before merging

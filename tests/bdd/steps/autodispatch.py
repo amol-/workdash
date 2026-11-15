@@ -968,14 +968,18 @@ def reviewer_awaited(autodispatch_state):
     session = autodispatch_state["session"]
     session.backend.github_client.work_pull_request.return_value.changes_requested = True
     autodispatch_state["panes"].clear()
-    wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "failed")
+    wait_for(lambda: session.backend.github_client.work_pull_request.called)
 
 
-@then("the session fails without merging or dispatching again")
+@then("the session waits without merging or dispatching again")
 def waiting_prevents_merge_and_dispatch(autodispatch_state):
-    assert (
-        "waiting for a reviewer"
-        in autodispatch_state["session"].autodispatch_sessions()[0]["error"]
-    )
+    assert autodispatch_state["session"].autodispatch_sessions()[0]["status"] == "running"
     assert not autodispatch_state["merged"]
     assert len(autodispatch_state["calls"]) == 1
+
+
+@when("the reviewer approves the pull request")
+def reviewer_approves(autodispatch_state):
+    session = autodispatch_state["session"]
+    session.backend.github_client.work_pull_request.return_value.changes_requested = False
+    wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "finished")

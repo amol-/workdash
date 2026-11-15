@@ -186,32 +186,51 @@ class _AutodispatchSession:
                             continue
                         item = self.owner._require_item(str(review["item_id"]))
                         stage = "merge"
-                        state = self.owner.backend.github_client.work_pull_request(
-                            item,
-                            github_username=self.owner.config.github_username,
-                            todo_repository=self.owner.config.todo_repository,
-                        )
                         head = review.get("head_sha")
-                        if not head or not state or state.state != "OPEN" or not state.head_sha:
-                            raise RuntimeError("Pull request head is unavailable after review.")
-                        if state.head_sha != head:
-                            retry_head = True
-                            continue
-                        if not state.review_threads_complete:
-                            raise RuntimeError("Cannot verify all pull request review feedback.")
-                        if state.reasons:
-                            if not state.head_writable:
+                        while True:
+                            with self.lock:
+                                merge = self.automerge and not self.stop_event.is_set()
+                            if not merge:
+                                break
+                            state = self.owner.backend.github_client.work_pull_request(
+                                item,
+                                github_username=self.owner.config.github_username,
+                                todo_repository=self.owner.config.todo_repository,
+                            )
+                            if not head or not state or state.state != "OPEN" or not state.head_sha:
+                                raise RuntimeError("Pull request head is unavailable after review.")
+                            if state.head_sha != head:
+                                retry_head = True
+                                break
+                            if not state.review_threads_complete:
                                 raise RuntimeError(
-                                    "Pull request needs fixes but its head is not writable."
+                                    "Cannot verify all pull request review feedback."
                                 )
+                            if state.reasons:
+                                if not state.head_writable:
+                                    raise RuntimeError(
+                                        "Pull request needs fixes but its head is not writable."
+                                    )
+                                break
+                            if (
+                                not state.changes_requested
+                                and state.mergeability == "mergeable"
+                                and state.ci_status in {"passing", "no_checks"}
+                            ):
+                                break
+                            with self.lock:
+                                self.stage = "waiting"
+                            if self.stop_event.wait(_AUTODISPATCH_POLL_SECONDS):
+                                return
+                        with self.lock:
+                            merge = self.automerge and not self.stop_event.is_set()
+                            self.stage = "reviewing"
+                        if not merge:
                             break
-                        if state.changes_requested:
-                            raise RuntimeError("Pull request is waiting for a reviewer to respond.")
-                        if state.mergeability != "mergeable" or state.ci_status not in {
-                            "passing",
-                            "no_checks",
-                        }:
-                            raise RuntimeError("Pull request mergeability or checks are not ready.")
+                        if state.head_sha != head:
+                            continue
+                        if state.reasons:
+                            break
                         if self.stop_event.is_set():
                             return
                         try:
