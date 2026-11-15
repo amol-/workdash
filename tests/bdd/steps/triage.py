@@ -88,6 +88,59 @@ def is_linked_issues_query(command: list[str]) -> bool:
 # --------------------------------------------------------------------------
 
 
+@given("the dashboard contains a work item with a long title")
+def _long_title_item(work_items: list[WorkItem]) -> None:
+    work_items.append(make_work_item(title="A long work item title " * 8))
+
+
+@when("the user opens the dashboard at 80 columns")
+def _open_dashboard_at_80_columns(
+    scenario_state: dict[str, Any], work_items: list[WorkItem]
+) -> None:
+    async def interactions(app, pilot) -> None:
+        table = app.query_one("#work-items", DataTable)
+        command = app.query_one("#command-footer", Static)
+        status = app.query_one("#status-footer", Static)
+        scenario_state["dashboard_rows"] = [
+            strip.text for strip in app.screen._compositor.render_strips()
+        ]
+        scenario_state["dashboard_hint"] = command.render()
+        scenario_state["dashboard_footer_order"] = command.region.y < status.region.y
+        scenario_state["dashboard_status"] = status.render().plain
+        await pilot.press("right", "right")
+        scenario_state["dashboard_horizontal_scroll"] = (
+            table.show_horizontal_scrollbar,
+            table.scroll_x,
+        )
+
+    run_app(work_items=work_items, interactions=interactions)
+
+
+@then("the item age and last update are visible alongside its shortened title")
+def _long_title_details_visible(scenario_state: dict[str, Any]) -> None:
+    rows = scenario_state["dashboard_rows"]
+    assert "Age" in rows[0] and "Last Update" in rows[0], rows
+    assert "A long work item title" in rows[1] and rows[1].count("10d") == 2, rows
+    assert "A long work item title " * 8 not in rows[1], rows
+
+
+@then("the action bar highlights its shortcut keys above the loaded item count")
+def _dashboard_controls_visible(scenario_state: dict[str, Any]) -> None:
+    hint = scenario_state["dashboard_hint"]
+    for key in "/oracdiwq":
+        index = hint.plain.index(f"({key})") + 1
+        assert any(
+            span.start <= index < span.end and "bold" in str(span.style) for span in hint.spans
+        )
+    assert scenario_state["dashboard_footer_order"]
+    assert scenario_state["dashboard_status"] == "Loaded 1 item(s)."
+
+
+@then("the dashboard does not scroll horizontally")
+def _dashboard_no_horizontal_scroll(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["dashboard_horizontal_scroll"] == (False, 0)
+
+
 @given("the user has open work across all supported sources")
 def _has_open_work_all_sources(work_items: list[WorkItem]) -> None:
     # Build the list through the real normalization + merge pipeline so the
@@ -2733,14 +2786,14 @@ def _action_bar_lists_search_first(work_items: list[WorkItem]) -> None:
     run_app(work_items=list(work_items), interactions=interactions)
     hint = captured["hint"]
     assert hint.plain.startswith(_SEARCH_ACTION_HINT), hint.plain
-    # No filter is active yet, so nothing in the bar is emphasized.
-    assert hint.spans == [], hint.spans
+    # The full search action is emphasized only while a filter is active.
+    assert not any(span.start == 0 and span.end == len(_SEARCH_ACTION_HINT) for span in hint.spans)
 
 
 @then("the action bar emphasizes the search action")
 def _action_bar_emphasizes_search(scenario_state: dict[str, Any]) -> None:
     spans = scenario_state["search_hint_spans"]
-    assert [(start, end) for start, end, _ in spans] == [(0, len(_SEARCH_ACTION_HINT))], spans
+    assert (0, len(_SEARCH_ACTION_HINT)) in [(start, end) for start, end, _ in spans], spans
     assert all("bold" in style for _, _, style in spans), spans
 
 

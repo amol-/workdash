@@ -2035,13 +2035,13 @@ def test_tui_scrolling_remains_visible_when_progress_changes(size):
                 app._update_autodispatch_progress()
                 await pilot.pause()
                 assert not entries or progress.region.y == 0
-                assert table.region.bottom <= status.region.y < footer.region.y
+                assert table.region.bottom <= footer.region.y < status.region.y
                 await pilot.press("o")
                 assert opened[-1].number == 40
                 row_y = (
                     table.region.y + table._get_row_region(table.cursor_row).y - int(table.scroll_y)
                 )
-                assert table.region.y <= row_y < status.region.y
+                assert table.region.y <= row_y < footer.region.y
                 rows = [strip.text for strip in app.screen._compositor.render_strips()]
                 assert any("Failed owner/repo" in row for row in rows) == bool(entries)
                 assert "IS 40" in rows[row_y]
@@ -2053,7 +2053,7 @@ def test_tui_scrolling_remains_visible_when_progress_changes(size):
                             + table._get_row_region(table.cursor_row).y
                             - int(table.scroll_y)
                         )
-                        assert table.region.y <= row_y < status.region.y
+                        assert table.region.y <= row_y < footer.region.y
                         rows = [strip.text for strip in app.screen._compositor.render_strips()]
                         assert f"IS {number} " in rows[row_y]
                     await pilot.press("o")

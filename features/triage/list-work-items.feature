@@ -27,9 +27,18 @@ Feature: List work items
     - When the same item qualifies for multiple sources, the strongest relationship wins in this order: authored pull request, then REVIEW pull request, then assigned issue, then plain tracked item.
     - When GitHub does not return a repository or item while loading a specific work source, either because further repository authorization is required or because GitHub can no longer resolve it, the system warns the user, skips that inaccessible repository or item, and keeps loading other work. This includes an inaccessible repository found while searching authored pull requests across repositories.
     - When no work items match, the system reports that no work items were found.
+    - The dashboard list scrolls vertically but not horizontally. Long titles are shortened as needed to keep age and last update visible when space allows, including after resizing. The action bar highlights shortcut keys in bold, and the status bar beneath it shows the number of items loaded from the start.
     - Scrolling the TUI list keeps each visual row tied to the same GitHub issue or pull request; included items may show a "+" type suffix but must not create stale, duplicate, or empty visual rows. Resizing the dashboard keeps the selected item visible when there is room for a table row.
     - When autodispatch progress appears or disappears, the work item list keeps its scroll position when possible. In a short dashboard, work items remain visible when there is room for a table row, and the user can scroll through all progress entries.
     - The dashboard is keyboard-driven: it never captures mouse input, so mouse behavior (text selection, wheel scrolling) stays with the terminal.
+
+  @id:F-TRIAGE-LIST-S019
+  Scenario: Dashboard shows work details and controls without horizontal scrolling
+    Given the dashboard contains a work item with a long title
+    When the user opens the dashboard at 80 columns
+    Then the item age and last update are visible alongside its shortened title
+    And the action bar highlights its shortcut keys above the loaded item count
+    And the dashboard does not scroll horizontally
 
   @id:F-TRIAGE-LIST-S018
   Scenario: Autodispatch highlights its current issue and updates it when work stops

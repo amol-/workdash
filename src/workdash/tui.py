@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, TypeVar
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
@@ -402,6 +403,10 @@ class SearchDialog(ModalScreen[str | None]):
 class WorkItemsTable(DataTable):
     def on_resize(self, event: events.Resize) -> None:
         old_height = getattr(self, "_previous_height", 0)
+        old_width = getattr(self, "_previous_width", 0)
+        self._previous_width = event.size.width
+        if old_width != event.size.width and self.columns:
+            self.app._render_table(preserve_view=True)
         old_app_size = getattr(self, "_previous_app_size", None)
         self._previous_height = event.size.height
         self._previous_app_size = self.app.size
@@ -429,6 +434,7 @@ class WorkdashApp(App[None]):
         }
         #work-items {
             height: 1fr;
+            overflow-x: hidden;
         }
         #status-footer {
             height: 1;
@@ -520,8 +526,8 @@ class WorkdashApp(App[None]):
         with VerticalScroll(id="autodispatch-scroll"):
             yield Static("", id="autodispatch-progress", markup=False)
         yield WorkItemsTable(id="work-items")
-        yield Static(self._status_message, id="status-footer", markup=False)
         yield Static(self._command_hint(), id="command-footer")
+        yield Static(self._status_message, id="status-footer", markup=False)
 
     def on_mount(self) -> None:
         self.query_one("#work-items", DataTable).focus()
@@ -531,6 +537,7 @@ class WorkdashApp(App[None]):
             self.refresh_from_session()
         else:
             self._render_table()
+        self._update_status(f"Loaded {len(self._work_items)} item(s).")
 
     def _update_autodispatch_progress(self) -> None:
         if self._session is None:
@@ -713,6 +720,8 @@ class WorkdashApp(App[None]):
 
     def _command_hint(self) -> Text:
         hint = Text(self.COMMAND_HINT_TEXT)
+        for match in re.finditer(r"\((.)\)", hint.plain):
+            hint.stylize("bold", match.start() + 1, match.end() - 1)
         if self._search_filter:
             hint.stylize("bold", 0, len(self.SEARCH_HINT_TEXT))
         return hint
@@ -737,7 +746,32 @@ class WorkdashApp(App[None]):
         )
         table.add_column("Type", key="type", width=max(4, type_width))
         table.add_column("Repo", key="repo")
-        table.add_column("Title", key="title")
+        repo_width = max((cell_len(_repo_column(item)) for item in matched_items), default=4)
+        age_width = max(
+            (
+                len(f"{max(0, (self._now_utc - _to_utc(item.created_at)).days)}d")
+                for item in matched_items
+            ),
+            default=3,
+        )
+        update_width = max(
+            (
+                len(f"{max(0, (self._now_utc - _to_utc(item.updated_at)).days)}d")
+                for item in matched_items
+            ),
+            default=11,
+        )
+        title_width = max(
+            1,
+            (table.size.width or self.size.width)
+            - 1
+            - 10
+            - max(4, type_width)
+            - max(4, repo_width)
+            - max(3, age_width)
+            - max(11, update_width),
+        )
+        table.add_column("Title", key="title", width=title_width)
         table.add_column("Age", key="age")
         table.add_column("Last Update", key="last_update")
         self._sorted_work_items = matched_items
