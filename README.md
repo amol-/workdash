@@ -622,7 +622,8 @@ messaged twice, and every message restarts the 5 minutes. A pull request that
 merged closes its pane on the next check, even while the agent is still writing.
 A previously merged pull request does not finish a reopened issue, which continues to
 receive implementation reminders. A pane explicitly targeting a pull request that
-merged before launch is left alone. A supervised session on somebody else's pull
+merged before launch is left alone. GitHub reports merges only to the second, so a
+merge in the launch second is ambiguous and does not close the pane. A supervised session on somebody else's pull
 request is never messaged and closes only once that pull request merges after launch.
 
 Only a known pull request's state is read on every check: finding the pull

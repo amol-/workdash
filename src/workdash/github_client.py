@@ -1245,7 +1245,7 @@ class GitHubClient:
             state
             for state in states
             if state.item.kind is WorkItemKind.AUTHORED_PR
-            and (merged_since is None or state.merged_at is None or state.merged_at >= merged_since)
+            and (merged_since is None or state.merged_at is None or state.merged_at > merged_since)
         ]
         actionable = [state for state in authored if state.ready]
         if actionable:

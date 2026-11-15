@@ -3160,7 +3160,12 @@ def test_loaded_linked_pr_tracks_autodispatch_stop() -> None:
             assert table.get_row("pr:owner/repo#99")[2].style == "bold magenta"
             assert str(table.get_row("pr:owner/repo#99")[0]).startswith("✓")
             table.move_cursor(row=10)
-            await pilot.pause()
+            for _ in range(100):
+                await pilot.pause(0.02)
+                if table.scroll_y == table.scroll_target_y and table.scroll_y > 0:
+                    break
+            assert table.scroll_y == table.scroll_target_y
+            assert table._get_row_region(table.cursor_row).y - table.scroll_y < table.size.height
             selected, scroll = app._selected_item(), table.scroll_y
             assert scroll > 0
             session.stop_autodispatch(str(entry["id"]))

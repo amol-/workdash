@@ -183,8 +183,11 @@ class AutocloseSupervisor:
             return
         state, merged_at = self._merge_state(entry)
         if state == "MERGED":
-            if entry.item.item_type == WorkItemType.PR and merged_at < entry.launched_at:
-                self._panes.pop((entry.session, entry.pane_id), None)
+            if merged_at <= entry.launched_at:
+                if entry.item.item_type == WorkItemType.PR:
+                    self._panes.pop((entry.session, entry.pane_id), None)
+                else:
+                    entry.pull_request = None
                 return
             # A merge ends the work whether or not the agent is still writing.
             self._close(entry, after_idle=False)
@@ -210,6 +213,11 @@ class AutocloseSupervisor:
         state = self._work_state(entry)
         action = state.action if state is not None else "implement"
         if state is None:
+            if (
+                entry.item.item_type != WorkItemType.PR
+                and self._github_client.linked_open_pull_request(entry.item) is not None
+            ):
+                return
             with self._lock:
                 if time.monotonic() - entry.last_activity < IDLE_SECONDS:
                     return

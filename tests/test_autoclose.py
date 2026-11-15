@@ -316,6 +316,22 @@ def test_an_idle_pane_resolves_its_work_state_every_five_minutes(monkeypatch, tm
     assert "ReadyPullRequests" in supervision.github.operations
 
 
+def test_issue_with_someone_elses_new_pull_request_is_not_reminded_or_blocked(
+    monkeypatch, tmp_path
+):
+    supervision = Supervision(monkeypatch, tmp_path)
+    del supervision.github.pull_requests["owner/repo#51"]
+    supervision.launch(autoclose=True)
+    supervision.poll(5)
+    assert len(supervision.sent) == 1
+
+    supervision.github.add_pull_request("owner/repo#52", closes=("owner/repo#42",), author="other")
+    supervision.poll(20)
+    assert len(supervision.sent) == 1
+    assert not supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    assert not supervision.closed
+
+
 def test_a_pull_request_that_merged_before_the_launch_does_not_close_the_pane(
     monkeypatch, tmp_path
 ) -> None:
@@ -340,8 +356,11 @@ def test_a_pull_request_that_merged_before_the_launch_does_not_close_the_pane(
 
 
 @pytest.mark.parametrize("target", ["owner/repo#ISSUE-42", "owner/repo#PR-51"])
-@pytest.mark.parametrize("seconds_before_launch", [0, 1])
-def test_merge_second_relative_to_launch(monkeypatch, tmp_path, target, seconds_before_launch):
+@pytest.mark.parametrize("seconds_after_launch", [-1, 0, 1])
+@pytest.mark.parametrize("known_before_merge", [False, True])
+def test_merge_second_relative_to_launch(
+    monkeypatch, tmp_path, target, seconds_after_launch, known_before_merge
+):
     launched_at = datetime(2025, 1, 1, 12, 0, 0, 500000, tzinfo=UTC)
 
     class LaunchClock(datetime):
@@ -352,14 +371,16 @@ def test_merge_second_relative_to_launch(monkeypatch, tmp_path, target, seconds_
     monkeypatch.setattr(control_module, "datetime", LaunchClock)
     supervision = Supervision(monkeypatch, tmp_path)
     supervision.launch(target, autoclose=True)
-    merged_at = launched_at.replace(microsecond=0) - timedelta(seconds=seconds_before_launch)
+    if known_before_merge:
+        supervision.poll()
+    merged_at = launched_at.replace(microsecond=0) + timedelta(seconds=seconds_after_launch)
     supervision.github.pull_requests["owner/repo#51"].update(
         state="MERGED", merged=merged_at.isoformat().replace("+00:00", "Z")
     )
 
     supervision.poll()
 
-    assert supervision.closed == (["terminal_21"] if seconds_before_launch == 0 else [])
+    assert supervision.closed == (["terminal_21"] if seconds_after_launch > 0 else [])
 
 
 @pytest.mark.parametrize("target", ["owner/repo#ISSUE-42", "owner/repo#PR-51"])
