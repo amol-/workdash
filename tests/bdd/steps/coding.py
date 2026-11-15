@@ -700,6 +700,24 @@ def _agent_told_to_verify_ci(scenario_state: dict[str, Any]) -> None:
     )
 
 
+@then(
+    "the agent is told to resolve internal obstacles and reserve INCOMPLETE for external blockers or impossible requirements"
+)
+def _agent_told_to_resolve_obstacles(scenario_state: dict[str, Any]) -> None:
+    _assert_told(
+        scenario_state,
+        "Only report INCOMPLETE and wait for instructions if blocked by missing credentials "
+        "or access to development tools or external infrastructure, external service or "
+        "platform outages, or genuinely impossible or contradictory requirements where "
+        "essential specification is absent from both the repository and the issue.",
+        "Application-under-test endpoint errors are not external access blockers",
+        "tool or subagent disagreement",
+        "failing tests, lint or formatting, timeouts, and trade-offs",
+        "Inspect, resume, and finish partial uncommitted subagent work",
+    )
+    assert "anything else real" not in _launched_prompt(scenario_state)
+
+
 @then("the agent is told never to merge the pull request or close the issue")
 def _agent_told_never_to_merge(scenario_state: dict[str, Any]) -> None:
     _assert_told(scenario_state, "Never merge the pull request or close the issue")
