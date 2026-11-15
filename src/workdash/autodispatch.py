@@ -11,6 +11,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from . import launcher
+from .github_client import MergeConflictError
 from .log_diagnostics import safe_error
 
 if TYPE_CHECKING:
@@ -30,8 +31,16 @@ class _AutodispatchSession:
         FINISHED = "finished"
         FAILED = "failed"
 
-    def __init__(self, owner: WorkdashSession, scope: str, group: str | None, agent: str | None):
+    def __init__(
+        self,
+        owner: WorkdashSession,
+        scope: str,
+        group: str | None,
+        agent: str | None,
+        automerge: bool = False,
+    ):
         self.owner, self.scope, self.group, self.agent = owner, scope, group, agent
+        self.automerge = automerge
         self.id = uuid.uuid4().hex
         self.started_at = datetime.now(UTC).isoformat()
         self.started = time.monotonic()
@@ -54,6 +63,7 @@ class _AutodispatchSession:
                 "scope": self.scope,
                 "group": self.group,
                 "agent": self.agent,
+                "automerge": self.automerge,
                 "started_at": self.started_at,
                 "elapsed_seconds": int((self.ended or time.monotonic()) - self.started),
                 "current_item": self.current_item,
@@ -150,9 +160,29 @@ class _AutodispatchSession:
                         group=self.group,
                     )
                     if "pr_id" in result and review["status"] == "nothing_to_review":
-                        self.owner.review(
+                        review = self.owner.review(
                             target=str(result["item_id"]), agent=selected, group=self.group
                         )
+                    with self.lock:
+                        merge = self.automerge and not self.stop_event.is_set()
+                    if merge and review.get("status") == "reviewed":
+                        item = self.owner._require_item(str(review["item_id"]))
+                        stage = "merge"
+                        try:
+                            self.owner.backend.github_client.merge_pull_request(
+                                item.repo, item.number
+                            )
+                        except MergeConflictError:
+                            if self.stop_event.is_set():
+                                raise
+                            state = self.owner.backend.github_client.work_pull_request(
+                                item,
+                                github_username=self.owner.config.github_username,
+                                todo_repository=self.owner.config.todo_repository,
+                            )
+                            if not state or "fix_merge_conflicts" not in state.reasons:
+                                raise
+
         except Exception as error:
             logger.error("Session %s failed during %s: %s", self.id, stage, safe_error(error))
             with self.lock:
@@ -163,7 +193,7 @@ class _AutodispatchSession:
                     self.owner.completed_autodispatch_item(self.current_item)
         finally:
             with self.lock:
-                if stage == "review" and self.stop_event.is_set():
+                if stage in {"review", "merge"} and self.stop_event.is_set():
                     self.owner.completed_autodispatch_item(self.current_item)
 
 

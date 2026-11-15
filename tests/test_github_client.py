@@ -78,6 +78,87 @@ def test_parse_github_item_url_rejects_invalid_inputs(url: str) -> None:
     assert parse_github_item_url(url) is None
 
 
+@pytest.mark.parametrize("method", ["squash", "merge", "rebase"])
+def test_merge_pull_request_uses_a_repository_enabled_method(monkeypatch, method) -> None:
+    settings = {
+        "allow_squash_merge": method == "squash",
+        "allow_merge_commit": method == "merge",
+        "allow_rebase_merge": method == "rebase",
+    }
+    run_gh = MagicMock(return_value=json.dumps(settings))
+    monkeypatch.setattr("workdash.github_client._run_gh", run_gh)
+    GitHubClient().merge_pull_request("owner/repo", 42)
+    assert run_gh.call_args_list[0].args[0] == ["gh", "api", "repos/owner/repo"]
+    assert run_gh.call_args_list[1].args[0] == [
+        "gh",
+        "api",
+        "--method",
+        "PUT",
+        "repos/owner/repo/pulls/42/merge",
+        "-f",
+        f"merge_method={method}",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("message", "conflict"),
+    [
+        ("gh: Pull Request is not mergeable (HTTP 405)", True),
+        ("Resource not accessible by integration", False),
+    ],
+)
+def test_merge_pull_request_distinguishes_conflict_from_other_failures(
+    monkeypatch, message, conflict
+) -> None:
+    from workdash.github_client import MergeConflictError
+
+    settings = json.dumps({"allow_squash_merge": True})
+    monkeypatch.setattr(
+        "workdash.github_client._run_gh",
+        MagicMock(side_effect=[settings, RuntimeError(message), json.dumps({"mergeable": False})]),
+    )
+    with pytest.raises(MergeConflictError if conflict else RuntimeError) as error:
+        GitHubClient().merge_pull_request("owner/repo", 42)
+    assert isinstance(error.value, MergeConflictError) is conflict
+    assert message in str(error.value)
+
+
+@pytest.mark.parametrize("mergeable", [False, True, None])
+def test_merge_pull_request_rechecks_unknown_mergeability(monkeypatch, mergeable) -> None:
+    from workdash.github_client import MergeConflictError
+
+    message = "gh: Pull Request is not mergeable (HTTP 405)"
+    run_gh = MagicMock(
+        side_effect=[
+            json.dumps({"allow_squash_merge": True}),
+            RuntimeError(message),
+            json.dumps({"mergeable": None}),
+            json.dumps({"mergeable": mergeable}),
+        ]
+    )
+    monkeypatch.setattr("workdash.github_client._run_gh", run_gh)
+    monkeypatch.setattr("workdash.github_client.time.sleep", lambda _: None)
+    with pytest.raises(RuntimeError) as error:
+        GitHubClient().merge_pull_request("owner/repo", 42)
+    assert isinstance(error.value, MergeConflictError) is (mergeable is False)
+    assert message in str(error.value)
+    assert run_gh.call_count == 4
+
+
+def test_merge_pull_request_does_not_treat_protection_failure_as_conflict(monkeypatch) -> None:
+    settings = json.dumps({"allow_squash_merge": True})
+    message = "gh: Pull Request is not mergeable (HTTP 405)"
+    monkeypatch.setattr(
+        "workdash.github_client._run_gh",
+        MagicMock(side_effect=[settings, RuntimeError(message), json.dumps({"mergeable": True})]),
+    )
+    from workdash.github_client import MergeConflictError
+
+    with pytest.raises(RuntimeError) as error:
+        GitHubClient().merge_pull_request("owner/repo", 42)
+    assert not isinstance(error.value, MergeConflictError)
+
+
 def _authored_search_stdout(nodes: list[dict[str, object]] | None = None) -> str:
     """Return a ``gh search prs`` response for authored pull requests."""
 

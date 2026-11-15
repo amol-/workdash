@@ -51,6 +51,7 @@ def autodispatch_state(monkeypatch):
             "status": "launched",
             "item_id": f"owner/repo#ISSUE-{len(calls)}",
             "pane_id": pane,
+            "cwd": "/worktree",
             "session": "workdash",
         }
 
@@ -771,3 +772,110 @@ def info_shows_progress(capsys):
     output = capsys.readouterr().out
     for value in ("project", "owner/repo", "42", "developing", "fix ci", "2", "31s"):
         assert value in output
+
+
+@given("an autodispatch session with automerge enabled")
+def automerge_session(autodispatch_state, monkeypatch, *, enabled=True, scope="owner/repo"):
+    session = autodispatch_state["session"]
+    github = session.backend.github_client
+    merged = set()
+    monkeypatch.setattr(
+        github, "merge_pull_request", lambda repo, number: merged.add((repo, number))
+    )
+    autodispatch_state["merged"] = merged
+    dispatch = session.dispatch_once
+    monkeypatch.setattr(
+        session,
+        "dispatch_once",
+        lambda **kwargs: (
+            {"status": "no_ready_task"} if autodispatch_state["calls"] else dispatch(**kwargs)
+        ),
+    )
+    session._require_item = MagicMock(
+        return_value=make_work_item(item_type=WorkItemType.PR, number=2)
+    )
+    monkeypatch.setattr(
+        session,
+        "review",
+        lambda **kwargs: {
+            "status": "reviewed",
+            "item_id": "owner/repo#PR-2",
+            "content": "Review completed.",
+        },
+    )
+    session.start_autodispatch(scope=scope, automerge=enabled)
+    wait_for(lambda: bool(autodispatch_state["panes"]))
+
+
+@when("its completed pull request has been reviewed successfully")
+def automerge_reviewed(autodispatch_state):
+    autodispatch_state["panes"].clear()
+    wait_for(
+        lambda: autodispatch_state["session"].autodispatch_sessions()[0]["status"] == "finished"
+    )
+
+
+@then("the pull request is merged")
+def automerge_merged(autodispatch_state):
+    assert autodispatch_state["merged"] == {("owner/repo", 2)}
+
+
+@given("an autodispatch session for the selected dashboard work")
+def dashboard_automerge(autodispatch_state, monkeypatch):
+    session = autodispatch_state["session"]
+    item = make_work_item(item_type=WorkItemType.ISSUE, number=1)
+    session.work_items = [item]
+    autodispatch_state["item"] = item
+    automerge_session(autodispatch_state, monkeypatch, enabled=False, scope=f"{item.repo}#ISSUE-1")
+
+
+@when("the user toggles automerge")
+def dashboard_toggle_automerge(autodispatch_state):
+    session = autodispatch_state["session"]
+
+    async def interact(app, pilot):
+        autodispatch_state["command_off"] = app.query_one("#command-footer", Static).render().plain
+        await pilot.press("m")
+        await pilot.pause()
+        autodispatch_state["command_on"] = app.query_one("#command-footer", Static).render().plain
+        autodispatch_state["footer"] = app.query_one("#status-footer", Static).render().plain
+        autodispatch_state["progress_text"] = (
+            app.query_one("#autodispatch-progress", Static).render().plain
+        )
+        await pilot.press("m")
+        await pilot.pause()
+        autodispatch_state["disabled_footer"] = (
+            app.query_one("#status-footer", Static).render().plain
+        )
+
+    run_app(work_items=[autodispatch_state["item"]], session=session, interactions=interact)
+
+
+@when(parsers.parse("the user toggles automerge {times}"))
+def dashboard_toggle_for_merge(autodispatch_state, times):
+    async def interact(app, pilot):
+        for _ in range(1 if times == "once" else 2):
+            await pilot.press("m")
+            await pilot.pause()
+
+    run_app(
+        work_items=[autodispatch_state["item"]],
+        session=autodispatch_state["session"],
+        interactions=interact,
+    )
+
+
+@then(parsers.parse("after toggling, the pull request is {outcome}"))
+def dashboard_merge_outcome(autodispatch_state, outcome):
+    assert autodispatch_state["merged"] == ({("owner/repo", 2)} if outcome == "merged" else set())
+
+
+@then("the dashboard reports and displays the new automerge state")
+def dashboard_automerge_visible(autodispatch_state):
+    assert "(m)erge" in autodispatch_state["command_off"]
+    assert "(m)erge off" in autodispatch_state["command_on"]
+    assert "(d)ispatch" not in autodispatch_state["command_on"]
+    assert "enabled" in autodispatch_state["footer"]
+    assert "[automerge]" in autodispatch_state["progress_text"]
+    assert "disabled" in autodispatch_state["disabled_footer"]
+    assert not autodispatch_state["session"].autodispatch_sessions()[0]["automerge"]

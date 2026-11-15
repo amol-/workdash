@@ -867,7 +867,12 @@ class WorkdashSession:
         return unclaimed
 
     def start_autodispatch(
-        self, *, scope: str, group: str | None = None, agent: str | None = None
+        self,
+        *,
+        scope: str,
+        group: str | None = None,
+        agent: str | None = None,
+        automerge: bool = False,
     ) -> dict[str, object]:
         """Start an independent server-owned sequence of dispatches."""
         if (
@@ -881,7 +886,7 @@ class WorkdashSession:
                 status=HTTPStatus.BAD_REQUEST,
             )
         entry = _AutodispatchSession(
-            self, scope.strip(), group.strip() if group is not None else None, agent
+            self, scope.strip(), group.strip() if group is not None else None, agent, automerge
         )
         with self._autodispatch_lock:
             identity = self._scope_identity(entry.scope)
@@ -1088,6 +1093,15 @@ class WorkdashSession:
     def autodispatch_sessions(self) -> list[dict[str, object]]:
         with self._autodispatch_lock:
             return [entry.snapshot() for entry in self._autodispatch.values()]
+
+    def toggle_automerge(self, session_id: str) -> bool:
+        with self._autodispatch_lock:
+            entry = self._autodispatch[session_id]
+            with entry.lock:
+                if entry.status != entry.Status.RUNNING:
+                    raise RuntimeError("Autodispatch session is no longer running.")
+                entry.automerge = not entry.automerge
+                return entry.automerge
 
     def stop_autodispatch(self, session_id: str) -> dict[str, object]:
         with self._autodispatch_lock:
@@ -1817,6 +1831,7 @@ def _make_turbogears_app(session: WorkdashSession):
                     scope=_required_text(payload, "scope"),
                     **({"group": _required_text(payload, "group")} if "group" in payload else {}),
                     agent=_optional_text(payload, "agent"),
+                    automerge=_optional_bool(payload, "automerge"),
                 ),
             )
 

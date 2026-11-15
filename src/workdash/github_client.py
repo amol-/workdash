@@ -300,6 +300,10 @@ _REPOSITORY_AUTHORIZATION_SUBSTRINGS = (
 )
 
 
+class MergeConflictError(RuntimeError):
+    """A pull request merge was rejected because of conflicts."""
+
+
 class TransientFetchError(RuntimeError):
     """Raised when a gh command failed with a retryable network/5xx/429 error.
 
@@ -1180,6 +1184,65 @@ class GitHubClient:
             )
             for (repo, number), node in zip(pull_requests, nodes, strict=True)
         ]
+
+    def merge_pull_request(self, repo: str, number: int) -> None:
+        """Merge a pull request directly on GitHub."""
+        settings = json.loads(
+            _run_gh(
+                ["gh", "api", f"repos/{repo}"],
+                operation=f"get {repo} merge methods",
+                todo_repository="",
+            )
+        )
+        method = next(
+            (
+                flag
+                for key, flag in (
+                    ("allow_squash_merge", "squash"),
+                    ("allow_merge_commit", "merge"),
+                    ("allow_rebase_merge", "rebase"),
+                )
+                if settings[key]
+            ),
+            None,
+        )
+        if method is None:
+            raise RuntimeError(f"No merge method enabled for {repo}.")
+        try:
+            _run_gh(
+                [
+                    "gh",
+                    "api",
+                    "--method",
+                    "PUT",
+                    f"repos/{repo}/pulls/{number}/merge",
+                    "-f",
+                    f"merge_method={method}",
+                ],
+                operation=f"merge {repo}#{number}",
+                todo_repository="",
+            )
+        except RuntimeError as error:
+            if "Pull Request is not mergeable (HTTP 405)" in str(error):
+                pull_request = json.loads(
+                    _run_gh(
+                        ["gh", "api", f"repos/{repo}/pulls/{number}"],
+                        operation=f"get {repo}#{number}",
+                        todo_repository="",
+                    )
+                )
+                if pull_request.get("mergeable") is None:
+                    time.sleep(_MERGEABILITY_RETRY_DELAY_SECONDS)
+                    pull_request = json.loads(
+                        _run_gh(
+                            ["gh", "api", f"repos/{repo}/pulls/{number}"],
+                            operation=f"get {repo}#{number}",
+                            todo_repository="",
+                        )
+                    )
+                if pull_request.get("mergeable") is False:
+                    raise MergeConflictError(str(error)) from error
+            raise
 
     def linked_open_pull_request(self, item: WorkItem) -> tuple[str, int] | None:
         """Find an issue's linked open pull request without evaluating readiness."""

@@ -143,6 +143,7 @@ class CLIOptions:
     full: bool = False
     raw: bool = False
     autoclose: bool = False
+    automerge: bool = False
     host: str = "127.0.0.1"
     listeners: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
@@ -309,11 +310,20 @@ class WorkdashCommands:
         return 0
 
     def autodispatch_cli(
-        self, *, target: str, agent: str | None, group: str | None, stop: bool, json_output: bool
+        self,
+        *,
+        target: str,
+        agent: str | None,
+        group: str | None,
+        stop: bool,
+        json_output: bool,
+        automerge: bool = False,
     ) -> int:
         payload = {"id": target} if stop else {"scope": target, "agent": agent}
         if not stop and group is not None:
             payload["group"] = group
+        if not stop and automerge:
+            payload["automerge"] = True
         try:
             result = self._client.request("autodispatch_stop" if stop else "autodispatch", payload)
         except WorkdashControlError as error:
@@ -569,6 +579,7 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             agent=options.agent,
             group=options.group,
             stop=options.command == "autodispatch-stop",
+            automerge=options.automerge,
             json_output=options.json_output,
         )
     if options.command == "analyze":
@@ -826,6 +837,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     autodispatch_parser.add_argument("target", metavar="SCOPE")
     autodispatch_parser.add_argument("--group", help="Zellij tab for agents.")
     autodispatch_parser.add_argument("--agent", help="Coding agent to launch.")
+    autodispatch_parser.add_argument(
+        "--automerge", action="store_true", help="Merge completed pull requests."
+    )
     autodispatch_stop_parser = subparsers.add_parser(
         "autodispatch-stop", help="Stop an autodispatch session."
     )
@@ -1020,6 +1034,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         full=getattr(namespace, "full", False),
         raw=getattr(namespace, "raw", False),
         autoclose=getattr(namespace, "autoclose", False),
+        automerge=getattr(namespace, "automerge", False),
         host=host or "127.0.0.1",
         listeners=tuple(listeners),
     )

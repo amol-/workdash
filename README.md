@@ -231,7 +231,8 @@ The `repositories` list in `config.json` accepts:
   item's worktree, choosing a numbered agent focuses its pane instead of launching another.
 - `d` — start an autodispatch session for the selected issue or a linked issue
   of an authored PR, including in another repository. A PR without a linked
-  issue cannot be dispatched.
+  issue cannot be dispatched. For work with a running session, `m` replaces `d` in the display; `d` still starts or replaces the session for the selected target.
+- `m` — toggle automerge for the selected work's running autodispatch session. If multiple sessions match, use `workdash info` and `workdash autodispatch-stop SESSION_ID` to leave only the intended session.
 - `w` — capture a todo. Opens a dialog asking for the todo text and an
   optional target repository.
 - `q` — quit.
@@ -444,11 +445,11 @@ in *Autoclose supervision* below.
 
 ## Autodispatch sessions
 
-`workdash autodispatch SCOPE [--group NAME] [--agent NAME]` starts a server-owned
+`workdash autodispatch SCOPE [--group NAME] [--agent NAME] [--automerge]` starts a server-owned
 session and returns its ID immediately. It uses the same scopes, readiness,
 parent behavior, claims and agent supervision as `dispatch`. Without `--group`, each task uses its implementation repository basename,
 including cross-repository work; `--group` overrides it. Each session dispatches one issue at a time, checks about every 30
-seconds for its pane to disappear, then synchronously reviews the linked open PR before checking readiness again. If there is no linked PR, review is skipped. The selected agent must support both coding and one-shot analysis. Review failure fails the session. The session fails before a tenth consecutive dispatch of the same issue; selecting another issue resets the count. It does not merge PRs. Multiple independent sessions can run at once.
+seconds for its pane to disappear, then synchronously reviews the linked open PR before checking readiness again. If there is no linked PR, review is skipped. The selected agent must support both coding and one-shot analysis. Review failure fails the session. The session fails before a tenth consecutive dispatch of the same issue; selecting another issue resets the count. By default it leaves PRs open. With `--automerge`, it attempts to merge the PR after a successful review. If a merge fails because of conflicts, the session continues to select ready work; other merge failures fail the session. The direct merge uses a method allowed by the repository, preferring squash, then merge commits, then rebase. The review is agent-produced, not independent proof. Multiple independent sessions can run at once.
 
 `workdash info` and `workdash info --json` report sessions, their current task,
 status, elapsed time and any failure. The TUI shows running sessions and the three
@@ -461,7 +462,7 @@ failure as an empty result. Sessions live only in the server process. After a
 restart, start another session on the same scope; readiness is checked afresh.
 
 The API accepts `POST /api/v0/autodispatch` with `scope` and optional `group` and
-`agent`, and `POST /api/v0/autodispatch_stop` with the session `id`.
+`agent` and boolean `automerge`, and `POST /api/v0/autodispatch_stop` with the session `id`.
 Session state is included in `POST /api/v0/info` as `autodispatch_sessions`;
 its `group` is null when no override was configured.
 
