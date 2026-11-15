@@ -794,6 +794,37 @@ def test_no_pull_request_blocks_after_three_full_windows_and_input_resumes(monke
     assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
 
 
+@pytest.mark.parametrize("raw", [True, False])
+@pytest.mark.parametrize("fails", [True, False])
+def test_blocked_input_with_unchanged_screen(monkeypatch, tmp_path, raw, fails):
+    from workdash.autodispatch import _AutodispatchSession
+
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    activity = _AutodispatchSession(supervision.session, "owner/repo", None, "pi")
+    activity.pane = ("workdash-main", "terminal_21")
+    supervision.session._autodispatch[activity.id] = activity
+    supervision.poll(20)
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+
+    send = MagicMock(side_effect=RuntimeError("send failed") if fails else None)
+    monkeypatch.setattr(control_module.launcher.zellij, "send_zellij_pane_input", send)
+    if fails:
+        with pytest.raises(RuntimeError, match="send failed"):
+            supervision.session.pane_send(pane_id="terminal_21", data="continue", raw=raw)
+        assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+    else:
+        supervision.session.pane_send(pane_id="terminal_21", data="continue", raw=raw)
+        assert supervision.session.autodispatch_sessions()[0]["status"] == "running"
+        supervision.poll(4)
+        assert send.call_count == 1
+        supervision.poll()
+        assert send.call_count == 2
+        supervision.poll(15)
+        assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+
+
 def test_delayed_reminder_redraw_does_not_reset_retry_limit(monkeypatch, tmp_path):
     supervision = Supervision(monkeypatch, tmp_path)
     supervision.github.pull_requests.clear()

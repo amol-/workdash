@@ -826,6 +826,13 @@ def blocked_pane_changes(scenario_state):
     scenario_state["api_session"].autoclose.poll_once()
 
 
+@when("the user sends input to its agent pane through Workdash")
+def send_blocked_pane_input(scenario_state):
+    scenario_state["api_session"].pane_send(
+        pane_id=scenario_state["supervised_pane_id"], data="continue"
+    )
+
+
 @then("the session resumes running")
 def blocked_session_resumes(scenario_state):
     assert scenario_state["api_session"].info()["autodispatch_sessions"][0]["status"] == "running"

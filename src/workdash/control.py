@@ -1248,6 +1248,7 @@ class WorkdashSession:
             )
         with self._lock:
             launcher.zellij.send_zellij_pane_input(self.zellij_session, pane_id, data, raw=raw)
+            self.autoclose.pane_input(self.zellij_session, pane_id)
         return {"pane_id": pane_id, "raw": raw, "accepted": True}
 
     def pane_close(self, *, pane_id: str) -> dict[str, object]:

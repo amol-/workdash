@@ -115,6 +115,13 @@ class AutocloseSupervisor:
             entry = self._panes.get((session, pane_id))
             return bool(entry and entry.blocked)
 
+    def pane_input(self, session: str, pane_id: str) -> None:
+        with self._lock:
+            entry = self._panes.get((session, pane_id))
+            if entry and entry.blocked:
+                entry.last_activity = time.monotonic()
+                entry.blocked, entry.attempts = False, 0
+
     def stop_blocked(self, session: str, pane_id: str) -> None:
         with self._lock:
             entry = self._panes.get((session, pane_id))
