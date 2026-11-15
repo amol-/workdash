@@ -578,3 +578,117 @@ def test_a_screen_signature_ignores_control_sequences_and_trailing_blanks() -> N
     styled = "\x1b[32mworking\x1b[0m   \r\n\x1b]0;title\x07\nidle   \n\n\n"
 
     assert autoclose_module._screen_signature(styled) == "working\n\nidle"
+
+
+def test_no_pull_request_blocks_after_three_full_windows_and_input_resumes(monkeypatch, tmp_path):
+    from workdash.autodispatch import _AutodispatchSession
+
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    launch = MagicMock(side_effect=supervision._launch)
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch)
+    supervision.launch(autoclose=True)
+    activity = _AutodispatchSession(supervision.session, "owner/repo", None, "pi")
+    activity.pane = ("workdash-main", "terminal_21")
+    supervision.session._autodispatch[activity.id] = activity
+
+    for attempt in range(3):
+        supervision.poll(4)
+        assert len(supervision.sent) == attempt
+        supervision.poll()
+        assert len(supervision.sent) == attempt + 1
+        assert supervision.sent[-1][1] in launch.call_args.args[1]
+    supervision.poll(4)
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "running"
+    supervision.poll()
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+    assert not supervision.closed
+
+    supervision.session.pane_send(pane_id="terminal_21", data="continue")
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "running"
+    supervision.poll(5)
+    assert len(supervision.sent) == 5  # three reminders, human input, then a new reminder
+    supervision.poll(15)
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+    supervision.screen = "new agent output"
+    supervision.poll()
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+
+
+def test_input_during_block_decision_restarts_reminders(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    supervision.poll(19)
+    assert len(supervision.sent) == 3
+
+    lookup = supervision.session.backend.github_client.work_pull_request
+    calls = 0
+
+    def input_during_decision(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            supervision.session.pane_send(pane_id="terminal_21", data="continue", raw=True)
+        return lookup(*args, **kwargs)
+
+    monkeypatch.setattr(
+        supervision.session.backend.github_client, "work_pull_request", input_during_decision
+    )
+    supervision.poll()
+    assert calls == 1
+    assert not supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    assert len(supervision.sent) == 4  # three reminders and human input
+    supervision.poll(5)
+    assert len(supervision.sent) == 5
+    supervision.poll(15)
+    assert supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+
+
+@pytest.mark.parametrize("change", ["output", "identity"])
+def test_pane_changes_during_block_decision(monkeypatch, tmp_path, change):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    supervision.poll(19)
+    assert len(supervision.sent) == 3
+
+    lookup = supervision.session.backend.github_client.work_pull_request
+
+    def change_during_decision(*args, **kwargs):
+        result = lookup(*args, **kwargs)
+        if change == "output":
+            supervision.screen = "agent is working"
+        else:
+            supervision.panes[0]["title"] = "another pane"
+        return result
+
+    monkeypatch.setattr(
+        supervision.session.backend.github_client, "work_pull_request", change_during_decision
+    )
+    supervision.poll()
+    assert not supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    supervision.poll(4)
+    assert not supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    if change == "output":
+        supervision.poll()
+        assert supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    assert not supervision.closed
+
+
+def test_stopping_blocked_autodispatch_closes_pane_without_touching_worktree(monkeypatch, tmp_path):
+    from workdash.autodispatch import _AutodispatchSession
+
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    activity = _AutodispatchSession(supervision.session, "owner/repo", None, "pi")
+    activity.pane = ("workdash-main", "terminal_21")
+    supervision.session._autodispatch[activity.id] = activity
+    work = supervision.worktree / "unpublished.txt"
+    work.write_text("keep this")
+    supervision.poll(20)
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+    assert supervision.session.stop_autodispatch(activity.id)["status"] == "stopped"
+    assert supervision.closed == ["terminal_21"]
+    assert work.read_text() == "keep this"

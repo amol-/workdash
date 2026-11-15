@@ -460,8 +460,8 @@ seconds for its pane to disappear, then synchronously reviews the linked open PR
 
 `workdash info` and `workdash info --json` report sessions, their current task,
 status, elapsed time and any failure. The TUI shows running sessions and the three
-most recently started failed sessions, including failure details, above the work table. Press Shift+Tab to focus progress and use the arrow keys or End to scroll it; press Tab to return to the work table. Stop a session with
-`workdash autodispatch-stop SESSION_ID`; stopping does not close its agent pane.
+most recently started failed sessions, including failure details, above the work table. Press Shift+Tab to focus progress and use the arrow keys or End to scroll it; press Tab to return to the work table. After three reminders and a further idle window with no pull request, a stuck session is blocked and remains visible. Send instructions with `workdash write PANE_ID TEXT` or the Workdash pane-input API to resume it; pane output and direct Zellij input do not unblock it. The TUI does not provide a pane-input action. With progress focused, select the blocked session with the arrow keys and press `s` to stop it and close its pane without changing the worktree. Stop a session with
+`workdash autodispatch-stop SESSION_ID`; stopping a blocked session closes its pane, while stopping a running session leaves its pane open.
 A dispatch already in progress may still finish launching its pane after stopping.
 Pane disappearance is not proof that the work was merged or completed.
 If dispatch, review, or the pane lookup fails, the session fails rather than treating the
@@ -617,7 +617,7 @@ and without a message from Workdash, the server asks GitHub what the work still
 needs, using the same classification `workdash ready` uses, and sends the same
 instruction the agent was briefed with: implement the issue, fix failing checks,
 resolve merge conflicts, or address review feedback. A new head, check result,
-review, base head, or mergeability is a new state; the same state is never
+review, base head, or mergeability is a new state; the same pull request state is never
 messaged twice, and every message restarts the 5 minutes. A pull request that
 merged closes its pane on the next check, even while the agent is still writing.
 A supervised session on somebody else's pull request is never messaged and closes
@@ -627,9 +627,8 @@ Only a known pull request's state is read on every check: finding the pull
 request an issue now has, and deciding what an idle pane needs, each cost a whole
 work state, so each runs at most every five minutes. That lookup also finds a pull
 request that opened and merged since the previous one, so such work closes its
-pane at the next lookup, at most about five minutes late. An instruction whose
-text reached the pane is never typed again: a failed Enter keystroke is retried
-on its own, unless the pane printed something since, which abandons that
+pane at the next lookup, at most about five minutes late. If instruction text reached the pane, a failed Enter keystroke is retried
+on its own without typing the text again, unless the pane printed something since, which abandons that
 instruction instead of answering whatever the agent now asks.
 
 Work counts as finished only when GitHub reports the current head's checks as
@@ -660,8 +659,7 @@ finished one, except when the pull request merges. A pane that cannot be checked
 surfaces only in the server log, as warnings spaced two, five, then fifteen
 minutes apart; once its checks keep failing at the longest of those waits, one
 further line reports the pane as stalled, and a stall after a successful check is
-reported again. A pane whose GitHub state does not change is never messaged
-twice.
+reported again. When no pull request exists, the same work instruction is sent up to three times, each after a full idle window; another full idle window leaves the pane blocked. A pull request state that does not change is never messaged twice.
 
 ## Read and write commands
 

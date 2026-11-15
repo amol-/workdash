@@ -103,6 +103,25 @@ class AutocloseSupervisor:
             review_only=item.kind in REVIEW_KINDS,
         )
 
+    def blocked(self, session: str, pane_id: str) -> bool:
+        with self._lock:
+            entry = self._panes.get((session, pane_id))
+            return bool(entry and entry.blocked)
+
+    def human_input(self, session: str, pane_id: str) -> None:
+        with self._lock:
+            entry = self._panes.get((session, pane_id))
+            if entry:
+                entry.blocked = False
+                entry.attempts = 0
+                entry.last_activity = time.monotonic()
+
+    def stop_blocked(self, session: str, pane_id: str) -> None:
+        with self._lock:
+            entry = self._panes.get((session, pane_id))
+            if entry and entry.blocked:
+                self._close(entry, after_idle=False)
+
     def poll_once(self) -> None:
         """Check every supervised pane once: close merged work, act on idle panes."""
 
@@ -157,6 +176,8 @@ class AutocloseSupervisor:
             entry.screen, entry.screen_known = screen, True
         elif screen != entry.screen:
             entry.screen, entry.last_activity = screen, now
+        if entry.blocked:
+            return
         state = self._merge_state(entry)
         if state == "MERGED":
             # A merge ends the work whether or not the agent is still writing.
@@ -170,6 +191,7 @@ class AutocloseSupervisor:
             )
         elif (
             not entry.review_only
+            and not entry.blocked
             and now >= entry.decide_at
             and now - entry.last_activity >= IDLE_SECONDS
         ):
@@ -181,12 +203,30 @@ class AutocloseSupervisor:
         entry.decide_at = time.monotonic() + RESOLVE_SECONDS
         state = self._work_state(entry)
         action = state.action if state is not None else "implement"
-        if action in _WORK_ACTIONS:
+        if state is None:
+            with self._lock:
+                if time.monotonic() - entry.last_activity < IDLE_SECONDS:
+                    return
+                if entry.attempts >= 3:
+                    if self._drop_unidentified(entry):
+                        return
+                    screen = _screen_signature(
+                        launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
+                    )
+                    if screen != entry.screen:
+                        entry.screen, entry.last_activity = screen, time.monotonic()
+                        return
+                    entry.blocked = True
+                else:
+                    instruction = render_autonomous_work_instruction(action, entry.item)
+                    self._send(
+                        entry, instruction, _state_fingerprint(action, state), no_pull_request=True
+                    )
+        elif action in _WORK_ACTIONS:
             fingerprint = _state_fingerprint(action, state)
             if fingerprint != entry.notified:
-                work = entry.item if state is None else state
-                instruction = render_autonomous_work_instruction(action, work)
-                self._send(entry, instruction, fingerprint)
+                instruction = render_autonomous_work_instruction(action, state)
+                self._send(entry, instruction, fingerprint, no_pull_request=False)
         elif state is not None and _finished(state):
             if self.git.has_unpublished_work(entry.repo_path, state.head_sha):
                 logger.info(
@@ -228,7 +268,9 @@ class AutocloseSupervisor:
             return None
         return self._github_client.pull_request_states([pull_request])[pull_request]
 
-    def _send(self, entry: _SupervisedPane, instruction: str, fingerprint: str) -> None:
+    def _send(
+        self, entry: _SupervisedPane, instruction: str, fingerprint: str, *, no_pull_request: bool
+    ) -> None:
         """Send an instruction to an idle pane, revalidating the pane and its last screen."""
 
         with self._lock:
@@ -248,6 +290,8 @@ class AutocloseSupervisor:
             # The text carries the instruction, so it counts as delivered before its Enter,
             # and the pane now shows it, which is what a retried Enter is compared against.
             entry.notified, entry.awaiting_enter = fingerprint, True
+            if no_pull_request:
+                entry.attempts += 1
             entry.screen = _screen_signature(
                 launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
             )
@@ -340,6 +384,8 @@ class _SupervisedPane:
     failures: int = 0
     retry_at: float = 0.0
     stalled: bool = False
+    attempts: int = 0
+    blocked: bool = False
 
 
 def _finished(state: PullRequestWorkState) -> bool:

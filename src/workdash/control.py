@@ -1171,7 +1171,7 @@ class WorkdashSession:
                 raise WorkdashControlError(
                     "not_found", "Autodispatch session not found.", status=HTTPStatus.NOT_FOUND
                 )
-            entry.stop()
+            entry.stop(close_blocked=True)
             return entry.snapshot()
 
     def stop_autodispatch_sessions(self) -> None:
@@ -1243,7 +1243,9 @@ class WorkdashSession:
                 "Pane input requires a known Workdash Zellij session.",
                 status=HTTPStatus.CONFLICT,
             )
-        launcher.zellij.send_zellij_pane_input(self.zellij_session, pane_id, data, raw=raw)
+        with self._lock:
+            launcher.zellij.send_zellij_pane_input(self.zellij_session, pane_id, data, raw=raw)
+            self.autoclose.human_input(self.zellij_session, pane_id)
         return {"pane_id": pane_id, "raw": raw, "accepted": True}
 
     def pane_close(self, *, pane_id: str) -> dict[str, object]:

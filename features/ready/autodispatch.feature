@@ -37,7 +37,9 @@ Feature: Automatically dispatch ready work
     - A pull request that closes several issues is dispatched as the lowest one by repository name, then by issue number, which is the issue coding the same pull request would code.
     - When GitHub cannot report a pull request's linked issues, the TUI reports that lookup failure instead of claiming the pull request has no linked issue.
     - Pressing "d" on a pull request that is not authored by you reports that dispatch is unavailable and starts no session.
-    - The dashboard shows running sessions and the three most recently started failed sessions, with failure summaries kept to one line each; full details remain available through info.
+    - After three unanswered reminders and a further idle window without a pull request, a session remains blocked and visible in the dashboard and info. Instructions sent through the Workdash pane-input API or `workdash write` resume supervision; pane output or direct Zellij input does not.
+    - With progress focused, the selected blocked session offers stop. Stopping closes its pane without changing the worktree.
+    - The dashboard shows running and blocked sessions and the three most recently started failed sessions, with failure summaries kept to one line each; full details remain available through info.
     - When an autodispatch refresh updates a pull request row, its current linked issues determine later refreshes and worktree selection.
 
   @id:F-AUTODISPATCH-S013

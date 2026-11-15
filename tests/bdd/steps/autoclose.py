@@ -422,3 +422,25 @@ def _server_reports_needs_review(caplog: pytest.LogCaptureFixture) -> None:
 @then("the server reports the pane as waiting for unpublished work")
 def _server_reports_unpublished_work(caplog: pytest.LogCaptureFixture) -> None:
     assert "unpublished work" in caplog.text
+
+
+@then("the supervised pane is blocked")
+def _pane_blocked(scenario_state: dict[str, Any]) -> None:
+    session = scenario_state["api_session"]
+    assert session.autoclose.blocked(session.zellij_session, scenario_state["supervised_pane_id"])
+
+
+@when("the user sends instructions to the supervised pane")
+def _user_sends_instructions(scenario_state: dict[str, Any]) -> None:
+    scenario_state["api_session"].pane_send(
+        pane_id=scenario_state["supervised_pane_id"], data="Please continue"
+    )
+    scenario_state["sent_count"] = len(scenario_state["sent"])
+
+
+@then("the supervised pane is no longer blocked")
+def _pane_unblocked(scenario_state: dict[str, Any]) -> None:
+    session = scenario_state["api_session"]
+    assert not session.autoclose.blocked(
+        session.zellij_session, scenario_state["supervised_pane_id"]
+    )

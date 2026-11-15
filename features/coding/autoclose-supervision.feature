@@ -10,7 +10,7 @@ Feature: Supervise an autoclosed coding pane
     - Autoclose needs autostart: the CLI always autostarts, the TUI never asks for autoclose, and a request for autoclose without autostart is rejected.
     - Supervision never takes over a pane that `code` did not just launch, so `already_running` enables nothing.
     - Only the server supervises: the CLI is a thin client with no polling of its own, and every GitHub and Zellij call happens in the server process.
-    - A pane is not judged while its output keeps changing.
+    - A pane is not judged while its output keeps changing, including output during a GitHub lookup before a blocked decision.
     - Five minutes without new output and without a Workdash message make the pane a candidate for a decision; every message Workdash sends restarts that wait.
     - The decision uses the same GitHub work classification as `ready`; an actionable message includes the autonomous publishing rules.
     - A pull request merged for the supervised work closes its pane on the next check, even while the agent is still writing; one that already merged before the pane was launched is not the work it was launched for, so the pane is left alone.
@@ -20,8 +20,9 @@ Feature: Supervise an autoclosed coding pane
     - A pull request closed without merging is neither completion nor work to redo on its own: supervision leaves the pane open, stops watching it, and reports it as needing review.
     - A pane whose identity stops matching is dropped from supervision for good: the action is abandoned and it is never messaged or closed again.
     - Somebody else's pull request stays a review: its pane is never messaged and closes only once that pull request merges.
-    - An unchanged GitHub state is never messaged twice; a new head, check result, review, base head, or mergeability is a new state.
-    - An instruction whose text reached the pane is never typed twice: a failed Enter is retried on its own.
+    - Except when no pull request exists, an unchanged GitHub state is never messaged twice; a new head, check result, review, base head, or mergeability is a new state.
+    - For work without a pull request, instructions sent through the Workdash pane-input API or `workdash write` reset the reminder count and idle wait, whether or not the pane is already blocked. Output alone does not unblock a pane.
+    - A failed Enter for instruction text that reached the pane is retried on its own, without typing the text again.
     - Supervising a pane that keeps failing its checks reports the stall once, and a stall after a recovery is reported again.
     - Supervision is a heuristic: a silent long-running command or a pending question looks exactly like a finished agent.
     - Supervision lives in the server process and does not survive a server restart.
@@ -220,14 +221,26 @@ Feature: Supervise an autoclosed coding pane
     Then the supervised pane receives the `fix_merge_conflicts` instruction
 
   @id:F-CODING-AUTOCLOSE-S019
-  Scenario: Work with no pull request yet is told to implement once
+  Scenario: Work with no pull request yet is reminded three times
     Given a server-backed Workdash session is ready to answer
     And a supervised coding pane for issue `owner/repo#42` with no pull request yet
     When 5 minutes pass
     Then the supervised pane receives the `implement` instruction
     When 5 minutes pass
+    Then the supervised pane receives the `implement` instruction again
+    When 5 minutes pass
+    Then the supervised pane receives the `implement` instruction again
+    When 5 minutes pass
     Then nothing more is sent to the supervised pane
+    And the supervised pane is blocked
     And no pane is closed
+    When the supervised pane prints new output
+    And a minute passes
+    Then the supervised pane is blocked
+    When the user sends instructions to the supervised pane
+    Then the supervised pane is no longer blocked
+    When 5 minutes pass
+    Then the supervised pane receives the `implement` instruction
 
   @id:F-CODING-AUTOCLOSE-S020
   Scenario: Work that opens and merges between two discovery checks closes its pane
