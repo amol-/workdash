@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
@@ -30,6 +31,52 @@ _DEFAULT_TUI_CONFIG = WorkdashConfig(
         "pi": AgentConfig(launch="pi"),
     },
 )
+
+
+def test_dashboard_initial_layout_and_shortcuts() -> None:
+    items = _search_work_items()
+    items[0] = replace(items[0], title="Long title " * 15)
+    session = MagicMock()
+    session.work_items = items
+    session.suggestion_markers = {}
+    session.autodispatch_sessions.return_value = []
+    session.take_completed_autodispatch_items.return_value = []
+    app = WorkdashApp(work_items=items[:1], session=session)
+
+    async def exercise() -> None:
+        async with app.run_test(size=(80, 10)) as pilot:
+            table = app.query_one("#work-items", DataTable)
+            command = app.query_one("#command-footer", Static)
+            status = app.query_one("#status-footer", Static)
+            assert status.render().plain == "Loaded 3 item(s)."
+            assert table.region.bottom <= command.region.y < status.region.y
+            for width in (80, 60, 100):
+                await pilot.resize_terminal(width, 10)
+                await pilot.pause()
+                rows = [strip.text for strip in app.screen._compositor.render_strips()]
+                assert "Age" in rows[0] and "Last Update" in rows[0], rows
+                long_row = next(row for row in rows if "Long title" in row)
+                assert len([word for word in long_row.split() if word.endswith("d")]) >= 2, rows
+            assert not table.show_horizontal_scrollbar
+            await pilot.press("right", "right", "down")
+            await pilot.pause()
+            assert table.scroll_x == 0
+            assert table.cursor_row == 1
+            hint = command.render()
+            for key in "/oracdiwq":
+                index = hint.plain.index(f"({key})") + 1
+                assert any(
+                    span.start <= index < span.end and str(span.style) == "bold"
+                    for span in hint.spans
+                )
+            assert not any(span.start <= 3 < span.end for span in hint.spans)
+            await _submit_search(app, pilot, "docs")
+            hint = command.render()
+            assert any(
+                span.start == 0 and span.end == len(app.SEARCH_HINT_TEXT) for span in hint.spans
+            )
+
+    asyncio.run(exercise())
 
 
 def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_columns() -> None:
@@ -588,7 +635,7 @@ def test_workdash_app_footer_shows_success_status_for_actions(
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
             footer = app.query_one("#status-footer", Static)
-            assert footer.render().plain == "Ready."
+            assert footer.render().plain == "Loaded 1 item(s)."
 
             await pilot.press("o")
             await pilot.pause()
@@ -1685,7 +1732,7 @@ def test_workdash_app_search_matches_rendered_columns_ignoring_case() -> None:
             assert _listed_titles(app) == ["Unrelated chore", "Ship the docs", "* Fix the parser"]
             assert footer.render().plain == "Search cleared; 3 item(s) shown."
             # The search action is emphasized only while a filter is active.
-            assert command_bar.render().spans == []
+            assert not any(s.start == 0 and s.end == 9 for s in command_bar.render().spans)
 
             await _submit_search(app, pilot, "OWNER/OTHER")
             assert _listed_titles(app) == ["Ship the docs"]
@@ -1748,7 +1795,7 @@ def test_workdash_app_search_box_dismissed_without_text_leaves_the_list_unchange
             assert _listed_titles(app) == _ALL_SEARCH_TITLES
 
             _assert_no_modal_screens(app)
-            assert app.query_one("#status-footer", Static).render().plain == "Ready."
+            assert app.query_one("#status-footer", Static).render().plain == "Loaded 3 item(s)."
             await pilot.press("q")
 
     asyncio.run(run_smoke())
@@ -1863,7 +1910,7 @@ def test_workdash_app_failed_include_keeps_the_search_filter_active() -> None:
                 await pilot.pause()
                 assert _listed_titles(app) == ["Fix the parser"]
                 spans = command_bar.render().spans
-                assert [(s.start, s.end, str(s.style)) for s in spans] == [(0, 9, "bold")]
+                assert (0, 9, "bold") in [(s.start, s.end, str(s.style)) for s in spans]
 
             # The filter is still live, so "/" clears it instead of reopening search.
             await pilot.press("/")
