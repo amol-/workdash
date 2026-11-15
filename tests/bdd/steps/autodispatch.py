@@ -838,6 +838,7 @@ def dashboard_toggle_automerge(autodispatch_state):
         await pilot.press("m")
         await pilot.pause()
         autodispatch_state["command_on"] = app.query_one("#command-footer", Static).render().plain
+        autodispatch_state["enabled"] = session.autodispatch_sessions()[0]["automerge"]
         autodispatch_state["footer"] = app.query_one("#status-footer", Static).render().plain
         autodispatch_state["progress_text"] = (
             app.query_one("#autodispatch-progress", Static).render().plain
@@ -846,6 +847,9 @@ def dashboard_toggle_automerge(autodispatch_state):
         await pilot.pause()
         autodispatch_state["disabled_footer"] = (
             app.query_one("#status-footer", Static).render().plain
+        )
+        autodispatch_state["command_disabled"] = (
+            app.query_one("#command-footer", Static).render().plain
         )
 
     run_app(work_items=[autodispatch_state["item"]], session=session, interactions=interact)
@@ -875,7 +879,10 @@ def dashboard_automerge_visible(autodispatch_state):
     assert "(m)erge" in autodispatch_state["command_off"]
     assert "(m)erge off" in autodispatch_state["command_on"]
     assert "(d)ispatch" not in autodispatch_state["command_on"]
+    assert autodispatch_state["enabled"]
     assert "enabled" in autodispatch_state["footer"]
     assert "[automerge]" in autodispatch_state["progress_text"]
     assert "disabled" in autodispatch_state["disabled_footer"]
+    assert "(m)erge" in autodispatch_state["command_disabled"]
+    assert "(m)erge off" not in autodispatch_state["command_disabled"]
     assert not autodispatch_state["session"].autodispatch_sessions()[0]["automerge"]

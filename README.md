@@ -168,6 +168,7 @@ workdash review ITEM [--agent NAME] [--group NAME] [--json]   # autonomously rev
 workdash code ITEM [--agent NAME] [--group NAME] [--autoclose] [--json]  # launch an autonomous coding agent, or report the running one
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
 workdash todo TEXT [--target REPOSITORY] [--body BODY] [--json]  # capture a todo
+workdash todo --close ITEM [--json]  # close a todo
 workdash read PANE_ID [--full] [--json]  # read text from a live pane
 workdash write PANE_ID TEXT [--raw] [--json]  # send text to a live pane
 workdash show-config [--json] # show configured agents and selected server address
@@ -256,6 +257,13 @@ workdash todo "Plan the migration" --body "Research findings and next steps..."
 and `target`. The issue body starts with Workdash's metadata block; user content
 is appended after it without changing formatting. Omitting the body keeps the
 existing metadata-only output. The TUI continues to capture title-only todos.
+
+Close an issue in the configured todo repository with `workdash todo --close ITEM`.
+`ITEM` may be its Workdash ID, a number such as `42` or `#42`, or its GitHub
+issue URL. The command requires a running server; `--json` returns the closed
+issue's ID, repository, number, URL, and status. The API offers the same action
+as `POST /api/v0/todo_close` with an `item` string. The dashboard updates after
+GitHub confirms the close.
 
 A todo may name a GitHub target (`--target owner/repo`) or a git URL on any
 hosting service (`--target https://codeberg.org/owner/repo.git`). HTTPS (with or

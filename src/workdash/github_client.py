@@ -782,6 +782,14 @@ def merge_normalized_work_items(
 class GitHubClient:
     """All GitHub interactions must go through this object."""
 
+    def close_todo(self, *, todo_repository: str, number: int) -> None:
+        """Close an issue in the todo repository."""
+        _run_gh(
+            ["gh", "issue", "close", str(number), "--repo", todo_repository],
+            operation=f"close todo issue {number} in {todo_repository}",
+            todo_repository=todo_repository,
+        )
+
     def create_todo(
         self, *, todo_repository: str, text: str, target: str | None = None, body: str | None = None
     ) -> WorkItem:

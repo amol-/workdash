@@ -10,7 +10,7 @@ Feature: Targeted todo work actions
   Rules:
     - A todo item without a target is an ordinary issue item of the todo repository, with an ordinary issue Workdash item ID and an ordinary issue worktree.
     - A todo item with a target is listed under the target repository's `owner/name`; for a URL target, this comes from its last two path segments without a `.git` suffix.
-    - A targeted todo item's Workdash item ID is `<owner/name>#ISSUE-WT<number>`, where the number is the todo issue number in the todo repository, so it never collides with the target repository's own issue of the same number.
+    - A targeted todo item's Workdash item ID is `<owner/name>#ISSUE-WT<number>`, where the number is the todo issue number in the todo repository, so it never collides with the target repository's own issue of the same number. The ID remains usable when the same issue is included on the dashboard during capture.
     - Opening a targeted todo item in the browser opens the todo issue in the todo repository.
     - A targeted todo's analysis combines the target repository's code with the title, body, and comments of the GitHub todo issue.
     - Free-form body text or JSON naming other repositories never overrides the metadata target, including after refresh.

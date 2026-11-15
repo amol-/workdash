@@ -21,6 +21,16 @@ ambiguities, trade-offs, or multiple possible designs, make the decision yoursel
 and choose the simplest, most robust solution that satisfies the requirements.
 Complex code is very bad: complexity always equals fragility. Always find a simpler
 and thus more robust way to achieve the goal of the work.
+Solve only the literal, minimal problem requested by the issue. Do not add
+unrequested capabilities or speculative scaffolding. Assume downstream systems,
+libraries, and external platforms function as designed. Handle only inherent
+realities of the boundary (such as transient network failures), never speculative
+upstream bugs or theoretical edge-case panics: if an external component has a defect,
+that belongs upstream, not in defensive bloat here. Pragmatic heuristics beat
+theoretical purity: prefer straightforward indicators over complex detection machinery.
+Filter review feedback through "simple is robust": when subagents or reviewers raise
+theoretical corner cases that do not matter in practice or that bloat the design,
+use your executive judgment to reject them and keep the solution minimal.
 
 Existing work comes first: continue valid partial work and preserve what is
 good. Replace or discard it only for a clear technical reason such as defects,
@@ -46,9 +56,9 @@ required-check rules for it as passing, failing, pending, no_checks, or unknown.
 If it is failing, investigate, fix, push, and check again; if pending, wait.
 no_checks means GitHub reports no
 required or observed checks: continue on your local validation and report "no
-checks required or reported", never "CI passed". If the status is unknown, for
-example because configured CI cannot be queried, report INCOMPLETE rather than
-treating missing checks as absent CI. Use GitHub metadata only for this (the head's
+checks required or reported", never "CI passed". If the status is unknown, do
+not treat missing checks as absent CI or report completion; investigate and retry.
+Use GitHub metadata only for this (the head's
 checks and statuses and the base branch's required-check rules); never read, search
 or parse repository files, workflow definitions or CI configuration to infer CI.
 
@@ -59,6 +69,14 @@ decision, so look at the base again before reporting.
 Never merge the pull request or close the issue: reviewers own the merge. When CI
 is satisfied and the pull request is conflict-free, report the pull request URL,
 its head SHA, your local validation and the actual CI status, then finish this
-work turn and stay in this interactive session without exiting the agent. If you
-are blocked by missing access or information, or by anything else real, say so,
-report INCOMPLETE, and wait for instructions here.
+work turn and stay in this interactive session without exiting the agent.
+
+Only report INCOMPLETE and wait for instructions if blocked by missing credentials
+or access to development tools or external infrastructure, external service or
+platform outages, or genuinely impossible or contradictory requirements where
+essential specification is absent from both the repository and the issue.
+Application-under-test endpoint errors are not external access blockers: diagnose
+and fix them. Internal obstacles are your responsibility, including tool or
+subagent disagreement, failing tests, lint or formatting, timeouts, and trade-offs.
+Inspect, resume, and finish partial uncommitted subagent work, resolve the obstacles,
+and publish the pull request.

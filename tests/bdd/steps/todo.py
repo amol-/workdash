@@ -1134,3 +1134,73 @@ def _worktree_is_target_todo_worktree(
         (str(Path(workdir) / f"{owner}_{name}_todo_{number}"), "workdash-main")
     ]
     assert scenario_state["github_lookups"] == [f"{TODO_REPOSITORY}#{number}"]
+
+
+@given("the user has a configured todo repository containing issue 42")
+def _close_todo_setup(scenario_state, work_items, tmp_path, monkeypatch):
+    session = ensure_api_session(scenario_state, work_items, tmp_path)
+    from dataclasses import replace
+
+    session.config = replace(session.config, todo_repository="owner/todos")
+    item = make_work_item(repo="owner/todos", number=42)
+    session.work_items.append(item)
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    scenario_state["close_commands"] = commands
+
+
+@when(parsers.parse("the user closes the todo using `{reference}`"))
+def _close_todo_cli(reference, scenario_state, monkeypatch, capsys):
+    import workdash.workdash as workdash_module
+
+    session = scenario_state["api_session"]
+
+    class Client:
+        def __init__(self, *args):
+            pass
+
+        def request(self, endpoint, payload):
+            assert endpoint == "todo_close"
+            return session.close_todo(item=payload["item"])
+
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", Client)
+    assert workdash_module.main(["todo", "--close", reference]) == 0
+    scenario_state["close_output"] = capsys.readouterr().out
+
+
+@when(parsers.parse("a client requests to close todo `{reference}`"))
+def _close_todo_api(reference, scenario_state, work_items, tmp_path):
+    _call_api(scenario_state, work_items, tmp_path, "todo_close", {"item": reference})
+
+
+@then("issue 42 is closed in the todo repository")
+def _todo_is_closed(scenario_state):
+    assert scenario_state["close_commands"] == [
+        ["gh", "issue", "close", "42", "--repo", "owner/todos"]
+    ]
+
+
+@then("the closed todo is removed from the dashboard")
+def _closed_todo_removed(scenario_state):
+    assert not any(
+        item.repo == "owner/todos" and item.number == 42
+        for item in scenario_state["api_session"].work_items
+    )
+
+
+@then("the user receives confirmation of the closed issue")
+def _close_confirmation(scenario_state):
+    assert "owner/todos#ISSUE-42" in scenario_state["close_output"]
+    assert "closed" in scenario_state["close_output"].lower()
+
+
+@then("the API confirms the closed issue")
+def _close_api_confirmation(scenario_state):
+    result = _api_result(scenario_state)
+    assert result["item_id"] == "owner/todos#ISSUE-42"
+    assert result["status"] == "closed"

@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, TypeVar
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
@@ -402,6 +403,10 @@ class SearchDialog(ModalScreen[str | None]):
 class WorkItemsTable(DataTable):
     def on_resize(self, event: events.Resize) -> None:
         old_height = getattr(self, "_previous_height", 0)
+        old_width = getattr(self, "_previous_width", 0)
+        self._previous_width = event.size.width
+        if old_width != event.size.width and self.columns:
+            self.app._render_table(preserve_view=True)
         old_app_size = getattr(self, "_previous_app_size", None)
         self._previous_height = event.size.height
         self._previous_app_size = self.app.size
@@ -429,6 +434,7 @@ class WorkdashApp(App[None]):
         }
         #work-items {
             height: 1fr;
+            overflow-x: hidden;
         }
         #status-footer {
             height: 1;
@@ -521,8 +527,8 @@ class WorkdashApp(App[None]):
         with VerticalScroll(id="autodispatch-scroll"):
             yield Static("", id="autodispatch-progress", markup=False)
         yield WorkItemsTable(id="work-items")
-        yield Static(self._status_message, id="status-footer", markup=False)
         yield Static(self.COMMAND_HINT_TEXT, id="command-footer")
+        yield Static(self._status_message, id="status-footer", markup=False)
 
     def on_mount(self) -> None:
         self.query_one("#work-items", DataTable).focus()
@@ -532,6 +538,7 @@ class WorkdashApp(App[None]):
             self.refresh_from_session()
         else:
             self._render_table()
+        self._update_status(f"Loaded {len(self._work_items)} item(s).")
 
     def _update_autodispatch_progress(self) -> None:
         if self._session is None:
@@ -741,6 +748,8 @@ class WorkdashApp(App[None]):
             if entries
             else self.COMMAND_HINT_TEXT
         )
+        for match in re.finditer(r"\((.)\)", hint.plain):
+            hint.stylize("bold", match.start() + 1, match.end() - 1)
         if self._search_filter:
             hint.stylize("bold", 0, len(self.SEARCH_HINT_TEXT))
         return hint
@@ -765,7 +774,32 @@ class WorkdashApp(App[None]):
         )
         table.add_column("Type", key="type", width=max(4, type_width))
         table.add_column("Repo", key="repo")
-        table.add_column("Title", key="title")
+        repo_width = max((cell_len(_repo_column(item)) for item in matched_items), default=4)
+        age_width = max(
+            (
+                len(f"{max(0, (self._now_utc - _to_utc(item.created_at)).days)}d")
+                for item in matched_items
+            ),
+            default=3,
+        )
+        update_width = max(
+            (
+                len(f"{max(0, (self._now_utc - _to_utc(item.updated_at)).days)}d")
+                for item in matched_items
+            ),
+            default=11,
+        )
+        title_width = max(
+            1,
+            (table.size.width or self.size.width)
+            - 1
+            - 10
+            - max(4, type_width)
+            - max(4, repo_width)
+            - max(3, age_width)
+            - max(11, update_width),
+        )
+        table.add_column("Title", key="title", width=title_width)
         table.add_column("Age", key="age")
         table.add_column("Last Update", key="last_update")
         self._sorted_work_items = matched_items
@@ -907,7 +941,9 @@ class WorkdashApp(App[None]):
                 message="Refreshing work items...",
                 callback=self._refresh_callback,
             )
-            if (
+            if self._session is not None:
+                self.refresh_from_session()
+            elif (
                 isinstance(refreshed, tuple)
                 and len(refreshed) == 2
                 and isinstance(refreshed[1], dict)
@@ -916,9 +952,10 @@ class WorkdashApp(App[None]):
                 self._suggestion_markers = dict(refreshed[1])
             else:
                 self._work_items = list(refreshed)
-            self._work_items.sort(key=lambda item: item.updated_at, reverse=True)
-            self._search_filter = ""
-            self._render_table()
+            if self._session is None:
+                self._work_items.sort(key=lambda item: item.updated_at, reverse=True)
+                self._search_filter = ""
+                self._render_table()
         except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
             self._update_status(f"Refresh failed: {error}")
             self.notify(f"Refresh failed: {error}", severity="error", timeout=10)
@@ -1258,13 +1295,21 @@ class WorkdashApp(App[None]):
             self._update_status(message)
             self.notify(message, severity="error", timeout=10)
             return
+        if self._session is not None:
+            self.refresh_from_session()
         if result.duplicate_identity is not None:
             item_type, repo, number = result.duplicate_identity
             existing = next(
-                item
-                for item in self._work_items
-                if item.item_type == item_type and item.repo == repo and item.number == number
+                (
+                    item
+                    for item in self._work_items
+                    if item.item_type == item_type and item.repo == repo and item.number == number
+                ),
+                None,
             )
+            if existing is None:
+                self._update_status("Included item is no longer on the dashboard.")
+                return
             existing.included = True
             self._search_filter = ""
             self._render_table(focus_item=existing)
@@ -1285,6 +1330,15 @@ class WorkdashApp(App[None]):
             ),
             None,
         )
+        if existing is None and self._session is not None:
+            self._update_status("Included item is no longer on the dashboard.")
+            if result.linked_issues_unavailable:
+                self.notify(
+                    "Linked issues unavailable; refresh the dashboard to retry.",
+                    severity="warning",
+                    timeout=10,
+                )
+            return
         if existing is None:
             self._work_items.append(fetched_item)
             self._work_items.sort(key=lambda item: item.updated_at, reverse=True)

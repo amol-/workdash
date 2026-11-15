@@ -140,6 +140,7 @@ class CLIOptions:
     pane_id: str | None = None
     text: str | None = None
     body: str | None = None
+    close_todo: str | None = None
     full: bool = False
     raw: bool = False
     autoclose: bool = False
@@ -338,7 +339,13 @@ class WorkdashCommands:
         return 0
 
     def todo_cli(
-        self, *, text: str, target: str | None, json_output: bool, body: str | None = None
+        self,
+        *,
+        text: str,
+        target: str | None,
+        json_output: bool,
+        body: str | None = None,
+        close: str | None = None,
     ) -> int:
         """Capture a todo through the local Workdash server."""
 
@@ -346,12 +353,18 @@ class WorkdashCommands:
         if body is not None:
             payload["body"] = body
         try:
-            result = self._client.request("todo", payload)
+            result = (
+                self._client.request("todo_close", {"item": close})
+                if close is not None
+                else self._client.request("todo", payload)
+            )
         except WorkdashControlError as error:
             _print_control_error(error)
             return 1
         if json_output:
             print(json.dumps(result, ensure_ascii=True, indent=2))
+        elif close is not None:
+            print(f"Closed {result['item_id']}: {result['url']}")
         else:
             _print_todo_result(result)
         return 0
@@ -614,6 +627,7 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             text=options.text or "",
             target=options.target,
             body=options.body,
+            close=options.close_todo,
             json_output=options.json_output,
         )
     if options.command == "read":
@@ -852,7 +866,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         "todo",
         help="Capture a todo in the configured todo repository.",
     )
-    todo_parser.add_argument("text", metavar="TEXT", help="Todo text used as the issue title.")
+    todo_parser.add_argument(
+        "text", nargs="?", metavar="TEXT", help="Todo text used as the issue title."
+    )
+    todo_parser.add_argument(
+        "--close", dest="close_todo", metavar="ITEM", help="Close a todo issue."
+    )
     todo_parser.add_argument(
         "--target",
         default=argparse.SUPPRESS,
@@ -967,6 +986,14 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         help="Show the open pull request and issue for the current branch.",
     )
     namespace = parser.parse_args(argv) if argv is not None else parser.parse_args()
+    if namespace.command == "todo" and (
+        (namespace.text is None) == (namespace.close_todo is None)
+        or (
+            namespace.close_todo is not None
+            and (getattr(namespace, "target", None) is not None or namespace.body is not None)
+        )
+    ):
+        parser.error("todo requires TEXT or --close ITEM; --target and --body are only for capture")
     host = getattr(namespace, "host", None)
     client_commands = {
         "list",
@@ -1031,6 +1058,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         pane_id=getattr(namespace, "pane_id", None),
         text=getattr(namespace, "text", None),
         body=getattr(namespace, "body", None),
+        close_todo=getattr(namespace, "close_todo", None),
         full=getattr(namespace, "full", False),
         raw=getattr(namespace, "raw", False),
         autoclose=getattr(namespace, "autoclose", False),

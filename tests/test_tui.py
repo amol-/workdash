@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
@@ -30,6 +31,52 @@ _DEFAULT_TUI_CONFIG = WorkdashConfig(
         "pi": AgentConfig(launch="pi"),
     },
 )
+
+
+def test_dashboard_initial_layout_and_shortcuts() -> None:
+    items = _search_work_items()
+    items[0] = replace(items[0], title="Long title " * 15)
+    session = MagicMock()
+    session.work_items = items
+    session.suggestion_markers = {}
+    session.autodispatch_sessions.return_value = []
+    session.take_completed_autodispatch_items.return_value = []
+    app = WorkdashApp(work_items=items[:1], session=session)
+
+    async def exercise() -> None:
+        async with app.run_test(size=(80, 10)) as pilot:
+            table = app.query_one("#work-items", DataTable)
+            command = app.query_one("#command-footer", Static)
+            status = app.query_one("#status-footer", Static)
+            assert status.render().plain == "Loaded 3 item(s)."
+            assert table.region.bottom <= command.region.y < status.region.y
+            for width in (80, 60, 100):
+                await pilot.resize_terminal(width, 10)
+                await pilot.pause()
+                rows = [strip.text for strip in app.screen._compositor.render_strips()]
+                assert "Age" in rows[0] and "Last Update" in rows[0], rows
+                long_row = next(row for row in rows if "Long title" in row)
+                assert len([word for word in long_row.split() if word.endswith("d")]) >= 2, rows
+            assert not table.show_horizontal_scrollbar
+            await pilot.press("right", "right", "down")
+            await pilot.pause()
+            assert table.scroll_x == 0
+            assert table.cursor_row == 1
+            hint = command.render()
+            for key in "/oracdiwq":
+                index = hint.plain.index(f"({key})") + 1
+                assert any(
+                    span.start <= index < span.end and str(span.style) == "bold"
+                    for span in hint.spans
+                )
+            assert not any(span.start <= 3 < span.end for span in hint.spans)
+            await _submit_search(app, pilot, "docs")
+            hint = command.render()
+            assert any(
+                span.start == 0 and span.end == len(app.SEARCH_HINT_TEXT) for span in hint.spans
+            )
+
+    asyncio.run(exercise())
 
 
 def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_columns() -> None:
@@ -588,7 +635,7 @@ def test_workdash_app_footer_shows_success_status_for_actions(
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
             footer = app.query_one("#status-footer", Static)
-            assert footer.render().plain == "Ready."
+            assert footer.render().plain == "Loaded 1 item(s)."
 
             await pilot.press("o")
             await pilot.pause()
@@ -1685,7 +1732,7 @@ def test_workdash_app_search_matches_rendered_columns_ignoring_case() -> None:
             assert _listed_titles(app) == ["Unrelated chore", "Ship the docs", "* Fix the parser"]
             assert footer.render().plain == "Search cleared; 3 item(s) shown."
             # The search action is emphasized only while a filter is active.
-            assert command_bar.render().spans == []
+            assert not any(s.start == 0 and s.end == 9 for s in command_bar.render().spans)
 
             await _submit_search(app, pilot, "OWNER/OTHER")
             assert _listed_titles(app) == ["Ship the docs"]
@@ -1748,7 +1795,7 @@ def test_workdash_app_search_box_dismissed_without_text_leaves_the_list_unchange
             assert _listed_titles(app) == _ALL_SEARCH_TITLES
 
             _assert_no_modal_screens(app)
-            assert app.query_one("#status-footer", Static).render().plain == "Ready."
+            assert app.query_one("#status-footer", Static).render().plain == "Loaded 3 item(s)."
             await pilot.press("q")
 
     asyncio.run(run_smoke())
@@ -1863,7 +1910,7 @@ def test_workdash_app_failed_include_keeps_the_search_filter_active() -> None:
                 await pilot.pause()
                 assert _listed_titles(app) == ["Fix the parser"]
                 spans = command_bar.render().spans
-                assert [(s.start, s.end, str(s.style)) for s in spans] == [(0, 9, "bold")]
+                assert (0, 9, "bold") in [(s.start, s.end, str(s.style)) for s in spans]
 
             # The filter is still live, so "/" clears it instead of reopening search.
             await pilot.press("/")
@@ -3322,3 +3369,121 @@ def test_include_pull_request_warns_when_linked_issues_unavailable(tmp_path) -> 
             )
 
     asyncio.run(run())
+
+
+def test_refresh_does_not_restore_todo_closed_after_capture() -> None:
+    now = datetime.now(UTC)
+    item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/todos",
+        number=42,
+        title="Close me",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/todos/issues/42",
+    )
+    backend = MagicMock()
+    backend.load_items.return_value = ([item], {})
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="owner/todos"),
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = WorkdashApp(
+        session=session,
+        refresh_callback=lambda: (
+            session.list_items(refresh=True) and (session.work_items, session.suggestion_markers)
+        ),
+    )
+    session.items_changed_callback = app.refresh_from_session
+
+    async def run_test() -> None:
+        async with app.run_test():
+
+            async def interrupted_refresh(*, message, callback):
+                captured = callback()
+                session.close_todo(item="42")
+                return captured
+
+            app._run_with_busy_screen = interrupted_refresh
+            await app.action_refresh_items()
+            assert app.query_one("#work-items", DataTable).row_count == 0
+            assert session.list_items()["items"] == []
+
+    asyncio.run(run_test())
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_include_closed_todo_is_pruned_on_refresh(tmp_path, duplicate: bool) -> None:
+    from workdash.backend import WorkdashBackend
+    from workdash.github_client import GitHubClient
+    from workdash.included_items import IncludedItemsStore
+
+    now = datetime.now(UTC)
+    item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/todos",
+        number=42,
+        title="Close me",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/todos/issues/42",
+    )
+    github = MagicMock(spec=GitHubClient)
+    for name in (
+        "list_open_authored_prs",
+        "list_open_review_requested_prs",
+        "list_open_reviewed_prs",
+        "list_open_assigned_issues",
+        "list_recent_tracked_items",
+        "list_open_todo_issues",
+    ):
+        getattr(github, name).return_value = []
+    github.fetch_item_by_url.side_effect = [None] if duplicate else [item, None]
+    store = IncludedItemsStore(tmp_path / "included.json")
+    config = WorkdashConfig(todo_repository="owner/todos")
+    backend = WorkdashBackend(
+        config=config,
+        github_client=github,
+        included_items_store=store,
+        cache_root=tmp_path / "cache",
+    )
+    session = WorkdashSession(
+        config=config,
+        backend=backend,
+        work_items=[item] if duplicate else [],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = WorkdashApp(
+        session=session,
+        include_callback=lambda url, _: session.include_item_by_url(url),
+        refresh_callback=lambda: session.list_items(refresh=True),
+    )
+    session.items_changed_callback = app.refresh_from_session
+
+    async def run_test() -> None:
+        async with app.run_test():
+
+            async def interrupted_include(*, message, callback):
+                captured = callback()
+                assert store.load() == [item.url]
+                session.close_todo(item="42")
+                return captured
+
+            app._run_with_busy_screen = interrupted_include
+            await app._perform_include(item.url)
+            assert app.query_one("#work-items", DataTable).row_count == 0
+            assert session.list_items()["items"] == []
+            session.list_items(refresh=True)
+            assert app.query_one("#work-items", DataTable).row_count == 0
+            assert session.list_items()["items"] == []
+            assert store.load() == []
+            github.close_todo.assert_called_once_with(todo_repository="owner/todos", number=42)
+            assert github.fetch_item_by_url.call_count == (1 if duplicate else 2)
+
+    asyncio.run(run_test())
