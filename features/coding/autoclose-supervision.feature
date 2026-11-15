@@ -13,7 +13,7 @@ Feature: Supervise an autoclosed coding pane
     - A pane is not judged while its output keeps changing, including output during a GitHub lookup before a blocked decision.
     - Five minutes without new output and without a Workdash message make the pane a candidate for a decision; every message Workdash sends restarts that wait.
     - The decision uses the same GitHub work classification as `ready`; an actionable message includes the autonomous publishing rules.
-    - A pull request merged for the supervised work closes its pane on the next check, even while the agent is still writing; one that already merged before the pane was launched is not the work it was launched for, so the pane is left alone.
+    - A pull request merged for the supervised work closes its pane on the next check, even while the agent is still writing or a detailed work lookup is unavailable. A pull request merged before launch does not finish a reopened issue; a pane explicitly targeting that merged pull request is left alone. A merge during pane startup or in the same second as launch is treated as occurring after launch.
     - Finished work (current-head CI passing or verifiably absent, clean mergeability, no outstanding feedback, no local work GitHub does not have: an edited file, a new file the agent never added, or an unpushed commit) closes its pane after the wait, rechecked immediately before closing, and the reason is logged when unpublished work keeps the pane open. Only the worktree's `.workdash/` artifact directory is left out of that check.
     - A known pull request is cheap to check, so its state is read on every check; finding the pull request an issue now has and deciding what an idle pane needs cost a whole work state, so each happens at most every five minutes, and a pull request that opens and merges between two of them is found at the next one.
     - Pending, unknown, or unavailable GitHub answers never close a pane and never report success; failed lookups back off instead of messaging.
@@ -21,7 +21,7 @@ Feature: Supervise an autoclosed coding pane
     - A pane whose identity stops matching is dropped from supervision for good: the action is abandoned and it is never messaged or closed again.
     - Somebody else's pull request stays a review: its pane is never messaged and closes only once that pull request merges.
     - Except when no pull request exists, an unchanged GitHub state is never messaged twice; a new head, check result, review, base head, or mergeability is a new state.
-    - For work without a pull request, instructions sent through the Workdash pane-input API or `workdash write` reset the reminder count and idle wait, whether or not the pane is already blocked. Output alone does not unblock a pane.
+    - For work without a pull request, any change in pane content postpones the next reminder or block, regardless of what caused the change. Only recovery from a blocked pane resets the reminder count. A blocked pane is still closed when its pull request merges.
     - A failed Enter for instruction text that reached the pane is retried on its own, without typing the text again.
     - Supervising a pane that keeps failing its checks reports the stall once, and a stall after a recovery is reported again.
     - Supervision is a heuristic: a silent long-running command or a pending question looks exactly like a finished agent.
@@ -234,13 +234,30 @@ Feature: Supervise an autoclosed coding pane
     Then nothing more is sent to the supervised pane
     And the supervised pane is blocked
     And no pane is closed
-    When the supervised pane prints new output
-    And a minute passes
-    Then the supervised pane is blocked
     When the user sends instructions to the supervised pane
+    And a minute passes
     Then the supervised pane is no longer blocked
+    And nothing more is sent to the supervised pane
+    When 4 minutes pass
+    Then nothing more is sent to the supervised pane
+    When another minute passes
+    Then the supervised pane receives the `implement` instruction again
+
+  @id:F-CODING-AUTOCLOSE-S022
+  Scenario: Activity between reminders postpones blocking but does not renew the reminder limit
+    Given a server-backed Workdash session is ready to answer
+    And a supervised coding pane for issue `owner/repo#42` with no pull request yet
     When 5 minutes pass
     Then the supervised pane receives the `implement` instruction
+    When the supervised pane prints new output
+    And a minute passes
+    And 5 minutes pass
+    Then the supervised pane receives the `implement` instruction again
+    When 5 minutes pass
+    Then the supervised pane receives the `implement` instruction again
+    When 5 minutes pass
+    Then nothing more is sent to the supervised pane
+    And the supervised pane is blocked
 
   @id:F-CODING-AUTOCLOSE-S020
   Scenario: Work that opens and merges between two discovery checks closes its pane
@@ -252,9 +269,26 @@ Feature: Supervise an autoclosed coding pane
     And nothing is sent to the supervised pane
 
   @id:F-CODING-AUTOCLOSE-S021
-  Scenario: A pull request that merged before the launch leaves a new pane alone
+  Scenario: A reopened issue with an old merged pull request receives reminders
     Given a server-backed Workdash session is ready to answer
     And a supervised coding pane for issue `owner/repo#42` whose pull request `owner/repo#51` merged before the launch
+    When 5 minutes pass
+    Then the supervised pane receives the `implement` instruction
+    And no pane is closed
+
+  @id:F-CODING-AUTOCLOSE-S024
+  Scenario: A reopened issue's new pull request merges after launch
+    Given a server-backed Workdash session is ready to answer
+    And a supervised coding pane for issue `owner/repo#42` whose pull request `owner/repo#51` merged before the launch
+    When pull request `owner/repo#52` opens and merges for issue `owner/repo#42`
+    And 6 minutes pass
+    Then the supervised pane is closed
+    And nothing is sent to the supervised pane
+
+  @id:F-CODING-AUTOCLOSE-S023
+  Scenario: A pull request explicitly targeted after it merged leaves its pane alone
+    Given a server-backed Workdash session is ready to answer
+    And a supervised coding pane for pull request `owner/repo#PR-51` that merged before the launch
     When 5 minutes pass
     Then nothing is sent to the supervised pane
     And no pane is closed

@@ -16,6 +16,7 @@ import urllib.request
 from collections.abc import Callable, Collection, Sequence
 from concurrent.futures import Future
 from contextlib import ExitStack, suppress
+from datetime import UTC, datetime
 from functools import partial
 from http import HTTPStatus
 from ipaddress import IPv4Address, ip_address, ip_network
@@ -728,6 +729,7 @@ class WorkdashSession:
             self._unconfirmed_launches[launch_key] = (
                 time.monotonic() + _UNCONFIRMED_LAUNCH_TTL_SECONDS
             )
+            launched_at = datetime.now(UTC).replace(microsecond=0)
             launch = agent_execution.executor.launch(
                 repo_path,
                 prompt,
@@ -784,6 +786,7 @@ class WorkdashSession:
                     pane_title=str(running[0].get("title") or ""),
                     item=item,
                     repo_path=repo_path,
+                    launched_at=launched_at,
                 )
                 launched["autoclose_enabled"] = True
             return launched
@@ -967,7 +970,7 @@ class WorkdashSession:
                 for old in self._autodispatch.values()
                 if self._scope_identity(old.scope) == identity
             ]:
-                old.stop()
+                old.stop(close_blocked=True)
                 del self._autodispatch[old.id]
             self._autodispatch[entry.id] = entry
             entry.thread.start()
@@ -1245,7 +1248,6 @@ class WorkdashSession:
             )
         with self._lock:
             launcher.zellij.send_zellij_pane_input(self.zellij_session, pane_id, data, raw=raw)
-            self.autoclose.human_input(self.zellij_session, pane_id)
         return {"pane_id": pane_id, "raw": raw, "accepted": True}
 
     def pane_close(self, *, pane_id: str) -> dict[str, object]:

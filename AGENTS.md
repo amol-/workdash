@@ -4,6 +4,7 @@ Before starting any work, read these files in order:
 
 1. **README.md** – Project overview, installation, and usage.
 2. **CONTRIBUTING.md** – Core rules, especially BDD-first workflow and the distinction between user-facing BDD scenarios and implementation-detail tests.
+3. **DESIGN.md** – Design direction; all solutions must adhere to it.
 
 ## Verifying visual/TUI behavior
 

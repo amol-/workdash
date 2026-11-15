@@ -12,15 +12,15 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 
 from . import launcher
 from .config import WorkdashConfig
 from .git import GitHelper
 from .github_client import GitHubClient
 from .launcher import (
-    ANSI_ESCAPE_RE,
     _format_zellij_pane_id,
     is_live_zellij_pane,
 )
@@ -83,7 +83,14 @@ class AutocloseSupervisor:
         self._stopped.set()
 
     def supervise(
-        self, *, session: str, pane_id: str, pane_title: str, item: WorkItem, repo_path: str
+        self,
+        *,
+        session: str,
+        pane_id: str,
+        pane_title: str,
+        item: WorkItem,
+        repo_path: str,
+        launched_at: datetime,
     ) -> None:
         """Watch the pane a request just launched, keyed by its identity.
 
@@ -98,7 +105,7 @@ class AutocloseSupervisor:
             pane_title=pane_title,
             item=item,
             repo_path=repo_path,
-            launched_at=datetime.now(UTC),
+            launched_at=launched_at,
             last_activity=time.monotonic(),
             review_only=item.kind in REVIEW_KINDS,
         )
@@ -108,19 +115,11 @@ class AutocloseSupervisor:
             entry = self._panes.get((session, pane_id))
             return bool(entry and entry.blocked)
 
-    def human_input(self, session: str, pane_id: str) -> None:
-        with self._lock:
-            entry = self._panes.get((session, pane_id))
-            if entry:
-                entry.blocked = False
-                entry.attempts = 0
-                entry.last_activity = time.monotonic()
-
     def stop_blocked(self, session: str, pane_id: str) -> None:
         with self._lock:
             entry = self._panes.get((session, pane_id))
             if entry and entry.blocked:
-                self._close(entry, after_idle=False)
+                self._close(entry, after_idle=True)
 
     def poll_once(self) -> None:
         """Check every supervised pane once: close merged work, act on idle panes."""
@@ -129,6 +128,10 @@ class AutocloseSupervisor:
             if self._stopped.is_set():
                 return
             if time.monotonic() < entry.retry_at:
+                if not entry.awaiting_enter:
+                    # The next full check reports failures at the backoff interval.
+                    with suppress(Exception):
+                        self._check(entry, local_only=True)
                 continue
             try:
                 self._check(entry)
@@ -160,7 +163,7 @@ class AutocloseSupervisor:
         while not self._stopped.wait(POLL_SECONDS):
             self.poll_once()
 
-    def _check(self, entry: _SupervisedPane) -> None:
+    def _check(self, entry: _SupervisedPane, *, local_only: bool = False) -> None:
         if entry.awaiting_enter:
             # The instruction text is already in the pane, so only its Enter is retried.
             self._submit(entry)
@@ -168,18 +171,21 @@ class AutocloseSupervisor:
         with self._lock:
             if self._drop_unidentified(entry):
                 return
-            screen = _screen_signature(
-                launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
-            )
-        now = time.monotonic()
-        if not entry.screen_known:
-            entry.screen, entry.screen_known = screen, True
-        elif screen != entry.screen:
-            entry.screen, entry.last_activity = screen, now
-        if entry.blocked:
+            screen = launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
+            now = time.monotonic()
+            if not entry.screen_known:
+                entry.screen, entry.screen_known = screen, True
+            elif screen != entry.screen:
+                entry.screen, entry.last_activity = screen, now
+                if entry.blocked:
+                    entry.blocked, entry.attempts = False, 0
+        if local_only:
             return
-        state = self._merge_state(entry)
+        state, merged_at = self._merge_state(entry)
         if state == "MERGED":
+            if entry.item.item_type == WorkItemType.PR and merged_at < entry.launched_at:
+                self._panes.pop((entry.session, entry.pane_id), None)
+                return
             # A merge ends the work whether or not the agent is still writing.
             self._close(entry, after_idle=False)
         elif state == "CLOSED":
@@ -210,9 +216,7 @@ class AutocloseSupervisor:
                 if entry.attempts >= 3:
                     if self._drop_unidentified(entry):
                         return
-                    screen = _screen_signature(
-                        launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
-                    )
+                    screen = launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
                     if screen != entry.screen:
                         entry.screen, entry.last_activity = screen, time.monotonic()
                         return
@@ -242,9 +246,10 @@ class AutocloseSupervisor:
             entry.item,
             github_username=self._config.github_username,
             todo_repository=self._config.todo_repository,
+            merged_since=entry.launched_at if entry.item.item_type != WorkItemType.PR else None,
         )
 
-    def _merge_state(self, entry: _SupervisedPane) -> str | None:
+    def _merge_state(self, entry: _SupervisedPane) -> tuple[str | None, datetime | None]:
         """The state of the pull request carrying the pane's work; cheap enough for every check."""
 
         if entry.item.item_type == WorkItemType.PR:
@@ -255,17 +260,12 @@ class AutocloseSupervisor:
             # Finding the pull request an issue now has costs a whole resolution, so look rarely.
             entry.discover_at = time.monotonic() + RESOLVE_SECONDS
             state = self._work_state(entry)
-            # A pull request that merged before this pane existed is not the work it was
-            # launched for, so the issue counts as having none yet. Its merge time, not its
-            # last change, decides that: a comment after the launch changes nothing.
-            if state is None or (
-                state.merged_at is not None and state.merged_at < entry.launched_at
-            ):
-                return None
+            if state is None:
+                return None, None
             pull_request = (state.item.repo, state.item.number)
             entry.pull_request = pull_request
         else:
-            return None
+            return None, None
         return self._github_client.pull_request_states([pull_request])[pull_request]
 
     def _send(
@@ -276,9 +276,7 @@ class AutocloseSupervisor:
         with self._lock:
             if self._drop_unidentified(entry):
                 return
-            screen = _screen_signature(
-                launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
-            )
+            screen = launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
             if screen != entry.screen:
                 # The agent is working again, so let it finish rather than interrupt it.
                 entry.screen, entry.last_activity = screen, time.monotonic()
@@ -292,9 +290,7 @@ class AutocloseSupervisor:
             entry.notified, entry.awaiting_enter = fingerprint, True
             if no_pull_request:
                 entry.attempts += 1
-            entry.screen = _screen_signature(
-                launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
-            )
+            entry.screen = launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
             entry.last_activity = time.monotonic()
             launcher.zellij.press_zellij_pane_enter(entry.session, entry.pane_id)
             entry.awaiting_enter = False
@@ -310,9 +306,7 @@ class AutocloseSupervisor:
         with self._lock:
             if self._drop_unidentified(entry):
                 return
-            screen = _screen_signature(
-                launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
-            )
+            screen = launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
             if screen != entry.screen:
                 entry.screen, entry.last_activity = screen, time.monotonic()
                 entry.awaiting_enter = False
@@ -330,11 +324,11 @@ class AutocloseSupervisor:
                 return
             if after_idle:
                 # The decision needed an idle pane; only a screen that changed since postpones it.
-                screen = _screen_signature(
-                    launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
-                )
+                screen = launcher.zellij.dump_zellij_pane(entry.session, entry.pane_id)
                 if screen != entry.screen:
                     entry.screen, entry.last_activity = screen, time.monotonic()
+                    if entry.blocked:
+                        entry.blocked, entry.attempts = False, 0
                     logger.info("Postponed closing the autoclosed pane %s", entry.pane_id)
                     return
             launcher.zellij.close_zellij_pane(entry.session, entry.pane_id)
@@ -417,10 +411,3 @@ def _state_fingerprint(action: str, state: PullRequestWorkState | None) -> str:
         *(feedback.url for feedback in state.feedback),
     ]
     return "|".join(parts)
-
-
-def _screen_signature(screen: str) -> str:
-    """Return pane text without terminal control sequences and trailing blanks."""
-
-    text = ANSI_ESCAPE_RE.sub("", screen)
-    return "\n".join(line.rstrip() for line in text.splitlines()).strip("\n")
