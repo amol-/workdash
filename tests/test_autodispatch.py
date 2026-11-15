@@ -3025,3 +3025,68 @@ def test_automerge_waits_for_readiness(monkeypatch, pending, outcome):
         assert owner.review.call_count == (2 if outcome == "head" else 1)
     else:
         github.merge_pull_request.assert_not_called()
+
+
+@pytest.mark.parametrize("disable_before_lookup", [False, True])
+def test_automerge_does_not_resume_after_disabled_observation(monkeypatch, disable_before_lookup):
+    from workdash.autodispatch import _AutodispatchSession
+
+    owner = MagicMock()
+    owner.config.configured_code_agents.return_value = ["pi"]
+    owner.config.configured_analyze_agents.return_value = ["pi"]
+    owner.dispatch_once.side_effect = [
+        {
+            "status": "launched",
+            "item_id": "owner/repo#ISSUE-1",
+            "pane_id": "terminal_1",
+            "session": "s",
+        },
+        {"status": "no_ready_task"},
+    ]
+    owner.review.return_value = {
+        "status": "reviewed",
+        "item_id": "owner/repo#PR-2",
+        "head_sha": "head",
+    }
+    entry = _AutodispatchSession(owner, "owner/repo", None, None, automerge=True)
+    github = owner.backend.github_client
+    github.work_pull_request.return_value = SimpleNamespace(
+        state="OPEN",
+        head_sha="head",
+        reasons=(),
+        changes_requested=False,
+        review_threads_complete=True,
+        head_writable=True,
+        ci_status="pending",
+        mergeability="unknown",
+    )
+    if disable_before_lookup:
+
+        def require_item(_):
+            entry.automerge = False
+            return MagicMock()
+
+        owner._require_item.side_effect = require_item
+    else:
+
+        def wait(timeout):
+            if entry.stage == "waiting":
+                entry.automerge = False
+            return False
+
+        monkeypatch.setattr(entry.stop_event, "wait", wait)
+
+    lock = MagicMock()
+
+    def unlock(*args):
+        if not entry.automerge:
+            entry.automerge = True
+
+    lock.__exit__.side_effect = unlock
+    entry.lock = lock
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.001)
+    monkeypatch.setattr("workdash.autodispatch.launcher.zellij.load_zellij_panes", lambda _: [])
+    entry.run()
+    assert entry.status == "finished", entry.error
+    github.merge_pull_request.assert_not_called()
+    assert github.work_pull_request.call_count == (0 if disable_before_lookup else 1)

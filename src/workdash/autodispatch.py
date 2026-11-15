@@ -223,7 +223,7 @@ class _AutodispatchSession:
                             if self.stop_event.wait(_AUTODISPATCH_POLL_SECONDS):
                                 return
                         with self.lock:
-                            merge = self.automerge and not self.stop_event.is_set()
+                            merge = merge and self.automerge and not self.stop_event.is_set()
                             self.stage = "reviewing"
                         if not merge:
                             break
