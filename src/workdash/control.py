@@ -131,6 +131,7 @@ class WorkdashSession:
         self.zellij_session = zellij_session
         self.items_changed_callback = items_changed_callback
         self._lock = threading.RLock()
+        self._todo_lock = threading.Lock()
         # Normalized worktree path -> monotonic deadline of an unconfirmed agent launch.
         self._unconfirmed_launches: dict[str, float] = {}
         self._git = GitHelper()
@@ -245,12 +246,22 @@ class WorkdashSession:
                 f"The todo target {target!r} must be a GitHub owner/repo or a supported git URL.",
                 status=HTTPStatus.BAD_REQUEST,
             )
-        item = self.backend.github_client.create_todo(
-            todo_repository=self.config.todo_repository, text=todo_text, target=target, body=body
-        )
-        with self._lock:
-            self.work_items.append(item)
-            self.suggestion_markers = compute_suggestion_markers(self.work_items)
+        with self._todo_lock:
+            item = self.backend.github_client.create_todo(
+                todo_repository=self.config.todo_repository,
+                text=todo_text,
+                target=target,
+                body=body,
+            )
+            with self._lock:
+                if not any(
+                    current.item_type == item.item_type
+                    and current.repo.lower() == item.repo.lower()
+                    and current.number == item.number
+                    for current in self.work_items
+                ):
+                    self.work_items.append(item)
+                    self.suggestion_markers = compute_suggestion_markers(self.work_items)
         self._notify_items_changed()
         return {
             "item_id": format_work_item_id(item),
@@ -258,6 +269,63 @@ class WorkdashSession:
             "target": item.todo_target,
             "number": item.number,
             "url": item.url,
+        }
+
+    def close_todo(self, *, item: str) -> dict[str, object]:
+        """Close an issue in the configured todo repository."""
+        repository = self.config.todo_repository
+        reference = item.strip()
+        targeted = False
+        if re.fullmatch(r"#?[0-9]+", reference):
+            number = int(reference.lstrip("#"))
+        else:
+            repo, number, item_type, targeted = self._item_target(reference)
+            if item_type != WorkItemType.ISSUE or repo.lower() != repository.lower():
+                raise WorkdashControlError(
+                    "invalid_target",
+                    "Todo must belong to the configured todo repository.",
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+        if number < 1:
+            raise WorkdashControlError(
+                "invalid_target", "Issue number must be positive.", status=HTTPStatus.BAD_REQUEST
+            )
+        with self._todo_lock:
+            if targeted:
+                resolved = self._require_item(reference)
+            else:
+                with self._lock:
+                    resolved = next(
+                        (
+                            current
+                            for current in self.work_items
+                            if current.item_type == WorkItemType.ISSUE
+                            and current.repo.lower() == repository.lower()
+                            and current.number == number
+                        ),
+                        None,
+                    )
+            self.backend.github_client.close_todo(todo_repository=repository, number=number)
+            with self._lock:
+                self.work_items = [
+                    current
+                    for current in self.work_items
+                    if not (
+                        current.item_type == WorkItemType.ISSUE
+                        and current.repo.lower() == repository.lower()
+                        and current.number == number
+                    )
+                ]
+                self.suggestion_markers = compute_suggestion_markers(self.work_items)
+        self._notify_items_changed()
+        return {
+            "item_id": format_work_item_id(resolved)
+            if resolved
+            else f"{repository}#ISSUE-{number}",
+            "todo_repository": repository,
+            "number": number,
+            "url": f"https://github.com/{repository}/issues/{number}",
+            "status": "closed",
         }
 
     def analyze(
@@ -1253,9 +1321,11 @@ class WorkdashSession:
         """
 
         repo, number, item_type, targeted_todo = self._item_target(target)
-        item = next(
-            (item for item in self.work_items if (item.repo, item.number) == (repo, number)), None
-        )
+        with self._lock:
+            item = next(
+                (item for item in self.work_items if (item.repo, item.number) == (repo, number)),
+                None,
+            )
         if item is None:
             try:
                 item = self.backend.github_client.fetch_item(
@@ -1838,6 +1908,14 @@ def _make_turbogears_app(session: WorkdashSession):
                     target=_optional_text(payload, "target"),
                     body=_optional_text(payload, "body"),
                 ),
+            )
+
+        @expose("json")
+        def todo_close(self):
+            return _handle_json_request(
+                request,
+                response,
+                lambda payload: self._session.close_todo(item=_required_text(payload, "item")),
             )
 
         @expose("json")

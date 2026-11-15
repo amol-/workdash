@@ -879,7 +879,9 @@ class WorkdashApp(App[None]):
                 message="Refreshing work items...",
                 callback=self._refresh_callback,
             )
-            if (
+            if self._session is not None:
+                self.refresh_from_session()
+            elif (
                 isinstance(refreshed, tuple)
                 and len(refreshed) == 2
                 and isinstance(refreshed[1], dict)
@@ -888,9 +890,10 @@ class WorkdashApp(App[None]):
                 self._suggestion_markers = dict(refreshed[1])
             else:
                 self._work_items = list(refreshed)
-            self._work_items.sort(key=lambda item: item.updated_at, reverse=True)
-            self._search_filter = ""
-            self._render_table()
+            if self._session is None:
+                self._work_items.sort(key=lambda item: item.updated_at, reverse=True)
+                self._search_filter = ""
+                self._render_table()
         except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
             self._update_status(f"Refresh failed: {error}")
             self.notify(f"Refresh failed: {error}", severity="error", timeout=10)

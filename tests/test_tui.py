@@ -3322,3 +3322,48 @@ def test_include_pull_request_warns_when_linked_issues_unavailable(tmp_path) -> 
             )
 
     asyncio.run(run())
+
+
+def test_refresh_does_not_restore_todo_closed_after_capture() -> None:
+    now = datetime.now(UTC)
+    item = WorkItem(
+        kind=WorkItemKind.TRACKED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="owner/todos",
+        number=42,
+        title="Close me",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/owner/todos/issues/42",
+    )
+    backend = MagicMock()
+    backend.load_items.return_value = ([item], {})
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="owner/todos"),
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = WorkdashApp(
+        session=session,
+        refresh_callback=lambda: (
+            session.list_items(refresh=True) and (session.work_items, session.suggestion_markers)
+        ),
+    )
+    session.items_changed_callback = app.refresh_from_session
+
+    async def run_test() -> None:
+        async with app.run_test():
+
+            async def interrupted_refresh(*, message, callback):
+                captured = callback()
+                session.close_todo(item="42")
+                return captured
+
+            app._run_with_busy_screen = interrupted_refresh
+            await app.action_refresh_items()
+            assert app.query_one("#work-items", DataTable).row_count == 0
+            assert session.list_items()["items"] == []
+
+    asyncio.run(run_test())

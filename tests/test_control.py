@@ -4,7 +4,7 @@ import shlex
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -4647,3 +4647,306 @@ def test_code_creates_worktree_for_existing_pr_branch(monkeypatch, tmp_path, ups
     assert git(worktree, "rev-parse", "--abbrev-ref", "@{upstream}") == "origin/selected-pr-branch"
     head.assert_called()
     verify.assert_called_with(worktree, "selected-pr-branch", "owner/repo")
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "10",
+        "#10",
+        "testuser/todos#10",
+        "testuser/todos#ISSUE-10",
+        "https://github.com/testuser/todos/issues/10",
+        "owner/repo#ISSUE-WT10",
+    ],
+)
+def test_close_todo_api_closes_correct_issue_and_notifies(reference, monkeypatch):
+    item = _work_item(number=10, title="todo")
+    item.repo = "testuser/todos"
+    item.todo_target = "owner/repo"
+    other = replace(
+        _work_item(number=10, title="unrelated"),
+        created_at=datetime(2026, 2, 11, tzinfo=UTC),
+    )
+    commands = []
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: commands.append(command) or SimpleNamespace(stdout=""),
+    )
+    notifications = []
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="testuser/todos"),
+        backend=MagicMock(github_client=GitHubClient()),
+        work_items=[item, other],
+        suggestion_markers={(WorkItemType.ISSUE, "testuser/todos", 10): "*"},
+        zellij_session=None,
+        items_changed_callback=lambda: notifications.append(list(session.work_items)),
+    )
+    assert [entry["suggested"] for entry in session.list_items()["items"]] == [True, False]
+    request = Request.blank(
+        "/api/v0/todo_close",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps({"item": reference}).encode(),
+    )
+    response = request.get_response(control_module._make_turbogears_app(session))
+    assert response.status_int == 200
+    result = json.loads(response.text)["result"]
+    assert result == {
+        "item_id": "owner/repo#ISSUE-WT10",
+        "todo_repository": "testuser/todos",
+        "number": 10,
+        "url": "https://github.com/testuser/todos/issues/10",
+        "status": "closed",
+    }
+    assert commands == [["gh", "issue", "close", "10", "--repo", "testuser/todos"]]
+    assert session.work_items == [other]
+    assert session.list_items()["items"][0]["suggested"] is True
+    assert notifications == [[other]]
+
+
+@pytest.mark.parametrize("targeted", [True, False])
+def test_close_todo_absent_from_dashboard(targeted):
+    item = _work_item(number=10, title="todo")
+    item.repo = "testuser/todos"
+    item.todo_target = "owner/repo"
+    github = MagicMock()
+    github.fetch_item.return_value = item
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="testuser/todos"),
+        backend=MagicMock(github_client=github),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    reference = "owner/repo#ISSUE-WT10" if targeted else "10"
+    result = session.close_todo(item=reference)
+    assert result["item_id"] == ("owner/repo#ISSUE-WT10" if targeted else "testuser/todos#ISSUE-10")
+    github.close_todo.assert_called_once_with(todo_repository="testuser/todos", number=10)
+    assert session.work_items == []
+
+
+def test_close_todo_api_rejects_wrong_repository_and_preserves_state_on_failure(monkeypatch):
+    item = _work_item(number=10, title="todo")
+    item.repo = "testuser/todos"
+    notifications = MagicMock()
+    run = MagicMock(side_effect=subprocess.CalledProcessError(1, "gh", stderr="permission denied"))
+    monkeypatch.setattr(subprocess, "run", run)
+    markers = {(WorkItemType.ISSUE, "testuser/todos", 10): "*"}
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="testuser/todos"),
+        backend=MagicMock(github_client=GitHubClient()),
+        work_items=[item],
+        suggestion_markers=markers.copy(),
+        zellij_session=None,
+        items_changed_callback=notifications,
+    )
+    app = control_module._make_turbogears_app(session)
+    for reference, status in [("other/repo#ISSUE-10", 400), ("10", 500), (12, 400)]:
+        response = Request.blank(
+            "/api/v0/todo_close",
+            method="POST",
+            content_type="application/json",
+            body=json.dumps({"item": reference}).encode(),
+        ).get_response(app)
+        assert response.status_int == status
+        if reference == "10":
+            assert (
+                "Failed to close todo issue 10 in testuser/todos: permission denied"
+                in (json.loads(response.text)["error"]["message"])
+            )
+    run.assert_called_once_with(
+        ["gh", "issue", "close", "10", "--repo", "testuser/todos"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert session.work_items == [item]
+    assert session.suggestion_markers == markers
+    notifications.assert_not_called()
+
+
+def test_close_todo_rejects_mismatched_target_without_closing():
+    item = _work_item(number=10, title="todo")
+    item.repo = "testuser/todos"
+    item.todo_target = "owner/repo"
+    github = MagicMock()
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="testuser/todos"),
+        backend=MagicMock(github_client=github),
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    response = Request.blank(
+        "/api/v0/todo_close",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps({"item": "wrong/repo#ISSUE-WT10"}).encode(),
+    ).get_response(control_module._make_turbogears_app(session))
+    assert response.status_int == 404
+    github.close_todo.assert_not_called()
+    assert session.work_items == [item]
+
+
+@pytest.mark.parametrize("operation", ["create", "close", "resolve"])
+def test_todo_github_calls_do_not_block_session_reads(operation):
+    item = _work_item(number=10, title="todo")
+    item.repo = "testuser/todos"
+    item.todo_target = "owner/repo"
+    entered = Event()
+    release = Event()
+
+    def blocked(**kwargs):
+        entered.set()
+        assert release.wait(5)
+        return item
+
+    github = MagicMock()
+    if operation == "create":
+        github.create_todo.side_effect = blocked
+    elif operation == "close":
+        github.close_todo.side_effect = blocked
+    else:
+        github.fetch_item.side_effect = lambda *args, **kwargs: blocked(**kwargs)
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="testuser/todos"),
+        backend=MagicMock(github_client=github),
+        work_items=[] if operation == "resolve" else [item],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        if operation == "create":
+            mutation = executor.submit(session.todo, text="todo")
+        else:
+            reference = "owner/repo#ISSUE-WT10" if operation == "resolve" else "10"
+            mutation = executor.submit(session.close_todo, item=reference)
+        try:
+            assert entered.wait(5)
+            listing = executor.submit(session.list_items)
+            assert len(listing.result(timeout=1)["items"]) == (operation != "resolve")
+        finally:
+            release.set()
+        mutation.result(timeout=5)
+
+
+def test_refresh_during_todo_creation_does_not_duplicate_item():
+    item = replace(
+        _work_item(number=10, title="todo"), repo="testuser/todos", todo_target="owner/repo"
+    )
+
+    def create(**kwargs):
+        assert len(session.list_items(refresh=True)["items"]) == 1
+        return item
+
+    backend = MagicMock()
+    backend.github_client.create_todo.side_effect = create
+    backend.load_items.return_value = ([replace(item, title="refreshed todo")], {})
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="testuser/todos"),
+        backend=backend,
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    result = session.todo(text="todo", target="owner/repo")
+
+    items = session.list_items()["items"]
+    assert result["item_id"] == "owner/repo#ISSUE-WT10"
+    assert [(row["id"], row["title"]) for row in items] == [
+        ("owner/repo#ISSUE-WT10", "refreshed todo")
+    ]
+
+
+def test_close_waits_for_inflight_todo_creation():
+    item = _work_item(number=10, title="todo")
+    item.repo = "testuser/todos"
+    created = Event()
+    release = Event()
+    closed = Event()
+
+    def create(**kwargs):
+        created.set()
+        assert release.wait(5)
+        return item
+
+    github = MagicMock()
+    github.create_todo.side_effect = create
+    github.close_todo.side_effect = lambda **kwargs: closed.set()
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="testuser/todos"),
+        backend=MagicMock(github_client=github),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        creation = executor.submit(session.todo, text="todo")
+        assert created.wait(5)
+        lock = session._todo_lock
+        attempting_close = Event()
+
+        @contextmanager
+        def observed_lock():
+            attempting_close.set()
+            with lock:
+                yield
+
+        session._todo_lock = observed_lock()
+        closing = executor.submit(session.close_todo, item="10")
+        try:
+            assert attempting_close.wait(5)
+            assert not closed.wait(0.3)
+        finally:
+            release.set()
+        creation.result(timeout=5)
+        closing.result(timeout=5)
+    assert closed.is_set()
+    assert session.work_items == []
+
+
+def test_close_todo_api_updates_tui_table():
+    import asyncio
+
+    from textual.widgets import DataTable
+
+    from workdash.tui import WorkdashApp
+
+    todo = _work_item(number=10, title="Close this todo")
+    todo.repo = "testuser/todos"
+    other = _work_item(number=11, title="Keep this item")
+    github = MagicMock()
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="testuser/todos"),
+        backend=MagicMock(github_client=github),
+        work_items=[todo, other],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = WorkdashApp(session=session)
+    session.items_changed_callback = lambda: app.call_from_thread(app.refresh_from_session)
+    api = control_module._make_turbogears_app(session)
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            table = app.query_one("#work-items", DataTable)
+            assert {str(table.get_row_at(i)[2]).lstrip("* ") for i in range(table.row_count)} == {
+                "Close this todo",
+                "Keep this item",
+            }
+            request = Request.blank(
+                "/api/v0/todo_close",
+                method="POST",
+                content_type="application/json",
+                body=json.dumps({"item": "10"}).encode(),
+            )
+            response = await asyncio.to_thread(request.get_response, api)
+            assert response.status_int == 200
+            await pilot.pause()
+            assert table.row_count == 1
+            assert str(table.get_row_at(0)[2]).lstrip("* ") == "Keep this item"
+            github.close_todo.assert_called_once_with(todo_repository="testuser/todos", number=10)
+
+    asyncio.run(exercise())
