@@ -3521,6 +3521,9 @@ def test_progress_selects_and_stops_a_blocked_session():
             footer = str(app.query_one("#command-footer").render())
             assert "(s)top" in footer
             assert "(d)ispatch" not in footer
+            app._selected_item = MagicMock()
+            await pilot.press("d")
+            app._selected_item.assert_not_called()
             await pilot.press("s")
             session.stop_autodispatch.assert_called_once_with("blocked")
             assert "blocked (s)top" in str(app.query_one("#autodispatch-progress").render())

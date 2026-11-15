@@ -1039,6 +1039,8 @@ class WorkdashApp(App[None]):
             self._update_status(f"Analyzed {item_label} with {tool_label}.")
 
     async def action_dispatch_item(self) -> None:
+        if self.query_one("#autodispatch-scroll", VerticalScroll).has_focus:
+            return
         item = self._selected_item()
         if item is None or self._session is None:
             self._update_status("Dispatch skipped.")
