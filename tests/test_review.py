@@ -69,6 +69,266 @@ def setup_review(monkeypatch, tmp_path):
     return session, tmp_path
 
 
+@pytest.mark.parametrize("stale", [False, True])
+def test_fresh_review_requires_checkout_at_github_head(setup_review, monkeypatch, stale):
+    from types import SimpleNamespace
+
+    session, path = setup_review
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "first",
+        ],
+        check=True,
+    )
+    first = subprocess.check_output(
+        ["git", "-C", str(path), "rev-parse", "HEAD"], text=True
+    ).strip()
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "second",
+        ],
+        check=True,
+    )
+    head = subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+    if stale:
+        subprocess.run(["git", "-C", str(path), "checkout", "-q", "--detach", first], check=True)
+    session.backend.github_client.work_pull_request.return_value = SimpleNamespace(
+        state="OPEN", head_sha=head
+    )
+    reviewer = MagicMock(return_value={"status": "reviewed"})
+    monkeypatch.setattr(control, "review_pull_request", reviewer)
+
+    session.backend.github_client.fetch_worktree_head.return_value = ("main", head)
+    monkeypatch.setattr(session.git, "fetch_origin_branch", lambda *args: None)
+    result = session.review(target="owner/repo#PR-2", require_fresh=True)
+    assert result["head_sha"] == head
+    reviewer.assert_called_once()
+    if stale:
+        assert reviewer.call_args.kwargs["cwd"] != str(path)
+        assert (
+            subprocess.check_output(
+                ["git", "-C", str(path), "rev-parse", "HEAD"], text=True
+            ).strip()
+            == first
+        )
+
+
+@pytest.mark.parametrize("change", ["staged", "unstaged", "untracked", "artifact"])
+def test_fresh_review_rejects_unpublished_work(setup_review, monkeypatch, change):
+    from types import SimpleNamespace
+
+    session, path = setup_review
+    tracked = path / "tracked.txt"
+    tracked.write_text("original")
+    subprocess.run(["git", "-C", str(path), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "first",
+        ],
+        check=True,
+    )
+    head = subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+    if change in ("staged", "unstaged"):
+        tracked.write_text("local work")
+        if change == "staged":
+            subprocess.run(["git", "-C", str(path), "add", "tracked.txt"], check=True)
+    elif change == "untracked":
+        (path / "new.txt").write_text("local work")
+    else:
+        (path / ".workdash").mkdir()
+        (path / ".workdash" / "artifact.txt").write_text("review artifact")
+    session.backend.github_client.work_pull_request.return_value = SimpleNamespace(
+        state="OPEN", head_sha=head
+    )
+    reviewer = MagicMock(return_value={"status": "reviewed"})
+    monkeypatch.setattr(control, "review_pull_request", reviewer)
+
+    if change == "artifact":
+        assert session.review(target="owner/repo#PR-2", require_fresh=True)["head_sha"] == head
+        reviewer.assert_called_once()
+    else:
+        with pytest.raises(RuntimeError, match="worktree"):
+            session.review(target="owner/repo#PR-2", require_fresh=True)
+        reviewer.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["commit", "untracked", "review_error", "clean", "ignored", "artifact", "pytest_cache"],
+)
+def test_detached_retry_preserves_reviewer_work(setup_review, monkeypatch, caplog, change):
+    from types import SimpleNamespace
+
+    session, path = setup_review
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "first",
+        ],
+        check=True,
+    )
+    head = subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+    (path / ".git" / "info" / "exclude").write_text(".pytest_cache/\n")
+    session.backend.github_client.work_pull_request.return_value = SimpleNamespace(
+        state="OPEN", head_sha=head
+    )
+    session.backend.github_client.fetch_worktree_head.return_value = ("main", head)
+    monkeypatch.setattr(session.git, "fetch_origin_branch", lambda *args: None)
+    checkout = None
+
+    def review(*args, cwd, **kwargs):
+        nonlocal checkout
+        checkout = Path(cwd)
+        if change == "pytest_cache":
+            cache = checkout / ".pytest_cache"
+            (cache / "v" / "cache").mkdir(parents=True)
+            (cache / "CACHEDIR.TAG").write_text("Signature: 8a477f597d28d172789f06886806bc55\n")
+            (cache / ".gitignore").write_text("# Created by pytest automatically.\n*\n")
+            (cache / "v" / "cache" / "nodeids").write_text('["test_example"]')
+        elif change in ("ignored", "artifact"):
+            directory = checkout / (".pytest_cache" if change == "ignored" else ".workdash")
+            directory.mkdir()
+            (directory / "data").write_text("preserved")
+            if change == "ignored":
+                (directory / ".gitignore").write_text("# Created by pytest automatically.\n*\n")
+                (directory / "CACHEDIR.TAG").write_text(
+                    "Signature: 8a477f597d28d172789f06886806bc55\n"
+                )
+        elif change != "clean":
+            (checkout / "reviewer.txt").write_text("reviewer work")
+        if change == "review_error":
+            raise RuntimeError("review failed")
+        if change == "commit":
+            subprocess.run(["git", "-C", cwd, "add", "reviewer.txt"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    cwd,
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-qm",
+                    "reviewer work",
+                ],
+                check=True,
+            )
+        return {"status": "reviewed"}
+
+    monkeypatch.setattr(control, "review_pull_request", review)
+    caplog.set_level("INFO", logger=control.__name__)
+    if change in ("clean", "ignored", "artifact", "pytest_cache"):
+        assert (
+            session.review(target="owner/repo#PR-2", require_fresh=True, detached=True)["head_sha"]
+            == head
+        )
+        assert checkout is not None
+        if change == "clean":
+            assert not checkout.exists()
+        else:
+            directory = checkout / (
+                ".pytest_cache" if change in ("ignored", "pytest_cache") else ".workdash"
+            )
+            if change == "pytest_cache":
+                assert (directory / "v" / "cache" / "nodeids").read_text() == '["test_example"]'
+            else:
+                assert (directory / "data").read_text() == "preserved"
+            assert str(checkout) in caplog.text
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(checkout)], cwd=path, check=True
+            )
+            checkout.parent.rmdir()
+        return
+    with pytest.raises(RuntimeError) as error:
+        session.review(target="owner/repo#PR-2", require_fresh=True, detached=True)
+    assert checkout is not None
+    assert str(checkout) in str(error.value)
+    assert (checkout / "reviewer.txt").read_text() == "reviewer work"
+    subprocess.run(["git", "worktree", "remove", "--force", str(checkout)], cwd=path, check=True)
+    checkout.parent.rmdir()
+
+
+@pytest.mark.parametrize("change", ["commit", "untracked", "artifact"])
+def test_fresh_review_rechecks_worktree_after_review(setup_review, monkeypatch, change):
+    from types import SimpleNamespace
+
+    session, path = setup_review
+    commit = [
+        "git",
+        "-C",
+        str(path),
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "--allow-empty",
+        "-qm",
+    ]
+    subprocess.run([*commit, "first"], check=True)
+    head = subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+    session.backend.github_client.work_pull_request.return_value = SimpleNamespace(
+        state="OPEN", head_sha=head
+    )
+
+    def review(*args, **kwargs):
+        if change == "commit":
+            subprocess.run([*commit, "second"], check=True)
+        elif change == "untracked":
+            (path / "new.txt").write_text("local work")
+        else:
+            (path / ".workdash").mkdir()
+            (path / ".workdash" / "artifact.txt").write_text("review artifact")
+        return {"status": "reviewed"}
+
+    monkeypatch.setattr(control, "review_pull_request", review)
+    if change == "artifact":
+        assert session.review(target="owner/repo#PR-2", require_fresh=True)["head_sha"] == head
+    else:
+        with pytest.raises(RuntimeError, match="worktree"):
+            session.review(target="owner/repo#PR-2", require_fresh=True)
+
+
 def test_issue_resolves_pr_and_retries_with_existing_threads(setup_review, monkeypatch):
     session, tmp_path = setup_review
     prompts = []
@@ -704,6 +964,8 @@ def test_concurrent_reviews_reuse_same_pr_but_allow_other_pr(setup_review, monke
             response = request.get_response(control._make_turbogears_app(session))
             assert response.status_int == 200
             assert response.json["result"]["status"] == "started"
+            with pytest.raises(RuntimeError, match="already running review"):
+                session.review(target="owner/repo#PR-2", require_fresh=True)
             assert (
                 pool.submit(session.review, target="owner/repo#PR-3").result(5)["status"]
                 == "reviewed"

@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -780,9 +781,12 @@ def automerge_session(autodispatch_state, monkeypatch, *, enabled=True, scope="o
     github = session.backend.github_client
     merged = set()
     monkeypatch.setattr(
-        github, "merge_pull_request", lambda repo, number: merged.add((repo, number))
+        github, "merge_pull_request", lambda repo, number, sha: merged.add((repo, number))
     )
     autodispatch_state["merged"] = merged
+    github.work_pull_request.return_value = SimpleNamespace(
+        state="OPEN", head_sha="head", reasons=(), mergeability="mergeable", ci_status="passing"
+    )
     dispatch = session.dispatch_once
     monkeypatch.setattr(
         session,
@@ -794,15 +798,21 @@ def automerge_session(autodispatch_state, monkeypatch, *, enabled=True, scope="o
     session._require_item = MagicMock(
         return_value=make_work_item(item_type=WorkItemType.PR, number=2)
     )
-    monkeypatch.setattr(
-        session,
-        "review",
-        lambda **kwargs: {
+
+    def review(**kwargs):
+        head = github.work_pull_request.return_value.head_sha
+        autodispatch_state.setdefault("reviewed_heads", []).append(head)
+        if autodispatch_state.get("change_during_review"):
+            github.work_pull_request.return_value.head_sha = "new-head"
+            autodispatch_state["change_during_review"] = False
+        return {
             "status": "reviewed",
             "item_id": "owner/repo#PR-2",
             "content": "Review completed.",
-        },
-    )
+            "head_sha": head,
+        }
+
+    monkeypatch.setattr(session, "review", review)
     session.start_autodispatch(scope=scope, automerge=enabled)
     wait_for(lambda: bool(autodispatch_state["panes"]))
 
@@ -886,3 +896,17 @@ def dashboard_automerge_visible(autodispatch_state):
     assert "(m)erge" in autodispatch_state["command_disabled"]
     assert "(m)erge off" not in autodispatch_state["command_disabled"]
     assert not autodispatch_state["session"].autodispatch_sessions()[0]["automerge"]
+
+
+@when("the pull request changes during review")
+def automerge_head_changes(autodispatch_state):
+    session = autodispatch_state["session"]
+    autodispatch_state["change_during_review"] = True
+    autodispatch_state["panes"].clear()
+    wait_for(lambda: session.autodispatch_sessions()[0]["status"] in ("finished", "failed"))
+
+
+@then("the new head is reviewed before the pull request is merged")
+def automerge_head_reviewed(autodispatch_state):
+    assert autodispatch_state["reviewed_heads"] == ["head", "new-head"]
+    assert autodispatch_state["merged"] == {("owner/repo", 2)}

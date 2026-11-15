@@ -13,7 +13,18 @@ Feature: Automatically dispatch ready work
   If an in-progress dispatch launches after stopping, the dashboard refreshes its issue.
   Autodispatch leaves pull requests open by default; opt-in automerge merges a
   pull request directly after a successful review, without scheduling a merge or
-  enabling GitHub auto-merge. If merging fails because the pull request
+  enabling GitHub auto-merge. It reviews the current pull request head and fails
+  safely if the review checkout has unpublished work or does not match it before or
+  after review; Workdash artifacts do not count as unpublished work. It merges only the unchanged reviewed
+  head when feedback is resolved, checks pass or are absent, and GitHub reports it mergeable.
+  Actionable feedback, conflicts or failing checks are dispatched for repair;
+  pending or unknown state fails safely. A review without a known starting head
+  is followed by a fresh review if automerge was enabled during it. If the head
+  changes during review or before the merge, including a force-push, the new head is
+  reviewed before merging, with a bounded number of attempts. Existing local commits
+  and files are preserved when reviewing the new head. Unpublished work produced during a
+  retry review is preserved, and the failure reports its checkout path for recovery.
+  If merging fails because the pull request
   has conflicts, the session continues and selects ready work again; other merge
   failures, including permission errors on conflicting pull requests, fail the session. If a merge finishes after stopping, the dashboard
   refreshes the issue again, including on failure.
@@ -186,6 +197,12 @@ Feature: Automatically dispatch ready work
     Given an autodispatch session with automerge enabled
     When its completed pull request has been reviewed successfully
     Then the pull request is merged
+
+  @id:F-AUTODISPATCH-S024
+  Scenario: Review changed work before merging
+    Given an autodispatch session with automerge enabled
+    When the pull request changes during review
+    Then the new head is reviewed before the pull request is merged
 
   @id:F-AUTODISPATCH-S021
   Scenario: Toggle automerge from the dashboard

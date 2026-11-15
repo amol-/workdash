@@ -300,6 +300,10 @@ _REPOSITORY_AUTHORIZATION_SUBSTRINGS = (
 )
 
 
+class MergeHeadChangedError(RuntimeError):
+    """A SHA-pinned merge was rejected because the head changed."""
+
+
 class MergeConflictError(RuntimeError):
     """A pull request merge was rejected because of conflicts."""
 
@@ -1193,7 +1197,7 @@ class GitHubClient:
             for (repo, number), node in zip(pull_requests, nodes, strict=True)
         ]
 
-    def merge_pull_request(self, repo: str, number: int) -> None:
+    def merge_pull_request(self, repo: str, number: int, head_sha: str) -> None:
         """Merge a pull request directly on GitHub."""
         settings = json.loads(
             _run_gh(
@@ -1226,11 +1230,15 @@ class GitHubClient:
                     f"repos/{repo}/pulls/{number}/merge",
                     "-f",
                     f"merge_method={method}",
+                    "-f",
+                    f"sha={head_sha}",
                 ],
                 operation=f"merge {repo}#{number}",
                 todo_repository="",
             )
         except RuntimeError as error:
+            if "HTTP 409" in str(error):
+                raise MergeHeadChangedError(str(error)) from error
             if "Pull Request is not mergeable (HTTP 405)" in str(error):
                 pull_request = json.loads(
                     _run_gh(

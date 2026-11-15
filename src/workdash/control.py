@@ -8,6 +8,8 @@ import logging
 import os
 import re
 import stat
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -414,6 +416,8 @@ class WorkdashSession:
         agent: str | None = None,
         background: bool = False,
         group: str | None = None,
+        require_fresh: bool = False,
+        detached: bool = False,
     ) -> dict[str, object]:
         """Review an open pull request using a configured one-shot agent."""
         _validate_group(group)
@@ -426,6 +430,8 @@ class WorkdashSession:
         key = (item.repo.lower(), item.number)
         with self._review_lock:
             active = self._active_reviews.get(key)
+            if active is not None and require_fresh:
+                raise RuntimeError("Cannot automerge using an already running review.")
             if active is None:
                 context = self.backend.github_client.fetch_launch_context(item)
                 if context.get("state", "").upper() != "OPEN":
@@ -479,18 +485,116 @@ class WorkdashSession:
             return started.copy() if background else future.result()
 
         def run_review():
+            review_cwd = cwd
             try:
-                result = review_pull_request(
-                    item,
-                    context=context,
-                    cwd=cwd,
-                    tokens=tokens,
-                    document=document,
-                    git=self.git,
-                    zellij_session=self.zellij_session,
-                    group=selected_group,
-                )
-                result["agent"] = selected
+                with ExitStack() as stack:
+                    if require_fresh:
+                        state = self.backend.github_client.work_pull_request(
+                            item,
+                            github_username=self.config.github_username,
+                            todo_repository=self.config.todo_repository,
+                        )
+                        if not state or state.state != "OPEN" or not state.head_sha:
+                            raise RuntimeError(
+                                "Cannot determine the pull request head before review."
+                            )
+                        use_detached = detached
+                        if not detached and self.git.has_unpublished_work(cwd, state.head_sha):
+                            local_head = subprocess.run(
+                                ["git", "rev-parse", "HEAD"],
+                                cwd=cwd,
+                                check=True,
+                                capture_output=True,
+                                text=True,
+                            ).stdout.strip()
+                            if self.git.has_unpublished_work(cwd, local_head):
+                                raise RuntimeError("Review worktree has unpublished work.")
+                            branch, _ = self.backend.github_client.fetch_worktree_head(item)
+                            self.git.fetch_origin_branch(Path(cwd), branch)
+                            ancestor = subprocess.run(
+                                ["git", "merge-base", "--is-ancestor", local_head, state.head_sha],
+                                cwd=cwd,
+                                capture_output=True,
+                            )
+                            if ancestor.returncode != 0:
+                                raise RuntimeError(
+                                    "Review worktree has unpublished work or does not match the pull request head."
+                                )
+                            use_detached = True
+                        if use_detached:
+                            if detached:
+                                branch, _ = self.backend.github_client.fetch_worktree_head(item)
+                                self.git.fetch_origin_branch(Path(cwd), branch)
+                            directory = tempfile.mkdtemp(prefix="workdash-review-")
+                            review_cwd = str(Path(directory) / "checkout")
+                            try:
+                                subprocess.run(
+                                    [
+                                        "git",
+                                        "worktree",
+                                        "add",
+                                        "--detach",
+                                        review_cwd,
+                                        state.head_sha,
+                                    ],
+                                    cwd=cwd,
+                                    check=True,
+                                    capture_output=True,
+                                    text=True,
+                                )
+                            except BaseException:
+                                os.rmdir(directory)
+                                raise
+
+                            def cleanup_review_checkout():
+                                try:
+                                    if self.git.has_unpublished_work(review_cwd, state.head_sha):
+                                        raise RuntimeError("Checkout contains unpublished work.")
+                                    status = subprocess.run(
+                                        ["git", "status", "--porcelain", "--ignored"],
+                                        cwd=review_cwd,
+                                        check=True,
+                                        capture_output=True,
+                                        text=True,
+                                    )
+                                    if status.stdout:
+                                        logger.info("Review checkout preserved at %s", review_cwd)
+                                        return
+                                    subprocess.run(
+                                        ["git", "worktree", "remove", review_cwd],
+                                        cwd=cwd,
+                                        check=True,
+                                        capture_output=True,
+                                        text=True,
+                                    )
+                                except Exception as error:
+                                    raise RuntimeError(
+                                        f"Review checkout preserved for recovery at {review_cwd}: {error}"
+                                    ) from error
+                                os.rmdir(directory)
+
+                            stack.callback(cleanup_review_checkout)
+                        if self.git.has_unpublished_work(review_cwd, state.head_sha):
+                            raise RuntimeError(
+                                "Review worktree has unpublished work or does not match the pull request head."
+                            )
+                    result = review_pull_request(
+                        item,
+                        context=context,
+                        cwd=review_cwd,
+                        tokens=tokens,
+                        document=document,
+                        git=self.git,
+                        zellij_session=self.zellij_session,
+                        group=selected_group,
+                    )
+                    result["agent"] = selected
+                    if require_fresh:
+                        if self.git.has_unpublished_work(review_cwd, state.head_sha):
+                            raise RuntimeError(
+                                "Review worktree has unpublished work or does not match the pull request head."
+                            )
+                        result["head_sha"] = state.head_sha
             except BaseException as error:
                 with self._review_lock:
                     del self._active_reviews[key]

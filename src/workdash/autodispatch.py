@@ -11,7 +11,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from . import launcher
-from .github_client import MergeConflictError
+from .github_client import MergeConflictError, MergeHeadChangedError
 from .log_diagnostics import safe_error
 
 if TYPE_CHECKING:
@@ -153,25 +153,70 @@ class _AutodispatchSession:
                     with self.lock:
                         self.stage = "reviewing"
                         self.launch_reason = None
-                    stage = "review"
-                    review = self.owner.review(
-                        target=str(result.get("pr_id", result["item_id"])),
-                        agent=selected,
-                        group=self.group,
-                    )
-                    if "pr_id" in result and review["status"] == "nothing_to_review":
+                    target = str(result.get("pr_id", result["item_id"]))
+                    retry_head = False
+                    for _ in range(4):
+                        if self.stop_event.is_set():
+                            return
+                        stage = "review"
+                        with self.lock:
+                            require_fresh = self.automerge
+                        review_options = {"detached": True} if retry_head else {}
                         review = self.owner.review(
-                            target=str(result["item_id"]), agent=selected, group=self.group
+                            target=target,
+                            agent=selected,
+                            group=self.group,
+                            require_fresh=require_fresh,
+                            **review_options,
                         )
-                    with self.lock:
-                        merge = self.automerge and not self.stop_event.is_set()
-                    if merge and review.get("status") == "reviewed":
+                        if "pr_id" in result and review["status"] == "nothing_to_review":
+                            target = str(result["item_id"])
+                            review = self.owner.review(
+                                target=target,
+                                agent=selected,
+                                group=self.group,
+                                require_fresh=require_fresh,
+                                **review_options,
+                            )
+                        with self.lock:
+                            merge = self.automerge and not self.stop_event.is_set()
+                        if not merge or review.get("status") != "reviewed":
+                            break
+                        if not require_fresh:
+                            continue
                         item = self.owner._require_item(str(review["item_id"]))
                         stage = "merge"
+                        state = self.owner.backend.github_client.work_pull_request(
+                            item,
+                            github_username=self.owner.config.github_username,
+                            todo_repository=self.owner.config.todo_repository,
+                        )
+                        head = review.get("head_sha")
+                        if not head or not state or state.state != "OPEN" or not state.head_sha:
+                            raise RuntimeError("Pull request head is unavailable after review.")
+                        if state.head_sha != head:
+                            retry_head = True
+                            continue
+                        if state.reasons:
+                            if not state.head_writable:
+                                raise RuntimeError(
+                                    "Pull request needs fixes but its head is not writable."
+                                )
+                            break
+                        if state.mergeability != "mergeable" or state.ci_status not in {
+                            "passing",
+                            "no_checks",
+                        }:
+                            raise RuntimeError("Pull request mergeability or checks are not ready.")
+                        if self.stop_event.is_set():
+                            return
                         try:
                             self.owner.backend.github_client.merge_pull_request(
-                                item.repo, item.number
+                                item.repo, item.number, head
                             )
+                        except MergeHeadChangedError:
+                            retry_head = True
+                            continue
                         except MergeConflictError:
                             if self.stop_event.is_set():
                                 raise
@@ -182,6 +227,9 @@ class _AutodispatchSession:
                             )
                             if not state or "fix_merge_conflicts" not in state.reasons:
                                 raise
+                        break
+                    else:
+                        raise RuntimeError("Pull request head changed too often to merge safely.")
 
         except Exception as error:
             logger.error("Session %s failed during %s: %s", self.id, stage, safe_error(error))

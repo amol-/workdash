@@ -87,7 +87,7 @@ def test_merge_pull_request_uses_a_repository_enabled_method(monkeypatch, method
     }
     run_gh = MagicMock(return_value=json.dumps(settings))
     monkeypatch.setattr("workdash.github_client._run_gh", run_gh)
-    GitHubClient().merge_pull_request("owner/repo", 42)
+    GitHubClient().merge_pull_request("owner/repo", 42, "head")
     assert run_gh.call_args_list[0].args[0] == ["gh", "api", "repos/owner/repo"]
     assert run_gh.call_args_list[1].args[0] == [
         "gh",
@@ -97,6 +97,8 @@ def test_merge_pull_request_uses_a_repository_enabled_method(monkeypatch, method
         "repos/owner/repo/pulls/42/merge",
         "-f",
         f"merge_method={method}",
+        "-f",
+        "sha=head",
     ]
 
 
@@ -118,7 +120,7 @@ def test_merge_pull_request_distinguishes_conflict_from_other_failures(
         MagicMock(side_effect=[settings, RuntimeError(message), json.dumps({"mergeable": False})]),
     )
     with pytest.raises(MergeConflictError if conflict else RuntimeError) as error:
-        GitHubClient().merge_pull_request("owner/repo", 42)
+        GitHubClient().merge_pull_request("owner/repo", 42, "head")
     assert isinstance(error.value, MergeConflictError) is conflict
     assert message in str(error.value)
 
@@ -139,7 +141,7 @@ def test_merge_pull_request_rechecks_unknown_mergeability(monkeypatch, mergeable
     monkeypatch.setattr("workdash.github_client._run_gh", run_gh)
     monkeypatch.setattr("workdash.github_client.time.sleep", lambda _: None)
     with pytest.raises(RuntimeError) as error:
-        GitHubClient().merge_pull_request("owner/repo", 42)
+        GitHubClient().merge_pull_request("owner/repo", 42, "head")
     assert isinstance(error.value, MergeConflictError) is (mergeable is False)
     assert message in str(error.value)
     assert run_gh.call_count == 4
@@ -155,7 +157,7 @@ def test_merge_pull_request_does_not_treat_protection_failure_as_conflict(monkey
     from workdash.github_client import MergeConflictError
 
     with pytest.raises(RuntimeError) as error:
-        GitHubClient().merge_pull_request("owner/repo", 42)
+        GitHubClient().merge_pull_request("owner/repo", 42, "head")
     assert not isinstance(error.value, MergeConflictError)
 
 
@@ -2372,3 +2374,14 @@ def test_fetch_item_refreshes_issue_state_and_pull_request_status(monkeypatch):
         else:
             assert item.ci_state == "FAILURE"
             assert item.review_decision == "CHANGES_REQUESTED"
+
+
+def test_sha_pinned_merge_rejection_is_distinguished(monkeypatch):
+    from workdash.github_client import MergeHeadChangedError
+
+    monkeypatch.setattr(
+        "workdash.github_client._run_gh",
+        MagicMock(side_effect=[json.dumps({"allow_squash_merge": True}), RuntimeError("HTTP 409")]),
+    )
+    with pytest.raises(MergeHeadChangedError):
+        GitHubClient().merge_pull_request("owner/repo", 42, "old-head")
