@@ -522,6 +522,7 @@ class WorkdashApp(App[None]):
         self._pending_autodispatch: set[str] = set()
         self._autodispatch_refreshing = False
         self._progress_index = 0
+        self._progress_entries: list[dict[str, object]] = []
         self._row_keys: dict[tuple[WorkItemType, str, int], str] = {}
 
     def compose(self) -> ComposeResult:
@@ -578,6 +579,7 @@ class WorkdashApp(App[None]):
                 f"Autodispatch {started_failure['id']} failed: {started_failure['error']}"
             )
         entries = running + failed[-3:]
+        self._progress_entries = entries
         widget = self.query_one("#autodispatch-progress", Static)
         self.query_one("#autodispatch-scroll", VerticalScroll).display = bool(entries)
 
@@ -656,9 +658,7 @@ class WorkdashApp(App[None]):
         scroll = self.query_one("#autodispatch-scroll", VerticalScroll)
         if self._session is None or not scroll.has_focus:
             return
-        sessions = self._session.autodispatch_sessions()
-        entries = [entry for entry in sessions if entry["status"] in {"running", "blocked"}]
-        entries += [entry for entry in sessions if entry["status"] == "failed"][-3:]
+        entries = self._progress_entries
         index = self._progress_index
         if index < len(entries) and entries[index]["status"] == "blocked":
             try:

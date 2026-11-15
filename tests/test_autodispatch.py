@@ -459,6 +459,41 @@ def test_failed_pane_lookup_fails_session_without_dispatching_again(monkeypatch)
     assert dispatch.call_count == 1
 
 
+def test_blocked_session_does_not_poll_for_pane_disappearance(monkeypatch):
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    monkeypatch.setattr(
+        session,
+        "dispatch_once",
+        MagicMock(
+            return_value={
+                "status": "launched",
+                "item_id": "owner/repo#ISSUE-1",
+                "pane_id": "terminal_1",
+                "session": "workdash",
+            }
+        ),
+    )
+    monkeypatch.setattr(session.autoclose, "blocked", lambda *_: True)
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
+    load_panes = MagicMock(side_effect=RuntimeError("unavailable"))
+    monkeypatch.setattr("workdash.autodispatch.launcher.zellij.load_zellij_panes", load_panes)
+    session.start_autodispatch(scope="owner/repo")
+    deadline = time.monotonic() + 2
+    while session.autodispatch_sessions()[0]["status"] != "blocked":
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    time.sleep(0.05)
+    assert session.autodispatch_sessions()[0]["status"] == "blocked"
+    load_panes.assert_not_called()
+    session.stop_autodispatch_sessions()
+
+
 def test_one_empty_pane_listing_does_not_end_supervision(monkeypatch):
     session = WorkdashSession(
         config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),

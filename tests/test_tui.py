@@ -3524,8 +3524,9 @@ def test_progress_selects_and_stops_a_blocked_session():
             app._selected_item = MagicMock()
             await pilot.press("d")
             app._selected_item.assert_not_called()
+            assert "blocked (s)top" in str(app.query_one("#autodispatch-progress").render())
+            session.autodispatch_sessions.return_value = [entry]
             await pilot.press("s")
             session.stop_autodispatch.assert_called_once_with("blocked")
-            assert "blocked (s)top" in str(app.query_one("#autodispatch-progress").render())
 
     asyncio.run(run())
