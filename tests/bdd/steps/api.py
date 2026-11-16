@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import base64
+import errno
 import json
+import os
 import re
+import socket
 import subprocess
 import threading
 from contextlib import nullcontext
@@ -18,7 +21,6 @@ from pytest_bdd import given, parsers, then, when
 from webob import Request
 
 import workdash.control as control_module
-import workdash.github_client as github_client_module
 from workdash.analysis_cache import AnalysisCache
 from workdash.backend import compute_suggestion_markers
 from workdash.control import (
@@ -133,15 +135,16 @@ def _api_result(scenario_state: dict[str, Any]) -> dict[str, Any]:
 
 @given("no server-backed Workdash session is already running")
 def _no_server_backed_session(scenario_state: dict[str, Any]) -> None:
-    scenario_state["server_port_busy"] = False
     scenario_state["sessions"] = ["workdash-main"]
 
 
-@given(parsers.parse("a server-backed Workdash session is already running on `{address}`"))
-def _server_backed_session_already_running(address: str, scenario_state: dict[str, Any]) -> None:
-    scenario_state["server_port_busy"] = True
-    scenario_state["server_address"] = address
-    scenario_state["sessions"] = ["workdash-main"]
+@given("the selected local server port is already occupied")
+def _server_port_occupied(scenario_state: dict[str, Any], request) -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    request.addfinalizer(listener.close)
+    scenario_state["occupied_port"] = listener.getsockname()[1]
 
 
 @given("the Workdash Zellij session has live Workdash-owned panes")
@@ -187,47 +190,15 @@ def _workdash_info_reports_pane_id(pane_id: str, scenario_state: dict[str, Any])
     scenario_state["pane_id"] = pane_id
 
 
-@when("the user starts Workdash with `--server`")
-@when("the user starts another Workdash session with `--server`")
+@when("the user starts Workdash normally")
+@when("the user starts another Workdash session normally")
 def _user_starts_workdash_with_server(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     import workdash.workdash as workdash_module
-
-    if scenario_state.get("outside_zellij"):
-        exec_calls: list[tuple[str, list[str]]] = []
-
-        def fake_which(command: str) -> str | None:
-            if command in {"gh", "zellij"}:
-                return f"/usr/bin/{command}"
-            return None
-
-        def fake_execvp(file: str, args: list[str]) -> None:
-            exec_calls.append((file, args))
-            raise SystemExit(0)
-
-        monkeypatch.setattr(github_client_module.shutil, "which", fake_which)
-        monkeypatch.setattr(github_client_module.subprocess, "run", lambda *args, **kwargs: None)
-        monkeypatch.setattr(
-            workdash_module, "load_config", lambda: api_config(Path("/tmp/workdash-bdd"))
-        )
-        monkeypatch.setattr("workdash.launcher.shutil.which", fake_which)
-        monkeypatch.setattr("workdash.launcher.os.execvp", fake_execvp)
-        monkeypatch.setattr(
-            "workdash.launcher.subprocess.run",
-            lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""),
-        )
-        monkeypatch.delenv("ZELLIJ", raising=False)
-        try:
-            scenario_state["exit_code"] = workdash_module.main(["--server"])
-        except SystemExit as error:
-            scenario_state["exit_code"] = int(error.code or 0)
-        captured = capsys.readouterr()
-        scenario_state["output"] = captured.out + captured.err
-        scenario_state["exec_calls"] = exec_calls
-        return
 
     class FakeBackend:
         def __init__(self, config=None, **kwargs) -> None:
@@ -243,30 +214,17 @@ def _user_starts_workdash_with_server(
         def include_item_by_url(self, _url, _existing_identities):
             return None
 
-    class FakeControlServer:
-        def __init__(self, session, *, listeners=()) -> None:
-            assert listeners == ()
-            self.session = session
-
-        def start(self) -> None:
-            if scenario_state.get("server_port_busy"):
-                raise RuntimeError(
-                    "Workdash server port 8765 is already in use. "
-                    "Is another `workdash --server` running?"
-                )
-            scenario_state["json_api_started"] = True
-            scenario_state["server_session"] = self.session
-
-        def stop(self) -> None:
-            scenario_state["json_api_stopped"] = True
-
     class FakeApp:
         def __init__(self, **kwargs) -> None:
             scenario_state["tui_work_items"] = kwargs["work_items"]
             scenario_state["tui_suggestion_markers"] = kwargs["suggestion_markers"]
+            scenario_state["server_session"] = kwargs["session"]
 
         def run(self, *, mouse: bool) -> None:
             scenario_state["tui_started"] = True
+            scenario_state["api_items"] = control_module.WorkdashControlClient().request("list")[
+                "items"
+            ]
 
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
@@ -274,14 +232,21 @@ def _user_starts_workdash_with_server(
         workdash_module, "load_config", lambda: api_config(Path("/tmp/workdash-bdd"))
     )
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
-    monkeypatch.setattr(workdash_module, "WorkdashControlServer", FakeControlServer)
+    if "occupied_port" not in scenario_state:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            scenario_state["port"] = probe.getsockname()[1]
+    else:
+        scenario_state["port"] = scenario_state["occupied_port"]
+    monkeypatch.setenv("WORKDASH_HOST", f"127.0.0.1:{scenario_state['port']}")
+    monkeypatch.setattr(control_module, "SERVER_LOG_PATH", tmp_path / "workdash.log")
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
     monkeypatch.setattr(
         workdash_module.launcher.zellij, "list_workdash_sessions", lambda: ["workdash-main"]
     )
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
 
-    scenario_state["exit_code"] = workdash_module.main(["--server"])
+    scenario_state["exit_code"] = workdash_module.main([])
     captured = capsys.readouterr()
     scenario_state["output"] = captured.out + captured.err
 
@@ -655,10 +620,9 @@ def _system_loads_initial_dashboard_items(scenario_state: dict[str, Any]) -> Non
     assert scenario_state.get("initial_dashboard_loaded") is True
 
 
-@then(parsers.parse("the system starts the JSON API on `{address}`"))
-def _system_starts_json_api(address: str, scenario_state: dict[str, Any]) -> None:
-    assert address == "127.0.0.1:8765"
-    assert scenario_state.get("json_api_started") is True
+@then("the JSON API responds on the selected local address")
+def _system_starts_json_api(scenario_state: dict[str, Any]) -> None:
+    assert [item["title"] for item in scenario_state["api_items"]] == ["Fix the issue"]
 
 
 @then("the system starts the TUI using the same dashboard state")
@@ -673,26 +637,18 @@ def _system_starts_tui_with_same_dashboard_state(scenario_state: dict[str, Any])
 
 @then("the system reports that the Workdash server port is already in use")
 def _system_reports_server_port_in_use(scenario_state: dict[str, Any]) -> None:
-    assert "Workdash server port 8765 is already in use" in scenario_state["output"]
+    assert (
+        f"Cannot bind Workdash server at 127.0.0.1:{scenario_state['port']}"
+        in scenario_state["output"]
+    )
+    assert os.strerror(errno.EADDRINUSE) in scenario_state["output"]
+    assert "WORKDASH_HOST" in scenario_state["output"]
+    assert not scenario_state.get("tui_started")
 
 
 @then("the second session exits with a non-zero status")
 def _second_session_exits_nonzero(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["exit_code"] != 0
-
-
-@then("the Zellij process runs the dashboard with `--direct --server`")
-def _zellij_runs_dashboard_direct_server(scenario_state: dict[str, Any]) -> None:
-    layout = _read_startup_layout(scenario_state)
-    assert "--direct" in layout
-    assert "--server" in layout
-
-
-@then("the JSON API belongs to the dashboard process inside Zellij")
-def _json_api_belongs_to_dashboard_process_inside_zellij(scenario_state: dict[str, Any]) -> None:
-    layout = _read_startup_layout(scenario_state)
-    assert "workdash" in layout
-    assert "--direct" in layout and "--server" in layout
 
 
 @then("the API returns the current in-memory work items")
@@ -971,13 +927,6 @@ def _error_message_includes_zellij_failure(scenario_state: dict[str, Any]) -> No
     assert "Zellij rejected terminal_404" in scenario_state["api_payload"]["error"]["message"]
 
 
-def _read_startup_layout(scenario_state: dict[str, Any]) -> str:
-    command = scenario_state["exec_calls"][0][1]
-    layout_path = command[command.index("--layout") + 1]
-    with open(layout_path, encoding="utf-8") as layout_file:
-        return layout_file.read()
-
-
 @given("listeners accept source IPs `192.0.2.10` and `192.0.2.11`")
 def _listeners_accept_sources(scenario_state, work_items, tmp_path) -> None:
     seed_dashboard_item(work_items, scenario_state)
@@ -1135,7 +1084,7 @@ def _start_two_server_dashboards(scenario_state, monkeypatch, tmp_path, request)
         ports.append(port)
         monkeypatch.setenv("ZELLIJ_SESSION_NAME", session)
         monkeypatch.setenv("WORKDASH_HOST", f"127.0.0.1:{port}")
-        thread = threading.Thread(target=lambda: cli.main(["--direct", "--server"]), daemon=True)
+        thread = threading.Thread(target=lambda: cli.main([]), daemon=True)
         threads.append(thread)
         thread.start()
         deadline = time.monotonic() + 5

@@ -92,7 +92,7 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
         f"agents={{'agent': AgentConfig(launch={shlex.quote(str(agent))!r})}}, repositories=('owner/repo',), "
         f"workdir={str(tmp_path)!r}, todo_repository='test/todos')\n"
         "cli.WorkdashBackend.load_items = lambda self, progress_callback=None: ([item], {})\n"
-        "raise SystemExit(cli.main(['--direct', '--server']))\n"
+        "raise SystemExit(cli.main([]))\n"
     )
     shell = tmp_path / "dashboard-shell"
     shell.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(harness))}\n")
@@ -112,7 +112,7 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
                 port = probe.getsockname()[1]
             assert port not in ports
             ports.append(port)
-            name = f"{prefix}-{uuid.uuid4().hex}"
+            name = f"{prefix}-{uuid.uuid4().hex[:8]}"
             env = {**zellij_env, "WORKDASH_HOST": f"127.0.0.1:{port}"}
             pid, fd = pty.fork()
             if pid == 0:
@@ -314,7 +314,13 @@ def test_persistent_dashboard_quit_and_restart_in_real_zellij(tmp_path, repeat):
         "raise SystemExit(cli.main())\n"
     )
     script.chmod(0o755)
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
     env = os.environ.copy()
+    env["WORKDASH_HOST"] = f"127.0.0.1:{port}"
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
         env.pop(key, None)
     env.update(
@@ -384,14 +390,27 @@ def test_persistent_dashboard_quit_and_restart_in_real_zellij(tmp_path, repeat):
         shell = next(p for p in panes if not p["is_plugin"] and p["id"] != dashboard["id"])
         assert dashboard["tab_name"] == "dashboard" and dashboard["pane_y"] < shell["pane_y"]
         assert {p.get("plugin_url") for p in panes} >= {"zellij:tab-bar", "zellij:status-bar"}
+        from workdash.control import WorkdashControlClient, WorkdashControlError
+
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                result = WorkdashControlClient(f"127.0.0.1:{port}").request("list")
+                break
+            except WorkdashControlError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)
+        assert result["items"] == []
         pane_id = f"terminal_{dashboard['id']}"
         wait_for(
             lambda panes: any(
-                p.get("title") == "workdash tui" and "--direct" in str(p.get("pane_command"))
+                p.get("title") == "workdash tui"
+                and "--persistent-pane" in str(p.get("pane_command"))
                 for p in panes
             )
         )
-        start("--server", expired=True)
+        start("--refresh", expired=True)
         output = b""
         deadline = time.monotonic() + 10
         while b"options are ignored" not in output and time.monotonic() < deadline:
@@ -609,3 +628,103 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
         assert initial_ids <= {p["id"] for p in panes if not p["is_plugin"]}
     finally:
         _cleanup_sessions(zellij, env, [(name, pid, fd)])
+
+
+@pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
+@pytest.mark.parametrize("selected", ["custom", "unset"])
+@pytest.mark.parametrize("repeat", range(2))
+def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected, repeat):
+    import socket
+    import tempfile
+
+    from workdash.control import WorkdashControlClient, WorkdashControlError
+
+    zellij = shutil.which("zellij")
+    sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        old_port = probe.getsockname()[1]
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    name = f"wd-{uuid.uuid4().hex[:8]}"
+    received = tmp_path / "received"
+    dashboard = tmp_path / "dashboard.py"
+    dashboard.write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "import workdash.workdash as cli\n"
+        "import workdash.control as control\n"
+        "from workdash.config import WorkdashConfig, AgentConfig\n"
+        f"Path({str(received)!r}).write_text(os.environ.get('WORKDASH_HOST', '<unset>'))\n"
+        f"control.SERVER_LOG_PATH = Path({str(tmp_path / 'workdash.log')!r})\n"
+        + (f"control.SERVER_PORT = {port}\n" if selected == "unset" else "")
+        + "cli.GitHubClient.check_authentication = lambda self: None\n"
+        "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
+        "analysis_viewer={'command': 'workdash mdview', 'format': 'markdown', 'needs_pane': True}, "
+        "agents={'agent': AgentConfig(launch='sh')}, repositories=('owner/repo',), "
+        f"workdir={str(tmp_path)!r}, todo_repository='test/todos')\n"
+        "cli.WorkdashBackend.load_items = lambda self, progress_callback=None: ([], {})\n"
+        "raise SystemExit(cli.main(['--persistent-pane']))\n"
+    )
+    wrapper = tmp_path / "wrapper.py"
+    wrapper.write_text(
+        "import sys\n"
+        "from workdash import launcher\n"
+        f"launcher._build_direct_workdash_command = lambda args: [{sys.executable!r}, {str(dashboard)!r}]\n"
+        "launcher.os.execvp = lambda *args: sys.exit(0)\n"
+        f"launcher.zellij.exec_zellij_wrapped_workdash(['--session', {name!r}, '--debug'])\n"
+    )
+    env = os.environ.copy()
+    for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
+        env.pop(key, None)
+    config = tmp_path / "config.kdl"
+    config.write_text("")
+    env.update(
+        TERM="xterm-256color",
+        SHELL="/bin/sh",
+        WORKDASH_HOST=f"127.0.0.1:{old_port}",
+        ZELLIJ_CONFIG_FILE=str(config),
+        ZELLIJ_SOCKET_DIR=sockets.name,
+    )
+    pid, fd = pty.fork()
+    if pid == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        os.execve(zellij, [zellij, "--session", name], env)
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            result = subprocess.run(
+                [zellij, "list-sessions", "--no-formatting"],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            if name in result.stdout:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("Zellij session did not start")
+        current = env.copy()
+        if selected == "unset":
+            del current["WORKDASH_HOST"]
+        else:
+            current["WORKDASH_HOST"] = f"127.0.0.1:{port}"
+        subprocess.run([sys.executable, str(wrapper)], env=current, check=True, timeout=15)
+        deadline = time.monotonic() + 15
+        client = WorkdashControlClient(f"127.0.0.1:{port}")
+        while time.monotonic() < deadline:
+            try:
+                result = client.request("info")
+                break
+            except WorkdashControlError:
+                time.sleep(0.1)
+        else:
+            pytest.fail(
+                f"dashboard did not listen on {port}; received {received.read_text() if received.exists() else 'nothing'}"
+            )
+        assert received.read_text() == ("<unset>" if selected == "unset" else f"127.0.0.1:{port}")
+        assert result["session"] == name
+    finally:
+        _cleanup_sessions(zellij, env, [(name, pid, fd)])
+        sockets.cleanup()

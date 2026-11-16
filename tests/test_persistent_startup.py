@@ -32,10 +32,10 @@ def test_existing_session_restarts_dashboard_in_its_tab(monkeypatch):
     monkeypatch.setattr(launcher.subprocess, "run", run)
     monkeypatch.setattr(launcher.os, "execvp", lambda *args: (_ for _ in ()).throw(SystemExit()))
     with pytest.raises(SystemExit):
-        launcher.zellij.exec_zellij_wrapped_workdash(["--server"])
+        launcher.zellij.exec_zellij_wrapped_workdash(["--refresh"])
     assert any("rename-pane" in command and "terminal_4" in command for command in calls)
     launch = next(command for command in calls if "new-pane" in command)
-    assert "--server" in launch and "--tab-id" in launch and "3" in launch
+    assert "--refresh" in launch and "--tab-id" in launch and "3" in launch
 
 
 @pytest.mark.parametrize(
@@ -43,7 +43,7 @@ def test_existing_session_restarts_dashboard_in_its_tab(monkeypatch):
     [
         "/usr/bin/python3 /opt/bin/workdash --direct",
         "/usr/bin/python3 -m workdash --direct",
-        "/usr/bin/python3 /opt/bin/renamed-dashboard --direct --persistent-pane",
+        "/usr/bin/python3 /opt/bin/renamed-dashboard --persistent-pane",
     ],
 )
 def test_existing_running_dashboard_attaches_without_starting_another(
@@ -68,7 +68,7 @@ def test_existing_running_dashboard_attaches_without_starting_another(
         lambda file, command: calls.append((file, command)) or (_ for _ in ()).throw(SystemExit()),
     )
     with pytest.raises(SystemExit):
-        launcher.zellij.exec_zellij_wrapped_workdash(["--session", "custom", "--server"])
+        launcher.zellij.exec_zellij_wrapped_workdash(["--session", "custom", "--refresh"])
     assert calls == [("sleep", 1), ("/zellij", ["/zellij", "attach", "custom"])]
     assert "options are ignored" in capsys.readouterr().out
 
@@ -86,11 +86,11 @@ def test_missing_dashboard_tab_is_created_with_new_options(monkeypatch):
     monkeypatch.setattr(launcher.subprocess, "run", run)
     monkeypatch.setattr(launcher.os, "execvp", lambda *args: (_ for _ in ()).throw(SystemExit()))
     with pytest.raises(SystemExit):
-        launcher.zellij.exec_zellij_wrapped_workdash(["--session=custom", "--server"])
+        launcher.zellij.exec_zellij_wrapped_workdash(["--session=custom", "--refresh"])
     assert any("new-tab" in command and "dashboard" in command for command in calls)
     launch = next(command for command in calls if "new-pane" in command)
     assert launch[launch.index("--tab-id") + 1] == "17"
-    assert "--server" in launch
+    assert "--refresh" in launch
 
 
 def test_inside_start_renames_stale_panes_without_interrupting_commands(monkeypatch):

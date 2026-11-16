@@ -13,7 +13,7 @@ Feature: Open a terminal in the work item's worktree
     - No coding agent is started by this action.
     - The system reports the outcome of the action to the user.
     - Terminal-backed work actions open panes in the current Zellij session.
-    - Terminal-backed work actions require an active Zellij session, even when the dashboard was started with `--direct`.
+    - Terminal-backed work actions require an active Zellij session.
     - Terminal-backed work actions do not create, inspect, attach, or resurrect shared sessions.
     - If preparing the worktree or launching the terminal subprocess fails, the system closes the progress overlay and reports the error details to the user.
 
@@ -32,13 +32,6 @@ Feature: Open a terminal in the work item's worktree
     When the user launches a terminal-backed work action
     Then the work action opens in the current Zellij session
     And the system does not target the shared `workdash` Zellij session
-
-  @id:F-TERMINAL-OPEN-S003
-  Scenario: Direct dashboard outside Zellij reports the active-session requirement
-    Given the system is not running inside a Zellij session
-    And the dashboard was started with `--direct`
-    When the user launches a terminal-backed work action
-    Then the system reports that terminal-backed work actions require an active Zellij session
 
   @id:F-TERMINAL-OPEN-S004
   Scenario: Worktree preparation failure reports the error details

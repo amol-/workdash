@@ -1763,6 +1763,9 @@ def test_listener_bind_failure_releases_all_earlier_sockets(monkeypatch) -> None
         )
         with pytest.raises(RuntimeError, match=f"{failing_host}:{port}") as error:
             server.start()
+        assert "Cannot bind Workdash server" in str(error.value)
+        assert "another Workdash server" in str(error.value)
+        assert "WORKDASH_HOST" in str(error.value)
         assert isinstance(error.value.__cause__, OSError)
         assert error.value.__cause__.errno == errno.EADDRINUSE
         assert len(bound) == 2
@@ -1785,8 +1788,10 @@ def test_duplicate_extra_listener_fails_and_releases_sockets(monkeypatch) -> Non
         listeners=(("127.0.0.2", ("192.0.2.1",)), ("127.0.0.2", ("192.0.2.2",))),
     )
     try:
-        with pytest.raises(RuntimeError, match="127.0.0.2"):
+        with pytest.raises(RuntimeError, match="127.0.0.2") as error:
             server.start()
+        assert f"127.0.0.2:{port}" in str(error.value)
+        assert "WORKDASH_HOST" in str(error.value)
         for host in ("127.0.0.1", "127.0.0.2"):
             with socket.socket() as replacement:
                 replacement.bind((host, port))

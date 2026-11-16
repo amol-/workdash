@@ -1675,7 +1675,7 @@ class WorkdashControlServer:
             self.stop()
             raise RuntimeError(
                 f"Cannot bind Workdash server at {host}:{port}: {error}. "
-                "Is another `workdash --server` running?"
+                "Check for another Workdash server or change WORKDASH_HOST."
             ) from error
         log_path = SERVER_LOG_PATH
         try:
@@ -1757,8 +1757,7 @@ class WorkdashControlClient:
         except OSError as error:
             raise WorkdashControlError(
                 "server_unreachable",
-                f"No Workdash server is reachable at {self._address}. "
-                "Start one with `workdash --server`.",
+                f"No Workdash server is reachable at {self._address}. Start one with `workdash`.",
                 status=HTTPStatus.SERVICE_UNAVAILABLE,
             ) from error
         try:
@@ -1908,7 +1907,7 @@ def _pane_info_payload(
 
 
 def _make_turbogears_app(session: WorkdashSession):
-    # TurboGears is imported only when `--server` starts so ordinary client commands
+    # TurboGears is imported only when the server starts so ordinary client commands
     # can still report "server not running" without constructing the web app.
     from tg import MinimalApplicationConfigurator, TGController, expose, request, response
 

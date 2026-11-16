@@ -7,7 +7,7 @@ Feature: List command
 
   Rules:
     - `workdash list` is a thin client for the local Workdash JSON API.
-    - `workdash list` requires a running `workdash --server` session.
+    - `workdash list` requires a running `workdash` session.
     - The list command does not load configuration, run GitHub preflight, inspect Zellij, or fetch GitHub directly.
     - Running `workdash list` emits a non-interactive listing and exits.
     - The list command never starts the TUI and requires no keyboard input.
@@ -79,5 +79,5 @@ Feature: List command
   Scenario: List command requires the local Workdash server
     Given no server-backed Workdash session is running
     When the user runs `workdash list`
-    Then the command reports that `workdash --server` must be running
+    Then the command reports that `workdash` must be running
     And the command exits with a non-zero status

@@ -286,8 +286,8 @@ def _build_direct_workdash_command(original_args: Sequence[str]) -> list[str]:
     if current_entrypoint.name in {"__main__.py", "workdash.py"} and (
         current_entrypoint.parent.name == "workdash"
     ):
-        return [sys.executable, "-m", "workdash", "--direct", *original_args]
-    return [sys.argv[0] or "workdash", "--direct", *original_args]
+        return [sys.executable, "-m", "workdash", *original_args]
+    return [sys.argv[0] or "workdash", *original_args]
 
 
 def _quote_kdl_string(value: str) -> str:
@@ -703,6 +703,12 @@ class Zellij:
                             "--name",
                             "workdash tui",
                             "--",
+                            "env",
+                            *(
+                                [f"WORKDASH_HOST={os.environ['WORKDASH_HOST']}"]
+                                if "WORKDASH_HOST" in os.environ
+                                else ["-u", "WORKDASH_HOST"]
+                            ),
                             *workdash_command,
                         ],
                         check=True,

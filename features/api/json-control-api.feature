@@ -6,11 +6,11 @@ Feature: Local JSON control API
   state as the TUI.
 
   Rules:
-    - `workdash --server` starts the normal TUI and a JSON API server in the same process.
+    - `workdash` starts the normal TUI and a JSON API server in the same process.
     - The API server starts only after the initial dashboard items have loaded successfully.
     - The API server runs in the background and stops when the TUI process exits.
     - Multiple server-backed sessions can run on different addresses; a dashboard started inside Zellij uses its current session regardless of its name. If the current session is unknown, startup fails rather than selecting another session.
-    - The server listens on `WORKDASH_HOST` (IPv4 address or IPv4 address:port), defaulting to `127.0.0.1:8765`; repeatable `--listen HOST@IP1,IP2` adds listeners and requires `--server`.
+    - The server listens on `WORKDASH_HOST` (IPv4 address or IPv4 address:port), defaulting to `127.0.0.1:8765`; repeatable `--listen HOST@IP1,IP2` adds listeners; it cannot be used with client commands.
     - Each listener requires a nonempty list of exact source IPs or CIDR subnets, not hostnames; missing, malformed, or empty entries are rejected.
     - Listener hosts may be IPs or DNS hostnames; wildcard binds and ports in `--listen` are not supported. Extra listeners use the selected server port.
     - All listeners share the union of accepted source IPs and CIDR subnets, automatically including localhost and the primary server IP. A `--listen` matching the primary IP adds its source IPs without binding a second listener.
@@ -86,26 +86,17 @@ Feature: Local JSON control API
   @id:F-API-JSON-CONTROL-S001
   Scenario: Server-backed startup exposes a local JSON API with the TUI
     Given no server-backed Workdash session is already running
-    When the user starts Workdash with `--server`
+    When the user starts Workdash normally
     Then the system loads the initial dashboard items
-    And the system starts the JSON API on `127.0.0.1:8765`
+    And the JSON API responds on the selected local address
     And the system starts the TUI using the same dashboard state
 
   @id:F-API-JSON-CONTROL-S002
   Scenario: A second server-backed session is rejected
-    Given a server-backed Workdash session is already running on `127.0.0.1:8765`
-    When the user starts another Workdash session with `--server`
+    Given the selected local server port is already occupied
+    When the user starts another Workdash session normally
     Then the system reports that the Workdash server port is already in use
     And the second session exits with a non-zero status
-
-  @id:F-API-JSON-CONTROL-S003
-  Scenario: Server-backed startup keeps the Zellij wrapper behavior
-    Given the system is not running inside a Zellij session
-    And Zellij is installed on PATH
-    When the user starts Workdash with `--server`
-    Then the system replaces itself with a Zellij process
-    And the Zellij process runs the dashboard with `--direct --server`
-    And the JSON API belongs to the dashboard process inside Zellij
 
   @id:F-API-JSON-CONTROL-S004
   Scenario: List API returns current dashboard items
