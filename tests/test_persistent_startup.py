@@ -7,6 +7,34 @@ import pytest
 from workdash import launcher
 
 
+def test_exited_session_recovery_failure_does_not_create_a_new_session(monkeypatch):
+    calls = []
+    monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/zellij")
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if "attach" in command:
+            raise subprocess.CalledProcessError(1, command, stderr="recovery failed")
+        return subprocess.CompletedProcess(
+            command, 0, "custom [Created now] (EXITED - attach to resurrect)\n", ""
+        )
+
+    monkeypatch.setattr(launcher.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="recovery failed"):
+        launcher.zellij.exec_zellij_wrapped_workdash(["--session", "custom"])
+    assert calls == [
+        ["/zellij", "list-sessions", "--no-formatting"],
+        [
+            "/zellij",
+            "--layout-string",
+            "session_serialization true\ndisable_session_metadata false\nlayout {}",
+            "attach",
+            "-b",
+            "custom",
+        ],
+    ]
+
+
 def test_existing_session_restarts_dashboard_in_its_tab(monkeypatch):
     calls = []
     monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/zellij")

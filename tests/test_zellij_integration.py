@@ -728,3 +728,238 @@ def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected
     finally:
         _cleanup_sessions(zellij, env, [(name, pid, fd)])
         sockets.cleanup()
+
+
+@pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
+def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
+    import socket
+    import tempfile
+
+    from workdash.control import WorkdashControlClient, WorkdashControlError
+
+    zellij = shutil.which("zellij")
+    name = f"wd-{uuid.uuid4().hex[:8]}"
+    script = tmp_path / "workdash"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import workdash.workdash as cli\n"
+        "from workdash.config import WorkdashConfig, AgentConfig\n"
+        "cli.GitHubClient.check_authentication = lambda self: None\n"
+        "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
+        "analysis_viewer={'command': 'workdash mdview', 'format': 'markdown', 'needs_pane': True}, "
+        "agents={'agent': AgentConfig(launch='sh')}, repositories=('owner/repo',), "
+        f"workdir={str(tmp_path)!r}, todo_repository='test/todos')\n"
+        "cli.WorkdashBackend.load_items = lambda self, progress_callback=None: ([], {})\n"
+        "raise SystemExit(cli.main())\n"
+    )
+    script.chmod(0o755)
+    command = tmp_path / "saved-command"
+    runs = tmp_path / "command-runs"
+    command.write_text(f"#!/bin/sh\necho run >> {shlex.quote(str(runs))}\nsleep 120\n")
+    command.chmod(0o755)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    config = tmp_path / "config.kdl"
+    config.write_text(
+        "session_serialization false\ndisable_session_metadata true\nserialization_interval 1\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="wd-zellij-") as sockets:
+        env = os.environ.copy()
+        for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
+            env.pop(key, None)
+        env.update(
+            TERM="xterm-256color",
+            SHELL="/bin/sh",
+            WORKDASH_HOST=f"127.0.0.1:{port}",
+            ZELLIJ_SOCKET_DIR=sockets,
+            ZELLIJ_CONFIG_FILE=str(config),
+            XDG_CACHE_HOME=str(tmp_path / "cache"),
+            XDG_DATA_HOME=str(tmp_path / "data"),
+            XDG_CONFIG_HOME=str(tmp_path / "config"),
+        )
+        clients = []
+
+        def start(command):
+            pid, fd = pty.fork()
+            if pid == 0:
+                fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+                os.execve(command[0], command, env)
+            clients.append((pid, fd))
+
+        def run(*args):
+            return subprocess.run([zellij, *args], env=env, capture_output=True, text=True)
+
+        try:
+            start([str(script), "--session", name])
+            client = WorkdashControlClient(f"127.0.0.1:{port}")
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    client.request("info")
+                    break
+                except WorkdashControlError:
+                    time.sleep(0.1)
+            else:
+                pytest.fail("initial dashboard did not start")
+            assert (
+                run(
+                    "--session", name, "action", "new-tab", "--name", "work", "--cwd", str(tmp_path)
+                ).returncode
+                == 0
+            )
+            assert (
+                run(
+                    "--session",
+                    name,
+                    "action",
+                    "new-pane",
+                    "--name",
+                    "saved-command",
+                    "--",
+                    str(command),
+                ).returncode
+                == 0
+            )
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                layouts = list((tmp_path / "cache").rglob("session-layout.kdl"))
+                if runs.exists() and any(
+                    'name="work"' in layout.read_text() and str(command) in layout.read_text()
+                    for layout in layouts
+                ):
+                    break
+                time.sleep(0.1)
+            else:
+                pytest.fail(f"work tab was not serialized: {layouts}")
+            assert run("kill-session", name).returncode == 0
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                sessions = run("list-sessions", "--no-formatting").stdout
+                if name in sessions and "(EXITED" in sessions:
+                    break
+                time.sleep(0.1)
+            else:
+                pytest.fail(f"session did not exit: {sessions}")
+            client = WorkdashControlClient(f"127.0.0.1:{port}")
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    client.request("info")
+                except WorkdashControlError:
+                    break
+                time.sleep(0.1)
+            else:
+                pytest.fail("original dashboard did not stop")
+            start([str(script), "--session", name])
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    info = client.request("info")
+                    break
+                except WorkdashControlError:
+                    time.sleep(0.1)
+            else:
+                pytest.fail("resurrected dashboard did not start")
+            assert info["session"] == name
+            assert client.request("list")["items"] == []
+            panes = json.loads(
+                run("--session", name, "action", "list-panes", "--json", "--all").stdout
+            )
+            assert runs.read_text().splitlines() == ["run"]
+            assert any(p["title"] == "saved-command" and p["is_held"] for p in panes)
+            work = next(
+                p
+                for p in panes
+                if p["tab_name"] == "work" and not p["is_plugin"] and not p["is_held"]
+            )
+            dashboard = next(p for p in panes if p["title"] == "workdash tui" and not p["is_held"])
+            pane_id = f"terminal_{work['id']}"
+            assert (
+                run(
+                    "--session",
+                    name,
+                    "action",
+                    "write-chars",
+                    "--pane-id",
+                    pane_id,
+                    "echo preserved > preserved.txt",
+                ).returncode
+                == 0
+            )
+            assert (
+                run(
+                    "--session", name, "action", "send-keys", "--pane-id", pane_id, "Enter"
+                ).returncode
+                == 0
+            )
+            deadline = time.monotonic() + 10
+            while not (tmp_path / "preserved.txt").exists() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            assert (tmp_path / "preserved.txt").read_text().strip() == "preserved"
+            assert (
+                run("--session", name, "action", "new-tab", "--name", "later-work").returncode == 0
+            )
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                layouts = list((tmp_path / "cache").rglob("session-layout.kdl"))
+                if any('name="later-work"' in layout.read_text() for layout in layouts):
+                    break
+                time.sleep(0.1)
+            else:
+                pytest.fail("tab added after recovery was not serialized")
+            assert run("kill-session", name).returncode == 0
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                sessions = run("list-sessions", "--no-formatting").stdout
+                if name in sessions and "(EXITED" in sessions:
+                    break
+                time.sleep(0.1)
+            else:
+                pytest.fail(f"recovered session did not exit: {sessions}")
+            start([str(script), "--session", name])
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    client.request("info")
+                    panes = json.loads(
+                        run("--session", name, "action", "list-panes", "--json", "--all").stdout
+                    )
+                    if any(p["tab_name"] == "later-work" for p in panes):
+                        break
+                except (WorkdashControlError, json.JSONDecodeError):
+                    pass
+                time.sleep(0.1)
+            else:
+                pytest.fail("tab added after recovery did not survive the next recovery")
+            assert runs.read_text().splitlines() == ["run"]
+            assert any(p["title"] == "saved-command" and p["is_held"] for p in panes)
+            assert any(p["tab_name"] == "work" and not p["is_plugin"] for p in panes)
+            dashboard = next(p for p in panes if p["title"] == "workdash tui" and not p["is_held"])
+            dashboard_id = f"terminal_{dashboard['id']}"
+            assert (
+                run(
+                    "--session", name, "action", "write-chars", "--pane-id", dashboard_id, "q"
+                ).returncode
+                == 0
+            )
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                screen = run(
+                    "--session", name, "action", "dump-screen", "--pane-id", dashboard_id
+                ).stdout
+                if "Ctrl+Q" in screen:
+                    break
+                time.sleep(0.1)
+            else:
+                pytest.fail(f"dashboard did not respond to quit: {screen}")
+        finally:
+            if clients:
+                _cleanup_sessions(zellij, env, [(name, *clients[0])])
+            for pid, fd in clients[1:]:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                os.waitpid(pid, 0)
+                os.close(fd)

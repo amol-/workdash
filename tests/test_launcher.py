@@ -1069,8 +1069,8 @@ def test_exec_zellij_wrapped_workdash_replaces_process_with_layout(
         layout = layout_file.read()
     assert 'session_name "workdash"' in layout
     assert 'on_force_close "detach"' in layout
-    assert "session_serialization false" in layout
-    assert "disable_session_metadata true" in layout
+    assert "session_serialization true" in layout
+    assert "disable_session_metadata false" in layout
     assert "show_startup_tips false" in layout
     assert "attach_to_session false" in layout
     assert 'tab name="dashboard"' in layout

@@ -305,8 +305,8 @@ def _write_zellij_startup_layout(workdash_command: Sequence[str], *, session_nam
     layout = (
         f"session_name {_quote_kdl_string(session_name)}\n"
         'on_force_close "detach"\n'
-        "session_serialization false\n"
-        "disable_session_metadata true\n"
+        "session_serialization true\n"
+        "disable_session_metadata false\n"
         "show_startup_tips false\n"
         "attach_to_session false\n"
         "layout {\n"
@@ -656,11 +656,10 @@ class Zellij:
                 text=True,
                 check=True,
             )
-            sessions = [
-                line.split(" [Created ", 1)[0]
+            sessions = {
+                line.split(" [Created ", 1)[0]: "(EXITED" in line
                 for line in result.stdout.splitlines()
-                if "(EXITED" not in line
-            ]
+            }
         except OSError as error:
             raise RuntimeError(f"Failed to list Zellij sessions: {error}") from error
         except subprocess.CalledProcessError as error:
@@ -669,8 +668,31 @@ class Zellij:
                 raise RuntimeError(
                     f"Failed to list Zellij sessions: {details or error.returncode}"
                 ) from error
-            sessions = []
+            sessions = {}
         if session_name in sessions:
+            if sessions[session_name]:
+                try:
+                    # Attach's boolean options can toggle twice; layout options override config.
+                    subprocess.run(
+                        [
+                            zellij,
+                            "--layout-string",
+                            "session_serialization true\ndisable_session_metadata false\nlayout {}",
+                            "attach",
+                            "-b",
+                            session_name,
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                except OSError as error:
+                    raise RuntimeError(f"Failed to recover Zellij session: {error}") from error
+                except subprocess.CalledProcessError as error:
+                    details = (error.stderr or "").strip() or (error.stdout or "").strip()
+                    raise RuntimeError(
+                        f"Failed to recover Zellij session: {details or error.returncode}"
+                    ) from error
             panes = Zellij.load_zellij_panes(session_name)
             dashboard_panes = [
                 pane
