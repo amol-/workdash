@@ -170,7 +170,7 @@ code {{ background: #f0f0f0; padding: 0.2em 0.4em; border-radius: 3px; font-size
 pre code {{ background: none; padding: 0; }}
 blockquote {{ border-left: 4px solid #d0d7de; margin: 0; padding: 0.5em 1em; color: #656d76; }}
 table {{ border-collapse: collapse; }} th, td {{ border: 1px solid #d0d7de; padding: 6px 13px; }}
-@media (max-width: 40em) {{
+@media (max-width: 1023px) {{
   body {{ margin: 1em auto; padding: 0 0.75em; overflow-wrap: anywhere; }}
   pre {{ padding: 0.75em; font-size: 0.85em; }}
   pre, table {{ max-width: 100%; overflow-x: auto; }}

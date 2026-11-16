@@ -36,17 +36,20 @@ try {
     socket.send(JSON.stringify({ id: request, method, params }));
   });
   const results = [];
-  for (const width of [375, 1200]) {
-    await send('Emulation.setDeviceMetricsOverride', { width, height: 800, deviceScaleFactor: 1, mobile: width === 375 });
-    await send('Page.navigate', { url });
-    for (let i = 0; i < 100; i++) {
-      const ready = await send('Runtime.evaluate', { expression: `location.href === ${JSON.stringify(url)} && document.readyState === 'complete'`, returnByValue: true });
-      if (ready.result.value) break;
-      await new Promise(resolve => setTimeout(resolve, 100));
+  for (const width of [375, 667, 1024, 1200]) {
+    await send('Emulation.setDeviceMetricsOverride', { width, height: 800, deviceScaleFactor: 1, mobile: width < 1024 });
+    if (width === 375) {
+      await send('Page.navigate', { url });
+      for (let i = 0; i < 100; i++) {
+        const ready = await send('Runtime.evaluate', { expression: `location.href === ${JSON.stringify(url)} && document.readyState === 'complete'`, returnByValue: true });
+        if (ready.result.value) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
     }
     const result = await send('Runtime.evaluate', {
       expression: `(() => {
         const pre = document.querySelector('pre'), table = document.querySelector('table');
+        pre.scrollLeft = 0; table.scrollLeft = 0;
         pre.scrollLeft = 100; table.scrollLeft = 100;
         const body = getComputedStyle(document.body), cell = getComputedStyle(document.querySelector('td'));
         return { viewport: innerWidth, page: document.documentElement.scrollWidth,

@@ -40,14 +40,17 @@ def test_analysis_layout_on_phone_and_desktop(tmp_path):
         timeout=30,
         check=True,
     )
-    phone, desktop = json.loads(result.stdout)
-    assert phone["viewport"] == 375
-    assert phone["page"] == 375
-    assert phone["preScroll"] > 0 and phone["tableScroll"] > 0
-    assert desktop["bodyMax"] == "832px"
-    assert desktop["bodyPadding"] == "16px"
-    assert desktop["bodyMargin"] == "32px"
-    assert desktop["cellPadding"] == "13px"
+    portrait, landscape, *desktops = json.loads(result.stdout)
+    for phone, width in ((portrait, 375), (landscape, 667)):
+        assert phone["viewport"] == width
+        assert phone["page"] == width
+        assert phone["preScroll"] > 0 and phone["tableScroll"] > 0
+    for desktop, width in zip(desktops, (1024, 1200), strict=True):
+        assert desktop["viewport"] == width
+        assert desktop["bodyMax"] == "832px"
+        assert desktop["bodyPadding"] == "16px"
+        assert desktop["bodyMargin"] == "32px"
+        assert desktop["cellPadding"] == "13px"
 
 
 @pytest.mark.browser
