@@ -68,8 +68,10 @@ logger = logging.getLogger(__name__)
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8765
 SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
-# Every successful server start replaces this diagnostic log.
+# Every successful server start appends to this diagnostic log.
 SERVER_LOG_PATH = Path.home() / ".config" / "workdash" / "workdash.log"
+# These loggers explain background supervision, so the server records them at INFO.
+_LOGGED_LOGGERS = ("workdash.autodispatch", "workdash.control", "workdash.autoclose")
 # `owner/repo#42`, a Workdash item ID such as `owner/repo#CHECK-42`, or a
 # targeted todo ID such as `owner/repo#ISSUE-WT42`.
 _ITEM_REFERENCE_RE = re.compile(
@@ -1647,7 +1649,7 @@ class WorkdashControlServer:
         self._httpds: list[BaseServer] = []
         self._threads: list[threading.Thread] = []
         self._log_handler: logging.Handler | None = None
-        self._autodispatch_log_level = logging.NOTSET
+        self._log_levels: dict[str, int] = {}
 
     def start(self) -> None:
         """Bind every listener before serving the shared JSON API."""
@@ -1680,16 +1682,15 @@ class WorkdashControlServer:
         log_path = SERVER_LOG_PATH
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            self._log_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+            self._log_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
             self._log_handler.setFormatter(
                 logging.Formatter("%(asctime)s %(levelname)s %(message)s")
             )
-            autodispatch_logger = logging.getLogger("workdash.autodispatch")
-            self._autodispatch_log_level = autodispatch_logger.level
-            autodispatch_logger.setLevel(logging.INFO)
-            autodispatch_logger.addHandler(self._log_handler)
-            logging.getLogger("workdash.control").addHandler(self._log_handler)
-            logging.getLogger("workdash.autoclose").addHandler(self._log_handler)
+            for name in _LOGGED_LOGGERS:
+                logged = logging.getLogger(name)
+                self._log_levels[name] = logged.level
+                logged.setLevel(logging.INFO)
+                logged.addHandler(self._log_handler)
         except OSError as error:
             self.stop()
             raise RuntimeError(
@@ -1712,9 +1713,11 @@ class WorkdashControlServer:
             httpd.shutdown()
         self._session.stop_autodispatch_sessions()
         if self._log_handler is not None:
-            for name in ("workdash.autodispatch", "workdash.control", "workdash.autoclose"):
-                logging.getLogger(name).removeHandler(self._log_handler)
-            logging.getLogger("workdash.autodispatch").setLevel(self._autodispatch_log_level)
+            for name in _LOGGED_LOGGERS:
+                logged = logging.getLogger(name)
+                logged.removeHandler(self._log_handler)
+                logged.setLevel(self._log_levels.get(name, logging.NOTSET))
+            self._log_levels.clear()
             self._log_handler.close()
             self._log_handler = None
         for httpd in self._httpds:

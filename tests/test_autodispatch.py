@@ -1998,6 +1998,46 @@ def test_failed_second_server_preserves_running_server_log(monkeypatch, tmp_path
         first.stop()
 
 
+def test_server_log_keeps_earlier_runs(monkeypatch, tmp_path):
+    import logging
+
+    from workdash.control import WorkdashControlServer
+
+    log = tmp_path / "workdash.log"
+    log.write_text("earlier run\n")
+    monkeypatch.setattr("workdash.control.SERVER_LOG_PATH", log)
+    monkeypatch.setattr("workdash.control.server_address", lambda: ("127.0.0.1", 0))
+    server = WorkdashControlServer(MagicMock())
+    server.start()
+    try:
+        logging.getLogger("workdash.autodispatch").info("current run")
+    finally:
+        server.stop()
+    text = log.read_text()
+    assert "earlier run" in text and "current run" in text
+
+
+def test_server_log_records_autoclose_decisions(monkeypatch, tmp_path):
+    import logging
+
+    from workdash.control import WorkdashControlServer
+
+    log = tmp_path / "workdash.log"
+    monkeypatch.setattr("workdash.control.SERVER_LOG_PATH", log)
+    monkeypatch.setattr("workdash.control.server_address", lambda: ("127.0.0.1", 0))
+    autoclose = logging.getLogger("workdash.autoclose")
+    level = autoclose.level
+    server = WorkdashControlServer(MagicMock())
+    server.start()
+    try:
+        assert autoclose.level == logging.INFO
+        autoclose.info("Closed the autoclosed pane terminal_1")
+    finally:
+        server.stop()
+    assert "Closed the autoclosed pane terminal_1" in log.read_text()
+    assert autoclose.level == level
+
+
 def test_server_log_records_request_failures(monkeypatch, tmp_path):
     import logging
 

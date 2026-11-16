@@ -1723,9 +1723,9 @@ def _log_records_failure(scenario_state):
     assert "HTTP 404" in text
 
 
-@then("the server log holds only the current run")
-def _log_holds_current_run(scenario_state):
-    assert "previous run output" not in scenario_state["server_log"].read_text()
+@then("the server log keeps the earlier run")
+def _log_keeps_earlier_run(scenario_state):
+    assert "previous run output" in scenario_state["server_log"].read_text()
 
 
 @then("the server log omits the failure's raw details")

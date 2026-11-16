@@ -236,6 +236,11 @@ class AutocloseSupervisor:
                         entry.screen, entry.last_activity = screen, time.monotonic()
                         return
                     entry.blocked = True
+                    logger.info(
+                        "Blocked pane %s after %d reminders without a pull request",
+                        entry.pane_id,
+                        entry.attempts,
+                    )
                 else:
                     instruction = render_autonomous_work_instruction(action, entry.item)
                     self._send(
@@ -368,6 +373,10 @@ class AutocloseSupervisor:
         if self._identified(entry):
             return False
         self._panes.pop((entry.session, entry.pane_id), None)
+        logger.info(
+            "Stopped supervising pane %s: it no longer matches its launch identity",
+            entry.pane_id,
+        )
         return True
 
 
