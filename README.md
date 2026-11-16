@@ -193,7 +193,7 @@ runs in the current pane and uses the current session regardless of `--session`.
 - Open pull requests you authored (shown as `PR` in the TUI).
 - Open pull requests where you are a requested reviewer, plus open pull
   requests you have already reviewed (shown as `RV` in the TUI).
-- Open issues assigned to you (shown as `IS` in the TUI).
+- Open issues assigned to you (shown as `TD` for the configured todo repository and `IS` for other repositories in the TUI).
 - Open issues and pull requests across the tracked repositories. A pull request
   that is neither yours nor yours to review is shown as `VR` (voluntary review) in the TUI; once
   you review it, the next refresh lists it as `RV`.

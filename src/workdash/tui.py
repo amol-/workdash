@@ -55,7 +55,7 @@ def _to_utc(dt: datetime) -> datetime:
     return dt.replace(tzinfo=UTC)
 
 
-def _type_column(item: WorkItem, *, bold: bool) -> Text:
+def _type_column(item: WorkItem, *, bold: bool, todo_repository: str = "") -> Text:
     """Return the Type column cell, prefixed with the item's CI and review symbols.
 
     An item without a CI result or review state keeps a blank prefix so every
@@ -70,7 +70,11 @@ def _type_column(item: WorkItem, *, bold: bool) -> Text:
     )
     prefix = f"{ci_symbol}{review_symbol}"
     label = format_type_label(item)
-    code = _TYPE_CODES[label.removesuffix("+")] + ("+" if item.included else "")
+    code = (
+        "TD"
+        if item.item_type == WorkItemType.ISSUE and item.repo.lower() == todo_repository.lower()
+        else _TYPE_CODES[label.removesuffix("+")]
+    ) + ("+" if item.included else "")
     cell = Text(
         f"{prefix}{code} {item.number}",
         style="bold" if bold else "",
@@ -497,6 +501,7 @@ class WorkdashApp(App[None]):
     ) -> None:
         super().__init__()
         self._session = session
+        self._todo_repository = session.config.todo_repository if session is not None else ""
         self._work_items = sorted(work_items or (), key=lambda item: item.updated_at, reverse=True)
         self._sorted_work_items: list[WorkItem] = []
         # Cleared whenever the loaded list changes so new items are never hidden.
@@ -679,7 +684,7 @@ class WorkdashApp(App[None]):
         return any(
             needle in value.lower()
             for value in (
-                str(_type_column(item, bold=False))[2:],
+                str(_type_column(item, bold=False, todo_repository=self._todo_repository))[2:],
                 f"{format_type_label(item)}#{item.number}",
                 display_repo(item),
                 item.title if item.state == "OPEN" else f"{item.title} ({item.state.lower()})",
@@ -812,7 +817,11 @@ class WorkdashApp(App[None]):
         table.clear(columns=True)
         self._row_keys.clear()
         type_width = max(
-            (len(str(_type_column(item, bold=False))) for item in matched_items), default=4
+            (
+                len(str(_type_column(item, bold=False, todo_repository=self._todo_repository)))
+                for item in matched_items
+            ),
+            default=4,
         )
         table.add_column("Type", key="type", width=max(4, type_width))
         table.add_column("Repo", key="repo")
@@ -863,7 +872,7 @@ class WorkdashApp(App[None]):
             self._row_keys[(item.item_type, item.repo, item.number)] = row_key
             if _to_utc(item.updated_at) >= cutoff:
                 table.add_row(
-                    _type_column(item, bold=True),
+                    _type_column(item, bold=True, todo_repository=self._todo_repository),
                     Text(_repo_column(item), style="bold"),
                     self._title_cell(item, current_without_rows),
                     Text(f"{age_days}d", style="bold"),
@@ -872,7 +881,7 @@ class WorkdashApp(App[None]):
                 )
             else:
                 table.add_row(
-                    _type_column(item, bold=False),
+                    _type_column(item, bold=False, todo_repository=self._todo_repository),
                     _repo_column(item),
                     self._title_cell(item, current_without_rows),
                     f"{age_days}d",
