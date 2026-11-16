@@ -132,6 +132,8 @@ def test_analysis_endpoints_serve_markdown_and_rendered_html():
     assert html.status_int == 200
     assert html.content_type == "text/html"
     assert "<strong>real content</strong>" in html.text
+    assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in html.text
+    assert "@media (max-width: 40em)" in html.text
 
 
 def test_html_analysis_blocks_active_content_locally_and_over_http(tmp_path, monkeypatch):

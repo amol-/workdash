@@ -14,6 +14,43 @@ from workdash import control, launcher
 
 
 @pytest.mark.browser
+def test_analysis_layout_on_phone_and_desktop(tmp_path):
+    browser = (
+        os.environ.get("CHROME_BIN") or shutil.which("chromium") or shutil.which("google-chrome")
+    )
+    node = shutil.which("node")
+    if not browser or not node:
+        pytest.fail("Chromium and Node.js with built-in WebSocket are required")
+    markdown = "```\n" + "long_code_line_" * 30 + "\n```\n\n"
+    markdown += "| " + " | ".join(["Column"] * 20) + " |\n"
+    markdown += "| " + " | ".join(["---"] * 20) + " |\n"
+    markdown += "| " + " | ".join(["value"] * 20) + " |\n"
+    page = tmp_path / "analysis.html"
+    page.write_text(launcher.render_analysis_html(markdown))
+    result = subprocess.run(
+        [
+            node,
+            str(Path(__file__).with_name("browser_analysis_layout.mjs")),
+            browser,
+            str(tmp_path / "profile"),
+            page.as_uri(),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    phone, desktop = json.loads(result.stdout)
+    assert phone["viewport"] == 375
+    assert phone["page"] == 375
+    assert phone["preScroll"] > 0 and phone["tableScroll"] > 0
+    assert desktop["bodyMax"] == "832px"
+    assert desktop["bodyPadding"] == "16px"
+    assert desktop["bodyMargin"] == "32px"
+    assert desktop["cellPadding"] == "13px"
+
+
+@pytest.mark.browser
 def test_analysis_images_and_control_security_in_browser(tmp_path, monkeypatch):
     browser = (
         os.environ.get("CHROME_BIN") or shutil.which("chromium") or shutil.which("google-chrome")

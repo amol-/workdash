@@ -159,6 +159,7 @@ def open_in_browser(
 _HTML_TEMPLATE = """\
 <!DOCTYPE html>
 <html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src http: https:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <title>{title}</title>
 <style>
@@ -169,6 +170,14 @@ code {{ background: #f0f0f0; padding: 0.2em 0.4em; border-radius: 3px; font-size
 pre code {{ background: none; padding: 0; }}
 blockquote {{ border-left: 4px solid #d0d7de; margin: 0; padding: 0.5em 1em; color: #656d76; }}
 table {{ border-collapse: collapse; }} th, td {{ border: 1px solid #d0d7de; padding: 6px 13px; }}
+@media (max-width: 40em) {{
+  body {{ margin: 1em auto; padding: 0 0.75em; overflow-wrap: anywhere; }}
+  pre {{ padding: 0.75em; font-size: 0.85em; }}
+  pre, table {{ max-width: 100%; overflow-x: auto; }}
+  table {{ display: block; }}
+  th, td {{ padding: 4px 8px; }}
+  img {{ max-width: 100%; height: auto; }}
+}}
 </style></head>
 <body>{body}</body></html>
 """
