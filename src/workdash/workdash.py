@@ -108,7 +108,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"Error: {error}", file=sys.stderr, flush=True)
                 return 1
 
-    result = commands.interactive(server=options.server, listeners=options.listeners)
+    result = commands.interactive(listeners=options.listeners)
     if (options.persistent_pane or os.getenv("ZELLIJ")) and result == 0:
         print(
             "Dashboard exited. Ctrl+Q quits the entire Zellij session and all its panes.",
@@ -127,8 +127,6 @@ class CLIOptions:
     debug: bool
     refresh: bool
     configure: bool
-    direct: bool
-    server: bool
     json_output: bool
     persistent_pane: bool = False
     command: str | None = None
@@ -443,10 +441,8 @@ class WorkdashCommands:
             return False
         return True
 
-    def interactive(
-        self, *, server: bool = False, listeners: Sequence[tuple[str, Sequence[str]]] = ()
-    ) -> int:
-        """Start the interactive dashboard, optionally with the JSON server."""
+    def interactive(self, *, listeners: Sequence[tuple[str, Sequence[str]]] = ()) -> int:
+        """Start the interactive dashboard and JSON server."""
 
         loaded = self._load_config_and_backend()
         if loaded is None:
@@ -456,17 +452,11 @@ class WorkdashCommands:
         work_items, suggestion_markers = backend.load_items(
             progress_callback=lambda message: print(message, flush=True)
         )
-        try:
-            current_session = os.getenv("ZELLIJ_SESSION_NAME")
-            if server and os.getenv("ZELLIJ") and not current_session:
-                raise RuntimeError("Cannot determine the current Zellij session.")
-            zellij_session = (
-                _select_workdash_session(None)
-                if server and not os.getenv("ZELLIJ")
-                else current_session
+        zellij_session = os.getenv("ZELLIJ_SESSION_NAME")
+        if os.getenv("ZELLIJ") and not zellij_session:
+            print(
+                "Error: Cannot determine the current Zellij session.", file=sys.stderr, flush=True
             )
-        except RuntimeError as error:
-            print(f"Error: {error}", file=sys.stderr, flush=True)
             return 1
         session = WorkdashSession(
             config=config,
@@ -529,32 +519,28 @@ class WorkdashCommands:
             focus_callback=session.focus_pane,
             session=session,
         )
-        if server:
 
-            def refresh_tui_from_session() -> None:
-                if not app.is_running:
-                    return
-                try:
-                    app.call_from_thread(app.refresh_from_session)
-                except RuntimeError as error:
-                    if str(error) != "App is not running":
-                        raise
-
-            session.items_changed_callback = refresh_tui_from_session
-        control_server = WorkdashControlServer(session, listeners=listeners) if server else None
-        if control_server is not None:
+        def refresh_tui_from_session() -> None:
+            if not app.is_running:
+                return
             try:
-                control_server.start()
+                app.call_from_thread(app.refresh_from_session)
             except RuntimeError as error:
-                print(f"Error: {error}", file=sys.stderr, flush=True)
-                return 1
+                if str(error) != "App is not running":
+                    raise
+
+        session.items_changed_callback = refresh_tui_from_session
+        control_server = WorkdashControlServer(session, listeners=listeners)
         try:
-            # Keyboard-only dashboard: never enable terminal mouse tracking so
-            # the terminal keeps native mouse behavior (selection, scrolling).
+            control_server.start()
+        except RuntimeError as error:
+            print(f"Error: {error}", file=sys.stderr, flush=True)
+            return 1
+        try:
+            # Keyboard-only dashboard: preserve native terminal mouse behavior.
             app.run(mouse=False)
         finally:
-            if control_server is not None:
-                control_server.stop()
+            control_server.stop()
         return 0
 
     def _load_config_and_backend(self) -> tuple[WorkdashConfig, WorkdashBackend] | None:
@@ -687,25 +673,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         action="store_true",
         help="Interactively set up or update the configuration file.",
     )
-    parser.add_argument(
-        "--direct",
-        action="store_true",
-        help="Start directly without wrapping the interactive dashboard in Zellij.",
-    )
     parser.add_argument("--session", help="Select the persistent Zellij session.")
     parser.add_argument("--persistent-pane", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--server",
-        action="store_true",
-        help="Start the TUI with the localhost JSON control API.",
-    )
     parser.add_argument("--host", default=argparse.SUPPRESS, help="Workdash server HOST[:PORT].")
     parser.add_argument(
         "--listen",
         action="append",
         default=[],
         metavar="HOST@IP1,IP2",
-        help="Add a trusted LAN listener with accepted source IPs or subnets (requires --server).",
+        help="Add a trusted LAN listener with accepted source IPs or subnets.",
     )
     parser.add_argument(
         "--json",
@@ -1011,26 +987,24 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         "write",
         "close",
     }
-    if host is not None and (
-        namespace.command not in client_commands or namespace.server or namespace.configure
-    ):
+    if host is not None and (namespace.command not in client_commands or namespace.configure):
         parser.error("--host is only supported by server-backed client commands")
-    if namespace.command in client_commands | {"show-config"} or namespace.server:
+    if namespace.command in client_commands | {"show-config", None} and not namespace.configure:
         try:
-            server_address(None if namespace.server or namespace.command == "show-config" else host)
+            server_address(None if namespace.command not in client_commands else host)
         except ValueError as error:
             parser.error(str(error))
         if host is None:
             host = os.environ.get("WORKDASH_HOST", "127.0.0.1")
-    if namespace.listen and not namespace.server:
-        parser.error("--listen requires --server")
+    if namespace.listen and namespace.command in client_commands:
+        parser.error("--listen cannot be used with client commands")
     listeners = []
     for listener in namespace.listen:
-        host, separator, sources = listener.partition("@")
-        if not host or not separator or ":" in host or host == "*":
+        listener_host, separator, sources = listener.partition("@")
+        if not listener_host or not separator or ":" in listener_host or listener_host == "*":
             parser.error("--listen requires HOST@IP1,IP2 without wildcard binds or custom ports")
         try:
-            if host == "0.0.0.0":
+            if listener_host == "0.0.0.0":
                 raise ValueError("wildcard listener binds are not allowed")
             ips = tuple(
                 str(net.network_address)
@@ -1040,13 +1014,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
             )
         except ValueError as error:
             parser.error(f"Invalid --listen {listener!r}: {error}")
-        listeners.append((host, ips))
+        listeners.append((listener_host, ips))
     return CLIOptions(
         debug=namespace.debug,
         refresh=namespace.refresh,
         configure=namespace.configure,
-        direct=namespace.direct,
-        server=namespace.server,
         json_output=namespace.json_output,
         persistent_pane=namespace.persistent_pane,
         command=namespace.command,
@@ -1069,12 +1041,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
 
 
 def _should_wrap_interactive_start(options: CLIOptions) -> bool:
-    return (
-        not options.direct
-        and not options.configure
-        and options.command is None
-        and not os.getenv("ZELLIJ")
-    )
+    return not options.configure and options.command is None and not os.getenv("ZELLIJ")
 
 
 def _print_work_items(
@@ -1253,22 +1220,3 @@ def _print_show_config(result: dict[str, object]) -> None:
 
 def _print_control_error(error: WorkdashControlError) -> None:
     print(f"Error: {error}", file=sys.stderr, flush=True)
-
-
-def _select_workdash_session(requested_session: str | None) -> str:
-    sessions = launcher.zellij.list_workdash_sessions()
-    if requested_session is not None:
-        if requested_session in sessions:
-            return requested_session
-        raise RuntimeError(
-            f"Workdash-owned Zellij session {requested_session!r} is not active. "
-            f"Candidates: {', '.join(sessions) if sessions else '(none)'}"
-        )
-    if not sessions:
-        raise RuntimeError("An active Workdash-owned Zellij session is required.")
-    if len(sessions) > 1:
-        raise RuntimeError(
-            "Multiple Workdash-owned Zellij sessions found. Close the extras before "
-            "starting `workdash --server`: " + ", ".join(sessions)
-        )
-    return sessions[0]

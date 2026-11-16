@@ -84,11 +84,6 @@ def _new_zellij_pane_named(pane_name: str, scenario_state: dict[str, Any]) -> No
     assert command[name_index + 1] == pane_name
 
 
-@given("the dashboard was started with `--direct`")
-def _dashboard_started_direct(scenario_state: dict[str, Any]) -> None:
-    scenario_state["direct_mode"] = True
-
-
 @when("the user launches a terminal-backed work action")
 def _launch_terminal_backed_work_action(
     scenario_state: dict[str, Any],

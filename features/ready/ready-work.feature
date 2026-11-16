@@ -7,7 +7,7 @@ Feature: Ready work
   the live Zellij panes, never from the dashboard list.
 
   Rules:
-    - `workdash ready SCOPE` requires a running `workdash --server`; like the other server-backed commands it accepts `--host HOST` and `--json`, and it never reads configuration, runs `gh`, or inspects Zellij or worktrees on the client.
+    - `workdash ready SCOPE` requires a running `workdash`; like the other server-backed commands it accepts `--host HOST` and `--json`, and it never reads configuration, runs `gh`, or inspects Zellij or worktrees on the client.
     - SCOPE is required: `owner/repo`, an issue (`owner/repo#42`, `owner/repo#ISSUE-42`, a targeted todo ID such as `owner/repo#ISSUE-WT7`, or a GitHub issue URL), `todo`, or `any`.
     - The server resolves `todo` and `any` from its own configuration: `todo` is the todo repository, `any` is every repository selected by `repositories`, with `owner/*` expanded to every unarchived repository of that owner, plus the todo repository.
     - A repository scope covers every open issue of the repository, including linked open pull requests in other repositories, and issues in other repositories linked to its actionable authored pull requests, however many the dashboard lists.

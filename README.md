@@ -152,8 +152,7 @@ workdash
 Useful commands and flags:
 
 ```bash
-workdash --server            # start the TUI plus localhost JSON control API
-workdash --server --listen 192.168.1.5@192.168.1.10,192.168.1.11
+workdash --listen 192.168.1.5@192.168.1.10,192.168.1.11
 workdash list --host dashboard.lan --json  # connect to an explicit server host
 workdash list                # list server-backed dashboard items as plain text
 workdash list --refresh      # ask the server to refresh items before listing
@@ -175,7 +174,6 @@ workdash show-config [--json] # show configured agents and selected server addre
 workdash --debug             # verbose logging
 workdash --configure         # run the interactive setup wizard
 workdash --session NAME      # use a named persistent Zellij session
-workdash --direct            # start without the automatic Zellij wrapper
 workdash --version           # print version and exit
 ```
 
@@ -186,7 +184,7 @@ already running, new options are ignored; otherwise it starts with the supplied
 options in the `dashboard` tab. Pressing `q` exits the dashboard but keeps the
 session and its panes; Ctrl+Q quits the entire session. Inside Zellij, Workdash
 runs in the current pane and uses the current session regardless of `--session`.
-`--direct` bypasses the automatic wrapper.
+
 
 ## What gets shown
 
@@ -301,7 +299,7 @@ dashboard refreshes or the pull request is added by URL.
 
 ## Local control server
 
-`workdash --server` starts the normal TUI and a JSON control API in the same
+`workdash` starts the normal TUI and a JSON control API in the same
 process. It listens on `WORKDASH_HOST` (default `127.0.0.1:8765`) and stops all
 listeners when the TUI exits. Control requests use JSON; item artifact GETs return file contents or a JSON listing.
 
@@ -312,9 +310,8 @@ written, startup fails and names the path instead of running without
 diagnostics. The log records server-side failures and where they happened, and
 omits raw command output and request bodies.
 
-For trusted LAN access, add repeatable `--listen HOST@IP1,IP2` options alongside
-`--server`. Each listener needs a nonempty list of exact accepted source IPs
-(no hostnames or subnets). All supplied source IPs are shared across every
+For trusted LAN access, add repeatable `--listen HOST@IP1,IP2` options. Each listener needs a nonempty list of accepted source IPs or CIDR subnets
+(no hostnames). All supplied source IPs are shared across every
 listener, with localhost and the primary server IP always accepted.
 Access checks use the actual peer IP, never forwarding headers. Wildcard binds are
 rejected; extra listeners use the selected server port.
@@ -359,7 +356,7 @@ reports the selected default server address.
 
 ## List command
 
-`workdash list` requires a running `workdash --server` session and emits one row
+`workdash list` requires a running `workdash` session and emits one row
 per server-known item, sorted by last update (most recent first):
 
 ```
@@ -380,7 +377,7 @@ status.
 
 ## Ready command
 
-`workdash ready SCOPE [--json]` requires a running `workdash --server` session
+`workdash ready SCOPE [--json]` requires a running `workdash` session
 and lists the GitHub work that can be picked up next, read straight from GitHub
 rather than from the dashboard. It only reports: nothing is claimed or launched.
 
@@ -481,7 +478,7 @@ its `group` is null when no override was configured.
 
 ## Info command
 
-`workdash info [--json]` requires a running `workdash --server` session and
+`workdash info [--json]` requires a running `workdash` session and
 reports live Workdash-owned Zellij panes for terminal-backed work actions,
 including pane title, cwd, command, tab, state, and mapped Workdash item. It maps
 each live pane's current working directory to the matching Workdash item ID when
@@ -492,7 +489,7 @@ Workdash session as `kind=unknown` with unknown item mapping.
 ## Analyze command
 
 `workdash analyze ITEM [--agent NAME] [--group NAME] [--json]` requires a running
-`workdash --server` session and analyzes a work item. `ITEM` can be a row ID from
+`workdash` session and analyzes a work item. `ITEM` can be a row ID from
 `workdash list` (such as `owner/repo#ISSUE-123`), `owner/repo#123` for an issue,
 or a GitHub issue/PR URL. The item does not need to be on the dashboard: the
 server looks up any issue or pull request it can access on GitHub, without adding
@@ -550,7 +547,7 @@ The document is agent-produced, not independent verification of GitHub's review 
 ## Code command
 
 `workdash code ITEM [--agent NAME] [--group NAME] [--autoclose] [--json]` requires a running
-`workdash --server` session and launches a configured coding agent for a work
+`workdash` session and launches a configured coding agent for a work
 item. `ITEM` accepts the same items as `workdash analyze`. With `--group NAME`,
 the server opens a new agent pane in the named Zellij tab, creating it if needed;
 without it the pane opens in the current tab. This also works with `--host`.
@@ -656,7 +653,7 @@ instead of messaging. A pull request closed without merging is neither completio
 nor work to redo on its own: its pane is left open, supervision of it stops, and
 the server logs that the pane needs review.
 
-**Limitation:** supervision lives only in the running `workdash --server`
+**Limitation:** supervision lives only in the running `workdash`
 process, so it stops when the server restarts and never resumes on its own. The
 pane's identity is the session name, the pane ID, and the pane title Zellij
 reports after the launch, revalidated immediately before every message or close,
@@ -674,12 +671,12 @@ reported again. When no pull request exists, the same work instruction is sent u
 
 ## Read and write commands
 
-`workdash read PANE_ID [--full] [--json]` requires a running `workdash --server`
+`workdash read PANE_ID [--full] [--json]` requires a running `workdash`
 session and reads pane text through the server-backed pane content API. Human
 output prints the pane text directly. Add `--full` to request full scrollback.
 
 `workdash write PANE_ID TEXT [--raw] [--json]` requires a running
-`workdash --server` session and sends pane input through the server-backed pane
+`workdash` session and sends pane input through the server-backed pane
 send API. By default Workdash appends Enter; `--raw` or `--no-enter` sends the
 text exactly. Human output confirms that the pane accepted the input.
 

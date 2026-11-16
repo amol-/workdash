@@ -6,7 +6,7 @@ Feature: CLI orchestration commands
   humans or pass structured JSON through for agents.
 
   Rules:
-    - `workdash list`, `workdash info`, `workdash ready`, `workdash dispatch`, `workdash analyze`, `workdash code`, `workdash terminal`, `workdash todo`, `workdash read`, `workdash write`, and `workdash close` require a running `workdash --server` session.
+    - `workdash list`, `workdash info`, `workdash ready`, `workdash dispatch`, `workdash analyze`, `workdash code`, `workdash terminal`, `workdash todo`, `workdash read`, `workdash write`, and `workdash close` require a running `workdash` session.
     - All eleven server-backed CLI commands accept `--host HOST[:PORT]` before or after the command, overriding `WORKDASH_HOST`; otherwise they use `WORKDASH_HOST` or `127.0.0.1:8765`. A host without a port uses 8765.
     - `--host` is rejected for server startup and commands other than the eleven server-backed clients; `--version` exits immediately.
     - `WORKDASH_HOST` must be an IPv4 address with an optional port; an explicit `--host` may be a DNS hostname and overrides even an invalid `WORKDASH_HOST`. Host selection preserves positional item targets and todo targets, whether GitHub `owner/repo` names or git URLs.
@@ -66,7 +66,7 @@ Feature: CLI orchestration commands
   Scenario: Info requires the local Workdash server
     Given no server-backed Workdash session is running
     When the user runs `workdash info`
-    Then the command reports that `workdash --server` must be running
+    Then the command reports that `workdash` must be running
     And the command exits with a non-zero status
 
   @id:F-CLI-ORCHESTRATION-S005
@@ -115,7 +115,7 @@ Feature: CLI orchestration commands
   Scenario: Orchestration commands require the local Workdash server
     Given no server-backed Workdash session is running
     When the user runs a server-backed orchestration command
-    Then the command reports that `workdash --server` must be running
+    Then the command reports that `workdash` must be running
     And the command exits with a non-zero status
 
   @id:F-CLI-ORCHESTRATION-S012
@@ -149,7 +149,7 @@ Feature: CLI orchestration commands
   Scenario: Terminal requires the local Workdash server
     Given no server-backed Workdash session is running
     When the user runs `workdash terminal owner/repo#ISSUE-1`
-    Then the command reports that `workdash --server` must be running
+    Then the command reports that `workdash` must be running
     And the command exits with a non-zero status
 
   @id:F-CLI-ORCHESTRATION-S014
@@ -244,7 +244,7 @@ Feature: CLI orchestration commands
   Scenario: Todo requires the local Workdash server
     Given no server-backed Workdash session is running
     When the user runs `workdash todo "Fix the flaky test"`
-    Then the command reports that `workdash --server` must be running
+    Then the command reports that `workdash` must be running
     And the command exits with a non-zero status
 
   @id:F-CLI-ORCHESTRATION-S032
@@ -346,7 +346,6 @@ Feature: CLI orchestration commands
 
     Examples:
       | command     |
-      | --server    |
       | show-config |
 
   @id:F-CLI-ORCHESTRATION-S043

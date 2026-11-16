@@ -104,13 +104,13 @@ def _user_runs_system(
     _run_system(scenario_state, monkeypatch, capsys, [])
 
 
-@when("the user runs the system with `--server`")
+@when("the user runs the system normally")
 def _user_runs_system_with_server(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _run_system(scenario_state, monkeypatch, capsys, ["--server"])
+    _run_system(scenario_state, monkeypatch, capsys, [])
 
 
 def _run_system(
@@ -123,6 +123,7 @@ def _run_system(
         monkeypatch.delenv("ZELLIJ", raising=False)
     else:
         monkeypatch.setenv("ZELLIJ", "0")
+        monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
     exec_calls: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(
         launcher_module.os,
@@ -259,6 +260,9 @@ def _install_direct_start_fakes(
     )
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(workdash_module, "WorkdashControlServer", MagicMock())
 
 
 def _install_startup_which(
@@ -304,7 +308,7 @@ def _start_interactive_dashboard(
     monkeypatch.setattr(launcher_module.subprocess, "run", run)
     if scenario_state.get("named_dashboard"):
         command = (
-            "/usr/bin/python -m workdash --direct"
+            "/usr/bin/python -m workdash --persistent-pane"
             if scenario_state["named_dashboard"] == "running"
             else "/bin/sh"
         )
@@ -328,6 +332,7 @@ def _start_interactive_dashboard(
         monkeypatch.delenv("ZELLIJ", raising=False)
     else:
         monkeypatch.setenv("ZELLIJ", "0")
+        monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
 
     try:
         exit_code = workdash_module.main(argv or [])
@@ -346,30 +351,6 @@ def _user_starts_interactive_dashboard(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _start_interactive_dashboard(scenario_state, monkeypatch, capsys)
-
-
-@when("the user starts the interactive dashboard with `--direct`")
-def _user_starts_interactive_dashboard_direct(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _install_direct_start_fakes(scenario_state, monkeypatch)
-    monkeypatch.setattr(github_client_module.subprocess, "run", lambda *args, **kwargs: None)
-    _install_startup_which(monkeypatch, zellij=False)
-    monkeypatch.setattr(github_client_module.subprocess, "run", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        workdash_module.os,
-        "execvp",
-        lambda _file, _args: (_ for _ in ()).throw(AssertionError("unexpected exec")),
-    )
-    monkeypatch.delenv("ZELLIJ", raising=False)
-
-    exit_code = workdash_module.main(["--direct"])
-    captured = capsys.readouterr()
-    scenario_state["exit_code"] = exit_code
-    scenario_state["output"] = captured.out + captured.err
-    scenario_state["exec_calls"] = []
 
 
 @when("the user starts a server-backed client command")
@@ -459,6 +440,7 @@ def _user_starts_list_command(
         monkeypatch.delenv("ZELLIJ", raising=False)
     else:
         monkeypatch.setenv("ZELLIJ", "0")
+        monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
 
     exit_code = workdash_module.main(["list"])
     captured = capsys.readouterr()
@@ -487,28 +469,6 @@ def _replaces_with_zellij_process(scenario_state: dict[str, Any]) -> None:
     file, command = scenario_state["exec_calls"][0]
     assert file == "/usr/bin/zellij"
     assert command[0] == "/usr/bin/zellij"
-
-
-@then("the Zellij process runs the dashboard with `--direct`")
-def _zellij_runs_dashboard_direct(scenario_state: dict[str, Any]) -> None:
-    layout = _read_startup_layout(scenario_state)
-    assert "--direct" in layout
-
-
-@when("the user starts the interactive dashboard with `--server`")
-def _user_starts_interactive_dashboard_server(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _start_interactive_dashboard(scenario_state, monkeypatch, capsys, argv=["--server"])
-
-
-@then("the Zellij process runs the dashboard with `--direct --server`")
-def _zellij_runs_dashboard_direct_server(scenario_state: dict[str, Any]) -> None:
-    layout = _read_startup_layout(scenario_state)
-    assert "--direct" in layout
-    assert "--server" in layout
 
 
 def _read_startup_layout(scenario_state: dict[str, Any]) -> str:
@@ -592,10 +552,13 @@ def _named_session_stopped(scenario_state):
     scenario_state.update(outside_zellij=True, _zellij_installed=True, named_dashboard="stopped")
 
 
-@when("the user starts the dashboard in the named session with server mode")
+@when("the user starts the dashboard in the named session with extra listener options")
 def _start_named_session(scenario_state, monkeypatch, capsys):
     _start_interactive_dashboard(
-        scenario_state, monkeypatch, capsys, argv=["--session", "project", "--server"]
+        scenario_state,
+        monkeypatch,
+        capsys,
+        argv=["--session", "project", "--listen", "127.0.0.2@192.0.2.0/24"],
     )
 
 
@@ -609,11 +572,11 @@ def _reports_options_ignored(scenario_state):
     assert "options are ignored" in scenario_state["output"]
 
 
-@then("the system starts a dashboard with server mode in that session")
+@then("the system starts a dashboard with extra listener options in that session")
 def _starts_dashboard_in_named_session(scenario_state):
     command = next(c for c in scenario_state["zellij_actions"] if "new-pane" in c)
     assert command[1:3] == ["--session", "project"]
-    assert "--server" in command
+    assert "--listen" in command and "127.0.0.2@192.0.2.0/24" in command
 
 
 @then("the previous dashboard pane is preserved")

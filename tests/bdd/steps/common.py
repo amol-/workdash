@@ -703,11 +703,11 @@ def _system_exits_nonzero(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["exit_code"] != 0, scenario_state
 
 
-@then("the command reports that `workdash --server` must be running")
+@then("the command reports that `workdash` must be running")
 def _reports_server_must_be_running(scenario_state: dict[str, Any]) -> None:
     assert scenario_state.get("urlopen_requests"), scenario_state
     assert (
-        "No Workdash server is reachable at 127.0.0.1:8765. Start one with `workdash --server`."
+        "No Workdash server is reachable at 127.0.0.1:8765. Start one with `workdash`."
     ) in scenario_state["stderr"]
 
 

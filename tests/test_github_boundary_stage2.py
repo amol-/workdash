@@ -48,7 +48,7 @@ def test_startup_and_backend_use_same_github_client(monkeypatch):
         lambda self, **kwargs: seen.append(self._load_config_and_backend()[1].github_client) or 0,
     )
 
-    assert app.main(["--direct"]) == 0
+    assert app.main([]) == 0
     client.check_authentication.assert_called_once()
     assert seen == [client]
 
