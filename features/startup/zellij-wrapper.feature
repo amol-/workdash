@@ -2,7 +2,7 @@
 Feature: Persistent dashboard Zellij session
 
   Rules:
-    - Outside Zellij, workdash creates or attaches to the `workdash` session; `--session NAME` selects another session. An exited selected session is recovered with its existing tabs and panes before ensuring the dashboard is running.
+    - Outside Zellij, workdash creates or attaches to the `workdash` session; `--session NAME` selects another session. An exited selected session is recovered with its existing tabs and panes before ensuring the dashboard is running. Tabs added after recovery are also preserved for a later recovery, even if the user's Zellij configuration disables session persistence.
     - A new session has a `dashboard` tab with tab and status bars, a dashboard pane named `workdash tui` above a shell pane.
     - If the dashboard is already running, workdash reports that the new options are ignored and attaches after one second.
     - If the dashboard is not running, workdash starts it with the new options and current `WORKDASH_HOST` setting in the `dashboard` tab, creating that tab if needed, and preserves any stale dashboard pane under another name. An unset `WORKDASH_HOST` selects the default address.

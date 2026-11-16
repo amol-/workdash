@@ -753,6 +753,10 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
         "raise SystemExit(cli.main())\n"
     )
     script.chmod(0o755)
+    command = tmp_path / "saved-command"
+    runs = tmp_path / "command-runs"
+    command.write_text(f"#!/bin/sh\necho run >> {shlex.quote(str(runs))}\nsleep 120\n")
+    command.chmod(0o755)
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -804,10 +808,26 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
                 ).returncode
                 == 0
             )
+            assert (
+                run(
+                    "--session",
+                    name,
+                    "action",
+                    "new-pane",
+                    "--name",
+                    "saved-command",
+                    "--",
+                    str(command),
+                ).returncode
+                == 0
+            )
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 layouts = list((tmp_path / "cache").rglob("session-layout.kdl"))
-                if any('name="work"' in layout.read_text() for layout in layouts):
+                if runs.exists() and any(
+                    'name="work"' in layout.read_text() and str(command) in layout.read_text()
+                    for layout in layouts
+                ):
                     break
                 time.sleep(0.1)
             else:
@@ -846,7 +866,13 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
             panes = json.loads(
                 run("--session", name, "action", "list-panes", "--json", "--all").stdout
             )
-            work = next(p for p in panes if p["tab_name"] == "work" and not p["is_plugin"])
+            assert runs.read_text().splitlines() == ["run"]
+            assert any(p["title"] == "saved-command" and p["is_held"] for p in panes)
+            work = next(
+                p
+                for p in panes
+                if p["tab_name"] == "work" and not p["is_plugin"] and not p["is_held"]
+            )
             dashboard = next(p for p in panes if p["title"] == "workdash tui" and not p["is_held"])
             pane_id = f"terminal_{work['id']}"
             assert (
@@ -871,6 +897,45 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
             while not (tmp_path / "preserved.txt").exists() and time.monotonic() < deadline:
                 time.sleep(0.1)
             assert (tmp_path / "preserved.txt").read_text().strip() == "preserved"
+            assert (
+                run("--session", name, "action", "new-tab", "--name", "later-work").returncode == 0
+            )
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                layouts = list((tmp_path / "cache").rglob("session-layout.kdl"))
+                if any('name="later-work"' in layout.read_text() for layout in layouts):
+                    break
+                time.sleep(0.1)
+            else:
+                pytest.fail("tab added after recovery was not serialized")
+            assert run("kill-session", name).returncode == 0
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                sessions = run("list-sessions", "--no-formatting").stdout
+                if name in sessions and "(EXITED" in sessions:
+                    break
+                time.sleep(0.1)
+            else:
+                pytest.fail(f"recovered session did not exit: {sessions}")
+            start([str(script), "--session", name])
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    client.request("info")
+                    panes = json.loads(
+                        run("--session", name, "action", "list-panes", "--json", "--all").stdout
+                    )
+                    if any(p["tab_name"] == "later-work" for p in panes):
+                        break
+                except (WorkdashControlError, json.JSONDecodeError):
+                    pass
+                time.sleep(0.1)
+            else:
+                pytest.fail("tab added after recovery did not survive the next recovery")
+            assert runs.read_text().splitlines() == ["run"]
+            assert any(p["title"] == "saved-command" and p["is_held"] for p in panes)
+            assert any(p["tab_name"] == "work" and not p["is_plugin"] for p in panes)
+            dashboard = next(p for p in panes if p["title"] == "workdash tui" and not p["is_held"])
             dashboard_id = f"terminal_{dashboard['id']}"
             assert (
                 run(

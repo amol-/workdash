@@ -24,7 +24,14 @@ def test_exited_session_recovery_failure_does_not_create_a_new_session(monkeypat
         launcher.zellij.exec_zellij_wrapped_workdash(["--session", "custom"])
     assert calls == [
         ["/zellij", "list-sessions", "--no-formatting"],
-        ["/zellij", "attach", "-b", "custom"],
+        [
+            "/zellij",
+            "--layout-string",
+            "session_serialization true\ndisable_session_metadata false\nlayout {}",
+            "attach",
+            "-b",
+            "custom",
+        ],
     ]
 
 

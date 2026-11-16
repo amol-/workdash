@@ -650,8 +650,16 @@ class Zellij:
         if session_name in sessions:
             if sessions[session_name]:
                 try:
+                    # Attach's boolean options can toggle twice; layout options override config.
                     subprocess.run(
-                        [zellij, "attach", "-b", session_name],
+                        [
+                            zellij,
+                            "--layout-string",
+                            "session_serialization true\ndisable_session_metadata false\nlayout {}",
+                            "attach",
+                            "-b",
+                            session_name,
+                        ],
                         check=True,
                         capture_output=True,
                         text=True,
