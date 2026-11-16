@@ -272,7 +272,10 @@ class FakeGitHub:
     def _PullRequestStates(self, query: str) -> dict:
         return {
             alias: {
-                "pullRequest": {"state": self.pull_requests[f"{owner}/{name}#{number}"]["state"]}
+                "pullRequest": {
+                    "state": self.pull_requests[f"{owner}/{name}#{number}"]["state"],
+                    "mergedAt": self.pull_requests[f"{owner}/{name}#{number}"]["merged"],
+                }
             }
             for alias, owner, name, number in _queried_pull_requests(query)
         }

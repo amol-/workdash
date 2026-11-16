@@ -62,8 +62,29 @@ Feature: Automatically dispatch ready work
     - A pull request that closes several issues is dispatched as the lowest one by repository name, then by issue number, which is the issue coding the same pull request would code.
     - When GitHub cannot report a pull request's linked issues, the TUI reports that lookup failure instead of claiming the pull request has no linked issue.
     - Pressing "d" on a pull request that is not authored by you reports that dispatch is unavailable and starts no session.
-    - The dashboard shows running sessions and the three most recently started failed sessions, with failure summaries kept to one line each; full details remain available through info.
+    - After three reminders and a further idle window without a pull request, a session remains blocked and visible in the dashboard and info. Pane activity postpones the next reminder or block but does not reset the reminder limit. A change in blocked pane content or successful input through Workdash immediately resumes supervision with a fresh limit, even if the screen stays unchanged or GitHub is temporarily unavailable. If a later pull request merges, the pane closes and the session continues to the next ready task.
+    - With progress focused, the selected blocked session offers stop. Stopping closes its pane without changing the worktree. Starting another session for the same scope also closes the blocked pane before replacing the session. If the pane content has changed before either action closes it, the session still stops or is replaced, but that action leaves the recovered pane open. An exact-issue restart can still close it to dispatch ready work.
+    - The dashboard shows running and blocked sessions and the three most recently started failed sessions, with failure summaries kept to one line each; full details remain available through info.
     - When an autodispatch refresh updates a pull request row, its current linked issues determine later refreshes and worktree selection.
+
+  @id:F-AUTODISPATCH-S020
+  Scenario: A blocked session is visible and resumes when its pane changes
+    Given an autodispatch session has blocked after three reminders without a pull request
+    Then the blocked session is visible in info and on the dashboard
+    When its agent pane content changes
+    Then the session resumes running
+
+  @id:F-AUTODISPATCH-S022
+  Scenario: Input through Workdash resumes a blocked session
+    Given an autodispatch session has blocked after three reminders without a pull request
+    When the user sends input to its agent pane through Workdash
+    Then the session resumes running
+
+  @id:F-AUTODISPATCH-S021
+  Scenario: Stop a blocked session from the dashboard
+    Given an autodispatch session has blocked after three reminders without a pull request
+    When the user stops the blocked session from the dashboard
+    Then its agent pane closes and its worktree is preserved
 
   @id:F-AUTODISPATCH-S013
   Scenario: Start autodispatch from an issue in the dashboard

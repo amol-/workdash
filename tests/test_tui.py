@@ -3160,7 +3160,12 @@ def test_loaded_linked_pr_tracks_autodispatch_stop() -> None:
             assert table.get_row("pr:owner/repo#99")[2].style == "bold magenta"
             assert str(table.get_row("pr:owner/repo#99")[0]).startswith("✓")
             table.move_cursor(row=10)
-            await pilot.pause()
+            for _ in range(100):
+                await pilot.pause(0.02)
+                if table.scroll_y == table.scroll_target_y and table.scroll_y > 0:
+                    break
+            assert table.scroll_y == table.scroll_target_y
+            assert table._get_row_region(table.cursor_row).y - table.scroll_y < table.size.height
             selected, scroll = app._selected_item(), table.scroll_y
             assert scroll > 0
             session.stop_autodispatch(str(entry["id"]))
@@ -3487,3 +3492,46 @@ def test_include_closed_todo_is_pruned_on_refresh(tmp_path, duplicate: bool) -> 
             assert github.fetch_item_by_url.call_count == (1 if duplicate else 2)
 
     asyncio.run(run_test())
+
+
+def test_progress_selects_and_stops_a_blocked_session():
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    entry = {
+        "id": "first",
+        "status": "running",
+        "scope": "owner/repo#1",
+        "current_item": "owner/repo#1",
+        "selected_group": None,
+        "stage": "developing",
+        "launch_reason": None,
+        "iteration": 1,
+        "elapsed_seconds": 0,
+        "error": None,
+    }
+    blocked = {**entry, "id": "blocked", "scope": "owner/repo#2", "status": "blocked"}
+    session.autodispatch_sessions = MagicMock(return_value=[entry, blocked])
+    session.stop_autodispatch = MagicMock()
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test() as pilot:
+            await pilot.press("shift+tab")
+            await pilot.press("down")
+            footer = str(app.query_one("#command-footer").render())
+            assert "(s)top" in footer
+            assert "(d)ispatch" not in footer
+            app._selected_item = MagicMock()
+            await pilot.press("d")
+            app._selected_item.assert_not_called()
+            assert "blocked (s)top" in str(app.query_one("#autodispatch-progress").render())
+            session.autodispatch_sessions.return_value = [entry]
+            await pilot.press("s")
+            session.stop_autodispatch.assert_called_once_with("blocked")
+
+    asyncio.run(run())

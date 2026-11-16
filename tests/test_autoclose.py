@@ -151,6 +151,7 @@ class Supervision:
 
     def _type(self, _session: str, pane_id: str, data: str, *, raw: bool = False) -> None:
         self.sent.append((pane_id, data))
+        self.screen += data
 
     def _press_enter(self, _session: str, pane_id: str) -> None:
         self.enters.append(pane_id)
@@ -315,6 +316,22 @@ def test_an_idle_pane_resolves_its_work_state_every_five_minutes(monkeypatch, tm
     assert "ReadyPullRequests" in supervision.github.operations
 
 
+def test_issue_with_someone_elses_new_pull_request_is_not_reminded_or_blocked(
+    monkeypatch, tmp_path
+):
+    supervision = Supervision(monkeypatch, tmp_path)
+    del supervision.github.pull_requests["owner/repo#51"]
+    supervision.launch(autoclose=True)
+    supervision.poll(5)
+    assert len(supervision.sent) == 1
+
+    supervision.github.add_pull_request("owner/repo#52", closes=("owner/repo#42",), author="other")
+    supervision.poll(20)
+    assert len(supervision.sent) == 1
+    assert not supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    assert not supervision.closed
+
+
 def test_a_pull_request_that_merged_before_the_launch_does_not_close_the_pane(
     monkeypatch, tmp_path
 ) -> None:
@@ -328,13 +345,88 @@ def test_a_pull_request_that_merged_before_the_launch_does_not_close_the_pane(
     # A comment after the launch makes the pull request look newer, but it merged long before.
     supervision.github.pull_requests["owner/repo#51"]["updated"] = datetime.now(UTC).isoformat()
 
+    for attempt in range(3):
+        supervision.poll(5)
+        assert len(supervision.sent) == attempt + 1
+        assert not supervision.session.autoclose.blocked("workdash-main", "terminal_21")
     supervision.poll(5)
+    assert len(supervision.sent) == 3
+    assert supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    assert not supervision.closed
 
-    assert (supervision.sent, supervision.closed) == ([], [])
-    # The pane is still checked, so it is still supervised.
-    supervision.github.operations.clear()
-    supervision.poll(10)
-    assert supervision.github.operations
+
+@pytest.mark.parametrize("target", ["owner/repo#ISSUE-42", "owner/repo#PR-51"])
+@pytest.mark.parametrize("seconds_after_launch", [-1, 0, 1])
+@pytest.mark.parametrize("known_before_merge", [False, True])
+def test_merge_second_relative_to_launch(
+    monkeypatch, tmp_path, target, seconds_after_launch, known_before_merge
+):
+    launched_at = datetime(2025, 1, 1, 12, 0, 0, 500000, tzinfo=UTC)
+
+    class LaunchClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return launched_at
+
+    monkeypatch.setattr(control_module, "datetime", LaunchClock)
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.launch(target, autoclose=True)
+    if known_before_merge:
+        supervision.poll()
+    merged_at = launched_at.replace(microsecond=0) + timedelta(seconds=seconds_after_launch)
+    supervision.github.pull_requests["owner/repo#51"].update(
+        state="MERGED", merged=merged_at.isoformat().replace("+00:00", "Z")
+    )
+
+    supervision.poll()
+
+    assert supervision.closed == (["terminal_21"] if seconds_after_launch > 0 else [])
+
+
+@pytest.mark.parametrize("target", ["owner/repo#ISSUE-42", "owner/repo#PR-51"])
+def test_merge_during_pane_startup_closes_pane(monkeypatch, tmp_path, target):
+    now = [datetime(2025, 1, 1, 12, 0, tzinfo=UTC)]
+
+    class LaunchClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now[0]
+
+    monkeypatch.setattr(control_module, "datetime", LaunchClock)
+    supervision = Supervision(monkeypatch, tmp_path)
+    launch = supervision._launch
+
+    def launch_during_merge(*args, **kwargs):
+        result = launch(*args, **kwargs)
+        now[0] += timedelta(seconds=1)
+        supervision.github.pull_requests["owner/repo#51"].update(
+            state="MERGED", merged=now[0].isoformat()
+        )
+        now[0] += timedelta(seconds=1)
+        return result
+
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch_during_merge)
+    supervision.launch(target, autoclose=True)
+    supervision.poll()
+
+    assert supervision.closed == ["terminal_21"]
+
+
+def test_explicit_pull_request_merge_closes_without_detailed_lookup(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.launch("owner/repo#PR-51", autoclose=True)
+    supervision.github.pull_requests["owner/repo#51"].update(
+        state="MERGED", merged=datetime.now(UTC).isoformat()
+    )
+    monkeypatch.setattr(
+        supervision.session.backend.github_client,
+        "work_pull_request",
+        MagicMock(side_effect=RuntimeError("work lookup unavailable")),
+    )
+
+    supervision.poll()
+
+    assert supervision.closed == ["terminal_21"]
 
 
 def test_work_that_merges_inside_the_discovery_gap_closes_its_pane(monkeypatch, tmp_path) -> None:
@@ -574,7 +666,396 @@ def test_github_is_read_outside_the_session_lock(monkeypatch, tmp_path) -> None:
     assert lock_states and not any(lock_states)
 
 
-def test_a_screen_signature_ignores_control_sequences_and_trailing_blanks() -> None:
-    styled = "\x1b[32mworking\x1b[0m   \r\n\x1b]0;title\x07\nidle   \n\n\n"
+@pytest.mark.parametrize("change", [" ", "\n", "\x1b[32m"])
+def test_blocked_pane_content_change_resumes_supervision(monkeypatch, tmp_path, change):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    supervision.poll(20)
+    assert supervision.session.autoclose.blocked("workdash-main", "terminal_21")
 
-    assert autoclose_module._screen_signature(styled) == "working\n\nidle"
+    supervision.screen += change
+    supervision.poll()
+    assert not supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    supervision.poll(5)
+    assert len(supervision.sent) == 4
+
+
+def test_blocked_pane_recovers_during_github_backoff(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    supervision.poll(20)
+    assert supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+
+    lookup = MagicMock(side_effect=RuntimeError("GitHub unavailable"))
+    monkeypatch.setattr(supervision.session.backend.github_client, "work_pull_request", lookup)
+    supervision.poll()
+    assert lookup.call_count == 1
+    supervision.screen += "resumed"
+    supervision.poll()
+    assert not supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    assert lookup.call_count == 1
+    assert len(supervision.sent) == 3
+    assert not supervision.closed
+
+    monkeypatch.setattr(
+        supervision.session.backend.github_client, "work_pull_request", supervision._work_state
+    )
+    supervision.poll(4)
+    assert len(supervision.sent) == 3
+    supervision.poll()
+    assert len(supervision.sent) == 4
+
+
+def test_stop_during_blocked_pane_recovery_keeps_pane_open(monkeypatch, tmp_path):
+    from workdash.autodispatch import _AutodispatchSession
+
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    activity = _AutodispatchSession(supervision.session, "owner/repo", None, "pi")
+    activity.pane = ("workdash-main", "terminal_21")
+    supervision.session._autodispatch[activity.id] = activity
+    supervision.poll(20)
+    assert supervision.session.autoclose.blocked(*activity.pane)
+    supervision.screen += "resumed"
+
+    observed = threading.Event()
+    resume = threading.Event()
+    stopped = threading.Event()
+
+    def dump(*args, **kwargs):
+        screen = supervision._dump(*args, **kwargs)
+        observed.set()
+        assert resume.wait(2)
+        return screen
+
+    monkeypatch.setattr(autoclose_module.launcher.zellij, "dump_zellij_pane", dump)
+
+    def stop():
+        supervision.session.stop_autodispatch(activity.id)
+        stopped.set()
+
+    polling = threading.Thread(target=supervision.poll)
+    stopping = threading.Thread(target=stop)
+    polling.start()
+    try:
+        assert observed.wait(2)
+        stopping.start()
+        assert not stopped.wait(0.2)
+    finally:
+        resume.set()
+        polling.join(2)
+        if stopping.ident is not None:
+            stopping.join(2)
+    assert stopped.is_set()
+    assert not supervision.closed
+    assert not supervision.session.autoclose.blocked(*activity.pane)
+
+
+def test_no_pull_request_blocks_after_three_full_windows_and_input_resumes(monkeypatch, tmp_path):
+    from workdash.autodispatch import _AutodispatchSession
+
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    launch = MagicMock(side_effect=supervision._launch)
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch)
+    supervision.launch(autoclose=True)
+    activity = _AutodispatchSession(supervision.session, "owner/repo", None, "pi")
+    activity.pane = ("workdash-main", "terminal_21")
+    supervision.session._autodispatch[activity.id] = activity
+
+    for attempt in range(3):
+        supervision.poll(4)
+        assert len(supervision.sent) == attempt
+        supervision.poll()
+        assert len(supervision.sent) == attempt + 1
+        assert supervision.sent[-1][1] == launch.call_args.args[1].removeprefix("PROMPT\n\n")
+    supervision.poll(4)
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "running"
+    supervision.poll()
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+    assert not supervision.closed
+
+    supervision.session.pane_send(pane_id="terminal_21", data="continue")
+    supervision.poll()
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "running"
+    supervision.poll(5)
+    assert len(supervision.sent) == 5  # three reminders, human input, then a new reminder
+    supervision.poll(15)
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+    supervision.screen = "new agent output"
+    supervision.poll()
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "running"
+    supervision.poll(5)
+    assert len(supervision.sent) == 8
+    supervision.poll(15)
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+
+
+@pytest.mark.parametrize("raw", [True, False])
+@pytest.mark.parametrize("fails", [True, False])
+def test_blocked_input_with_unchanged_screen(monkeypatch, tmp_path, raw, fails):
+    from workdash.autodispatch import _AutodispatchSession
+
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    activity = _AutodispatchSession(supervision.session, "owner/repo", None, "pi")
+    activity.pane = ("workdash-main", "terminal_21")
+    supervision.session._autodispatch[activity.id] = activity
+    supervision.poll(20)
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+
+    send = MagicMock(side_effect=RuntimeError("send failed") if fails else None)
+    monkeypatch.setattr(control_module.launcher.zellij, "send_zellij_pane_input", send)
+    if fails:
+        with pytest.raises(RuntimeError, match="send failed"):
+            supervision.session.pane_send(pane_id="terminal_21", data="continue", raw=raw)
+        assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+    else:
+        supervision.session.pane_send(pane_id="terminal_21", data="continue", raw=raw)
+        assert supervision.session.autodispatch_sessions()[0]["status"] == "running"
+        supervision.poll(4)
+        assert send.call_count == 1
+        supervision.poll()
+        assert send.call_count == 2
+        supervision.poll(15)
+        assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+
+
+def test_delayed_reminder_redraw_does_not_reset_retry_limit(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    monkeypatch.setattr(
+        autoclose_module.launcher.zellij,
+        "send_zellij_pane_input",
+        lambda _session, pane_id, data, **_kwargs: supervision.sent.append((pane_id, data)),
+    )
+
+    for attempt in range(3):
+        supervision.poll(5)
+        assert len(supervision.sent) == attempt + 1
+        supervision.screen += supervision.sent[-1][1]
+        supervision.poll()
+        assert not supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    supervision.poll(5)
+    assert len(supervision.sent) == 3
+    assert supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+
+
+def test_output_between_reminders_postpones_blocking(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    supervision.poll(10)
+    assert len(supervision.sent) == 2
+
+    supervision.screen = "agent resumed on its own"
+    supervision.poll()
+    supervision.poll(4)
+    assert len(supervision.sent) == 2
+    supervision.poll(6)
+    assert len(supervision.sent) == 3
+    assert supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+
+
+def test_input_during_block_decision_restarts_reminders(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    supervision.poll(19)
+    assert len(supervision.sent) == 3
+
+    lookup = supervision.session.backend.github_client.work_pull_request
+    calls = 0
+
+    def input_during_decision(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            supervision.session.pane_send(pane_id="terminal_21", data="continue", raw=True)
+        return lookup(*args, **kwargs)
+
+    monkeypatch.setattr(
+        supervision.session.backend.github_client, "work_pull_request", input_during_decision
+    )
+    supervision.poll()
+    assert calls == 1
+    assert not supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    assert len(supervision.sent) == 4  # three reminders and human input
+    supervision.poll(5)
+    assert len(supervision.sent) == 4
+    assert supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+
+
+@pytest.mark.parametrize("change", ["output", "identity"])
+def test_pane_changes_during_block_decision(monkeypatch, tmp_path, change):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    supervision.poll(19)
+    assert len(supervision.sent) == 3
+
+    lookup = supervision.session.backend.github_client.work_pull_request
+
+    def change_during_decision(*args, **kwargs):
+        result = lookup(*args, **kwargs)
+        monkeypatch.setattr(supervision.session.backend.github_client, "work_pull_request", lookup)
+        if change == "output":
+            supervision.screen = "agent is working"
+        else:
+            supervision.panes[0]["title"] = "another pane"
+        return result
+
+    monkeypatch.setattr(
+        supervision.session.backend.github_client, "work_pull_request", change_during_decision
+    )
+    supervision.poll()
+    assert not supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    supervision.poll(4)
+    assert not supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    if change == "output":
+        supervision.poll()
+        assert supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    assert not supervision.closed
+
+
+def test_stopping_blocked_autodispatch_closes_pane_without_touching_worktree(monkeypatch, tmp_path):
+    from workdash.autodispatch import _AutodispatchSession
+
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    activity = _AutodispatchSession(supervision.session, "owner/repo", None, "pi")
+    activity.pane = ("workdash-main", "terminal_21")
+    supervision.session._autodispatch[activity.id] = activity
+    work = supervision.worktree / "unpublished.txt"
+    work.write_text("keep this")
+    supervision.poll(20)
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+    assert supervision.session.stop_autodispatch(activity.id)["status"] == "stopped"
+    assert supervision.closed == ["terminal_21"]
+    assert work.read_text() == "keep this"
+
+
+def test_blocked_pane_discovers_later_merge_without_reminders(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    supervision.poll(20)
+    assert supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    supervision.github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#42",),
+        state="MERGED",
+        merged=datetime.now(UTC).isoformat(),
+    )
+    supervision.poll(6)
+    assert supervision.closed == ["terminal_21"]
+    assert len(supervision.sent) == 3
+
+
+def test_replacing_blocked_autodispatch_closes_old_pane(monkeypatch, tmp_path):
+    from workdash.autodispatch import _AutodispatchSession
+
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    activity = _AutodispatchSession(supervision.session, "owner/repo", None, "pi")
+    activity.pane = ("workdash-main", "terminal_21")
+    supervision.session._autodispatch[activity.id] = activity
+    work = supervision.worktree / "unpublished.txt"
+    work.write_text("keep this")
+    supervision.poll(20)
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+    supervision.session.start_autodispatch(scope="owner/repo")
+    assert supervision.closed == ["terminal_21"]
+    assert work.read_text() == "keep this"
+
+
+@pytest.mark.parametrize("action", ["stop", "replace"])
+@pytest.mark.parametrize("change", ["agent resumed", " ", "\n", "\x1b[32m"])
+def test_changed_blocked_pane_stays_open_when_session_stops(monkeypatch, tmp_path, action, change):
+    from workdash.autodispatch import _AutodispatchSession
+
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    activity = _AutodispatchSession(supervision.session, "owner/repo", None, "pi")
+    activity.pane = ("workdash-main", "terminal_21")
+    supervision.session._autodispatch[activity.id] = activity
+    supervision.poll(20)
+    assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+
+    supervision.screen += change
+    if action == "stop":
+        assert supervision.session.stop_autodispatch(activity.id)["status"] == "stopped"
+    else:
+        supervision.session.start_autodispatch(scope="owner/repo")
+        assert activity.status == activity.Status.STOPPED
+    assert not supervision.closed
+    assert not supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    supervision.poll(4)
+    assert len(supervision.sent) == 3
+    supervision.poll()
+    assert len(supervision.sent) == 4
+
+
+def test_blocked_autodispatch_advances_after_later_merge(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.session.config.agents["pi"] = AgentConfig(launch="pi", analyze="pi -p")
+    monkeypatch.setattr(supervision.session, "prepare_autodispatch", lambda _: None)
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
+    launched = threading.Event()
+    selected_next = threading.Event()
+    calls = []
+
+    def dispatch(**kwargs):
+        calls.append("dispatch")
+        if len(calls) > 1:
+            selected_next.set()
+            return {"status": "no_ready_task"}
+        supervision.launch(autoclose=True)
+        launched.set()
+        return {
+            "status": "launched",
+            "item_id": "owner/repo#ISSUE-42",
+            "pane_id": "terminal_21",
+            "session": "workdash-main",
+        }
+
+    def review(**kwargs):
+        calls.append("review")
+        return {"status": "nothing_to_review"}
+
+    monkeypatch.setattr(supervision.session, "dispatch_once", dispatch)
+    monkeypatch.setattr(supervision.session, "review", review)
+    started = supervision.session.start_autodispatch(scope="owner/repo")
+    try:
+        assert launched.wait(2)
+        for _ in range(200):
+            if supervision.session.autodispatch_sessions()[0]["current_item"]:
+                break
+            threading.Event().wait(0.01)
+        assert (
+            supervision.session.autodispatch_sessions()[0]["current_item"] == "owner/repo#ISSUE-42"
+        )
+        supervision.poll(20)
+        assert supervision.session.info()["autodispatch_sessions"][0]["status"] == "blocked"
+        supervision.github.add_pull_request(
+            "owner/repo#51",
+            closes=("owner/repo#42",),
+            state="MERGED",
+            merged=datetime.now(UTC).isoformat(),
+        )
+        supervision.poll(6)
+        assert supervision.closed == ["terminal_21"]
+        assert selected_next.wait(2)
+        assert calls == ["dispatch", "review", "dispatch"]
+    finally:
+        supervision.session.stop_autodispatch(started["id"])
+        supervision.session._autodispatch[started["id"]].thread.join(timeout=2)
