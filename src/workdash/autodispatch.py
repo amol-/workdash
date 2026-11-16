@@ -38,6 +38,7 @@ class _AutodispatchSession:
         self.ended: float | None = None
         self.status = self.Status.RUNNING
         self.current_item: str | None = None
+        self.pane: tuple[str, str] | None = None
         self.selected_group: str | None = group
         self.stage = "checking"
         self.launch_reason: str | None = None
@@ -49,6 +50,7 @@ class _AutodispatchSession:
 
     def snapshot(self) -> dict[str, object]:
         with self.lock:
+            blocked = self.pane and self.owner.autoclose.blocked(*self.pane)
             return {
                 "id": self.id,
                 "scope": self.scope,
@@ -66,12 +68,16 @@ class _AutodispatchSession:
                 "stage": self.stage,
                 "launch_reason": self.launch_reason,
                 "iteration": self.iteration,
-                "status": str(self.status),
+                "status": "blocked"
+                if self.status == self.Status.RUNNING and blocked
+                else str(self.status),
                 "error": self.error,
             }
 
-    def stop(self) -> None:
+    def stop(self, *, close_blocked: bool = False) -> None:
         with self.lock:
+            if close_blocked and self.pane and self.owner.autoclose.blocked(*self.pane):
+                self.owner.autoclose.stop_blocked(*self.pane)
             self.stop_event.set()
             if self.status == self.Status.RUNNING:
                 self.status = self.Status.STOPPED
@@ -103,6 +109,7 @@ class _AutodispatchSession:
                     self.stage = "checking"
                     self.owner.completed_autodispatch_item(self.current_item)
                     self.current_item = None
+                    self.pane = None
                     self.launch_reason = None
                 stage = "dispatch"
                 result = self.owner.dispatch_once(
@@ -121,6 +128,7 @@ class _AutodispatchSession:
                         return
                     logger.info("Session %s launched pane %s", self.id, result["pane_id"])
                     self.current_item = str(result["item_id"])
+                    self.pane = (str(result["session"]), str(result["pane_id"]))
                     self.selected_group = result.get("tab_name") or result.get("group")
                     self.launch_reason = result.get("launch_reason")
                     self.stage = "developing"
@@ -129,6 +137,9 @@ class _AutodispatchSession:
                 stage = "pane polling"
                 absent = 0
                 while not self.stop_event.wait(_AUTODISPATCH_POLL_SECONDS):
+                    if self.pane and self.owner.autoclose.blocked(*self.pane):
+                        absent = 0
+                        continue
                     panes = launcher.zellij.load_zellij_panes(str(result["session"]))
                     present = any(
                         _format_pane_id(pane.get("id")) == result["pane_id"]

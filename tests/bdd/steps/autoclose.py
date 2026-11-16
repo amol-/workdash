@@ -212,6 +212,28 @@ def _supervised_pull_request_pane(
 
 
 @given(
+    parsers.parse(
+        "a supervised coding pane for pull request `{item_id}` that merged before the launch"
+    )
+)
+def _supervised_previously_merged_pull_request(
+    item_id: str,
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repo, _, number = item_id.partition("#PR-")
+    scenario_state["github"].add_pull_request(
+        f"{repo}#{number}",
+        state="MERGED",
+        merged=(datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+    )
+    _supervise_new_pane(scenario_state, work_items, tmp_path, monkeypatch, caplog, item_id)
+
+
+@given(
     parsers.parse("an open pull request `{ref}` by somebody else with a failing check `{check}`")
 )
 def _somebody_elses_pull_request(ref: str, check: str, scenario_state: dict[str, Any]) -> None:
@@ -302,7 +324,9 @@ def _base_branch_moves(ref: str, scenario_state: dict[str, Any]) -> None:
 
 @when(parsers.parse("pull request `{ref}` merges"))
 def _pull_request_merges(ref: str, scenario_state: dict[str, Any]) -> None:
-    scenario_state["github"].pull_requests[ref]["state"] = "MERGED"
+    scenario_state["github"].pull_requests[ref].update(
+        state="MERGED", merged=datetime.now(UTC).isoformat()
+    )
 
 
 @when(parsers.parse("pull request `{ref}` opens and merges for issue `{issue}`"))
@@ -374,6 +398,9 @@ def _pane_receives_instruction(action: str, scenario_state: dict[str, Any]) -> N
     pane_id, instruction = scenario_state["sent"][-1]
     assert pane_id == scenario_state["supervised_pane_id"]
     assert INSTRUCTION_PHRASES[action] in instruction
+    if action == "implement":
+        original = scenario_state.setdefault("original_implement_instruction", instruction)
+        assert instruction == original
     # The text is followed by its Enter, so the agent reads it and starts working.
     assert scenario_state["submitted"][-1] == pane_id
     scenario_state["sent_count"] = len(scenario_state["sent"])
@@ -391,7 +418,8 @@ def _pane_receives_instruction_again(action: str, scenario_state: dict[str, Any]
     sent_count = scenario_state["sent_count"]
     _pane_receives_instruction(action, scenario_state)
     assert len(scenario_state["sent"]) == sent_count + 1
-    assert scenario_state["sent"][-1][1] == scenario_state["sent"][-2][1]
+    if action != "implement":
+        assert scenario_state["sent"][-1][1] == scenario_state["sent"][-2][1]
 
 
 @then("nothing is sent to the supervised pane")
@@ -422,3 +450,26 @@ def _server_reports_needs_review(caplog: pytest.LogCaptureFixture) -> None:
 @then("the server reports the pane as waiting for unpublished work")
 def _server_reports_unpublished_work(caplog: pytest.LogCaptureFixture) -> None:
     assert "unpublished work" in caplog.text
+
+
+@then("the supervised pane is blocked")
+def _pane_blocked(scenario_state: dict[str, Any]) -> None:
+    session = scenario_state["api_session"]
+    assert session.autoclose.blocked(session.zellij_session, scenario_state["supervised_pane_id"])
+
+
+@when("the user sends instructions to the supervised pane")
+def _user_sends_instructions(scenario_state: dict[str, Any]) -> None:
+    scenario_state["api_session"].pane_send(
+        pane_id=scenario_state["supervised_pane_id"], data="Please continue"
+    )
+    scenario_state["screen"] = "Please continue\n"
+    scenario_state["sent_count"] = len(scenario_state["sent"])
+
+
+@then("the supervised pane is no longer blocked")
+def _pane_unblocked(scenario_state: dict[str, Any]) -> None:
+    session = scenario_state["api_session"]
+    assert not session.autoclose.blocked(
+        session.zellij_session, scenario_state["supervised_pane_id"]
+    )

@@ -2904,7 +2904,8 @@ def _autodispatch_stops(work_items: list[WorkItem], scenario_state: dict[str, An
         session.stop_autodispatch(str(entry["id"]))
         for _ in range(150):
             await pilot.pause(0.02)
-            if session.work_items[1].title == "Finished leaf":
+            row = table.get_row("issue:owner/repo#2")
+            if "Finished leaf" in str(row[2]) and "magenta" not in str(row[2].style):
                 break
         row = table.get_row("issue:owner/repo#2")
         scenario_state["updated"] = (

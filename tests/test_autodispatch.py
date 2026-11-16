@@ -39,6 +39,52 @@ def _issue_item(number: int) -> WorkItem:
     )
 
 
+def test_autodispatch_supervises_reminders_blocking_and_recovery(monkeypatch, tmp_path):
+    from bdd.steps.autoclose import _install_supervision
+    from bdd.steps.common import ensure_api_session
+
+    real_monotonic = time.monotonic
+    state = {}
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    session = ensure_api_session(state, [], tmp_path)
+    _install_supervision(state, monkeypatch, tmp_path)
+    started = session.start_autodispatch(scope="owner/repo", agent="codex")
+    entry = session._autodispatch[started["id"]]
+    try:
+        deadline = real_monotonic() + 3
+        while session.autodispatch_sessions()[0]["stage"] != "developing":
+            assert entry.status == "running", entry.error
+            assert real_monotonic() < deadline
+            time.sleep(0.01)
+        pane_id = f"terminal_{state['panes'][0]['id']}"
+        prompt = state["agent_launches"][0][1]
+        assert prompt.startswith("PROMPT\n\n")
+        instruction = prompt.removeprefix("PROMPT\n\n")
+        assert instruction
+        assert session.autodispatch_sessions()[0]["current_item"] == "owner/repo#ISSUE-42"
+        for _ in range(40):
+            state["clock"]["now"] += 30
+            session.autoclose.poll_once()
+        assert state["sent"] == [(pane_id, instruction)] * 3
+        assert session.info()["autodispatch_sessions"][0]["status"] == "blocked"
+        for _ in range(10):
+            state["clock"]["now"] += 30
+            session.autoclose.poll_once()
+        assert len(state["sent"]) == 3
+        state["screen"] = "agent resumed work"
+        session.autoclose.poll_once()
+        assert session.info()["autodispatch_sessions"][0]["status"] == "running"
+        for _ in range(10):
+            state["clock"]["now"] += 30
+            session.autoclose.poll_once()
+        assert state["sent"] == [(pane_id, instruction)] * 4
+    finally:
+        session.stop_autodispatch(started["id"])
+        entry.thread.join(timeout=3)
+        assert not entry.thread.is_alive()
+
+
 def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
     waits = queue.Queue()
     original_wait = threading.Event.wait
@@ -457,6 +503,55 @@ def test_failed_pane_lookup_fails_session_without_dispatching_again(monkeypatch)
     entry = session.autodispatch_sessions()[0]
     assert entry["status"] == "failed" and "unavailable" in entry["error"]
     assert dispatch.call_count == 1
+
+
+def test_blocked_session_does_not_poll_for_pane_disappearance(monkeypatch):
+    polled = threading.Event()
+    original_wait = threading.Event.wait
+    waits = 0
+
+    def controlled_wait(event, timeout=None):
+        nonlocal waits
+        if threading.current_thread().name.startswith("autodispatch-"):
+            waits += 1
+            if waits == 1:
+                return False
+            polled.set()
+        return original_wait(event, timeout)
+
+    monkeypatch.setattr(threading.Event, "wait", controlled_wait)
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    monkeypatch.setattr(
+        session,
+        "dispatch_once",
+        MagicMock(
+            return_value={
+                "status": "launched",
+                "item_id": "owner/repo#ISSUE-1",
+                "pane_id": "terminal_1",
+                "session": "workdash",
+            }
+        ),
+    )
+    monkeypatch.setattr(session.autoclose, "blocked", lambda *_: True)
+    load_panes = MagicMock(side_effect=RuntimeError("unavailable"))
+    monkeypatch.setattr("workdash.autodispatch.launcher.zellij.load_zellij_panes", load_panes)
+    started = session.start_autodispatch(scope="owner/repo")
+    entry = session._autodispatch[started["id"]]
+    try:
+        assert polled.wait(2), entry.error
+        assert session.autodispatch_sessions()[0]["status"] == "blocked"
+        load_panes.assert_not_called()
+    finally:
+        session.stop_autodispatch_sessions()
+        entry.thread.join(timeout=3)
+        assert not entry.thread.is_alive()
 
 
 def test_one_empty_pane_listing_does_not_end_supervision(monkeypatch):

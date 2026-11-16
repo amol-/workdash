@@ -771,3 +771,88 @@ def info_shows_progress(capsys):
     output = capsys.readouterr().out
     for value in ("project", "owner/repo", "42", "developing", "fix ci", "2", "31s"):
         assert value in output
+
+
+@given("an autodispatch session has blocked after three reminders without a pull request")
+def blocked_session(scenario_state, work_items, tmp_path, monkeypatch, caplog):
+    import workdash.autoclose as autoclose_module
+    from workdash.autodispatch import _AutodispatchSession
+
+    from .autoclose import _supervised_coding_pane_without_pull_request
+
+    scenario_state["real_monotonic"] = autoclose_module.time.monotonic
+    scenario_state["github"] = install_fake_github(monkeypatch)
+    _supervised_coding_pane_without_pull_request(
+        "owner/repo#42", scenario_state, work_items, tmp_path, monkeypatch, caplog
+    )
+    session = scenario_state["api_session"]
+    activity = _AutodispatchSession(session, "owner/repo", None, "pi")
+    activity.pane = (session.zellij_session, scenario_state["supervised_pane_id"])
+    session._autodispatch[activity.id] = activity
+    scenario_state["work"] = tmp_path / "owner_repo_42" / "unpublished.txt"
+    scenario_state["work"].write_text("keep this")
+    for _ in range(40):
+        scenario_state["clock"]["now"] += 30
+        session.autoclose.poll_once()
+    assert len(scenario_state["sent"]) == 3
+    assert session.info()["autodispatch_sessions"][0]["status"] == "blocked"
+
+
+@then("the blocked session is visible in info and on the dashboard")
+def blocked_visible(scenario_state, work_items, monkeypatch, capsys):
+    import workdash.autoclose as autoclose_module
+    from workdash.workdash import main
+
+    session = scenario_state["api_session"]
+    client = MagicMock()
+    client.request.return_value = session.info()
+    monkeypatch.setattr("workdash.workdash.WorkdashControlClient", lambda *a, **kw: client)
+    assert main(["info"]) == 0
+    entry = client.request.return_value["autodispatch_sessions"][0]
+    assert f"Autodispatch {entry['id']} blocked" in capsys.readouterr().out
+
+    async def check(app, pilot):
+        assert "blocked" in app.query_one("#autodispatch-progress", Static).render().plain
+
+    with monkeypatch.context() as patch:
+        patch.setattr(autoclose_module.time, "monotonic", scenario_state["real_monotonic"])
+        run_app(work_items=work_items, session=session, interactions=check)
+
+
+@when("its agent pane content changes")
+def blocked_pane_changes(scenario_state):
+    scenario_state["screen"] = "agent resumed work"
+    scenario_state["clock"]["now"] += 30
+    scenario_state["api_session"].autoclose.poll_once()
+
+
+@when("the user sends input to its agent pane through Workdash")
+def send_blocked_pane_input(scenario_state):
+    scenario_state["api_session"].pane_send(
+        pane_id=scenario_state["supervised_pane_id"], data="continue"
+    )
+
+
+@then("the session resumes running")
+def blocked_session_resumes(scenario_state):
+    assert scenario_state["api_session"].info()["autodispatch_sessions"][0]["status"] == "running"
+
+
+@when("the user stops the blocked session from the dashboard")
+def stop_blocked_session(scenario_state, work_items, monkeypatch):
+    import workdash.autoclose as autoclose_module
+
+    async def stop(app, pilot):
+        assert "blocked" in app.query_one("#autodispatch-progress", Static).render().plain
+        await pilot.press("shift+tab", "s")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(autoclose_module.time, "monotonic", scenario_state["real_monotonic"])
+        run_app(work_items=work_items, session=scenario_state["api_session"], interactions=stop)
+
+
+@then("its agent pane closes and its worktree is preserved")
+def blocked_pane_closed(scenario_state):
+    assert scenario_state["closed"] == [scenario_state["supervised_pane_id"]]
+    assert scenario_state["api_session"].info()["autodispatch_sessions"][0]["status"] == "stopped"
+    assert scenario_state["work"].read_text() == "keep this"

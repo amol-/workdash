@@ -1212,7 +1212,12 @@ class GitHubClient:
                 after = json.dumps(connection["pageInfo"]["endCursor"])
 
     def work_pull_request(
-        self, item: WorkItem, *, github_username: str, todo_repository: str
+        self,
+        item: WorkItem,
+        *,
+        github_username: str,
+        todo_repository: str,
+        merged_since: datetime | None = None,
     ) -> PullRequestWorkState | None:
         """Return the pull request whose state carries an item's work, ``None`` when it has none.
 
@@ -1236,7 +1241,12 @@ class GitHubClient:
         if item.item_type == WorkItemType.PR:
             return states[0]
         # Prefer the same actionable pull request that readiness selects for this issue.
-        authored = [state for state in states if state.item.kind is WorkItemKind.AUTHORED_PR]
+        authored = [
+            state
+            for state in states
+            if state.item.kind is WorkItemKind.AUTHORED_PR
+            and (merged_since is None or state.merged_at is None or state.merged_at > merged_since)
+        ]
         actionable = [state for state in authored if state.ready]
         if actionable:
             return min(
@@ -1251,23 +1261,30 @@ class GitHubClient:
 
     def pull_request_states(
         self, pull_requests: Sequence[tuple[str, int]]
-    ) -> dict[tuple[str, int], str]:
-        """Return each pull request's state: ``OPEN``, ``MERGED``, or ``CLOSED``.
+    ) -> dict[tuple[str, int], tuple[str, datetime | None]]:
+        """Return each pull request's state and merge time.
 
         Repeated checks of pull requests that are already tracked only need their state,
         so this reads one metadata query instead of a whole work state evaluation.
         """
 
-        states: dict[tuple[str, int], str] = {}
+        states: dict[tuple[str, int], tuple[str, datetime | None]] = {}
         for start in range(0, len(pull_requests), _PULL_REQUESTS_PER_QUERY):
             batch = pull_requests[start : start + _PULL_REQUESTS_PER_QUERY]
             subject = ", ".join(f"{repo}#{number}" for repo, number in batch)
             data = self._graphql(
-                f"query PullRequestStates {{ {_pull_request_aliases(batch, 'state')} }}", subject
+                f"query PullRequestStates {{ {_pull_request_aliases(batch, 'state mergedAt')} }}",
+                subject,
             )
             with _github_payload(subject):
                 for index, pull_request in enumerate(batch):
-                    states[pull_request] = data[f"p{index}"]["pullRequest"]["state"]
+                    node = data[f"p{index}"]["pullRequest"]
+                    merged_at = (
+                        parse_github_datetime(node["mergedAt"]) if node["mergedAt"] else None
+                    )
+                    if node["state"] == "MERGED" and merged_at is None:
+                        raise ValueError("Merged pull request has no merge time")
+                    states[pull_request] = (node["state"], merged_at)
         return states
 
     def fetch_launch_context(self, item: WorkItem) -> dict[str, Any]:

@@ -456,6 +456,7 @@ class WorkdashApp(App[None]):
         ("a", "analyze_item", "Analyze"),
         ("c", "launch_code", "Code"),
         ("d", "dispatch_item", "Dispatch"),
+        ("s", "stop_blocked", "Stop blocked"),
         ("i", "include_item", "Include"),
         ("w", "capture_todo", "Todo"),
         ("q", "quit_app", "Quit"),
@@ -520,6 +521,8 @@ class WorkdashApp(App[None]):
         self._current_autodispatch: set[tuple[str, int] | str] = set()
         self._pending_autodispatch: set[str] = set()
         self._autodispatch_refreshing = False
+        self._progress_index = 0
+        self._progress_entries: list[dict[str, object]] = []
         self._row_keys: dict[tuple[WorkItemType, str, int], str] = {}
 
     def compose(self) -> ComposeResult:
@@ -543,7 +546,7 @@ class WorkdashApp(App[None]):
         if self._session is None:
             return
         sessions = self._session.autodispatch_sessions()
-        running = [entry for entry in sessions if entry["status"] == "running"]
+        running = [entry for entry in sessions if entry["status"] in {"running", "blocked"}]
         current = {
             self._session._scope_identity(str(entry["current_item"]))
             for entry in running
@@ -576,6 +579,7 @@ class WorkdashApp(App[None]):
                 f"Autodispatch {started_failure['id']} failed: {started_failure['error']}"
             )
         entries = running + failed[-3:]
+        self._progress_entries = entries
         widget = self.query_one("#autodispatch-progress", Static)
         self.query_one("#autodispatch-scroll", VerticalScroll).display = bool(entries)
 
@@ -590,8 +594,9 @@ class WorkdashApp(App[None]):
                 flags=re.IGNORECASE,
             )
 
+        self._progress_index = min(self._progress_index, max(0, len(entries) - 1))
         rows = []
-        for entry in entries:
+        for index, entry in enumerate(entries):
             if entry["status"] == "failed":
                 # Error text can span lines and carry escape sequences; the full text
                 # stays available through `workdash info`.
@@ -617,11 +622,50 @@ class WorkdashApp(App[None]):
                     if entry["stage"] == "developing" and entry["launch_reason"]
                     else ""
                 )
-                line = f"{entry['selected_group'] or 'automatic'}  {target}  {entry['stage']}{reason}  {entry['iteration']}/{entry['elapsed_seconds']}s"
-            text = Text(" ".join(line.splitlines()))
+                status = "blocked (s)top" if entry["status"] == "blocked" else entry["stage"]
+                line = f"{entry['selected_group'] or 'automatic'}  {target}  {status}{reason}  {entry['iteration']}/{entry['elapsed_seconds']}s"
+            marker = "> " if index == self._progress_index else "  "
+            text = Text(marker + " ".join(line.splitlines()))
             text.truncate(max(0, self.size.width - 4), overflow="ellipsis")
             rows.append(text)
         widget.update(Text("\n").join(rows))
+        selected_blocked = (
+            self.query_one("#autodispatch-scroll", VerticalScroll).has_focus
+            and bool(entries)
+            and entries[self._progress_index]["status"] == "blocked"
+        )
+        hint = self._command_hint()
+        if selected_blocked:
+            hint = Text(hint.plain.replace("(d)ispatch", "(s)top"))
+        self.query_one("#command-footer", Static).update(hint)
+
+    def on_key(self, event: events.Key) -> None:
+        scroll = self.query_one("#autodispatch-scroll", VerticalScroll)
+        if not scroll.has_focus or event.key not in {"up", "down"}:
+            return
+        sessions = self._session.autodispatch_sessions() if self._session else []
+        count = sum(entry["status"] in {"running", "blocked"} for entry in sessions)
+        count += min(3, sum(entry["status"] == "failed" for entry in sessions))
+        self._progress_index = max(
+            0, min(count - 1, self._progress_index + (1 if event.key == "down" else -1))
+        )
+        scroll.scroll_to(y=self._progress_index, animate=False)
+        self._update_autodispatch_progress()
+        event.prevent_default()
+        event.stop()
+
+    def action_stop_blocked(self) -> None:
+        scroll = self.query_one("#autodispatch-scroll", VerticalScroll)
+        if self._session is None or not scroll.has_focus:
+            return
+        entries = self._progress_entries
+        index = self._progress_index
+        if index < len(entries) and entries[index]["status"] == "blocked":
+            try:
+                self._session.stop_autodispatch(str(entries[index]["id"]))
+            except Exception as error:
+                self._update_status(f"Could not stop autodispatch: {error}")
+            self._update_autodispatch_progress()
 
     def _item_identity(self, item: WorkItem) -> tuple[str, int]:
         repo = self._session.config.todo_repository if item.todo_target else item.repo
@@ -995,6 +1039,8 @@ class WorkdashApp(App[None]):
             self._update_status(f"Analyzed {item_label} with {tool_label}.")
 
     async def action_dispatch_item(self) -> None:
+        if self.query_one("#autodispatch-scroll", VerticalScroll).has_focus:
+            return
         item = self._selected_item()
         if item is None or self._session is None:
             self._update_status("Dispatch skipped.")

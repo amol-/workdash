@@ -695,5 +695,5 @@ def test_client_owns_work_state_github_access(monkeypatch):
         ).item.number
         == 51
     )
-    assert client.pull_request_states([("owner/repo", 51)]) == {("owner/repo", 51): "OPEN"}
+    assert client.pull_request_states([("owner/repo", 51)]) == {("owner/repo", 51): ("OPEN", None)}
     assert ("owner/repo", "main") in calls
