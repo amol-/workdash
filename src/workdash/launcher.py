@@ -634,11 +634,10 @@ class Zellij:
                 text=True,
                 check=True,
             )
-            sessions = [
-                line.split(" [Created ", 1)[0]
+            sessions = {
+                line.split(" [Created ", 1)[0]: "(EXITED" in line
                 for line in result.stdout.splitlines()
-                if "(EXITED" not in line
-            ]
+            }
         except OSError as error:
             raise RuntimeError(f"Failed to list Zellij sessions: {error}") from error
         except subprocess.CalledProcessError as error:
@@ -647,8 +646,23 @@ class Zellij:
                 raise RuntimeError(
                     f"Failed to list Zellij sessions: {details or error.returncode}"
                 ) from error
-            sessions = []
+            sessions = {}
         if session_name in sessions:
+            if sessions[session_name]:
+                try:
+                    subprocess.run(
+                        [zellij, "attach", "-b", session_name],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                except OSError as error:
+                    raise RuntimeError(f"Failed to recover Zellij session: {error}") from error
+                except subprocess.CalledProcessError as error:
+                    details = (error.stderr or "").strip() or (error.stdout or "").strip()
+                    raise RuntimeError(
+                        f"Failed to recover Zellij session: {details or error.returncode}"
+                    ) from error
             panes = Zellij.load_zellij_panes(session_name)
             dashboard_panes = [
                 pane

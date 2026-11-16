@@ -299,6 +299,8 @@ def _start_interactive_dashboard(
     def run(command, **kwargs):
         scenario_state.setdefault("zellij_actions", []).append(command)
         output = "project [Created now]\n" if scenario_state.get("named_dashboard") else ""
+        if scenario_state.get("named_dashboard") == "exited" and "list-sessions" in command:
+            output = "project [Created now] (EXITED - attach to resurrect)\n"
         return subprocess.CompletedProcess(command, 0, output, "")
 
     monkeypatch.setattr(launcher_module.subprocess, "run", run)
@@ -308,19 +310,24 @@ def _start_interactive_dashboard(
             if scenario_state["named_dashboard"] == "running"
             else "/bin/sh"
         )
-        monkeypatch.setattr(
-            launcher_module.Zellij,
-            "load_zellij_panes",
-            lambda session: [
+
+        def load_panes(session):
+            if scenario_state["named_dashboard"] == "exited":
+                assert ["/usr/bin/zellij", "attach", "-b", session] in scenario_state[
+                    "zellij_actions"
+                ]
+            return [
                 {
                     "id": 2,
                     "title": "workdash tui",
                     "tab_name": "dashboard",
                     "tab_id": 3,
                     "pane_command": command,
-                }
-            ],
-        )
+                },
+                {"id": 5, "title": "work", "tab_name": "project", "tab_id": 4},
+            ]
+
+        monkeypatch.setattr(launcher_module.Zellij, "load_zellij_panes", load_panes)
         monkeypatch.setattr(launcher_module.time, "sleep", lambda seconds: None)
     monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
     monkeypatch.delenv("ZELLIJ_PANE_ID", raising=False)
@@ -590,6 +597,20 @@ def _named_session_running(scenario_state):
 @given("the named session `project` has a stopped dashboard")
 def _named_session_stopped(scenario_state):
     scenario_state.update(outside_zellij=True, _zellij_installed=True, named_dashboard="stopped")
+
+
+@given("the selected Zellij session has exited with existing work panes")
+def _named_session_exited(scenario_state):
+    scenario_state.update(outside_zellij=True, _zellij_installed=True, named_dashboard="exited")
+
+
+@then("the existing session is recovered with its work panes and a dashboard")
+def _recovered_session(scenario_state):
+    actions = scenario_state["zellij_actions"]
+    assert ["/usr/bin/zellij", "attach", "-b", "project"] in actions
+    assert any("new-pane" in command and "--server" in command for command in actions)
+    assert not any("close-pane" in command or "terminal_5" in command for command in actions)
+    assert scenario_state["exec_calls"][0][1] == ["/usr/bin/zellij", "attach", "project"]
 
 
 @when("the user starts the dashboard in the named session with server mode")

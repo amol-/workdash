@@ -2,7 +2,7 @@
 Feature: Persistent dashboard Zellij session
 
   Rules:
-    - Outside Zellij, workdash creates or attaches to the `workdash` session; `--session NAME` selects another session.
+    - Outside Zellij, workdash creates or attaches to the `workdash` session; `--session NAME` selects another session. An exited selected session is recovered with its existing tabs and panes before ensuring the dashboard is running.
     - A new session has a `dashboard` tab with tab and status bars, a dashboard pane named `workdash tui` above a shell pane.
     - If the dashboard is already running, workdash reports that the new options are ignored and attaches after one second.
     - If the dashboard is not running, workdash starts it with the new options in the `dashboard` tab, creating that tab if needed, and preserves any stale dashboard pane under another name.
@@ -10,6 +10,12 @@ Feature: Persistent dashboard Zellij session
     - Inside Zellij, the dashboard starts in the current pane and uses the current session regardless of `--session`; stale dashboard panes are preserved under another name, and a running dashboard is not renamed.
     - Direct mode bypasses the wrapper; server-backed client commands never wrap.
     - Startup preflight runs before starting a new dashboard; attaching to a running dashboard does not require it. Missing Zellij reports configuration guidance.
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S013
+  Scenario: Recover an exited selected session
+    Given the selected Zellij session has exited with existing work panes
+    When the user starts the dashboard in the named session with server mode
+    Then the existing session is recovered with its work panes and a dashboard
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S001
   Scenario: Start a dashboard outside Zellij
