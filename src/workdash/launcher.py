@@ -376,7 +376,7 @@ def _zellij_pane_name_for_work_action(work_action: str, repo_path: str) -> str:
 
 
 def _zellij_pane_identity(pane: dict[str, object]) -> tuple[bool, object]:
-    return (pane.get("is_plugin") is True, pane.get("id"))
+    return (pane.get("is_plugin") is True, _format_zellij_pane_id(pane.get("id")))
 
 
 def _format_zellij_pane_id(pane_id: object) -> str | None:
@@ -386,6 +386,28 @@ def _format_zellij_pane_id(pane_id: object) -> str | None:
     if pane_id_text.startswith("terminal_"):
         return pane_id_text
     return f"terminal_{pane_id_text}"
+
+
+def _terminal_zellij_panes(panes: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    return [pane for pane in panes if pane.get("is_plugin") is not True]
+
+
+def find_zellij_pane(
+    panes: Sequence[dict[str, object]], pane_id: object
+) -> dict[str, object] | None:
+    """Find a terminal pane by its Zellij ID."""
+    formatted = _format_zellij_pane_id(pane_id)
+    if formatted is None:
+        return None
+    return next(
+        (
+            pane
+            for pane in panes
+            if pane.get("is_plugin") is not True
+            and _format_zellij_pane_id(pane.get("id")) == formatted
+        ),
+        None,
+    )
 
 
 def collect_launch_github_context(item: WorkItem) -> dict[str, Any]:
@@ -652,8 +674,8 @@ class Zellij:
             panes = Zellij.load_zellij_panes(session_name)
             dashboard_panes = [
                 pane
-                for pane in panes
-                if pane.get("title") == "workdash tui" and pane.get("is_plugin") is not True
+                for pane in _terminal_zellij_panes(panes)
+                if pane.get("title") == "workdash tui"
             ]
             running = any([_is_dashboard_pane(pane) for pane in dashboard_panes])
             if running:
@@ -737,10 +759,9 @@ class Zellij:
     def name_dashboard_pane(self, session: str, pane_id: str) -> None:
         stale = [
             pane
-            for pane in self.load_zellij_panes(session)
+            for pane in self.list_workdash_panes(session)
             if pane.get("title") == "workdash tui"
-            and pane.get("is_plugin") is not True
-            and str(pane.get("id")) != pane_id
+            and _format_zellij_pane_id(pane.get("id")) != _format_zellij_pane_id(pane_id)
         ]
         if any([_is_dashboard_pane(pane) for pane in stale]):
             raise RuntimeError("A Workdash dashboard is already running in this session.")
@@ -811,6 +832,10 @@ class Zellij:
                     raise
                 time.sleep(_ZELLIJ_PANE_READ_RETRY_SECONDS)
         raise AssertionError("unreachable: retry loop exited without return or raise")
+
+    def list_workdash_panes(self, session: str) -> list[dict[str, object]]:
+        """List terminal panes, including exited and held panes."""
+        return _terminal_zellij_panes(self.load_zellij_panes(session))
 
     @contextmanager
     def zellij_fullscreen_pane(self) -> Iterator[None]:
@@ -945,7 +970,7 @@ class Zellij:
         zellij = _resolve_zellij_binary()
         pane_title = _zellij_pane_name_for_work_action(work_action, repo_path)
         before_panes = (
-            {_zellij_pane_identity(pane) for pane in self.load_zellij_panes(target_session)}
+            {_zellij_pane_identity(pane) for pane in self.list_workdash_panes(target_session)}
             if target_session
             else set()
         )
@@ -964,9 +989,8 @@ class Zellij:
         if target_session:
             new_panes = [
                 pane
-                for pane in self.load_zellij_panes(target_session)
-                if pane.get("is_plugin") is not True
-                and _zellij_pane_identity(pane) not in before_panes
+                for pane in self.list_workdash_panes(target_session)
+                if _zellij_pane_identity(pane) not in before_panes
             ]
             matching_panes = [
                 pane
@@ -1126,17 +1150,9 @@ class Zellij:
         """Return the identified pane's state, or None when it cannot be read."""
 
         try:
-            panes = self.load_zellij_panes(session)
+            return find_zellij_pane(self.list_workdash_panes(session), pane_id)
         except RuntimeError:
             return None
-        return next(
-            (
-                pane
-                for pane in panes
-                if pane.get("is_plugin") is not True and str(pane.get("id")) == pane_id
-            ),
-            None,
-        )
 
 
 zellij = Zellij()

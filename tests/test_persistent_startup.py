@@ -14,6 +14,7 @@ def test_existing_session_restarts_dashboard_in_its_tab(monkeypatch):
         launcher.Zellij,
         "load_zellij_panes",
         lambda session: [
+            {"id": 4, "title": "workdash tui", "is_plugin": True},
             {
                 "id": 4,
                 "title": "workdash tui",
@@ -21,7 +22,7 @@ def test_existing_session_restarts_dashboard_in_its_tab(monkeypatch):
                 "tab_id": 3,
                 "is_plugin": False,
                 "pane_command": "/bin/bash",
-            }
+            },
         ],
     )
 
@@ -91,6 +92,28 @@ def test_missing_dashboard_tab_is_created_with_new_options(monkeypatch):
     launch = next(command for command in calls if "new-pane" in command)
     assert launch[launch.index("--tab-id") + 1] == "17"
     assert "--refresh" in launch
+
+
+def test_existing_plugin_only_dashboard_tab_is_reused(monkeypatch):
+    calls = []
+    monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/zellij")
+    monkeypatch.setattr(
+        launcher.Zellij,
+        "load_zellij_panes",
+        lambda session: [{"id": 4, "is_plugin": True, "tab_name": "dashboard", "tab_id": 3}],
+    )
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "workdash [Created now]\n", "")
+
+    monkeypatch.setattr(launcher.subprocess, "run", run)
+    monkeypatch.setattr(launcher.os, "execvp", lambda *args: (_ for _ in ()).throw(SystemExit()))
+    with pytest.raises(SystemExit):
+        launcher.zellij.exec_zellij_wrapped_workdash([])
+    assert not any("new-tab" in command for command in calls)
+    launch = next(command for command in calls if "new-pane" in command)
+    assert launch[launch.index("--tab-id") + 1] == "3"
 
 
 def test_inside_start_renames_stale_panes_without_interrupting_commands(monkeypatch):

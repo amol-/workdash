@@ -1569,7 +1569,7 @@ def test_autodispatch_review_feedback_cycle(monkeypatch, tmp_path):
             self.panes = []
             self.polled = threading.Event()
 
-        def load_zellij_panes(self, session):
+        def list_workdash_panes(self, session):
             if threading.current_thread().name.startswith("autodispatch-") and self.panes:
                 self.polled.set()
             return list(self.panes)

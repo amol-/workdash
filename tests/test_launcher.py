@@ -1712,3 +1712,31 @@ def test_launch_pane_and_wait_requires_a_zellij_session(
             zellij_session=None,
             group=None,
         )
+
+
+def test_workdash_pane_listing_and_lookup_ignore_plugins(monkeypatch):
+    monkeypatch.setattr(launcher_module, "_resolve_zellij_binary", lambda: "zellij")
+    monkeypatch.setattr(
+        launcher_module.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=json.dumps(
+                [
+                    {"id": 3, "is_plugin": True, "title": "status"},
+                    {"id": 3, "is_plugin": False, "exited": True},
+                    {"id": "terminal_4", "is_held": True},
+                ]
+            ),
+        ),
+    )
+    panes = launcher_module.zellij.list_workdash_panes("workdash")
+    assert panes == [
+        {"id": 3, "is_plugin": False, "exited": True},
+        {"id": "terminal_4", "is_held": True},
+    ]
+    raw_panes = launcher_module.zellij.load_zellij_panes("workdash")
+    assert launcher_module.find_zellij_pane(raw_panes, "terminal_3") == panes[0]
+    assert launcher_module.find_zellij_pane(raw_panes, 4) == panes[1]
+    assert launcher_module.find_zellij_pane(raw_panes[:1], 3) is None
