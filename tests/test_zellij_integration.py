@@ -758,7 +758,7 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
         port = probe.getsockname()[1]
     config = tmp_path / "config.kdl"
     config.write_text(
-        "session_serialization true\ndisable_session_metadata false\nserialization_interval 1\n"
+        "session_serialization false\ndisable_session_metadata true\nserialization_interval 1\n"
     )
     with tempfile.TemporaryDirectory(prefix="wd-zellij-") as sockets:
         env = os.environ.copy()
@@ -787,17 +787,17 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
             return subprocess.run([zellij, *args], env=env, capture_output=True, text=True)
 
         try:
-            start([zellij, "--session", name])
+            start([str(script), "--session", name])
+            client = WorkdashControlClient(f"127.0.0.1:{port}")
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
-                if (
-                    run("--session", name, "action", "list-panes", "--json", "--all").returncode
-                    == 0
-                ):
+                try:
+                    client.request("info")
                     break
-                time.sleep(0.1)
+                except WorkdashControlError:
+                    time.sleep(0.1)
             else:
-                pytest.fail("Zellij session did not start")
+                pytest.fail("initial dashboard did not start")
             assert (
                 run(
                     "--session", name, "action", "new-tab", "--name", "work", "--cwd", str(tmp_path)

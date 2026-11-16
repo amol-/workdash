@@ -305,8 +305,8 @@ def _write_zellij_startup_layout(workdash_command: Sequence[str], *, session_nam
     layout = (
         f"session_name {_quote_kdl_string(session_name)}\n"
         'on_force_close "detach"\n'
-        "session_serialization false\n"
-        "disable_session_metadata true\n"
+        "session_serialization true\n"
+        "disable_session_metadata false\n"
         "show_startup_tips false\n"
         "attach_to_session false\n"
         "layout {\n"
