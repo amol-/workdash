@@ -28,6 +28,25 @@ def install_agent(monkeypatch, run):
 @pytest.fixture
 def setup_review(monkeypatch, tmp_path):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+        check=True,
+    )
+    head = subprocess.check_output(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True
+    ).strip()
     now = datetime.now(UTC)
     issue = WorkItem(
         WorkItemKind.TRACKED_ISSUE,
@@ -50,6 +69,8 @@ def setup_review(monkeypatch, tmp_path):
         "https://github.com/owner/repo/pull/2",
     )
     backend = MagicMock()
+    backend.github_client.work_pull_request.return_value.state = "OPEN"
+    backend.github_client.work_pull_request.return_value.head_sha = head
     backend.resolve_analyze_command_tokens.return_value = ["agent", "-p"]
     session = control.WorkdashSession(
         config=WorkdashConfig(
@@ -67,6 +88,94 @@ def setup_review(monkeypatch, tmp_path):
     }
     backend.github_client.linked_open_pull_request.return_value = ("owner/repo", 2)
     return session, tmp_path
+
+
+def test_ordinary_review_rejects_force_pushed_head_without_losing_local_work(
+    setup_review, monkeypatch
+):
+    from types import SimpleNamespace
+
+    session, path = setup_review
+    commit = [
+        "git",
+        "-C",
+        str(path),
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "--allow-empty",
+        "-qm",
+    ]
+    subprocess.run([*commit, "base"], check=True)
+    base = subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+    subprocess.run([*commit, "old head"], check=True)
+    old_head = subprocess.check_output(
+        ["git", "-C", str(path), "rev-parse", "HEAD"], text=True
+    ).strip()
+    subprocess.run(["git", "-C", str(path), "checkout", "-q", "--detach", base], check=True)
+    subprocess.run([*commit, "new head"], check=True)
+    new_head = subprocess.check_output(
+        ["git", "-C", str(path), "rev-parse", "HEAD"], text=True
+    ).strip()
+    subprocess.run(["git", "-C", str(path), "checkout", "-q", "--detach", old_head], check=True)
+    (path / "local.txt").write_text("local work")
+    session.backend.github_client.work_pull_request.return_value = SimpleNamespace(
+        state="OPEN", head_sha=new_head
+    )
+    reviewer = MagicMock(return_value={"status": "reviewed"})
+    monkeypatch.setattr(control, "review_pull_request", reviewer)
+
+    with pytest.raises(RuntimeError, match="head"):
+        session.review(target="owner/repo#PR-2")
+    reviewer.assert_not_called()
+    assert (
+        subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+        == old_head
+    )
+    assert (path / "local.txt").read_text() == "local work"
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_ordinary_review_rejects_modified_tracked_files(setup_review, monkeypatch, staged):
+    session, path = setup_review
+    tracked = path / "tracked.txt"
+    tracked.write_text("committed")
+    subprocess.run(["git", "-C", str(path), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "tracked",
+        ],
+        check=True,
+    )
+    head = subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+    session.backend.github_client.work_pull_request.return_value.head_sha = head
+    tracked.write_text("local work")
+    if staged:
+        subprocess.run(["git", "-C", str(path), "add", "tracked.txt"], check=True)
+    reviewer = MagicMock(return_value={"status": "reviewed"})
+    monkeypatch.setattr(control, "review_pull_request", reviewer)
+
+    with pytest.raises(RuntimeError, match="local|unpublished"):
+        session.review(target="owner/repo#PR-2")
+    reviewer.assert_not_called()
+    assert tracked.read_text() == "local work"
+    assert (
+        subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+        == head
+    )
+    status = subprocess.check_output(["git", "-C", str(path), "status", "--porcelain"], text=True)
+    assert status == ("M  tracked.txt\n" if staged else " M tracked.txt\n")
 
 
 @pytest.mark.parametrize("stale", [False, True])
@@ -770,6 +879,9 @@ def test_review_documents_are_not_staged_in_linked_worktree(setup_review, monkey
         ],
         check=True,
     )
+    session.backend.github_client.work_pull_request.return_value.head_sha = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+    ).strip()
     worktree = tmp_path.parent / (tmp_path.name + "-worktree")
     subprocess.run(
         ["git", "-C", str(repo), "worktree", "add", "-qb", "review", str(worktree)], check=True
@@ -822,6 +934,9 @@ def test_selected_agent_runs_in_prepared_pr_worktree(setup_review, monkeypatch, 
         ],
         check=True,
     )
+    session.backend.github_client.work_pull_request.return_value.head_sha = subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+    ).strip()
     subprocess.run(["git", "-C", str(source), "branch", "feature"], check=True)
     origin = tmp_path / "owner" / "repo.git"
     origin.parent.mkdir()

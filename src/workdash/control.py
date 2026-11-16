@@ -512,6 +512,39 @@ class WorkdashSession:
             review_cwd = cwd
             try:
                 with ExitStack() as stack:
+                    if not require_fresh:
+                        state = self.backend.github_client.work_pull_request(
+                            item,
+                            github_username=self.config.github_username,
+                            todo_repository=self.config.todo_repository,
+                        )
+                        head = subprocess.run(
+                            ["git", "rev-parse", "HEAD"],
+                            cwd=cwd,
+                            check=True,
+                            capture_output=True,
+                            text=True,
+                        ).stdout.strip()
+                        if (
+                            not state
+                            or state.state != "OPEN"
+                            or not state.head_sha
+                            or head != state.head_sha
+                        ):
+                            raise RuntimeError(
+                                "Review worktree does not match the current pull request head; reconcile local work before retrying."
+                            )
+                        status = subprocess.run(
+                            ["git", "status", "--porcelain", "--untracked-files=no"],
+                            cwd=cwd,
+                            check=True,
+                            capture_output=True,
+                            text=True,
+                        )
+                        if status.stdout:
+                            raise RuntimeError(
+                                "Review worktree has local changes to tracked files."
+                            )
                     if require_fresh:
                         state = self.backend.github_client.work_pull_request(
                             item,

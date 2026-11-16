@@ -1209,6 +1209,28 @@ def test_autodispatch_waits_for_selected_pull_request_review(monkeypatch, tmp_pa
         ]
     )
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+        check=True,
+    )
+    head = subprocess.check_output(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True
+    ).strip()
+    session.backend.github_client.work_pull_request.return_value = SimpleNamespace(
+        state="OPEN", head_sha=head
+    )
     entered, release = threading.Event(), threading.Event()
     reviewed = []
 
@@ -1497,6 +1519,15 @@ def test_autodispatch_review_feedback_cycle(monkeypatch, tmp_path):
             return ""
 
     github = FakeGitHub()
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kwargs: SimpleNamespace(
+            stdout=("fixed-head" if github.resolved else "original-head")
+            if cmd[1] == "rev-parse"
+            else ""
+        ),
+    )
     zellij = FakeZellij()
     agent = FakeAgent()
     worktree = tmp_path / "owner_repo_1"

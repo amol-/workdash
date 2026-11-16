@@ -26,6 +26,25 @@ from .common import install_pane, run_app
 @pytest.fixture
 def review_state(monkeypatch, tmp_path, scenario_state):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+        check=True,
+    )
+    head = subprocess.check_output(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True
+    ).strip()
     now = datetime.now(UTC)
     issue = WorkItem(
         WorkItemKind.TRACKED_ISSUE,
@@ -48,6 +67,8 @@ def review_state(monkeypatch, tmp_path, scenario_state):
         "https://github.com/owner/repo/pull/2",
     )
     backend = MagicMock()
+    backend.github_client.work_pull_request.return_value.state = "OPEN"
+    backend.github_client.work_pull_request.return_value.head_sha = head
     backend.resolve_analyze_command_tokens.return_value = ["agent", "-p"]
     session = control.WorkdashSession(
         config=WorkdashConfig(

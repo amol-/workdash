@@ -14,7 +14,7 @@ Feature: Review a pull request
     - A review runs in a Zellij pane of its own, named `review_<worktree>`, so the user can watch it while it runs.
     - The review pane opens in the Zellij tab named after the code repository's basename, or in the tab named by an explicitly requested group.
     - A review needs a known Zellij session.
-    - A fresh review uses the pull request's current head, including when it belongs to a fork.
+    - A review uses the pull request's current head, including after a force-push and when it belongs to a fork; its checkout must not contain local changes to tracked source files. If it cannot review safely, it fails without discarding local work.
     - The code menu offers `(r) auto review`, which asks which configured analysis agent reviews the selected item, shows a progress dialog until the review finishes, and then reports the outcome.
 
   @id:F-CODING-REVIEW-S001
