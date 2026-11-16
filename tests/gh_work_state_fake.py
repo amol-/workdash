@@ -462,9 +462,18 @@ class FakeGitHub:
             "reviewRequests": {
                 "nodes": [{"requestedReviewer": actor(login)} for login in pr["review_requests"]]
             },
-            "latestOpinionatedReviews": {"nodes": list(latest_opinions.values())},
+            "latestOpinionatedReviews": {
+                "nodes": list(latest_opinions.values())[:100],
+                "pageInfo": {"hasNextPage": len(latest_opinions) > 100},
+            },
             "reviews": {"nodes": pr["reviews"]},
-            "reviewThreads": {"nodes": pr["threads"]},
+            "reviewThreads": {
+                "nodes": [
+                    entry | {"comments": {"nodes": entry["comments"]["nodes"][-10:]}}
+                    for entry in pr["threads"][-100:]
+                ],
+                "pageInfo": {"hasPreviousPage": len(pr["threads"]) > 100},
+            },
             "comments": {"nodes": pr["comments"]},
         }
 

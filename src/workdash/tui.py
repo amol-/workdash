@@ -456,6 +456,7 @@ class WorkdashApp(App[None]):
         ("a", "analyze_item", "Analyze"),
         ("c", "launch_code", "Code"),
         ("d", "dispatch_item", "Dispatch"),
+        ("m", "toggle_automerge", "Merge"),
         ("s", "stop_blocked", "Stop blocked"),
         ("i", "include_item", "Include"),
         ("w", "capture_todo", "Todo"),
@@ -529,7 +530,7 @@ class WorkdashApp(App[None]):
         with VerticalScroll(id="autodispatch-scroll"):
             yield Static("", id="autodispatch-progress", markup=False)
         yield WorkItemsTable(id="work-items")
-        yield Static(self._command_hint(), id="command-footer")
+        yield Static(self.COMMAND_HINT_TEXT, id="command-footer")
         yield Static(self._status_message, id="status-footer", markup=False)
 
     def on_mount(self) -> None:
@@ -624,6 +625,8 @@ class WorkdashApp(App[None]):
                 )
                 status = "blocked (s)top" if entry["status"] == "blocked" else entry["stage"]
                 line = f"{entry['selected_group'] or 'automatic'}  {target}  {status}{reason}  {entry['iteration']}/{entry['elapsed_seconds']}s"
+            if entry.get("automerge"):
+                line = f"[automerge] {line}"
             marker = "> " if index == self._progress_index else "  "
             text = Text(marker + " ".join(line.splitlines()))
             text.truncate(max(0, self.size.width - 4), overflow="ellipsis")
@@ -762,8 +765,31 @@ class WorkdashApp(App[None]):
         marker = self._suggestion_markers.get((item.item_type, item.repo, item.number))
         return f"* {item.title}" if marker else item.title
 
+    def _selected_autodispatch(self) -> list[dict[str, object]]:
+        item = self._selected_item()
+        if item is None or self._session is None:
+            return []
+        identities = {self._item_identity(item)}
+        identities.update((repo.lower(), number) for repo, number in item.linked_issues)
+        identities.update((item.repo.lower(), number) for number in item.closing_issue_numbers)
+        return [
+            entry
+            for entry in self._session.autodispatch_sessions()
+            if entry["status"] == "running"
+            and any(
+                value and self._session._scope_identity(str(value)) in identities
+                for value in (entry["current_item"], entry["scope"])
+            )
+        ]
+
     def _command_hint(self) -> Text:
-        hint = Text(self.COMMAND_HINT_TEXT)
+        entries = self._selected_autodispatch()
+        action = "(m)erge off" if len(entries) == 1 and entries[0].get("automerge") else "(m)erge"
+        hint = Text(
+            self.COMMAND_HINT_TEXT.replace("(d)ispatch", action)
+            if entries
+            else self.COMMAND_HINT_TEXT
+        )
         for match in re.finditer(r"\((.)\)", hint.plain):
             hint.stylize("bold", match.start() + 1, match.end() - 1)
         if self._search_filter:
@@ -1037,6 +1063,33 @@ class WorkdashApp(App[None]):
             self._update_status(f"Opened analysis for {item_label}.")
         else:
             self._update_status(f"Analyzed {item_label} with {tool_label}.")
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if self.query("#command-footer") and self.query("#work-items"):
+            self.query_one("#command-footer", Static).update(self._command_hint())
+
+    def action_toggle_automerge(self) -> None:
+        entries = self._selected_autodispatch()
+        if not entries:
+            self._update_status("No autodispatch session for selected work.")
+            return
+        if len(entries) > 1:
+            self._update_status(
+                "Multiple sessions match; use workdash info and autodispatch-stop to select one."
+            )
+            return
+        entry = entries[0]
+        try:
+            enabled = self._session.toggle_automerge(str(entry["id"]))
+        except (KeyError, RuntimeError) as error:
+            self._update_status(f"Automerge toggle failed: {error}")
+            return
+        self._update_status(
+            f"Automerge {'enabled' if enabled else 'disabled'} for {entry['scope']}."
+            + (" A merge already in progress may still complete." if not enabled else "")
+        )
+        self._update_autodispatch_progress()
+        self.query_one("#command-footer", Static).update(self._command_hint())
 
     async def action_dispatch_item(self) -> None:
         if self.query_one("#autodispatch-scroll", VerticalScroll).has_focus:

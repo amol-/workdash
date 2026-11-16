@@ -71,7 +71,7 @@ _CHECK_CONTEXTS = f"""
     }}
 """
 # Per pull request feedback lists stop at GitHub's page size of 100, keeping the
-# newest entries: only feedback after the latest push can be actionable.
+# newest entries.
 _PULL_REQUEST_FRAGMENT = f"""
 fragment ReadyPullRequest on PullRequest {{
     number title url createdAt updatedAt state
@@ -95,10 +95,12 @@ fragment ReadyPullRequest on PullRequest {{
         nodes {{ requestedReviewer {{ __typename ... on User {{ login }} }} }}
     }}
     latestOpinionatedReviews(first: 100) {{
+        pageInfo {{ hasNextPage }}
         nodes {{ state url submittedAt isMinimized commit {{ oid }} {_ACTOR} }}
     }}
     reviews(last: 100) {{ nodes {{ state body url submittedAt isMinimized {_ACTOR} }} }}
     reviewThreads(last: 100) {{
+        pageInfo {{ hasPreviousPage }}
         nodes {{ isResolved isOutdated
             comments(last: 10) {{ nodes {{ url publishedAt isMinimized {_ACTOR} }} }}
         }}
@@ -298,6 +300,14 @@ _REPOSITORY_AUTHORIZATION_SUBSTRINGS = (
     "must grant your oauth token access",
     "organization has enabled oauth app access restrictions",
 )
+
+
+class MergeHeadChangedError(RuntimeError):
+    """A SHA-pinned merge was rejected because the head changed."""
+
+
+class MergeConflictError(RuntimeError):
+    """A pull request merge was rejected because of conflicts."""
 
 
 class TransientFetchError(RuntimeError):
@@ -1188,6 +1198,69 @@ class GitHubClient:
             )
             for (repo, number), node in zip(pull_requests, nodes, strict=True)
         ]
+
+    def merge_pull_request(self, repo: str, number: int, head_sha: str) -> None:
+        """Merge a pull request directly on GitHub."""
+        settings = json.loads(
+            _run_gh(
+                ["gh", "api", f"repos/{repo}"],
+                operation=f"get {repo} merge methods",
+                todo_repository="",
+            )
+        )
+        method = next(
+            (
+                flag
+                for key, flag in (
+                    ("allow_squash_merge", "squash"),
+                    ("allow_merge_commit", "merge"),
+                    ("allow_rebase_merge", "rebase"),
+                )
+                if settings[key]
+            ),
+            None,
+        )
+        if method is None:
+            raise RuntimeError(f"No merge method enabled for {repo}.")
+        try:
+            _run_gh(
+                [
+                    "gh",
+                    "api",
+                    "--method",
+                    "PUT",
+                    f"repos/{repo}/pulls/{number}/merge",
+                    "-f",
+                    f"merge_method={method}",
+                    "-f",
+                    f"sha={head_sha}",
+                ],
+                operation=f"merge {repo}#{number}",
+                todo_repository="",
+            )
+        except RuntimeError as error:
+            if "HTTP 409" in str(error):
+                raise MergeHeadChangedError(str(error)) from error
+            if "Pull Request is not mergeable (HTTP 405)" in str(error):
+                pull_request = json.loads(
+                    _run_gh(
+                        ["gh", "api", f"repos/{repo}/pulls/{number}"],
+                        operation=f"get {repo}#{number}",
+                        todo_repository="",
+                    )
+                )
+                if pull_request.get("mergeable") is None:
+                    time.sleep(_MERGEABILITY_RETRY_DELAY_SECONDS)
+                    pull_request = json.loads(
+                        _run_gh(
+                            ["gh", "api", f"repos/{repo}/pulls/{number}"],
+                            operation=f"get {repo}#{number}",
+                            todo_repository="",
+                        )
+                    )
+                if pull_request.get("mergeable") is False:
+                    raise MergeConflictError(str(error)) from error
+            raise
 
     def linked_open_pull_request(self, item: WorkItem) -> tuple[str, int] | None:
         """Find an issue's linked open pull request without evaluating readiness."""
@@ -2313,7 +2386,9 @@ class GitHubClient:
                 subject,
             )
             with _github_payload(subject):
-                nodes += [data[f"p{index}"]["pullRequest"] for index in range(len(batch))]
+                for index in range(len(batch)):
+                    node = data[f"p{index}"]["pullRequest"]
+                    nodes.append(node)
         return nodes
 
     def _issue_state(self, node: dict, todo_repository: str) -> IssueWorkState:
@@ -2417,6 +2492,20 @@ class GitHubClient:
                 ci_status=ci_status,
                 failing_checks=failing_checks,
                 feedback=_actionable_feedback(node),
+                changes_requested=node["reviewDecision"] == "CHANGES_REQUESTED"
+                or any(
+                    review["state"] == "CHANGES_REQUESTED"
+                    for review in node["latestOpinionatedReviews"]["nodes"]
+                ),
+                review_threads_complete=(
+                    not node["reviewThreads"]["pageInfo"]["hasPreviousPage"]
+                    and not node["latestOpinionatedReviews"]["pageInfo"]["hasNextPage"]
+                    and all(
+                        thread["isResolved"]
+                        or any(comment["publishedAt"] for comment in thread["comments"]["nodes"])
+                        for thread in node["reviewThreads"]["nodes"]
+                    )
+                ),
                 merged_at=parse_github_datetime(node["mergedAt"]) if node["mergedAt"] else None,
             )
 

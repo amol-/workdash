@@ -491,10 +491,34 @@ def test_main_tui_review_callback_waits_for_the_review_to_finish(
     release_review = threading.Event()
     review_finished = threading.Event()
 
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+        check=True,
+    )
+    head = subprocess.check_output(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True
+    ).strip()
+
     class FakeBackend:
         def __init__(self, config=None, **kwargs) -> None:
             self.github_client = SimpleNamespace(
-                fetch_launch_context=lambda _item: {"state": "OPEN"}
+                fetch_launch_context=lambda _item: {"state": "OPEN"},
+                work_pull_request=lambda *args, **kwargs: SimpleNamespace(
+                    state="OPEN", head_sha=head
+                ),
             )
 
         def load_items(self, progress_callback=None):
@@ -526,6 +550,11 @@ def test_main_tui_review_callback_waits_for_the_review_to_finish(
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
     monkeypatch.setattr(control_module, "ensure_worktree", lambda *args, **kwargs: str(tmp_path))
     monkeypatch.setattr(control_module, "review_pull_request", blocking_review)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kwargs: SimpleNamespace(stdout=head if cmd[1] == "rev-parse" else ""),
+    )
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-selected")
 

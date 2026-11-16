@@ -11,7 +11,32 @@ Feature: Automatically dispatch ready work
   without closing its agent pane. If a review is already running when stopped,
   the dashboard refreshes the issue again after that review ends, including on failure.
   If an in-progress dispatch launches after stopping, the dashboard refreshes its issue.
-  Autodispatch does not merge work.
+  Autodispatch leaves pull requests open by default; opt-in automerge merges a
+  pull request directly after an explicitly successful review; failed or unconfirmed
+  review postings fail the session and prevent merging, without scheduling a merge or
+  enabling GitHub auto-merge. It reviews the current pull request head and fails
+  safely if the review checkout has unpublished work or does not match it before or
+  after review; Workdash artifacts do not count as unpublished work. It merges only the unchanged reviewed
+  head when feedback is resolved, checks pass or are absent, and GitHub reports it mergeable.
+  If the complete review feedback cannot be verified, or any review thread remains unresolved,
+  the session fails instead of merging unless actionable feedback is dispatched for repair.
+  Actionable feedback, conflicts or failing checks are dispatched for repair;
+  while a requested re-review, checks or mergeability are pending or unknown, the
+  session remains active and rechecks until it can safely merge or dispatch repairs.
+  Stopping or disabling automerge ends this wait. A review without a known starting head
+  is followed by a fresh review if automerge was enabled during it. If the head
+  changes during review or before the merge, including a force-push, the new head is
+  reviewed before merging, with a bounded number of attempts. Existing local commits
+  and files are preserved when reviewing the new head. Unpublished work produced during a
+  retry review is preserved, and the failure reports its checkout path for recovery.
+  If merging fails because the pull request
+  has conflicts, the session continues and selects ready work again; other merge
+  failures, including permission errors on conflicting pull requests, fail the session. If a merge finishes after stopping, the dashboard
+  refreshes the issue again, including on failure.
+  A selected row with a running session displays merge control instead of dispatch;
+  pressing d still starts or replaces the session for the selected target.
+  When several sessions match a row, merge control refuses to choose one; the user can
+  inspect and stop sessions by ID until only the intended session remains.
   A tenth consecutive launch of the same issue fails without another launch;
   work claimed by another agent is skipped rather than counted. A target has at most
   one session: starting a session for a target that already has one stops and replaces
@@ -32,7 +57,7 @@ Feature: Automatically dispatch ready work
   JSON and the control API retain the underlying progress fields.
 
   Rules:
-    - Pressing "d" on an issue starts an autodispatch session scoped to that issue.
+    - Pressing "d" on an issue starts an autodispatch session scoped to that issue, replacing a session for the same target. For selected work with a running session, "m" controls automerge and is displayed instead of "d".
     - Pressing "d" on an authored pull request scopes the session to a linked issue, regardless of its repository or readiness. If there is no linked issue, the TUI reports an error.
     - A pull request that closes several issues is dispatched as the lowest one by repository name, then by issue number, which is the issue coding the same pull request would code.
     - When GitHub cannot report a pull request's linked issues, the TUI reports that lookup failure instead of claiming the pull request has no linked issue.
@@ -192,3 +217,47 @@ Feature: Automatically dispatch ready work
     Given an autodispatch session is running for `owner/repo`
     When the user starts autodispatch again for `owner/repo`
     Then the previous session is stopped and replaced
+
+  @id:F-AUTODISPATCH-S020
+  Scenario: Opt into merging completed work
+    Given an autodispatch session with automerge enabled
+    When its completed pull request has been reviewed successfully
+    Then the pull request is merged
+
+  @id:F-AUTODISPATCH-S025
+  Scenario: A review finding cannot be posted
+    Given an autodispatch session with automerge enabled
+    When the review cannot post a major finding
+    Then the session fails without merging the pull request
+
+  @id:F-AUTODISPATCH-S026
+  Scenario: Wait for a reviewer who was asked to review again
+    Given an autodispatch session with automerge enabled
+    When a reviewer has requested changes and has been asked to review again
+    Then the session waits without merging or dispatching again
+    When the reviewer approves the pull request
+    Then the pull request is merged
+
+  @id:F-AUTODISPATCH-S024
+  Scenario: Review changed work before merging
+    Given an autodispatch session with automerge enabled
+    When the pull request changes during review
+    Then the new head is reviewed before the pull request is merged
+
+  @id:F-AUTODISPATCH-S021
+  Scenario: Toggle automerge from the dashboard
+    Given an autodispatch session for the selected dashboard work
+    When the user toggles automerge
+    Then the dashboard reports and displays the new automerge state
+
+  @id:F-AUTODISPATCH-S022
+  Scenario Outline: The dashboard toggle controls merging completed work
+    Given an autodispatch session for the selected dashboard work
+    When the user toggles automerge <times>
+    And its completed pull request has been reviewed successfully
+    Then after toggling, the pull request is <outcome>
+
+    Examples:
+      | times | outcome    |
+      | once  | merged     |
+      | twice | left open  |

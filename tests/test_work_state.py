@@ -655,6 +655,27 @@ def test_ready_returns_issues_with_actionable_authored_prs_and_completed_parents
     ]
 
 
+def test_work_state_keeps_other_pull_requests_when_review_threads_are_truncated(monkeypatch):
+    github = install_fake_github(monkeypatch)
+    pr = github.add_pull_request(PR)
+    pr["threads"] = [thread(resolved=False)] + [thread(resolved=True) for _ in range(100)]
+    github.add_pull_request("owner/repo#52")
+    truncated, complete = _evaluate(PR, "owner/repo#52")
+    assert not truncated.review_threads_complete
+    assert complete.review_threads_complete
+    assert not truncated.reasons
+
+
+def test_rerequested_changes_remain_outstanding_without_actionable_feedback(monkeypatch):
+    github = install_fake_github(monkeypatch)
+    pr = github.add_pull_request(PR)
+    pr["reviews"] = [review("reviewer", "CHANGES_REQUESTED", created=AFTER_PUSH)]
+    pr["review_requests"] = ["reviewer"]
+    state = _evaluate()[0]
+    assert not state.reasons
+    assert state.changes_requested
+
+
 def test_client_owns_work_state_github_access(monkeypatch):
     from gh_work_state_fake import FakeGitHub
     from workdash.github_client import GitHubClient
@@ -697,3 +718,25 @@ def test_client_owns_work_state_github_access(monkeypatch):
     )
     assert client.pull_request_states([("owner/repo", 51)]) == {("owner/repo", 51): ("OPEN", None)}
     assert ("owner/repo", "main") in calls
+
+
+def test_incomplete_opinions_and_unpublished_thread_cannot_be_verified(monkeypatch):
+    github = install_fake_github(monkeypatch)
+    pr = github.add_pull_request(PR)
+    pr["reviews"] = [review(f"reviewer{i}", "APPROVED", created=AFTER_PUSH) for i in range(101)]
+    state = _evaluate()[0]
+    assert not state.review_threads_complete
+    pr["reviews"] = []
+    pr["threads"] = [
+        thread(*[comment("author", created=AFTER_PUSH) | {"publishedAt": None} for _ in range(10)])
+    ]
+    state = _evaluate()[0]
+    assert not state.reasons
+    assert not state.review_threads_complete
+
+
+def test_opinion_query_requests_pagination_metadata():
+    from workdash.github_client import _PULL_REQUEST_FRAGMENT
+
+    selection = _PULL_REQUEST_FRAGMENT.split("latestOpinionatedReviews")[1].split("reviews(last")[0]
+    assert "hasNextPage" in selection

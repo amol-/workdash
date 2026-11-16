@@ -6,14 +6,15 @@ Feature: Review a pull request
     - An issue without a linked open pull request, or a closed or merged pull request, has nothing to review.
     - A review reports major findings as inline comments and submits an appropriate review when permitted.
     - A review of one's own pull request is comment-only.
-    - The agent is asked to summarize the outcome and list posted inline comments in a fresh review document, but any non-empty document counts as success.
+    - The agent summarizes the outcome and posted inline comments in a fresh review document; success requires an explicit confirmation that the review and all required postings succeeded.
     - Starting a new review removes prior generated review documents in its worktree, except documents belonging to reviews still in progress; other files are preserved.
-    - A missing or empty document is retried once, and an agent failure is reported as a failure.
+    - A missing or empty document is retried once; an unsuccessful or unconfirmed review and an agent failure are reported as failures.
     - A repeated request for a running review returns the same started information without starting another review.
     - A started review reports the intended document path and runs without blocking other control requests.
     - A review runs in a Zellij pane of its own, named `review_<worktree>`, so the user can watch it while it runs.
     - The review pane opens in the Zellij tab named after the code repository's basename, or in the tab named by an explicitly requested group.
     - A review needs a known Zellij session.
+    - A review uses the pull request's current head, including after a force-push and when it belongs to a fork; its checkout must not contain local changes to tracked source files. If it cannot review safely, it fails without discarding local work.
     - The code menu offers `(r) auto review`, which asks which configured analysis agent reviews the selected item, shows a progress dialog until the review finishes, and then reports the outcome.
 
   @id:F-CODING-REVIEW-S001

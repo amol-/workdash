@@ -11,6 +11,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from . import launcher
+from .github_client import MergeConflictError, MergeHeadChangedError
 from .log_diagnostics import safe_error
 
 if TYPE_CHECKING:
@@ -30,8 +31,16 @@ class _AutodispatchSession:
         FINISHED = "finished"
         FAILED = "failed"
 
-    def __init__(self, owner: WorkdashSession, scope: str, group: str | None, agent: str | None):
+    def __init__(
+        self,
+        owner: WorkdashSession,
+        scope: str,
+        group: str | None,
+        agent: str | None,
+        automerge: bool = False,
+    ):
         self.owner, self.scope, self.group, self.agent = owner, scope, group, agent
+        self.automerge = automerge
         self.id = uuid.uuid4().hex
         self.started_at = datetime.now(UTC).isoformat()
         self.started = time.monotonic()
@@ -56,6 +65,7 @@ class _AutodispatchSession:
                 "scope": self.scope,
                 "group": self.group,
                 "agent": self.agent,
+                "automerge": self.automerge,
                 "started_at": self.started_at,
                 "elapsed_seconds": int((self.ended or time.monotonic()) - self.started),
                 "current_item": self.current_item,
@@ -137,7 +147,11 @@ class _AutodispatchSession:
                 stage = "pane polling"
                 absent = 0
                 while not self.stop_event.wait(_AUTODISPATCH_POLL_SECONDS):
-                    if self.pane and self.owner.autoclose.blocked(*self.pane):
+                    if (
+                        self.pane
+                        and getattr(self.owner, "autoclose", None)
+                        and self.owner.autoclose.blocked(*self.pane) is True
+                    ):
                         absent = 0
                         continue
                     panes = launcher.zellij.load_zellij_panes(str(result["session"]))
@@ -154,16 +168,107 @@ class _AutodispatchSession:
                     with self.lock:
                         self.stage = "reviewing"
                         self.launch_reason = None
-                    stage = "review"
-                    review = self.owner.review(
-                        target=str(result.get("pr_id", result["item_id"])),
-                        agent=selected,
-                        group=self.group,
-                    )
-                    if "pr_id" in result and review["status"] == "nothing_to_review":
-                        self.owner.review(
-                            target=str(result["item_id"]), agent=selected, group=self.group
+                    target = str(result.get("pr_id", result["item_id"]))
+                    retry_head = False
+                    for _ in range(4):
+                        if self.stop_event.is_set():
+                            return
+                        stage = "review"
+                        with self.lock:
+                            require_fresh = self.automerge
+                        review_options = {"detached": True} if retry_head else {}
+                        review = self.owner.review(
+                            target=target,
+                            agent=selected,
+                            group=self.group,
+                            require_fresh=require_fresh,
+                            **review_options,
                         )
+                        if "pr_id" in result and review["status"] == "nothing_to_review":
+                            target = str(result["item_id"])
+                            review = self.owner.review(
+                                target=target,
+                                agent=selected,
+                                group=self.group,
+                                require_fresh=require_fresh,
+                                **review_options,
+                            )
+                        with self.lock:
+                            merge = self.automerge and not self.stop_event.is_set()
+                        if not merge or review.get("status") != "reviewed":
+                            break
+                        if not require_fresh:
+                            continue
+                        item = self.owner._require_item(str(review["item_id"]))
+                        stage = "merge"
+                        head = review.get("head_sha")
+                        while True:
+                            with self.lock:
+                                merge = self.automerge and not self.stop_event.is_set()
+                            if not merge:
+                                break
+                            state = self.owner.backend.github_client.work_pull_request(
+                                item,
+                                github_username=self.owner.config.github_username,
+                                todo_repository=self.owner.config.todo_repository,
+                            )
+                            if not head or not state or state.state != "OPEN" or not state.head_sha:
+                                raise RuntimeError("Pull request head is unavailable after review.")
+                            if state.head_sha != head:
+                                retry_head = True
+                                break
+                            if not state.review_threads_complete:
+                                raise RuntimeError(
+                                    "Cannot verify all pull request review feedback."
+                                )
+                            if state.reasons:
+                                if not state.head_writable:
+                                    raise RuntimeError(
+                                        "Pull request needs fixes but its head is not writable."
+                                    )
+                                break
+                            if (
+                                not state.changes_requested
+                                and state.mergeability == "mergeable"
+                                and state.ci_status in {"passing", "no_checks"}
+                            ):
+                                break
+                            with self.lock:
+                                self.stage = "waiting"
+                            if self.stop_event.wait(_AUTODISPATCH_POLL_SECONDS):
+                                return
+                        with self.lock:
+                            merge = merge and self.automerge and not self.stop_event.is_set()
+                            self.stage = "reviewing"
+                        if not merge:
+                            break
+                        if state.head_sha != head:
+                            continue
+                        if state.reasons:
+                            break
+                        if self.stop_event.is_set():
+                            return
+                        try:
+                            self.owner.backend.github_client.merge_pull_request(
+                                item.repo, item.number, head
+                            )
+                        except MergeHeadChangedError:
+                            retry_head = True
+                            continue
+                        except MergeConflictError:
+                            if self.stop_event.is_set():
+                                raise
+                            state = self.owner.backend.github_client.work_pull_request(
+                                item,
+                                github_username=self.owner.config.github_username,
+                                todo_repository=self.owner.config.todo_repository,
+                            )
+                            if not state or "fix_merge_conflicts" not in state.reasons:
+                                raise
+                        break
+                    else:
+                        raise RuntimeError("Pull request head changed too often to merge safely.")
+
         except Exception as error:
             logger.error("Session %s failed during %s: %s", self.id, stage, safe_error(error))
             with self.lock:
@@ -174,7 +279,7 @@ class _AutodispatchSession:
                     self.owner.completed_autodispatch_item(self.current_item)
         finally:
             with self.lock:
-                if stage == "review" and self.stop_event.is_set():
+                if stage in {"review", "merge"} and self.stop_event.is_set():
                     self.owner.completed_autodispatch_item(self.current_item)
 
 

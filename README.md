@@ -232,7 +232,8 @@ The `repositories` list in `config.json` accepts:
   item's worktree, choosing a numbered agent focuses its pane instead of launching another.
 - `d` — start an autodispatch session for the selected issue or a linked issue
   of an authored PR, including in another repository. A PR without a linked
-  issue cannot be dispatched.
+  issue cannot be dispatched. For work with a running session, `m` replaces `d` in the display; `d` still starts or replaces the session for the selected target.
+- `m` — toggle automerge for the selected work's running autodispatch session. If multiple sessions match, use `workdash info` and `workdash autodispatch-stop SESSION_ID` to leave only the intended session.
 - `w` — capture a todo. Opens a dialog asking for the todo text and an
   optional target repository.
 - `q` — quit.
@@ -452,11 +453,16 @@ in *Autoclose supervision* below.
 
 ## Autodispatch sessions
 
-`workdash autodispatch SCOPE [--group NAME] [--agent NAME]` starts a server-owned
+`workdash autodispatch SCOPE [--group NAME] [--agent NAME] [--automerge]` starts a server-owned
 session and returns its ID immediately. It uses the same scopes, readiness,
 parent behavior, claims and agent supervision as `dispatch`. Without `--group`, each task uses its implementation repository basename,
 including cross-repository work; `--group` overrides it. Each session dispatches one issue at a time, checks about every 30
-seconds for its pane to disappear, then synchronously reviews the linked open PR before checking readiness again. If there is no linked PR, review is skipped. The selected agent must support both coding and one-shot analysis. Review failure fails the session. The session fails before a tenth consecutive dispatch of the same issue; selecting another issue resets the count. It does not merge PRs. Multiple independent sessions can run at once.
+seconds for its pane to disappear, then synchronously reviews the linked open PR before checking readiness again. If there is no linked PR, review is skipped. The selected agent must support both coding and one-shot analysis. Review failure, including a failed or unconfirmed GitHub posting, fails the session and prevents automerge. The session fails before a tenth consecutive dispatch of the same issue; selecting another issue resets the count. By default it leaves PRs open. With `--automerge`, it merges only the unchanged reviewed head after rechecking feedback, checks, and mergeability. Actionable feedback, conflicts, or failing checks return to dispatch; the session waits and rechecks while a requested re-review, checks, or mergeability are pending or unknown. Incomplete review feedback fails the session. Stopping the session or disabling automerge ends the wait. A review already in progress cannot be used for automerge; enabling automerge during one starts a fresh review afterward. A head that changes during review or merge is reviewed again, with bounded retries. If a merge fails because of conflicts, the session continues to select ready work; other merge failures fail the session. The direct merge selects a method enabled in the repository settings, preferring squash, then merge commits, then rebase. It does not account for branch rulesets that further restrict merge methods, so GitHub may reject the selected method and fail the session. The review is agent-produced, not independent proof. Multiple independent sessions can run at once.
+
+Feedback and checks can change between Workdash's readiness lookup and the GitHub
+merge. The head SHA guard only protects against changes to the commit, not those
+other changes. Use GitHub-enforced branch protection for policies that must be
+enforced atomically at merge time; Workdash's recheck is not such a guarantee.
 
 `workdash info` and `workdash info --json` report sessions, their current task,
 status, elapsed time and any failure. The TUI shows running sessions and the three
@@ -469,7 +475,7 @@ failure as an empty result. Sessions live only in the server process. After a
 restart, start another session on the same scope; readiness is checked afresh.
 
 The API accepts `POST /api/v0/autodispatch` with `scope` and optional `group` and
-`agent`, and `POST /api/v0/autodispatch_stop` with the session `id`.
+`agent` and boolean `automerge`, and `POST /api/v0/autodispatch_stop` with the session `id`.
 Session state is included in `POST /api/v0/info` as `autodispatch_sessions`;
 its `group` is null when no override was configured.
 
@@ -523,11 +529,13 @@ and submit a changes-requested review or approval as appropriate. For your own
 PR, based on the authenticated identity used to submit the review rather than
 the configured username, it submits a comment-only review, since GitHub does not
 permit self-approval or self-requested changes. If it cannot determine that
-identity, it is instructed not to submit a formal verdict and to say so in the
+identity, it is instructed not to submit a formal verdict and to report failure in the
 document. The agent writes a fresh document under the
 worktree's `.workdash/reviews/`, summarizing the outcome and explicitly listing
-posted comments or saying there were none. Any non-empty document counts as success,
-without checking its format. Starting a new review removes previous generated
+posted comments or saying there were none. The document must begin with
+`Review outcome: success`, confirming that the review completed and all required
+GitHub postings succeeded. An explicit failure or an unconfirmed outcome fails
+the review; its document is retained for diagnosis. Starting a new review removes previous generated
 `review-<UUID>.md` documents in that worktree, except documents of active reviews;
 other files are left alone. If the document is missing or empty, Workdash retries
 once, asking the agent to check existing threads before posting again; a failed
