@@ -21,7 +21,6 @@ from .config import WorkdashConfig
 from .git import GitHelper
 from .github_client import GitHubClient
 from .launcher import (
-    _format_zellij_pane_id,
     is_live_zellij_pane,
 )
 from .log_diagnostics import safe_error
@@ -358,11 +357,8 @@ class AutocloseSupervisor:
     def _identified(self, entry: _SupervisedPane) -> bool:
         """Whether a live pane in this session still has the registered ID and launch title."""
 
-        panes = launcher.zellij.load_zellij_panes(entry.session)
-        pane = next(
-            (pane for pane in panes if _format_zellij_pane_id(pane.get("id")) == entry.pane_id),
-            None,
-        )
+        panes = launcher.zellij.list_workdash_panes(entry.session)
+        pane = launcher.find_zellij_pane(panes, entry.pane_id)
         return (
             pane is not None and is_live_zellij_pane(pane) and pane.get("title") == entry.pane_title
         )

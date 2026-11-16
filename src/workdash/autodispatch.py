@@ -154,12 +154,8 @@ class _AutodispatchSession:
                     ):
                         absent = 0
                         continue
-                    panes = launcher.zellij.load_zellij_panes(str(result["session"]))
-                    present = any(
-                        _format_pane_id(pane.get("id")) == result["pane_id"]
-                        and pane.get("is_plugin") is not True
-                        for pane in panes
-                    )
+                    panes = launcher.zellij.list_workdash_panes(str(result["session"]))
+                    present = launcher.find_zellij_pane(panes, result["pane_id"]) is not None
                     # A listing can miss a live pane, so one miss is not proof it is gone.
                     absent = 0 if present else absent + 1
                     if absent >= 2:
@@ -281,10 +277,3 @@ class _AutodispatchSession:
             with self.lock:
                 if stage in {"review", "merge"} and self.stop_event.is_set():
                     self.owner.completed_autodispatch_item(self.current_item)
-
-
-def _format_pane_id(pane_id: object) -> str:
-    pane_id_text = str(pane_id)
-    if pane_id_text.startswith("terminal_"):
-        return pane_id_text
-    return f"terminal_{pane_id_text}"
