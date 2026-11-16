@@ -3884,7 +3884,7 @@ def test_zellij_replacement_tracks_terminal_and_coding_lifecycle(monkeypatch, tm
             self.content[pane_id] = ""
             return launcher_module.ZellijPaneLaunch(zellij_session, pane_id, title, repo_path)
 
-        def load_zellij_panes(self, session):
+        def list_workdash_panes(self, session):
             assert session == "workdash-test"
             return list(self.panes.values())
 
@@ -4086,7 +4086,7 @@ def test_session_analyzes_and_launches_coding_agent_with_real_executor(
         )
 
     fake_zellij = MagicMock()
-    fake_zellij.load_zellij_panes.side_effect = lambda _: list(panes)
+    fake_zellij.list_workdash_panes.side_effect = lambda _: list(panes)
     fake_zellij.launch_pane_and_wait.side_effect = launch_pane_and_wait
     fake_zellij.launch_pane.side_effect = launch_pane
     monkeypatch.setattr(launcher_module, "zellij", fake_zellij)

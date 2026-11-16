@@ -17,7 +17,7 @@ Feature: Supervise an autoclosed coding pane
     - A pull request that opens and merges between checks is found within about five minutes and its pane is closed.
     - Pending, unknown, or unavailable GitHub answers never close a pane and never report success; failed lookups back off instead of messaging.
     - A pull request closed without merging is neither completion nor work to redo on its own: supervision leaves the pane open, stops watching it, and reports it as needing review.
-    - A pane whose identity stops matching is dropped from supervision for good: the action is abandoned and it is never messaged or closed again.
+    - A pane whose identity stops matching is dropped from supervision for good: the action is abandoned and it is never messaged or closed again. Other Zellij panes do not interrupt supervision of the launched agent.
     - Somebody else's pull request stays a review: its pane is never messaged and closes only once that pull request merges. An issue with somebody else's open linked pull request does not receive no-pull-request reminders or become blocked for lack of a pull request.
     - Except when no pull request exists, an unchanged GitHub state is never messaged twice; a new head, check result, review, base head, or mergeability is a new state.
     - For work without a pull request, any change in pane content postpones the next reminder or block, regardless of what caused the change. Only recovery from a blocked pane resets the reminder count. A blocked pane is still closed when its pull request merges.

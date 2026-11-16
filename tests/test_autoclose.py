@@ -193,6 +193,17 @@ def failing_head(supervision: Supervision, head: str = HEAD_SHA) -> None:
     )
 
 
+def test_plugin_with_same_id_does_not_stop_supervision(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    supervision.launch(autoclose=True)
+    supervision.panes.insert(0, {"id": 21, "title": "status", "is_plugin": True})
+
+    supervision.poll(5)
+
+    assert supervision.sent[-1][0] == "terminal_21"
+
+
 def test_awaiting_launch_gets_publishing_rules_when_ci_fails(monkeypatch, tmp_path) -> None:
     supervision = Supervision(monkeypatch, tmp_path)
     supervision.github.pull_requests["owner/repo#51"]["checks"] = {

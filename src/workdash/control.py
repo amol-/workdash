@@ -30,7 +30,7 @@ from wsgiref.simple_server import make_server
 from . import agent_execution, launcher
 from .analysis_cache import AnalysisCache
 from .autoclose import AutocloseSupervisor
-from .autodispatch import _AutodispatchSession, _format_pane_id
+from .autodispatch import _AutodispatchSession
 from .backend import IncludeResult, SuggestionMarkers, WorkdashBackend, compute_suggestion_markers
 from .config import WorkdashConfig
 from .git import GitHelper, is_repository_name, is_todo_target
@@ -907,11 +907,8 @@ class WorkdashSession:
                 if running:
                     break
                 # Zellij holds the pane of an agent that exits at once, e.g. a missing binary.
-                if any(
-                    _format_pane_id(pane.get("id")) == launch.pane_id
-                    and pane.get("title") == launch.pane_title
-                    for pane in listed
-                ):
+                pane = launcher.find_zellij_pane(listed, launch.pane_id)
+                if pane is not None and pane.get("title") == launch.pane_title:
                     del self._unconfirmed_launches[launch_key]
                     raise WorkdashControlError(
                         "agent_exited",
@@ -926,7 +923,7 @@ class WorkdashSession:
                     status=HTTPStatus.CONFLICT,
                 )
             del self._unconfirmed_launches[launch_key]
-            pane_id = _format_pane_id(running[0]["id"])
+            pane_id = launcher._format_zellij_pane_id(running[0]["id"])
             launched = {
                 "status": "launched",
                 "item_id": item_id,
@@ -977,7 +974,7 @@ class WorkdashSession:
                 "agent": None,
                 "cwd": running[0].get("pane_cwd"),
                 "pane_title": running[0].get("title"),
-                "pane_id": _format_pane_id(running[0]["id"]),
+                "pane_id": launcher._format_zellij_pane_id(running[0]["id"]),
                 "tab_name": running[0].get("tab_name"),
             }
             if autoclose:
@@ -1212,7 +1209,9 @@ class WorkdashSession:
             {pane["id"] for path in paths for pane in _agent_panes_in_worktree(live, path)}
         )
         for pane_id in pane_ids:
-            launcher.zellij.close_zellij_pane(self.zellij_session, _format_pane_id(pane_id))
+            launcher.zellij.close_zellij_pane(
+                self.zellij_session, launcher._format_zellij_pane_id(pane_id)
+            )
         for _ in range(_LAUNCH_VISIBILITY_CHECKS):
             live = self._live_panes()
             if not any(_agent_panes_in_worktree(live, path) for path in paths):
@@ -1559,7 +1558,7 @@ class WorkdashSession:
                 status=HTTPStatus.CONFLICT,
             )
         try:
-            return launcher.zellij.load_zellij_panes(self.zellij_session)
+            return launcher.zellij.list_workdash_panes(self.zellij_session)
         except RuntimeError as error:
             raise WorkdashControlError(
                 "zellij_unavailable",
@@ -1892,7 +1891,7 @@ def _pane_info_payload(
             if item_path is not None:
                 item_by_cwd[_normalized_path(item_path)] = format_work_item_id(item)
     panes = []
-    for pane in launcher.zellij.load_zellij_panes(session):
+    for pane in launcher.zellij.list_workdash_panes(session):
         if _is_workdash_work_pane(pane):
             panes.append(
                 _pane_payload(selected_session=session, pane=pane, item_by_cwd=item_by_cwd)
@@ -2443,7 +2442,7 @@ def _pane_payload(
         "session": selected_session,
         "tab_id": pane.get("tab_id"),
         "tab_name": pane.get("tab_name"),
-        "pane_id": _format_pane_id(pane_id),
+        "pane_id": launcher._format_zellij_pane_id(pane_id),
         "title": title,
         "cwd": cwd,
         "command": pane.get("pane_command") or pane.get("terminal_command"),
