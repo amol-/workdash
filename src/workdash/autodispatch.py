@@ -147,7 +147,11 @@ class _AutodispatchSession:
                 stage = "pane polling"
                 absent = 0
                 while not self.stop_event.wait(_AUTODISPATCH_POLL_SECONDS):
-                    if self.pane and self.owner.autoclose.blocked(*self.pane):
+                    if (
+                        self.pane
+                        and getattr(self.owner, "autoclose", None)
+                        and self.owner.autoclose.blocked(*self.pane) is True
+                    ):
                         absent = 0
                         continue
                     panes = launcher.zellij.load_zellij_panes(str(result["session"]))
