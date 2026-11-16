@@ -33,6 +33,67 @@ _DEFAULT_TUI_CONFIG = WorkdashConfig(
 )
 
 
+def test_dashboard_todo_type_and_search() -> None:
+    from workdash.control import format_work_item_id
+
+    now = datetime.now(UTC)
+    base = WorkItem(
+        kind=WorkItemKind.ASSIGNED_ISSUE,
+        item_type=WorkItemType.ISSUE,
+        repo="Owner/Todos",
+        number=21,
+        title="Todo",
+        created_at=now,
+        updated_at=now,
+        url="https://github.com/Owner/Todos/issues/21",
+    )
+    items = [
+        base,
+        replace(base, number=22, title="Targeted", todo_target="owner/project", included=True),
+        replace(base, repo="owner/project", number=23, title="Issue"),
+        replace(
+            base,
+            repo="owner/project",
+            number=24,
+            title="Target is todo repo",
+            todo_target="owner/todos",
+        ),
+        replace(
+            base, kind=WorkItemKind.AUTHORED_PR, item_type=WorkItemType.PR, number=25, title="PR"
+        ),
+    ]
+    session = MagicMock()
+    session.config = WorkdashConfig(todo_repository="owner/todos")
+    session.work_items = items
+    session.suggestion_markers = {}
+    session.autodispatch_sessions.return_value = []
+    app = WorkdashApp(session=session)
+
+    async def exercise() -> None:
+        async with app.run_test() as pilot:
+            table = app.query_one("#work-items", DataTable)
+            labels = {
+                str(row[2]): str(row[0]).strip()
+                for row in (table.get_row_at(i) for i in range(table.row_count))
+            }
+            assert labels == {
+                "Todo": "TD 21",
+                "Targeted": "TD+ 22",
+                "Issue": "IS 23",
+                "Target is todo repo": "IS 24",
+                "PR": "PR 25",
+            }
+            assert format_work_item_id(items[0]) == "Owner/Todos#ISSUE-21"
+            assert format_work_item_id(items[1]) == "owner/project#ISSUE-WT22"
+            await _submit_search(app, pilot, "TD+ 22")
+            assert _listed_titles(app) == ["Targeted"]
+            await pilot.press("/")
+            await _submit_search(app, pilot, "IS 23")
+            assert _listed_titles(app) == ["Issue"]
+
+    asyncio.run(exercise())
+
+
 def test_dashboard_initial_layout_and_shortcuts() -> None:
     items = _search_work_items()
     items[0] = replace(items[0], title="Long title " * 15)
@@ -556,6 +617,7 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
     )
 
     class Session:
+        config = WorkdashConfig()
         work_items = [initial_item]
         suggestion_markers = {}
 

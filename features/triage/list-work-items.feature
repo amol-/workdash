@@ -9,7 +9,7 @@ Feature: List work items
     - The list includes open pull requests the user authored, open pull requests where the user is a REVIEW item, open issues assigned to the user, open issues and pull requests across tracked repositories, and items the user has explicitly included by URL.
     - A pull request is a REVIEW item when the user is directly requested as a reviewer, or when the user has already reviewed it.
     - Review requests addressed only to a team the user belongs to do not make the pull request a REVIEW item; only direct user review requests do.
-    - Each TUI entry's Type column shows its item type as IS, PR, RV, or VR, followed by a space and its GitHub number (for example, `IS 123`), alongside the owning repository, last update date, item's age, and title. Included items retain their `+` indicator.
+    - Each TUI entry's Type column shows TD for issues in the configured todo repository, IS for other issues, or PR, RV, or VR for pull requests, followed by a space and its GitHub number (for example, `IS 123`), alongside the repository, last update date, item's age, and title. Included items retain their `+` indicator.
     - A pull request the user neither authored nor was asked to review nor already reviewed is a CHECK item, displayed as VR (voluntary review) in the TUI, so it is never confused with the user's own work.
     - Reviewing a CHECK item needs no extra action: the next refresh finds the same pull request as a reviewed one and lists it as a REVIEW item instead.
     - A pull request that closes an issue replaces that issue: the issue is not listed on its own, so the same work never occupies two rows. This holds for PR, REVIEW, and CHECK items alike, and also for an issue the user included by URL.
@@ -70,9 +70,9 @@ Feature: List work items
 
   @id:F-TRIAGE-LIST-S008
   Scenario: Type column shows the GitHub number
-    Given the dashboard has issue, pull request, and review work items
+    Given the dashboard has issue, todo, pull request, and review work items
     When the user opens the dashboard
-    Then the Type column shows `IS 1`, `PR 2`, and `RV 3`
+    Then the Type column shows `IS 1`, `PR 2`, `RV 3`, and `TD 4`
 
   @id:F-TRIAGE-LIST-S002
   Scenario: Only direct user review requests are treated as REVIEW items

@@ -491,7 +491,7 @@ def _rendered_type_cells(scenario_state: dict[str, Any]) -> dict[str, str]:
     return captured
 
 
-@then("the Type column shows `IS 1`, `PR 2`, and `RV 3`")
+@then("the Type column shows `IS 1`, `PR 2`, `RV 3`, and `TD 4`")
 def _type_column_shows_github_numbers(scenario_state: dict[str, Any]) -> None:
     captured: list[str] = []
 
@@ -501,9 +501,14 @@ def _type_column_shows_github_numbers(scenario_state: dict[str, Any]) -> None:
             type_column_label(table.get_row_at(index)[0]) for index in range(table.row_count)
         )
 
-    run_app(work_items=scenario_state["work_items"], interactions=interactions)
+    session = MagicMock()
+    session.config = WorkdashConfig(todo_repository="owner/todos")
+    session.work_items = scenario_state["work_items"]
+    session.suggestion_markers = {}
+    session.autodispatch_sessions.return_value = []
+    run_app(work_items=scenario_state["work_items"], interactions=interactions, session=session)
 
-    assert set(captured) == {"IS 1", "PR 2", "RV 3"}
+    assert set(captured) == {"IS 1", "PR 2", "RV 3", "TD 4"}
 
 
 # -- S002: direct vs team review requests ---------------------------------
@@ -1168,6 +1173,15 @@ def _dashboard_has_item_types(scenario_state: dict[str, Any], work_items: list[W
             updated_at=NOW_UTC,
         ),
     ]
+    scenario_state["work_items"] = list(work_items)
+
+
+@given("the dashboard has issue, todo, pull request, and review work items")
+def _dashboard_has_item_types_and_todo(
+    scenario_state: dict[str, Any], work_items: list[WorkItem]
+) -> None:
+    _dashboard_has_item_types(scenario_state, work_items)
+    work_items.append(make_work_item(repo="owner/todos", number=4, title="Todo"))
     scenario_state["work_items"] = list(work_items)
 
 
