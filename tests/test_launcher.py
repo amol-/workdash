@@ -1075,7 +1075,7 @@ def test_exec_zellij_wrapped_workdash_replaces_process_with_layout(
     assert "attach_to_session false" in layout
     assert 'tab name="dashboard"' in layout
     assert 'pane name="workdash tui" command="/usr/local/bin/workdash"' in layout
-    assert 'args "--direct" "--persistent-pane" "--refresh"' in layout
+    assert 'args "--persistent-pane" "--refresh"' in layout
     assert "kill-session" not in layout
     assert "trap " not in layout
     assert "compact-bar" not in layout
@@ -1114,7 +1114,7 @@ def test_exec_zellij_wrapped_workdash_preserves_module_invocation(
         layout = layout_file.read()
     assert 'tab name="dashboard"' in layout
     assert 'pane name="workdash tui" command="/usr/bin/python3.12"' in layout
-    assert 'args "-m" "workdash" "--direct" "--persistent-pane" "--refresh"' in layout
+    assert 'args "-m" "workdash" "--persistent-pane" "--refresh"' in layout
     assert "kill-session" not in layout
 
 
@@ -1150,7 +1150,7 @@ def test_exec_zellij_wrapped_workdash_preserves_workdash_module_invocation(
     with open(exec_calls[0][1][2], encoding="utf-8") as layout_file:
         layout = layout_file.read()
     assert 'pane name="workdash tui" command="/usr/bin/python3.12"' in layout
-    assert 'args "-m" "workdash" "--direct" "--persistent-pane" "--refresh"' in layout
+    assert 'args "-m" "workdash" "--persistent-pane" "--refresh"' in layout
 
 
 def test_exec_zellij_wrapped_workdash_reports_exec_failure(

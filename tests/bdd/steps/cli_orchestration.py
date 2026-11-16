@@ -257,11 +257,6 @@ def _run_workdash(
             "check_authentication",
             lambda self: (_ for _ in ()).throw(AssertionError("unexpected GitHub preflight")),
         )
-        monkeypatch.setattr(
-            workdash_module,
-            "_select_workdash_session",
-            lambda _session: (_ for _ in ()).throw(AssertionError("unexpected Zellij inspection")),
-        )
     else:
         monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: config)
@@ -947,10 +942,10 @@ def _does_not_choose_session(scenario_state: dict[str, Any]) -> None:
     assert "Session:" not in scenario_state["stdout"]
 
 
-@then("the command reports that `workdash --server` must be running")
+@then("the command reports that `workdash` must be running")
 def _reports_server_required(scenario_state: dict[str, Any]) -> None:
     assert "No Workdash server is reachable" in scenario_state["stderr"]
-    assert "workdash --server" in scenario_state["stderr"]
+    assert "workdash" in scenario_state["stderr"]
 
 
 @then("the command exits with a non-zero status")
