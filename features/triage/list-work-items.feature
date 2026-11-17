@@ -9,7 +9,7 @@ Feature: List work items
     - The list includes open pull requests the user authored, open pull requests where the user is a REVIEW item, open issues assigned to the user, open issues and pull requests across tracked repositories, and items the user has explicitly included by URL.
     - A pull request is a REVIEW item when the user is directly requested as a reviewer, or when the user has already reviewed it.
     - Review requests addressed only to a team the user belongs to do not make the pull request a REVIEW item; only direct user review requests do.
-    - Each TUI entry's Type column shows TD for issues in the configured todo repository, IS for other issues, or PR, RV, or VR for pull requests, followed by a space and its GitHub number (for example, `IS 123`), alongside the repository, last update date, item's age, and title. Included items retain their `+` indicator.
+    - Each TUI entry's Type column shows TD for issues in the configured todo repository, IS for other issues, or PR, RV, or VR for pull requests, followed by a space and its GitHub number (for example, `IS 123`), alongside the repository, last update date, and title. Included items retain their `+` indicator.
     - A pull request the user neither authored nor was asked to review nor already reviewed is a CHECK item, displayed as VR (voluntary review) in the TUI, so it is never confused with the user's own work.
     - Reviewing a CHECK item needs no extra action: the next refresh finds the same pull request as a reviewed one and lists it as a REVIEW item instead.
     - A pull request that closes an issue replaces that issue: the issue is not listed on its own, so the same work never occupies two rows. This holds for PR, REVIEW, and CHECK items alike, and also for an issue the user included by URL.
@@ -27,7 +27,7 @@ Feature: List work items
     - When the same item qualifies for multiple sources, the strongest relationship wins in this order: authored pull request, then REVIEW pull request, then assigned issue, then plain tracked item.
     - When GitHub does not return a repository or item while loading a specific work source, either because further repository authorization is required or because GitHub can no longer resolve it, the system warns the user, skips that inaccessible repository or item, and keeps loading other work. This includes an inaccessible repository found while searching authored pull requests across repositories.
     - When no work items match, the system reports that no work items were found.
-    - The dashboard list scrolls vertically but not horizontally. Long titles are shortened as needed to keep age and last update visible when space allows, including after resizing. The action bar highlights shortcut keys in bold, and the status bar beneath it shows the number of items loaded from the start.
+    - The dashboard list scrolls vertically but not horizontally. Long titles are shortened as needed to keep the last update visible when space allows, including after resizing. The action bar highlights shortcut keys in bold, and the status bar beneath it shows the number of items loaded from the start.
     - Scrolling the TUI list keeps each visual row tied to the same GitHub issue or pull request; included items may show a "+" type suffix but must not create stale, duplicate, or empty visual rows. Resizing the dashboard keeps the selected item visible when there is room for a table row.
     - When autodispatch progress appears or disappears, the work item list keeps its scroll position when possible. In a short dashboard, work items remain visible when there is room for a table row, and the user can scroll through all progress entries.
     - The dashboard is keyboard-driven: it never captures mouse input, so mouse behavior (text selection, wheel scrolling) stays with the terminal.
@@ -36,7 +36,7 @@ Feature: List work items
   Scenario: Dashboard shows work details and controls without horizontal scrolling
     Given the dashboard contains a work item with a long title
     When the user opens the dashboard at 80 columns
-    Then the item age and last update are visible alongside its shortened title
+    Then the last update is visible alongside its shortened title
     And the action bar highlights its shortcut keys above the loaded item count
     And the dashboard does not scroll horizontally
 

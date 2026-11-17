@@ -11,7 +11,7 @@ Feature: Search work items
     - Pressing "/" with no active search filter opens a search box; submitting a non-empty string filters the list to matching items.
     - The search filter matches literal text, ignoring case, anywhere in the displayed Type and number (such as `VR 42`), the legacy full type and number (such as `CHECK#42`), the full repository, or the full title including its displayed state suffix. Spaces are matched literally.
     - The Repo column is matched on the full repository name, so an owner cut off by the column's width is still searchable.
-    - The Age and Last Update columns are never searched.
+    - The Updated column is never searched.
     - Pressing "/" while a search filter is active clears the filter and shows the full list again.
     - Closing the search box without submitting leaves the list unchanged.
     - Any action that changes the loaded work item list clears the search filter, so a newly arrived item is never hidden: refreshing, including an item by URL, and capturing a todo all show the full list again.
