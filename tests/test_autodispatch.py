@@ -2771,6 +2771,8 @@ def test_tui_toggles_automerge_for_the_session_it_just_dispatched():
         async with app.run_test() as pilot:
             await pilot.press("d")
             await pilot.pause()
+            # The dashboard learns the new session from the polled snapshot.
+            await app._poll_autodispatch_progress()
             await pilot.press("m")
             await pilot.pause()
             session.toggle_automerge.assert_called_once_with("new")

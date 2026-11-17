@@ -3877,6 +3877,57 @@ def test_narrow_progress_prioritizes_terminal_outcome_over_automerge(status):
     asyncio.run(run())
 
 
+def test_busy_dialog_and_row_highlight_render_from_the_polled_snapshot() -> None:
+    """The dashboard never reads the session's autodispatch state on the event loop."""
+
+    session = _dashboard_session()
+    session.work_items = _search_work_items()
+    entry = {
+        "id": "s",
+        "status": "running",
+        "scope": "owner/other#22",
+        "current_item": "owner/other#22",
+        "selected_group": None,
+        "stage": "developing",
+        "launch_reason": None,
+        "iteration": 1,
+        "elapsed_seconds": 0,
+        "error": None,
+    }
+    reader_threads: list[threading.Thread] = []
+
+    def autodispatch_sessions() -> list[dict[str, object]]:
+        reader_threads.append(threading.current_thread())
+        return [entry]
+
+    # The snapshot reads the autoclose supervisor, which shares the session lock.
+    session.autodispatch_sessions = autodispatch_sessions
+    app = WorkdashApp(session=session)
+
+    async def run() -> None:
+        async with app.run_test() as pilot:
+            # Mounting seeds the cache once; everything after it reads that cache.
+            reader_threads.clear()
+            await app._poll_autodispatch_progress()
+            footer = app.query_one("#command-footer", Static)
+            # Row 1 is the dispatched pull request.
+            await pilot.press("down")
+            assert "(m)erge" in footer.render().plain
+            await app.push_screen(BusyScreen(message="Checking ready work..."))
+            await pilot.pause(0.4)
+            await app.pop_screen()
+            assert "(m)erge" in footer.render().plain
+            await pilot.press("up")
+            assert "(d)ispatch" in footer.render().plain
+            await pilot.press("down")
+            assert "(m)erge" in footer.render().plain
+
+    asyncio.run(run())
+    # Only the thread the poll runs in may read the session; the event loop never does.
+    assert reader_threads
+    assert all(thread is not threading.main_thread() for thread in reader_threads)
+
+
 def test_dashboard_dialog_names_the_operation_that_took_over() -> None:
     session = _dashboard_session()
     app = WorkdashApp(session=session)
