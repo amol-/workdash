@@ -1557,7 +1557,26 @@ def test_zellij_pane_read_gives_up_after_retrying(monkeypatch, answer):
     assert run.call_count == attempts
 
 
-def test_zellij_pane_read_gives_up_within_a_few_seconds(monkeypatch):
+def test_zellij_pane_read_retries_two_unusable_answers_two_seconds_apart(monkeypatch):
+    sleep = MagicMock()
+    monkeypatch.setattr("workdash.launcher.time", SimpleNamespace(sleep=sleep))
+    unusable = subprocess.CompletedProcess([], 0, stdout="Session 'workdash' not found.\n")
+    run = MagicMock(
+        side_effect=[
+            unusable,
+            unusable,
+            subprocess.CompletedProcess([], 0, stdout='[{"id": 1}]'),
+        ]
+    )
+    monkeypatch.setattr("workdash.launcher._resolve_zellij_binary", lambda: "zellij")
+    monkeypatch.setattr("workdash.launcher.subprocess.run", run)
+
+    assert launcher_module.zellij.load_zellij_panes("workdash") == [{"id": 1}]
+    assert run.call_count == 3
+    assert [call.args[0] for call in sleep.call_args_list] == [2.0, 2.0]
+
+
+def test_zellij_pane_read_gives_up_within_ten_seconds(monkeypatch):
     sleep = MagicMock()
     monkeypatch.setattr("workdash.launcher.time", SimpleNamespace(sleep=sleep))
     run = MagicMock(side_effect=subprocess.TimeoutExpired("zellij", 5))
@@ -1567,7 +1586,7 @@ def test_zellij_pane_read_gives_up_within_a_few_seconds(monkeypatch):
         launcher_module.zellij.load_zellij_panes("workdash")
     timeouts = [call.kwargs["timeout"] for call in run.call_args_list]
     waits = [call.args[0] for call in sleep.call_args_list]
-    assert sum(timeouts) + sum(waits) <= 5
+    assert sum(timeouts) + sum(waits) <= 10
 
 
 def test_launch_pane_and_wait_blocks_on_the_pane_command(

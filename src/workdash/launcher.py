@@ -30,10 +30,11 @@ _BROWSER_OPEN_COMMANDS = ("xdg-open", "open")
 _BROWSER_OPEN_TIMEOUT_SECONDS = 4
 _WORKDASH_LOCAL_BIN = LOCAL_BIN_PATH
 # A Zellij session that is still starting answers unusably for a moment, so a pane
-# listing is retried once before it counts as unavailable. The whole read stays
-# short because callers list panes while holding the session lock.
-_ZELLIJ_PANE_READ_ATTEMPTS = 2
-_ZELLIJ_PANE_READ_RETRY_SECONDS = 0.25
+# listing is retried up to three times, two seconds apart, before it counts as
+# unavailable. Callers list panes while holding the session lock, so a persistent
+# failure delays them for about ten seconds in total.
+_ZELLIJ_PANE_READ_ATTEMPTS = 3
+_ZELLIJ_PANE_READ_RETRY_SECONDS = 2.0
 _ZELLIJ_PANE_READ_TIMEOUT_SECONDS = 2.0
 # Terminal control sequences in text captured from a pane or an error message.
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")

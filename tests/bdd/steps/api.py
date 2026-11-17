@@ -1285,23 +1285,27 @@ def _zellij_cannot_report_panes(scenario_state: dict[str, Any]) -> None:
     scenario_state["zellij_unavailable"] = True
 
 
-@given("Zellij answers the first pane listing unusably")
-def _zellij_answers_first_listing_unusably(
-    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+def _install_unusable_pane_listings(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    count: int,
 ) -> None:
     import workdash.launcher as launcher_module
 
     scenario_state["zellij_reads_real_panes"] = True
     panes = scenario_state.setdefault("panes", [])
-    answers = [subprocess.CompletedProcess([], 0, stdout="Session 'workdash-main' not found.\n")]
+    answers = [
+        subprocess.CompletedProcess([], 0, stdout="Session 'workdash-main' not found.\n")
+    ] * count
 
     def run(command, **_kwargs):
         if answers:
             return answers.pop()
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps(panes))
 
-    def assert_unusable_answer_consumed():
-        assert not answers, "the unusable pane listing was never read"
+    def assert_unusable_answers_consumed():
+        assert not answers, "an unusable pane listing was never read"
 
     monkeypatch.setattr(launcher_module, "subprocess", SimpleNamespace(run=run))
     monkeypatch.setattr(launcher_module, "_resolve_zellij_binary", lambda: "zellij")
@@ -1309,7 +1313,21 @@ def _zellij_answers_first_listing_unusably(
     monkeypatch.setattr(
         launcher_module.zellij, "load_zellij_panes", launcher_module.Zellij.load_zellij_panes
     )
-    request.addfinalizer(assert_unusable_answer_consumed)
+    request.addfinalizer(assert_unusable_answers_consumed)
+
+
+@given("Zellij answers the first pane listing unusably")
+def _zellij_answers_first_listing_unusably(
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    _install_unusable_pane_listings(scenario_state, monkeypatch, request, 1)
+
+
+@given("Zellij answers the first two pane listings unusably")
+def _zellij_answers_first_two_listings_unusably(
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    _install_unusable_pane_listings(scenario_state, monkeypatch, request, 2)
 
 
 @given("launched agent panes never become visible in Zellij")
