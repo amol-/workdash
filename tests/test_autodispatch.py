@@ -646,7 +646,26 @@ def _tui_session(*items: WorkItem) -> MagicMock:
     session = MagicMock()
     session.work_items = list(items)
     session.suggestion_markers = {}
+    session.busy_message.return_value = None
     return session
+
+
+def _started_session(
+    session_id: str, scope: str, *, current_item: str | None = None
+) -> dict[str, object]:
+    """Return the snapshot the session returns when a dispatch starts."""
+
+    return {
+        "id": session_id,
+        "status": "running",
+        "scope": scope,
+        "current_item": current_item,
+        "selected_group": None,
+        "stage": "checking",
+        "launch_reason": None,
+        "iteration": 0,
+        "elapsed_seconds": 0,
+    }
 
 
 def _visible_task() -> WorkItem:
@@ -677,6 +696,7 @@ def test_tui_shows_running_sessions_and_remains_interactive(scope):
     session = _tui_session(_visible_task())
     session.autodispatch_sessions.return_value = [
         {
+            "id": "first",
             "status": "running",
             "scope": scope,
             "group": "first",
@@ -688,6 +708,7 @@ def test_tui_shows_running_sessions_and_remains_interactive(scope):
             "iteration": 1,
         },
         {
+            "id": "second",
             "status": "running",
             "scope": "owner/b",
             "group": None,
@@ -727,10 +748,6 @@ def test_tui_shows_running_sessions_and_remains_interactive(scope):
 
 def test_tui_reports_the_failure_of_the_session_the_user_started():
     session = _tui_session(_visible_task())
-    session.start_autodispatch_for_item.return_value = {
-        "id": "session-1",
-        "scope": "owner/repo#ISSUE-42",
-    }
     running = {
         "id": "session-1",
         "status": "running",
@@ -743,6 +760,7 @@ def test_tui_reports_the_failure_of_the_session_the_user_started():
         "launch_reason": None,
         "iteration": 1,
     }
+    session.start_autodispatch_for_item.return_value = running
     session.autodispatch_sessions.return_value = [running]
     app = WorkdashApp(session=session)
 
@@ -851,6 +869,36 @@ def test_tui_reports_overlapping_dispatch_outcomes(finish_together):
             progress = app.query_one("#autodispatch-progress", Static).render().plain
             assert "No work available to dispatch: owner/a" in progress
             assert "Failed: GitHub unavailable (owner/b)" in progress
+
+    asyncio.run(exercise())
+
+
+def test_tui_does_not_reannounce_the_session_it_started():
+    session = _tui_session(_visible_task())
+    sessions: list[dict[str, object]] = []
+
+    def start(_item) -> dict[str, object]:
+        started = _started_session("session-1", "owner/repo#ISSUE-42")
+        sessions.append(started)
+        return started
+
+    session.autodispatch_sessions.side_effect = lambda: list(sessions)
+    session.start_autodispatch_for_item.side_effect = start
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+            await pilot.press("d")
+            await pilot.pause()
+            assert (
+                footer.render().plain == "Started autodispatch for owner/repo#ISSUE-42: session-1."
+            )
+            # The poll must not treat the session the dashboard started as a new one.
+            await pilot.pause(1.2)
+            assert (
+                footer.render().plain == "Started autodispatch for owner/repo#ISSUE-42: session-1."
+            )
 
     asyncio.run(exercise())
 
@@ -2678,7 +2726,7 @@ def test_tui_dispatch_replaces_selected_running_session():
         }
     ]
     session._scope_identity.side_effect = lambda value: ("owner/repo", 1)
-    session.start_autodispatch_for_item.return_value = {"id": "new", "scope": "owner/repo#ISSUE-1"}
+    session.start_autodispatch_for_item.return_value = _started_session("new", "owner/repo#ISSUE-1")
     app = WorkdashApp(session=session)
 
     async def exercise():
@@ -2688,6 +2736,32 @@ def test_tui_dispatch_replaces_selected_running_session():
             await pilot.press("d")
             await pilot.pause()
             session.start_autodispatch_for_item.assert_called_once_with(item)
+
+    asyncio.run(exercise())
+
+
+def test_tui_toggles_automerge_for_the_session_it_just_dispatched():
+    item = _issue_item(1)
+    session = _tui_session(item)
+    sessions: list[dict[str, object]] = []
+
+    def start(_item) -> dict[str, object]:
+        started = _started_session("new", "owner/repo#ISSUE-1", current_item="owner/repo#ISSUE-1")
+        sessions.append(started)
+        return started
+
+    session.autodispatch_sessions.side_effect = lambda: list(sessions)
+    session.start_autodispatch_for_item.side_effect = start
+    session._scope_identity.side_effect = lambda value: ("owner/repo", 1)
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("m")
+            await pilot.pause()
+            session.toggle_automerge.assert_called_once_with("new")
 
     asyncio.run(exercise())
 

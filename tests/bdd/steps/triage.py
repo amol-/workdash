@@ -506,6 +506,7 @@ def _type_column_shows_github_numbers(scenario_state: dict[str, Any]) -> None:
     session.work_items = scenario_state["work_items"]
     session.suggestion_markers = {}
     session.autodispatch_sessions.return_value = []
+    session.busy_message.return_value = None
     run_app(work_items=scenario_state["work_items"], interactions=interactions, session=session)
 
     assert set(captured) == {"IS 1", "PR 2", "RV 3", "TD 4"}
@@ -2958,6 +2959,7 @@ def _scroll_work_items(scenario_state: dict[str, Any], work_items: list[WorkItem
     session = MagicMock()
     session.work_items = work_items
     session.suggestion_markers = {}
+    session.busy_message.return_value = None
     session.autodispatch_sessions.return_value = [
         {"id": "1", "status": "failed", "scope": "owner/repo", "error": "failed"}
     ]

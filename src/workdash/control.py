@@ -16,9 +16,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
 from concurrent.futures import Future
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from datetime import UTC, datetime
 from functools import partial
 from http import HTTPStatus
@@ -155,6 +155,10 @@ class WorkdashSession:
         self._autodispatch: dict[str, _AutodispatchSession] = {}
         self._completed_autodispatch_items: set[str] = set()
         self._completed_autodispatch_lock = threading.Lock()
+        # The dashboard reads this while a blocking operation holds _lock, so it is
+        # kept under its own lock. Blocking operations overlap on different threads.
+        self._busy: list[str] = []
+        self._busy_lock = threading.Lock()
 
     @property
     def git(self) -> GitHelper:
@@ -164,6 +168,12 @@ class WorkdashSession:
     def git(self, git: GitHelper) -> None:
         self._git = git
         self.autoclose.git = git
+
+    def busy_message(self) -> str | None:
+        """Return the operation holding the dashboard, if any."""
+
+        with self._busy_lock:
+            return self._busy[-1] if self._busy else None
 
     def list_items(self, *, refresh: bool = False) -> dict[str, object]:
         """Return the dashboard items currently known to the shared session."""
@@ -380,12 +390,13 @@ class WorkdashSession:
                         "No analysis agents are configured.",
                         status=HTTPStatus.CONFLICT,
                     )
-            path = self._analyze_item(
-                item,
-                tool=selected_agent or "cached",
-                prefer_cache=prefer_cache,
-                group=group or _default_group(item),
-            )
+            with self._blocking(f"Analyzing {target}..."):
+                path = self._analyze_item(
+                    item,
+                    tool=selected_agent or "cached",
+                    prefer_cache=prefer_cache,
+                    group=group or _default_group(item),
+                )
             if path is None:
                 raise WorkdashControlError(
                     "analysis_failed",
@@ -1024,10 +1035,13 @@ class WorkdashSession:
         the dashboard is left alone.
         """
 
-        return {
-            "scope": scope,
-            "items": [_ready_work_payload(work) for work in self._ready(scope, fail_unconfirmed)],
-        }
+        with self._blocking("Checking ready work..."):
+            return {
+                "scope": scope,
+                "items": [
+                    _ready_work_payload(work) for work in self._ready(scope, fail_unconfirmed)
+                ],
+            }
 
     def _ready(
         self,
@@ -1182,43 +1196,44 @@ class WorkdashSession:
         the pane alone, because no launch would replace it.
         """
 
-        try:
-            item = self._require_item(scope)
-        except WorkdashControlError:
-            return
-        if item.item_type != WorkItemType.ISSUE:
-            return
-        item_id = format_work_item_id(item)
-        # Local panes are ignored: the pane this session is about to close must not hide
-        # the work it holds.
-        ready = self._ready(item_id, True, panes=[])
-        work = next((work for work in ready if format_work_item_id(work.item) == item_id), None)
-        if work is None:
-            return
-        # The agent may work in a worktree named after the pull request or a linked issue
-        # rather than the issue itself, so every claim of the work is a candidate.
-        paths = [
-            path
-            for claim in work.claims
-            if (path := existing_worktree_path(self.config.workdir, claim, git=self.git))
-            is not None
-        ]
-        if not paths:
-            return
-        live = self._live_panes()
-        pane_ids = sorted(
-            {pane["id"] for path in paths for pane in _agent_panes_in_worktree(live, path)}
-        )
-        for pane_id in pane_ids:
-            launcher.zellij.close_zellij_pane(
-                self.zellij_session, launcher._format_zellij_pane_id(pane_id)
-            )
-        for _ in range(_LAUNCH_VISIBILITY_CHECKS):
-            live = self._live_panes()
-            if not any(_agent_panes_in_worktree(live, path) for path in paths):
+        with self._blocking("Starting autodispatch..."):
+            try:
+                item = self._require_item(scope)
+            except WorkdashControlError:
                 return
-            time.sleep(_LAUNCH_VISIBILITY_INTERVAL_SECONDS)
-        raise RuntimeError("Could not confirm existing coding pane was closed.")
+            if item.item_type != WorkItemType.ISSUE:
+                return
+            item_id = format_work_item_id(item)
+            # Local panes are ignored: the pane this session is about to close must not
+            # hide the work it holds.
+            ready = self._ready(item_id, True, panes=[])
+            work = next((work for work in ready if format_work_item_id(work.item) == item_id), None)
+            if work is None:
+                return
+            # The agent may work in a worktree named after the pull request or a linked
+            # issue rather than the issue itself, so every claim of the work is a candidate.
+            paths = [
+                path
+                for claim in work.claims
+                if (path := existing_worktree_path(self.config.workdir, claim, git=self.git))
+                is not None
+            ]
+            if not paths:
+                return
+            live = self._live_panes()
+            pane_ids = sorted(
+                {pane["id"] for path in paths for pane in _agent_panes_in_worktree(live, path)}
+            )
+            for pane_id in pane_ids:
+                launcher.zellij.close_zellij_pane(
+                    self.zellij_session, launcher._format_zellij_pane_id(pane_id)
+                )
+            for _ in range(_LAUNCH_VISIBILITY_CHECKS):
+                live = self._live_panes()
+                if not any(_agent_panes_in_worktree(live, path) for path in paths):
+                    return
+                time.sleep(_LAUNCH_VISIBILITY_INTERVAL_SECONDS)
+            raise RuntimeError("Could not confirm existing coding pane was closed.")
 
     def _scope_identity(self, scope: str) -> tuple[str, int] | str:
         """Return the key that matches equivalent scopes, such as a todo ID and its URL.
@@ -1376,7 +1391,8 @@ class WorkdashSession:
             had_pull_request = candidate.pull_request is not None
             current = self._ready(candidate_id, True)
             candidate = next(
-                (work for work in current if format_work_item_id(work.item) == candidate_id), None
+                (work for work in current if format_work_item_id(work.item) == candidate_id),
+                None,
             )
             if candidate is None or (had_pull_request and candidate.pull_request is None):
                 continue
@@ -1437,6 +1453,21 @@ class WorkdashSession:
             )
         launcher.zellij.close_zellij_pane(self.zellij_session, pane_id)
         return {"pane_id": pane_id, "accepted": True}
+
+    @contextmanager
+    def _blocking(self, message: str) -> Iterator[None]:
+        """Tell the dashboard which operation is holding it until the block exits.
+
+        :param str message: The operation the dashboard reports to the user.
+        """
+
+        with self._busy_lock:
+            self._busy.append(message)
+        try:
+            yield
+        finally:
+            with self._busy_lock:
+                self._busy.remove(message)
 
     def _notify_items_changed(self) -> None:
         if self.items_changed_callback is not None:

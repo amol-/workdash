@@ -11,6 +11,7 @@ pytest.importorskip("textual")
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Input, Static
 
+import workdash.launcher as launcher_module
 from workdash.backend import IncludeResult
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession
@@ -67,6 +68,7 @@ def test_dashboard_todo_type_and_search() -> None:
     session.work_items = items
     session.suggestion_markers = {}
     session.autodispatch_sessions.return_value = []
+    session.busy_message.return_value = None
     app = WorkdashApp(session=session)
 
     async def exercise() -> None:
@@ -102,6 +104,7 @@ def test_dashboard_initial_layout_and_shortcuts() -> None:
     session.suggestion_markers = {}
     session.autodispatch_sessions.return_value = []
     session.take_completed_autodispatch_items.return_value = []
+    session.busy_message.return_value = None
     app = WorkdashApp(work_items=items[:1], session=session)
 
     async def exercise() -> None:
@@ -851,14 +854,49 @@ def _assert_no_modal_screens(app: WorkdashApp) -> None:
     assert lingering == []
 
 
+def _dashboard_session() -> WorkdashSession:
+    return WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+
+
+def _started_session(session_id: str, scope: str) -> dict[str, object]:
+    """Return the snapshot the session returns when a dispatch starts."""
+
+    return {
+        "id": session_id,
+        "status": "running",
+        "scope": scope,
+        "current_item": None,
+        "selected_group": None,
+        "stage": "checking",
+        "launch_reason": None,
+        "iteration": 0,
+        "elapsed_seconds": 0,
+    }
+
+
 async def _wait_for_busy_message(expected: str, pilot) -> None:
-    for _ in range(20):
-        await pilot.pause()
+    # A dashboard action in flight keeps the pilot from settling, so poll the screen.
+    for _ in range(40):
+        await asyncio.sleep(0.05)
         if isinstance(pilot.app.screen, BusyScreen):
             message = pilot.app.screen.query_one("#busy-message", Static).render().plain
             assert message == expected
             return
     raise AssertionError(f"no busy screen shown; expected {expected!r}")
+
+
+async def _wait_for_no_dialog(app: WorkdashApp, pilot) -> None:
+    for _ in range(30):
+        await pilot.pause(0.1)
+        if not isinstance(app.screen, BusyScreen):
+            return
+    raise AssertionError("the blocking dialog never cleared")
 
 
 async def _wait_for_footer(footer: Static, expected: str, pilot) -> None:
@@ -1129,6 +1167,7 @@ def test_code_dialog_actions_target_the_item_selected_when_the_dialog_opened(
     session.work_items = [selected, other]
     session.suggestion_markers = {}
     session.get_terminal_panes_for_item.return_value = []
+    session.busy_message.return_value = None
     worktree_calls: list[WorkItem] = []
     terminal_calls: list[WorkItem] = []
     app = WorkdashApp(
@@ -1889,9 +1928,11 @@ def test_workdash_app_actions_use_the_row_selected_in_the_filtered_list() -> Non
 
 def test_workdash_app_capture_todo_clears_the_search_filter() -> None:
     work_items = _search_work_items()
+    session = MagicMock(work_items=work_items, suggestion_markers={})
+    session.busy_message.return_value = None
     app = WorkdashApp(
         work_items=work_items,
-        session=MagicMock(work_items=work_items, suggestion_markers={}),
+        session=session,
         todo_callback=lambda _text, _target: {"item_id": "issue owner/todos#7"},
         now_utc=_SEARCH_NOW_UTC,
     )
@@ -2077,6 +2118,7 @@ def test_workdash_app_clearing_the_search_filter_keeps_the_selected_item() -> No
 def test_workdash_app_session_refresh_keeps_the_selected_item_while_filtered() -> None:
     work_items = _cursor_anchor_work_items()
     session = MagicMock(work_items=work_items, suggestion_markers={})
+    session.busy_message.return_value = None
     app = WorkdashApp(work_items=work_items, session=session, now_utc=_SEARCH_NOW_UTC)
 
     async def run_smoke() -> None:
@@ -2101,6 +2143,7 @@ def test_workdash_app_session_refresh_dropping_the_selected_item_clamps_the_curs
 
     work_items = _cursor_anchor_work_items()
     session = MagicMock(work_items=work_items, suggestion_markers={})
+    session.busy_message.return_value = None
     app = WorkdashApp(work_items=work_items, session=session, now_utc=_SEARCH_NOW_UTC)
 
     async def run_smoke() -> None:
@@ -3637,7 +3680,6 @@ def test_progress_selects_and_stops_a_blocked_session():
             await pilot.press("d")
             app._selected_item.assert_not_called()
             assert "blocked (s)top" in str(app.query_one("#autodispatch-progress").render())
-            session.autodispatch_sessions.return_value = [entry]
             await pilot.press("s")
             session.stop_autodispatch.assert_called_once_with("blocked")
 
@@ -3649,6 +3691,7 @@ def test_progress_arrows_reach_empty_sessions_on_short_screen():
     session.config = _DEFAULT_TUI_CONFIG
     session.work_items = []
     session.suggestion_markers = {}
+    session.busy_message.return_value = None
     session.take_completed_autodispatch_items.return_value = []
     session.autodispatch_sessions.return_value = [
         {"id": f"failed{n}", "status": "failed", "error": "error", "scope": f"owner/repo#{n}"}
@@ -3673,12 +3716,39 @@ def test_progress_arrows_reach_empty_sessions_on_short_screen():
     asyncio.run(run())
 
 
+def test_dashboard_keeps_its_own_progress_dialog_while_the_session_is_idle() -> None:
+    session = _dashboard_session()
+    release = threading.Event()
+
+    def refresh() -> list[WorkItem]:
+        release.wait(5)
+        return []
+
+    app = WorkdashApp(session=session, refresh_callback=refresh)
+
+    async def run() -> None:
+        async with app.run_test() as pilot:
+            press = asyncio.create_task(pilot.press("r"))
+            await asyncio.sleep(0.1)
+            assert isinstance(app.screen, BusyScreen)
+            # Let several busy-screen polls run while the action still blocks.
+            await asyncio.sleep(0.6)
+            message = app.screen.query_one("#busy-message", Static).render().plain
+            assert message == "Refreshing work items..."
+            release.set()
+            await press
+            _assert_no_modal_screens(app)
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("status", ["failed", "finished"])
 def test_narrow_progress_prioritizes_terminal_outcome_over_automerge(status):
     session = MagicMock()
     session.config = _DEFAULT_TUI_CONFIG
     session.work_items = []
     session.suggestion_markers = {}
+    session.busy_message.return_value = None
     session.take_completed_autodispatch_items.return_value = []
     session.autodispatch_sessions.return_value = [
         {
@@ -3703,5 +3773,89 @@ def test_narrow_progress_prioritizes_terminal_outcome_over_automerge(status):
             app._update_autodispatch_progress()
             row = app.query_one("#autodispatch-progress", Static).render().plain
             assert row.index("[automerge]") > row.index("owner/repo")
+
+    asyncio.run(run())
+
+
+def test_dashboard_dialog_names_the_operation_that_took_over() -> None:
+    session = _dashboard_session()
+    app = WorkdashApp(session=session)
+
+    async def run() -> None:
+        async with app.run_test() as pilot:
+            with session._blocking("Checking ready work..."):
+                await _wait_for_busy_message("Checking ready work...", pilot)
+                with session._blocking("Starting autodispatch..."):
+                    for _ in range(20):
+                        await pilot.pause()
+                        message = app.screen.query_one("#busy-message", Static).render().plain
+                        if message == "Starting autodispatch...":
+                            break
+                    assert message == "Starting autodispatch..."
+            await _wait_for_no_dialog(app, pilot)
+            _assert_no_modal_screens(app)
+
+    asyncio.run(run())
+
+
+def test_autodispatch_dispatch_iterations_leave_the_dashboard_interactive(monkeypatch) -> None:
+    session = _dashboard_session()
+    monkeypatch.setattr(session, "prepare_autodispatch", lambda _scope: None)
+    dispatching, release = threading.Event(), threading.Event()
+
+    def find_ready_work(**_kwargs):
+        dispatching.set()
+        release.wait(5)
+        return []
+
+    session.backend.github_client.find_ready_work.side_effect = find_ready_work
+    monkeypatch.setattr(launcher_module, "zellij", MagicMock(list_workdash_panes=lambda _: []))
+    app = WorkdashApp(session=session)
+
+    async def run() -> None:
+        async with app.run_test() as pilot:
+            started = session.start_autodispatch(scope="owner/repo", agent="claude")
+            try:
+                assert await asyncio.to_thread(dispatching.wait, 5)
+                await pilot.pause(0.6)
+                assert not isinstance(app.screen, BusyScreen)
+                await pilot.press("/")
+                await pilot.pause(0.2)
+                assert isinstance(app.screen, SearchDialog)
+            finally:
+                release.set()
+                session.stop_autodispatch(started["id"])
+
+    asyncio.run(run())
+
+
+def test_a_dispatch_started_from_the_dashboard_shows_one_blocking_dialog(monkeypatch) -> None:
+    session = _dashboard_session()
+    session.work_items = _search_work_items()[:1]
+    release = threading.Event()
+
+    def start(_item) -> dict[str, object]:
+        # The session reports the operation the dashboard's own dialog names.
+        with session._blocking("Starting autodispatch..."):
+            release.wait(5)
+        return _started_session("session-1", "owner/repo#ISSUE-11")
+
+    monkeypatch.setattr(session, "start_autodispatch_for_item", start)
+    app = WorkdashApp(session=session)
+
+    async def run() -> None:
+        async with app.run_test() as pilot:
+            press = asyncio.create_task(pilot.press("d"))
+            await _wait_for_busy_message("Starting autodispatch...", pilot)
+            # Let several busy-screen polls run while the session reports the operation.
+            await asyncio.sleep(0.6)
+            dialogs = [screen for screen in app.screen_stack if isinstance(screen, BusyScreen)]
+            assert len(dialogs) == 1
+            message = dialogs[0].query_one("#busy-message", Static).render().plain
+            assert message == "Starting autodispatch..."
+            release.set()
+            await press
+            await _wait_for_no_dialog(app, pilot)
+            _assert_no_modal_screens(app)
 
     asyncio.run(run())

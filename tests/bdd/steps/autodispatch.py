@@ -623,11 +623,13 @@ def dashboard_failure(scenario_state, monkeypatch):
 
     async def interact(app, pilot):
         await pilot.press("d")
-        for _ in range(100):
+        # The failure reaches the footer on the one-second progress poll.
+        for _ in range(300):
             await pilot.pause(0.02)
             if (
                 "GitHub unavailable"
                 in app.query_one("#autodispatch-progress", Static).render().plain
+                and "GitHub unavailable" in app.query_one("#status-footer", Static).render().plain
             ):
                 break
         scenario_state["failure_display"] = (

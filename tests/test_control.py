@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -732,6 +732,48 @@ def test_ready_reads_github_outside_the_session_lock_and_panes_inside_it(
     ]
     assert {held for call, held in lock_held if call == "gh"} == {False}
     assert {held for call, held in lock_held if call == "panes"} == {True}
+
+
+def test_session_reports_the_operation_blocking_the_dashboard(tmp_path) -> None:
+    session = _ready_session(tmp_path)
+    assert session.busy_message() is None
+
+    with session._blocking("Checking ready work..."):
+        assert session.busy_message() == "Checking ready work..."
+        # Operations overlap, so the dialog names the one that started last.
+        with session._blocking("Starting autodispatch..."):
+            assert session.busy_message() == "Starting autodispatch..."
+        assert session.busy_message() == "Checking ready work..."
+    assert session.busy_message() is None
+
+    with pytest.raises(RuntimeError):
+        with session._blocking("Starting autodispatch..."):
+            raise RuntimeError("Could not confirm existing coding pane was closed.")
+    assert session.busy_message() is None
+
+
+def test_busy_message_answers_while_an_operation_holds_the_session_lock(tmp_path) -> None:
+    session = _ready_session(tmp_path)
+    holding, release = Event(), Event()
+
+    def hold_lock() -> None:
+        with session._lock:
+            holding.set()
+            release.wait(5)
+
+    with session._blocking("Starting autodispatch..."):
+        holder = Thread(target=hold_lock)
+        holder.start()
+        assert holding.wait(5)
+        answers: list[str | None] = []
+        reader = Thread(target=lambda: answers.append(session.busy_message()))
+        reader.start()
+        reader.join(1)
+        answered_without_the_lock = not reader.is_alive()
+        release.set()
+        holder.join(5)
+        assert answered_without_the_lock
+        assert answers == ["Starting autodispatch..."]
 
 
 def test_session_analyze_returns_cached_analysis_without_configured_agents(

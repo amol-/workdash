@@ -25,6 +25,9 @@ from .steps import (
 )
 from .steps import autodispatch as _autodispatch
 from .steps import (
+    blocking as _blocking,
+)
+from .steps import (
     branchdiff as _branchdiff,
 )
 from .steps import (
@@ -76,6 +79,7 @@ for _step_module in (
     _api,
     _autoclose,
     _autodispatch,
+    _blocking,
     _branchdiff,
     _cli_orchestration,
     _triage,
@@ -100,6 +104,7 @@ for _step_module in (
             "work_items",
             "valid_config",
             "autodispatch_state",
+            "blocking_state",
             "dashboard_dispatch",
             "config_path",
         }:
