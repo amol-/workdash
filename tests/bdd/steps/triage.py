@@ -2967,7 +2967,7 @@ def _scroll_work_items(scenario_state: dict[str, Any], work_items: list[WorkItem
         footer = app.query_one("#command-footer", Static)
         progress = app.query_one("#autodispatch-progress", Static)
         assert progress.region.height > 0
-        assert "Failed owner/repo: failed" in progress.render().plain
+        assert "Failed: failed (owner/repo)" in progress.render().plain
         for index in range(table.row_count):
             await pilot.press("o")
             row_y = table.region.y + table._get_row_region(index).y - int(table.scroll_y)

@@ -64,7 +64,7 @@ Feature: Automatically dispatch ready work
     - Pressing "d" on a pull request that is not authored by you reports that dispatch is unavailable and starts no session.
     - After three reminders and a further idle window without a pull request, a session remains blocked and visible in the dashboard and info. Pane activity postpones the next reminder or block but does not reset the reminder limit. A change in blocked pane content or successful input through Workdash immediately resumes supervision with a fresh limit, even if the screen stays unchanged or GitHub is temporarily unavailable. If a later pull request merges, the pane closes and the session continues to the next ready task.
     - With progress focused, the selected blocked session offers stop. Stopping closes its pane without changing the worktree. Starting another session for the same scope also closes the blocked pane before replacing the session. If the pane content has changed before either action closes it, the session still stops or is replaced, but that action leaves the recovered pane open. An exact-issue restart can still close it to dispatch ready work.
-    - The dashboard shows running and blocked sessions and the three most recently started failed sessions, with failure summaries kept to one line each; full details remain available through info.
+    - The dashboard shows running and blocked sessions, the three most recently started failed sessions, and the three most recently started sessions that had no work at their first check. Their outcomes remain visible as other sessions finish; failure summaries are kept to one line each and full details remain available through info. Empty-start and failure status messages and progress rows lead with the outcome and reason so they remain visible on narrow screens, and identify the session's scope when space permits.
     - When an autodispatch refresh updates a pull request row, its current linked issues determine later refreshes and worktree selection.
 
   @id:F-AUTODISPATCH-S020
@@ -139,6 +139,14 @@ Feature: Automatically dispatch ready work
     Given an authored pull request linked to an issue that is not ready
     When the user presses d to start autodispatch
     Then an autodispatch session starts for the linked issue
+    And the dashboard reports that no work is available to dispatch
+
+  @id:F-AUTODISPATCH-S027
+  Scenario: Report when an issue has no ready work because of a dependency
+    Given an issue blocked by an open dependency selected in the dashboard
+    When the user presses d to start autodispatch
+    Then an autodispatch session starts for the selected issue
+    And the dashboard reports that no work is available to dispatch
 
   @id:F-AUTODISPATCH-S001
   Scenario: An autodispatch session continues until no work is ready

@@ -3584,3 +3584,66 @@ def test_progress_selects_and_stops_a_blocked_session():
             session.stop_autodispatch.assert_called_once_with("blocked")
 
     asyncio.run(run())
+
+
+def test_progress_arrows_reach_empty_sessions_on_short_screen():
+    session = MagicMock()
+    session.config = _DEFAULT_TUI_CONFIG
+    session.work_items = []
+    session.suggestion_markers = {}
+    session.take_completed_autodispatch_items.return_value = []
+    session.autodispatch_sessions.return_value = [
+        {"id": f"failed{n}", "status": "failed", "error": "error", "scope": f"owner/repo#{n}"}
+        for n in range(3)
+    ] + [
+        {"id": str(n), "status": "finished", "iteration": 1, "scope": f"owner/repo#{n}"}
+        for n in range(3)
+    ]
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test(size=(60, 8)) as pilot:
+            await pilot.press("shift+tab", *(["down"] * 5))
+            scroll = app.query_one("#autodispatch-scroll")
+            rows = app.query_one("#autodispatch-progress", Static).render().plain.splitlines()
+            assert rows[5].startswith("> ") and "owner/repo#2" in rows[5]
+            assert scroll.scroll_y > 0
+            await pilot.press("up")
+            rows = app.query_one("#autodispatch-progress", Static).render().plain.splitlines()
+            assert rows[4].startswith("> ")
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status", ["failed", "finished"])
+def test_narrow_progress_prioritizes_terminal_outcome_over_automerge(status):
+    session = MagicMock()
+    session.config = _DEFAULT_TUI_CONFIG
+    session.work_items = []
+    session.suggestion_markers = {}
+    session.take_completed_autodispatch_items.return_value = []
+    session.autodispatch_sessions.return_value = [
+        {
+            "id": "s",
+            "status": status,
+            "iteration": 1,
+            "scope": "owner/repo",
+            "error": "network error",
+            "automerge": True,
+        }
+    ]
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test(size=(36, 10)) as pilot:
+            row = app.query_one("#autodispatch-progress", Static).render().plain
+            if status == "failed":
+                assert row.startswith("> Failed: network error")
+            else:
+                assert row.startswith("> No work available to dispatch")
+            await pilot.resize_terminal(100, 10)
+            app._update_autodispatch_progress()
+            row = app.query_one("#autodispatch-progress", Static).render().plain
+            assert row.index("[automerge]") > row.index("owner/repo")
+
+    asyncio.run(run())

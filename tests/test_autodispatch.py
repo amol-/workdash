@@ -758,13 +758,98 @@ def test_tui_reports_the_failure_of_the_session_the_user_started():
             await pilot.pause()
             assert footer.render().plain == "Refresh skipped."
             session.autodispatch_sessions.return_value = [
-                {**running, "status": "failed", "error": "GitHub unavailable"}
+                {**running, "status": "failed", "error": "\x1b[31mGitHub\x1b[0m\nunavailable"}
             ]
             for _ in range(100):
                 await pilot.pause(0.02)
                 if "GitHub unavailable" in footer.render().plain:
                     break
-            assert footer.render().plain == "Autodispatch session-1 failed: GitHub unavailable"
+            assert footer.render().plain == "Dispatch failed: GitHub unavailable (owner/repo#42)"
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("status", "error", "expected"),
+    [
+        ("finished", None, "no work available to dispatch"),
+        ("failed", "GitHub unavailable", "failed: GitHub unavailable"),
+    ],
+)
+def test_dispatch_outcome_is_visible_on_narrow_screen(status, error, expected):
+    session = _tui_session(_visible_task())
+    scope = "owner/" + "long-repository-name" * 4
+    session.start_autodispatch_for_item.return_value = {"id": "a", "scope": scope}
+    running = {
+        "id": "a",
+        "status": "running",
+        "scope": scope,
+        "current_item": None,
+        "elapsed_seconds": 1,
+        "selected_group": None,
+        "stage": "checking",
+        "launch_reason": None,
+        "iteration": 1,
+    }
+    session.autodispatch_sessions.return_value = [running]
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test(size=(45, 24)) as pilot:
+            await pilot.press("d")
+            session.autodispatch_sessions.return_value = [
+                {**running, "status": status, "error": error}
+            ]
+            app._update_autodispatch_progress()
+            await pilot.pause()
+            footer = app.query_one("#status-footer", Static)
+            displayed = app.screen._compositor.render_strips()[footer.region.y].text
+            assert expected in displayed
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("finish_together", [False, True])
+def test_tui_reports_overlapping_dispatch_outcomes(finish_together):
+    session = _tui_session(_visible_task())
+    session.start_autodispatch_for_item.side_effect = [
+        {"id": "a", "scope": "owner/a"},
+        {"id": "b", "scope": "owner/b"},
+    ]
+    running = {
+        "status": "running",
+        "scope": "owner/a",
+        "current_item": None,
+        "elapsed_seconds": 1,
+        "selected_group": None,
+        "stage": "checking",
+        "launch_reason": None,
+        "iteration": 1,
+    }
+    a = {**running, "id": "a"}
+    b = {**running, "id": "b", "scope": "owner/b"}
+    session.autodispatch_sessions.return_value = [a, b]
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+            await pilot.press("d")
+            await pilot.press("d")
+            assert session.start_autodispatch_for_item.call_count == 2
+            a = {**running, "id": "a", "status": "finished"}
+            failed_b = {**b, "status": "failed", "error": "GitHub unavailable"}
+            session.autodispatch_sessions.return_value = [a, failed_b if finish_together else b]
+            app._update_autodispatch_progress()
+            assert footer.render().plain == "Dispatch: no work available to dispatch. (owner/a)"
+            session.autodispatch_sessions.return_value = [a, failed_b]
+            app._update_autodispatch_progress()
+            assert footer.render().plain == "Dispatch failed: GitHub unavailable (owner/b)"
+            for _ in range(3):
+                app._update_autodispatch_progress()
+            progress = app.query_one("#autodispatch-progress", Static).render().plain
+            assert "No work available to dispatch: owner/a" in progress
+            assert "Failed: GitHub unavailable (owner/b)" in progress
 
     asyncio.run(exercise())
 
@@ -838,7 +923,7 @@ def test_tui_short_dashboard_scrolls_progress_and_keeps_table_visible(width):
         {
             "id": str(i),
             "status": "failed",
-            "scope": f"owner/failure-{i}",
+            "scope": f"owner/f{i}",
             "group": None,
             "current_item": None,
             "elapsed_seconds": 1,
@@ -853,11 +938,11 @@ def test_tui_short_dashboard_scrolls_progress_and_keeps_table_visible(width):
             await pilot.pause()
             assert app.query_one("#work-items", DataTable).region.height >= 2
             assert any("IS 42" in strip.text for strip in app.screen._compositor.render_strips())
-            assert "owner/failure-0" in app.export_screenshot()
-            assert "owner/failure-2" not in app.export_screenshot()
+            assert "owner/f0" in app.export_screenshot()
+            assert "owner/f2" not in app.export_screenshot()
             await pilot.press("shift+tab", "end")
             await pilot.pause()
-            assert "owner/failure-2" in app.export_screenshot()
+            assert "owner/f2" in app.export_screenshot()
             assert any("IS 42" in strip.text for strip in app.screen._compositor.render_strips())
 
     asyncio.run(exercise())
@@ -915,7 +1000,7 @@ def test_tui_progress_keeps_a_failed_error_on_one_plain_line():
         # proves the truncation rather than the terminal width.
         async with app.run_test(size=(200, 24)):
             rows = [strip.text for strip in app.screen._compositor.render_strips()]
-            [progress] = [row for row in rows if "Failed owner/repo:" in row]
+            [progress] = [row for row in rows if "Failed: first line" in row]
             assert ("first line second line " + "x" * 200)[:_MAX_PROGRESS_ERROR_WIDTH] in progress
             assert "\x1b" not in progress
             assert sum("second line" in row for row in rows) == 1
@@ -2175,6 +2260,33 @@ def test_snapshot_identifies_targeted_todo_as_scope():
     assert dispatch.snapshot()["scope_is_current_item"] is False
 
 
+def test_tui_failure_reason_remains_visible_after_another_outcome():
+    session = _tui_session(_issue_item(1))
+    failure = {
+        "id": "failed",
+        "status": "failed",
+        "scope": "owner/" + "long-repository-name" * 3,
+        "error": "GitHub unavailable",
+    }
+    session.autodispatch_sessions.return_value = [failure]
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test(size=(40, 12)) as pilot:
+            app._dispatch_session_ids.add("empty")
+            session.autodispatch_sessions.return_value = [
+                failure,
+                {"id": "empty", "status": "finished", "scope": "owner/other", "iteration": 1},
+            ]
+            app._update_autodispatch_progress()
+            await pilot.pause()
+            assert "no work" in app.query_one("#status-footer", Static).render().plain
+            rows = [strip.text for strip in app.screen._compositor.render_strips()]
+            assert any("Failed" in row and "GitHub unavailable" in row for row in rows)
+
+    asyncio.run(exercise())
+
+
 def test_tui_short_pane_keeps_a_work_item_visible_with_progress():
     items = [_issue_item(i) for i in range(1, 11)]
     for item in items:
@@ -2278,7 +2390,7 @@ def test_tui_scrolling_remains_visible_when_progress_changes(size):
                 )
                 assert table.region.y <= row_y < footer.region.y
                 rows = [strip.text for strip in app.screen._compositor.render_strips()]
-                assert any("Failed owner/repo" in row for row in rows) == bool(entries)
+                assert any("Failed: failed (owner/repo)" in row for row in rows) == bool(entries)
                 assert "IS 40" in rows[row_y]
                 for key, numbers in (("up", range(39, 0, -1)), ("down", range(2, 41))):
                     for number in numbers:
