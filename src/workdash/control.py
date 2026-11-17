@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import mimetypes
 import os
 import re
 import stat
@@ -2215,7 +2216,9 @@ def _make_turbogears_app(session: WorkdashSession):
                                 "not_found", "Artifact not found.", status=404
                             )
                         content = artifact.read()
-                    response.content_type = "text/plain"
+                    response.content_type = (
+                        mimetypes.guess_type(parts[-1])[0] or "application/octet-stream"
+                    )
                     return content
             except WorkdashControlError as error:
                 response.status_int = error.status

@@ -20,7 +20,7 @@ Feature: Local JSON control API
     - The API is intentionally unauthenticated plain HTTP for trusted LAN use only; the header is not authentication.
     - V0 exposes JSON APIs only, not an HTML browser UI.
     - V0 API requests and responses use JSON objects; item file GET responses contain file bytes or a JSON directory listing.
-    - `GET /api/items/{item_id}/files/` lists the item's `.workdash` directory as a JSON success envelope containing a sorted `entries` array of names; `GET /api/items/{item_id}/files/.workdash/{path}` serves a file within it. Symlinked worktree paths and symlinks resolving inside `.workdash` are available; paths and symlinks escaping `.workdash` and missing worktrees are not served or listed. The same source IP access rules apply, and no writes are supported.
+    - `GET /api/items/{item_id}/files/` lists the item's `.workdash` directory as a JSON success envelope containing a sorted `entries` array of names; `GET /api/items/{item_id}/files/.workdash/{path}` serves a file within it with its original bytes and a Content-Type inferred from the requested filename, falling back to `application/octet-stream` when unknown. Symlinked worktree paths and symlinks resolving inside `.workdash` are available; paths and symlinks escaping `.workdash` and missing worktrees are not served or listed. The same source IP access rules apply, and no writes are supported.
     - `GET /api/items/{item_id}/analysis` serves the item's cached analysis markdown as `text/markdown` under the same source IP access rules; an item without a valid cached analysis returns a 404 JSON error. No writes are supported.
     - V0 capabilities are exposed as `POST /api/v0/list`, `POST /api/v0/info`, `POST /api/v0/analyze`, `POST /api/v0/code`, `POST /api/v0/terminal`, `POST /api/v0/ready`, `POST /api/v0/todo`, `POST /api/v0/show-config`, `POST /api/v0/pane/content`, `POST /api/v0/pane/send`, and `POST /api/v0/pane/close`.
     - `POST /api/v0/todo` accepts an optional target as a GitHub `owner/repo` name or a git URL on any hosting service.
@@ -62,6 +62,7 @@ Feature: Local JSON control API
     Given a server-backed Workdash session has an item with a worktree artifact and an alias inside .workdash
     When a client lists and reads the item's worktree artifacts
     Then the listing names the artifact and its alias and the API returns their contents
+    And file responses identify their content type from their filenames
 
   @id:F-API-JSON-CONTROL-S035
   Scenario: A client fetches a cached analysis over HTTP

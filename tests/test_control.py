@@ -2144,7 +2144,7 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
     base = "/api/items/owner/repo%23ISSUE-1/files/"
     response = get(base + ".workdash/review.md")
     assert response.status_int == 200 and response.text == "real review", response.text
-    assert response.content_type == "text/plain"
+    assert response.content_type == "text/markdown"
     assert get(base + ".workdash/nested/review.md").text == "nested review"
     assert get(base + ".workdash/alias").text == "real review"
     assert get(base + ".workdash/nested-alias/relative-alias").text == "real review"
