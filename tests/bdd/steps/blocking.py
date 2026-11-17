@@ -37,6 +37,8 @@ def blocking_state(tmp_path):
     session.config.configured_code_agents.return_value = ["pi"]
     # A workdir without worktrees keeps the ready work unclaimed.
     session.config.workdir = str(tmp_path / "worktrees")
+    # These scenarios are about the dialog, not about Zellij being installed.
+    session._live_panes = lambda: []
     analysis = tmp_path / "analysis.md"
     analysis.write_text("# Analysis\n")
     state = {
