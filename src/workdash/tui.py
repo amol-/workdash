@@ -43,6 +43,8 @@ _CallbackResult = TypeVar("_CallbackResult")
 _MAX_REPO_WIDTH = 15
 # A failed session's error is external text, so one progress row shows at most this much.
 _MAX_PROGRESS_ERROR_WIDTH = 60
+# Sizing the scope assumes the reason needs no more than this, so a long error cannot hide what failed.
+_MIN_FAILURE_REASON_WIDTH = 20
 _TYPE_CODES = {"ISSUE": "IS", "PR": "PR", "REVIEW": "RV", "CHECK": "VR"}
 
 if TYPE_CHECKING:
@@ -598,6 +600,39 @@ class WorkdashApp(App[None]):
                 flags=re.IGNORECASE,
             )
 
+        def failure(entry: dict, prefix: str, width: int) -> str:
+            """Render a failed session as one line within ``width`` cells.
+
+            The reason is capped at ``_MAX_PROGRESS_ERROR_WIDTH``; ``workdash info`` shows the
+            full error.
+            """
+
+            def fit(text: Text, room: int) -> Text:
+                if room <= 0:
+                    return Text()
+                text.truncate(room, overflow="ellipsis")
+                return text
+
+            error = " ".join(ANSI_ESCAPE_RE.sub("", str(entry["error"])).split())
+            scope = Text(short(entry["scope"]))
+            scope_width = max(
+                0, width - cell_len(prefix) - min(cell_len(error), _MIN_FAILURE_REASON_WIDTH) - 3
+            )
+            issue = re.search(r"#\d+$", scope.plain)
+            if issue and scope.cell_len > scope_width:
+                # Keep the issue number visible; the repository name shrinks or disappears.
+                scope = fit(
+                    Text(scope.plain[: issue.start()]), scope_width - cell_len(issue.group())
+                )
+                scope.append(issue.group())
+            else:
+                scope = fit(scope, scope_width)
+            reason = fit(
+                Text(error),
+                min(_MAX_PROGRESS_ERROR_WIDTH, width - cell_len(prefix) - scope.cell_len - 3),
+            )
+            return f"{prefix}{reason.plain} ({scope.plain})"
+
         failed = [entry for entry in sessions if entry["status"] == "failed"]
         self._dispatch_session_ids.intersection_update(entry.get("id") for entry in sessions)
         for entry in sessions:
@@ -609,8 +644,7 @@ class WorkdashApp(App[None]):
                 continue
             self._dispatch_session_ids.remove(entry["id"])
             if entry["status"] == "failed":
-                error = " ".join(ANSI_ESCAPE_RE.sub("", str(entry["error"])).split())
-                self._update_status(f"Dispatch failed: {error} ({short(entry['scope'])})")
+                self._update_status(failure(entry, "Dispatch failed: ", self.size.width - 2))
                 break
             if entry["status"] == "finished" and entry["iteration"] == 1:
                 self._update_status(
@@ -629,13 +663,10 @@ class WorkdashApp(App[None]):
         rows = []
         for index, entry in enumerate(entries):
             if entry["status"] == "failed":
-                # Error text can span lines and carry escape sequences; the full text
-                # stays available through `workdash info`.
-                error = " ".join(ANSI_ESCAPE_RE.sub("", str(entry["error"])).split())
-                line = (
-                    f"Failed: {error[:_MAX_PROGRESS_ERROR_WIDTH]} ({short(entry['scope'])})"
-                    f"  ({entry['id']})"
-                )
+                line = failure(entry, "Failed: ", self.size.width - 6)
+                suffix = f"  ({entry['id']})"
+                if cell_len(line + suffix) <= self.size.width - 6:
+                    line += suffix
             elif entry["status"] == "finished":
                 line = f"No work available to dispatch: {short(entry['scope'])}  ({entry['id']})"
             else:

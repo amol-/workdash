@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from rich.cells import cell_len
 from textual.widgets import DataTable, Static
 from webob import Request
 
@@ -948,6 +949,102 @@ def test_tui_short_dashboard_scrolls_progress_and_keeps_table_visible(width):
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize(
+    "scope", ["owner/repo#42", "owner/really-long-repository-name-for-production#42"]
+)
+def test_tui_long_failure_shows_scope_and_reason_at_80_columns(scope):
+    session = _tui_session(_visible_task())
+    session.start_autodispatch_for_item.return_value = {"id": "a", "scope": scope}
+    running = {
+        "id": "a",
+        "status": "running",
+        "scope": scope,
+        "current_item": None,
+        "elapsed_seconds": 1,
+        "selected_group": None,
+        "stage": "checking",
+        "launch_reason": None,
+        "iteration": 1,
+    }
+    session.autodispatch_sessions.return_value = [running]
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.press("d")
+            session.autodispatch_sessions.return_value = [
+                {**running, "status": "failed", "error": "GitHub unavailable " * 20}
+            ]
+            app._update_autodispatch_progress()
+            await pilot.pause()
+            rows = [strip.text for strip in app.screen._compositor.render_strips()]
+            progress = next(row for row in rows if "Failed:" in row)
+            footer = next(row for row in rows if "Dispatch failed:" in row)
+            for row in (progress, footer):
+                assert "owner/" in row
+                assert "#42" in row
+                assert "GitHub unavailable" in row
+                assert "…" in row
+
+    asyncio.run(exercise())
+
+
+def test_tui_narrow_failure_keeps_the_issue_number():
+    session = _tui_session(_visible_task())
+    session.autodispatch_sessions.return_value = [
+        {
+            "id": "a",
+            "status": "failed",
+            "scope": "owner/repo#42",
+            "group": None,
+            "current_item": None,
+            "elapsed_seconds": 1,
+            "error": "GitHub unavailable " * 20,
+        }
+    ]
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test(size=(40, 24)):
+            rows = [strip.text for strip in app.screen._compositor.render_strips()]
+            progress = next(row for row in rows if "Failed:" in row)
+            assert "#42" in progress
+            assert "GitHub unavailable" in progress
+
+    asyncio.run(exercise())
+
+
+def test_tui_narrow_failure_footer_keeps_the_issue_number():
+    session = _tui_session(_visible_task())
+    session.start_autodispatch_for_item.return_value = {"id": "a", "scope": "owner/repo#42"}
+    running = {
+        "id": "a",
+        "status": "running",
+        "scope": "owner/repo#42",
+        "current_item": None,
+        "elapsed_seconds": 1,
+        "selected_group": None,
+        "stage": "checking",
+        "launch_reason": None,
+        "iteration": 1,
+    }
+    session.autodispatch_sessions.return_value = [running]
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test(size=(40, 24)) as pilot:
+            await pilot.press("d")
+            session.autodispatch_sessions.return_value = [
+                {**running, "status": "failed", "error": "GitHub unavailable " * 20}
+            ]
+            app._update_autodispatch_progress()
+            footer = app.query_one("#status-footer", Static).render().plain
+            assert "#42" in footer
+            assert cell_len(footer) <= 40
+
+    asyncio.run(exercise())
+
+
 def test_tui_long_failures_leave_room_for_work_items():
     session = _tui_session(_visible_task())
     error = "dispatch failed " + "long error " * 80 + "\nmore details"
@@ -1001,7 +1098,9 @@ def test_tui_progress_keeps_a_failed_error_on_one_plain_line():
         async with app.run_test(size=(200, 24)):
             rows = [strip.text for strip in app.screen._compositor.render_strips()]
             [progress] = [row for row in rows if "Failed: first line" in row]
-            assert ("first line second line " + "x" * 200)[:_MAX_PROGRESS_ERROR_WIDTH] in progress
+            assert ("first line second line " + "x" * 200)[
+                : _MAX_PROGRESS_ERROR_WIDTH - 1
+            ] + "…" in progress
             assert "\x1b" not in progress
             assert sum("second line" in row for row in rows) == 1
 

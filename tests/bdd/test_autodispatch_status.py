@@ -53,7 +53,7 @@ def test_finished_before_start_returns_is_reported(scenario_state, monkeypatch, 
             else:
                 assert "Dispatch failed:" in status
                 assert "other/repo#3" in status
-                assert "Zellij" in status
+                assert "Cannot check for running" in status
                 assert session.autodispatch_sessions()[0]["status"] == "failed"
 
     asyncio.run(exercise())
