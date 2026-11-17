@@ -2874,6 +2874,7 @@ def _autodispatch_rows(work_items: list[WorkItem]) -> None:
 @when("autodispatch stops working on the leaf issue after its title changes")
 def _autodispatch_stops(work_items: list[WorkItem], scenario_state: dict[str, Any]) -> None:
     from dataclasses import replace
+    from time import monotonic
     from unittest.mock import MagicMock
 
     backend = MagicMock()
@@ -2908,11 +2909,27 @@ def _autodispatch_stops(work_items: list[WorkItem], scenario_state: dict[str, An
         assert "magenta" in table.get_row("issue:owner/repo#2")[2].style
         table.move_cursor(row=35)
         await pilot.pause()
-        position = table.scroll_offset
-        selected = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-        assert position.y > 0
+
+        def snapshot():
+            progress = app.query_one("#autodispatch-scroll")
+            return {
+                "selected": table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value,
+                "cursor": table.cursor_coordinate,
+                "scroll": table.scroll_offset,
+                "table_region": table.region,
+                "table_virtual_size": table.virtual_size,
+                "max_scroll": (table.max_scroll_x, table.max_scroll_y),
+                "progress_region": progress.region,
+                "progress_display": progress.display,
+                "refreshing": app._autodispatch_refreshing,
+                "pending": set(app._pending_autodispatch),
+            }
+
+        before = snapshot()
+        assert before["scroll"].y > 0
+        started = monotonic()
         session.stop_autodispatch(str(entry["id"]))
-        for _ in range(150):
+        for attempt in range(150):
             await pilot.pause(0.02)
             row = table.get_row("issue:owner/repo#2")
             if "Finished leaf" in str(row[2]) and "magenta" not in str(row[2].style):
@@ -2924,10 +2941,12 @@ def _autodispatch_stops(work_items: list[WorkItem], scenario_state: dict[str, An
             and "closed" in str(row[2]).lower()
             and "magenta" not in str(row[2].style)
         )
-        scenario_state["selection_preserved"] = (
-            table.coordinate_to_cell_key(table.cursor_coordinate).row_key == selected
-            and table.scroll_offset == position
-        )
+        scenario_state["selection_diagnostics"] = {
+            "before": before,
+            "after": snapshot(),
+            "stop_elapsed_seconds": round(monotonic() - started, 3),
+            "poll_attempts": attempt + 1,
+        }
 
     run_app(work_items=work_items, interactions=interactions, session=session)
 
@@ -2939,7 +2958,11 @@ def _autodispatch_updated(scenario_state: dict[str, Any]) -> None:
 
 @then("the selected row and scroll position remain unchanged")
 def _autodispatch_selection_preserved(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["selection_preserved"]
+    diagnostics = scenario_state["selection_diagnostics"]
+    before, after = diagnostics["before"], diagnostics["after"]
+    assert before["selected"] == after["selected"] and before["scroll"] == after["scroll"], (
+        diagnostics
+    )
 
 
 @given("the dashboard has more work items than fit on screen and autodispatch progress is shown")
