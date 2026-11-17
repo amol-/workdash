@@ -43,6 +43,8 @@ _CallbackResult = TypeVar("_CallbackResult")
 _MAX_REPO_WIDTH = 15
 # A failed session's error is external text, so one progress row shows at most this much.
 _MAX_PROGRESS_ERROR_WIDTH = 60
+# Sizing the scope assumes the reason needs no more than this, so a long error cannot hide what failed.
+_MIN_FAILURE_REASON_WIDTH = 20
 _TYPE_CODES = {"ISSUE": "IS", "PR": "PR", "REVIEW": "RV", "CHECK": "VR"}
 
 if TYPE_CHECKING:
@@ -530,7 +532,7 @@ class WorkdashApp(App[None]):
         self._todo_callback = todo_callback
         self._now_utc = now_utc or datetime.now(UTC)
         self._focus_callback = focus_callback
-        self._dispatch_session_id: str | None = None
+        self._dispatch_session_ids: set[str] = set()
         self._status_message = "Ready."
         self._current_autodispatch: set[tuple[str, int] | str] = set()
         self._pending_autodispatch: set[str] = set()
@@ -586,19 +588,6 @@ class WorkdashApp(App[None]):
         if self._pending_autodispatch and not self._autodispatch_refreshing:
             self._autodispatch_refreshing = True
             asyncio.create_task(self._refresh_autodispatch_items())
-        failed = [entry for entry in sessions if entry["status"] == "failed"]
-        started_failure = next(
-            (entry for entry in failed if entry["id"] == self._dispatch_session_id), None
-        )
-        if started_failure is not None:
-            self._dispatch_session_id = None
-            self._update_status(
-                f"Autodispatch {started_failure['id']} failed: {started_failure['error']}"
-            )
-        entries = running + failed[-3:]
-        self._progress_entries = entries
-        widget = self.query_one("#autodispatch-progress", Static)
-        self.query_one("#autodispatch-scroll", VerticalScroll).display = bool(entries)
 
         def short(value: str) -> str:
             parsed = parse_github_item_url(value)
@@ -611,17 +600,75 @@ class WorkdashApp(App[None]):
                 flags=re.IGNORECASE,
             )
 
+        def failure(entry: dict, prefix: str, width: int) -> str:
+            """Render a failed session as one line within ``width`` cells.
+
+            The reason is capped at ``_MAX_PROGRESS_ERROR_WIDTH``; ``workdash info`` shows the
+            full error.
+            """
+
+            def fit(text: Text, room: int) -> Text:
+                if room <= 0:
+                    return Text()
+                text.truncate(room, overflow="ellipsis")
+                return text
+
+            error = " ".join(ANSI_ESCAPE_RE.sub("", str(entry["error"])).split())
+            scope = Text(short(entry["scope"]))
+            scope_width = max(
+                0, width - cell_len(prefix) - min(cell_len(error), _MIN_FAILURE_REASON_WIDTH) - 3
+            )
+            issue = re.search(r"#\d+$", scope.plain)
+            if issue and scope.cell_len > scope_width:
+                # Keep the issue number visible; the repository name shrinks or disappears.
+                scope = fit(
+                    Text(scope.plain[: issue.start()]), scope_width - cell_len(issue.group())
+                )
+                scope.append(issue.group())
+            else:
+                scope = fit(scope, scope_width)
+            reason = fit(
+                Text(error),
+                min(_MAX_PROGRESS_ERROR_WIDTH, width - cell_len(prefix) - scope.cell_len - 3),
+            )
+            return f"{prefix}{reason.plain} ({scope.plain})"
+
+        failed = [entry for entry in sessions if entry["status"] == "failed"]
+        self._dispatch_session_ids.intersection_update(entry.get("id") for entry in sessions)
+        for entry in sessions:
+            if entry.get("id") not in self._dispatch_session_ids or entry["status"] not in {
+                "failed",
+                "finished",
+                "stopped",
+            }:
+                continue
+            self._dispatch_session_ids.remove(entry["id"])
+            if entry["status"] == "failed":
+                self._update_status(failure(entry, "Dispatch failed: ", self.size.width - 2))
+                break
+            if entry["status"] == "finished" and entry["iteration"] == 1:
+                self._update_status(
+                    f"Dispatch: no work available to dispatch. ({short(entry['scope'])})"
+                )
+                break
+        empty = [
+            entry for entry in sessions if entry["status"] == "finished" and entry["iteration"] == 1
+        ]
+        entries = running + failed[-3:] + empty[-3:]
+        self._progress_entries = entries
+        widget = self.query_one("#autodispatch-progress", Static)
+        self.query_one("#autodispatch-scroll", VerticalScroll).display = bool(entries)
+
         self._progress_index = min(self._progress_index, max(0, len(entries) - 1))
         rows = []
         for index, entry in enumerate(entries):
             if entry["status"] == "failed":
-                # Error text can span lines and carry escape sequences; the full text
-                # stays available through `workdash info`.
-                error = " ".join(ANSI_ESCAPE_RE.sub("", str(entry["error"])).split())
-                line = (
-                    f"Failed {short(entry['scope'])}: {error[:_MAX_PROGRESS_ERROR_WIDTH]}"
-                    f"  ({entry['id']})"
-                )
+                line = failure(entry, "Failed: ", self.size.width - 6)
+                suffix = f"  ({entry['id']})"
+                if cell_len(line + suffix) <= self.size.width - 6:
+                    line += suffix
+            elif entry["status"] == "finished":
+                line = f"No work available to dispatch: {short(entry['scope'])}  ({entry['id']})"
             else:
                 scope = short(entry["scope"])
                 item = short(entry["current_item"]) if entry["current_item"] else None
@@ -642,7 +689,11 @@ class WorkdashApp(App[None]):
                 status = "blocked (s)top" if entry["status"] == "blocked" else entry["stage"]
                 line = f"{entry['selected_group'] or 'automatic'}  {target}  {status}{reason}  {entry['iteration']}/{entry['elapsed_seconds']}s"
             if entry.get("automerge"):
-                line = f"[automerge] {line}"
+                line = (
+                    f"{line}  [automerge]"
+                    if entry["status"] in {"failed", "finished"}
+                    else f"[automerge] {line}"
+                )
             marker = (
                 "> "
                 if self.query_one("#autodispatch-scroll", VerticalScroll).has_focus
@@ -672,9 +723,7 @@ class WorkdashApp(App[None]):
         scroll = self.query_one("#autodispatch-scroll", VerticalScroll)
         if not scroll.has_focus or event.key not in {"up", "down"}:
             return
-        sessions = self._session.autodispatch_sessions() if self._session else []
-        count = sum(entry["status"] in {"running", "blocked"} for entry in sessions)
-        count += min(3, sum(entry["status"] == "failed" for entry in sessions))
+        count = len(self._progress_entries)
         self._progress_index = max(
             0, min(count - 1, self._progress_index + (1 if event.key == "down" else -1))
         )
@@ -1149,7 +1198,7 @@ class WorkdashApp(App[None]):
             self._update_status("Cannot dispatch a pull request without a linked issue.")
             self.notify("Cannot dispatch a pull request without a linked issue.", severity="error")
             return
-        self._dispatch_session_id = str(started["id"])
+        self._dispatch_session_ids.add(str(started["id"]))
         self._update_status(f"Started autodispatch for {started['scope']}: {started['id']}.")
 
     async def action_show_branchdiff(self, item: WorkItem | None = None) -> None:

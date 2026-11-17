@@ -470,6 +470,16 @@ def dashboard_pr_without_issue(dashboard_dispatch, scenario_state):
 def dashboard_pr_not_ready(dashboard_dispatch, scenario_state):
     dashboard_pr(dashboard_dispatch, scenario_state)
     scenario_state["github"].issues["other/repo#3"]["state"] = "CLOSED"
+    scenario_state["expect_no_ready"] = True
+
+
+@given("an issue blocked by an open dependency selected in the dashboard")
+def dashboard_blocked_issue(dashboard_dispatch, scenario_state):
+    dashboard_issue(dashboard_dispatch, scenario_state)
+    github = scenario_state["github"]
+    github.add_issue("other/repo#4")
+    github.issues["other/repo#3"]["blocked_by"] = ("other/repo#4",)
+    scenario_state["expect_no_ready"] = True
 
 
 @given(
@@ -520,7 +530,11 @@ def dashboard_press_dispatch(scenario_state):
         await pilot.press("d")
         for _ in range(100):
             await pilot.pause(0.02)
-            if footer.render().plain != before:
+            status = footer.render().plain
+            if scenario_state.get("expect_no_ready"):
+                if "no work available to dispatch" in status.lower():
+                    break
+            elif status != before:
                 break
         scenario_state["dispatch_status"] = footer.render().plain
 
@@ -554,6 +568,13 @@ def dashboard_launched_compatible(scenario_state):
     assert scenario_state["dashboard_session"].autodispatch_sessions()[0]["agent"] == "pi"
 
 
+@then("the dashboard reports that no work is available to dispatch")
+def dashboard_no_ready_tasks(scenario_state):
+    status = scenario_state["dispatch_status"].lower()
+    assert "no work available to dispatch" in status
+    assert "other/repo#3" in status
+
+
 @then("the dashboard reports that the pull request has no linked issue and starts no session")
 def dashboard_no_linked_issue(scenario_state):
     assert "without a linked issue" in scenario_state["dispatch_status"]
@@ -574,6 +595,7 @@ def dashboard_dispatch_unavailable(scenario_state):
     assert scenario_state["dashboard_session"].autodispatch_sessions() == []
 
 
+@then("an autodispatch session starts for the selected issue")
 @then("an autodispatch session starts for the linked issue")
 def dashboard_session_started(scenario_state):
     session = scenario_state["dashboard_session"]
