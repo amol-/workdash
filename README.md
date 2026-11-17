@@ -72,7 +72,7 @@ The wizard fills in:
 
 ### URL and analysis viewer
 
-Separate viewers open selected issue/PR URLs (`o`) and analyses (fresh or cached). Configure it with `workdash --configure`, or edit
+Separate viewers open selected issue/PR URLs (`v` then `o`) and analyses (fresh or cached). Configure it with `workdash --configure`, or edit
 `~/.config/workdash/config.json` for advanced commands:
 
 ```json
@@ -171,6 +171,7 @@ workdash todo --close ITEM [--json]  # close a todo
 workdash read PANE_ID [--full] [--json]  # read text from a live pane
 workdash write PANE_ID TEXT [--raw] [--json]  # send text to a live pane
 workdash show-config [--json] # show configured agents and selected server address
+workdash view TARGET         # read an issue or pull request as a Markdown document
 workdash --debug             # verbose logging
 workdash --configure         # run the interactive setup wizard
 workdash --session NAME      # use a named persistent Zellij session
@@ -215,7 +216,9 @@ The `repositories` list in `config.json` accepts:
   literal and case-insensitive, including the full repository and title. Search
   by the displayed type and number (e.g. `IS 42`) or the legacy form
   (e.g. `ISSUE#42`). Press `/` again to clear.
-- `o` — open the selected item with your configured viewer.
+- `v` — open the view menu for the selected item: `(v) view` reads it as a
+  Markdown document in a full-size floating pane, and `(o) open` opens its
+  GitHub URL with your configured viewer. Esc cancels.
 - `r` — refresh the list from GitHub.
 - `a` — analyze the selected item. Opens a dialog to open the cached analysis
   (if any), or run a fresh analysis with any configured analysis agent. Fresh
@@ -686,6 +689,27 @@ text exactly. Human output confirms that the pane accepted the input.
 coding agents, and the selected server address. It does not require a running
 server. The same information is also available from the JSON API for HTTP
 clients.
+
+## View command
+
+`workdash view TARGET` reads an issue or pull request from GitHub and shows it
+as one Markdown document in the built-in viewer. `TARGET` is a GitHub issue or
+pull request URL, `owner/repo#NUMBER`, or a bare `NUMBER` or `#NUMBER` resolved
+against the current directory's `origin` remote. Whether the target is an issue
+or a pull request comes from GitHub, not from the URL. The command needs no
+running server.
+
+The document starts with the title, a metadata line, and a labels, assignees,
+milestone and comments line. A pull request also reports draft, mergeable,
+merge state and review decision, plus CI, reviews and review threads (capped at
+50 threads, 100 comments per thread and 20 failing checks, with a truncation note). The description preserves its original
+Markdown; bare issue and pull request references are not converted to links.
+Sub-issues are listed as a table at every nesting level.
+
+Inside the viewer, activating a GitHub issue or pull request link opens a viewer
+for that item: a new full-size floating pane inside Zellij, or a replacement of
+the current process outside it. Any other link runs the configured `open`
+command, and the viewer reports the command it used.
 
 ## Analysis cache
 

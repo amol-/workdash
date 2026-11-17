@@ -6,7 +6,7 @@ Feature: Open a work item in the browser
   work item.
 
   Rules:
-    - Pressing "o" in the TUI opens the selected work item's GitHub URL with the configured viewer.
+    - Choosing "open" in the TUI's view menu opens the selected work item's GitHub URL with the configured viewer.
     - The viewer receives the URL literally after any configured arguments, without shell expansion.
     - Legacy configurations without a viewer terminal choice open directly; direct viewers do not require Zellij.
     - A viewer requiring its own terminal opens in a full-size floating pane in the current session, without creating a session or preparing a worktree.
@@ -18,7 +18,7 @@ Feature: Open a work item in the browser
   @id:F-BROWSE-OPEN-S001
   Scenario: Open the selected item in the browser
     Given the TUI has a work item selected
-    When the user presses "o"
+    When the user chooses to open the selected item
     Then the selected work item's GitHub URL is opened with the configured viewer
     And the TUI reports that the item was opened
 
@@ -26,7 +26,7 @@ Feature: Open a work item in the browser
   Scenario: Browser command failure reports the error details
     Given the TUI has a work item selected
     And the next browser open will fail
-    When the user presses "o"
+    When the user chooses to open the selected item
     Then the system reports the browser error details to the user
     And no dialog or progress overlay remains
 
@@ -34,13 +34,13 @@ Feature: Open a work item in the browser
   Scenario: Terminal viewer opens in a full-size floating pane in the current session
     Given the TUI has a work item selected
     And the configured viewer requires its own terminal
-    When the user presses "o"
+    When the user chooses to open the selected item
     Then the selected URL opens in a full-size floating pane in the current session
 
   @id:F-BROWSE-OPEN-S003
   Scenario: Unresponsive browser command reports that browser opening may not be supported
     Given the TUI has a work item selected
     And the next browser open will not respond
-    When the user presses "o"
+    When the user chooses to open the selected item
     Then the system reports that browser opening may not be supported from this session
     And no dialog or progress overlay remains

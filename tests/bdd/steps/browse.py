@@ -7,7 +7,7 @@ import subprocess
 from typing import Any
 
 import pytest
-from pytest_bdd import given, then
+from pytest_bdd import given, then, when
 from textual.widgets import Static
 
 from workdash.launcher import open_in_browser
@@ -72,6 +72,8 @@ def run_open_scenario(
     captured: dict[str, Any] = {}
 
     async def interactions(app, pilot) -> None:
+        await pilot.press("v")
+        await pilot.pause()
         await pilot.press("o")
         for _ in range(20):
             await pilot.pause()
@@ -94,6 +96,15 @@ def run_open_scenario(
     scenario_state["open_status"] = captured["status"]
     scenario_state["selected_item"] = work_items[0]
     scenario_state["modal_screen_names"] = captured["modal_screen_names"]
+
+
+@when("the user chooses to open the selected item")
+def _choose_open(
+    scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_open_scenario(scenario_state, work_items, monkeypatch)
 
 
 @then("the selected work item's GitHub URL is opened with the configured viewer")
