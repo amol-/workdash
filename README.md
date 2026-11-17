@@ -321,22 +321,25 @@ To list an item's `.workdash/` artifacts or retrieve one, URL-encode the `#` in
 its Workdash ID (otherwise it is interpreted as a URL fragment):
 
 ```bash
-curl -H 'X-Workdash: 1' 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/'
-curl -H 'X-Workdash: 1' 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/.workdash/PR_REVIEW.md'
+curl 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/'
+curl 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/.workdash/PR_REVIEW.md'
 ```
 
 The listing is a JSON success envelope with `result.entries`, a sorted array of
-names. Files are returned as `text/plain`; only files inside the existing
+names. Files are returned with a Content-Type inferred from the requested filename,
+or `application/octet-stream` when unknown. Compressed archives remain compressed
+when downloaded; compressed SVG images are decoded by the browser. Only files inside the existing
 worktree's `.workdash/` directory are available. These endpoints are read-only
 and use the same peer access checks as the control API.
 
-Control API requests, including artifact GETs, require `X-Workdash: 1`; the CLI
-sends it automatically. GETs of analysis Markdown and HTML documents are exempt
-for direct browser viewing, but still require an allowed source IP. Cross-origin
-preflight requests are denied. The header prevents browser images and cross-origin
-JavaScript from invoking control APIs; it is not authentication and non-browser
-clients can send it. HTML analyses block scripts but can load HTTP(S) images,
-which can request other URLs, including the read-only analysis documents.
+Control API requests require `X-Workdash: 1`; the CLI sends it automatically.
+Artifact GETs and GETs of analysis Markdown and HTML documents are exempt for
+browser viewing, but still require an allowed source IP. Cross-origin preflight
+requests are denied. The header prevents browser images and cross-origin JavaScript
+from invoking control APIs; it is not authentication and non-browser clients can
+send it. Artifact documents are sandboxed and cannot run scripts or submit forms.
+HTML analyses block scripts but can load HTTP(S) images, which can request other
+URLs, including read-only artifacts and analysis documents.
 
 **Trusted LAN only:** the API is intentionally unauthenticated plain HTTP.
 Allowed clients can execute dashboard actions; do not expose it to untrusted
