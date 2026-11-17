@@ -2216,9 +2216,10 @@ def _make_turbogears_app(session: WorkdashSession):
                                 "not_found", "Artifact not found.", status=404
                             )
                         content = artifact.read()
-                    response.content_type = (
-                        mimetypes.guess_type(parts[-1])[0] or "application/octet-stream"
-                    )
+                    content_type, encoding = mimetypes.guess_type(parts[-1])
+                    response.content_type = content_type or "application/octet-stream"
+                    if encoding:
+                        response.headers["Content-Encoding"] = encoding
                     return content
             except WorkdashControlError as error:
                 response.status_int = error.status

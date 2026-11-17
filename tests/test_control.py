@@ -2097,6 +2097,51 @@ def _pin_test_worktree(stack, path):
     return path, fd
 
 
+@pytest.mark.parametrize(
+    ("filename", "content_type"),
+    [
+        ("image.svgz", "image/svg+xml"),
+        ("archive.tar.gz", "application/x-tar"),
+        ("data.unknownworkdash.gz", "application/octet-stream"),
+    ],
+)
+def test_compressed_item_file_response(tmp_path, monkeypatch, filename, content_type):
+    import gzip
+
+    worktree = tmp_path / "checkout"
+    artifacts = worktree / ".workdash"
+    artifacts.mkdir(parents=True)
+    original = b"artifact contents"
+    compressed = gzip.compress(original)
+    (artifacts / filename).write_bytes(compressed)
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="one")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    monkeypatch.setattr(
+        control_module,
+        "existing_worktree_path",
+        lambda *args, pinned, git: _pin_test_worktree(pinned, worktree),
+    )
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    request = Request.blank(
+        f"/api/items/owner/repo%23ISSUE-1/files/.workdash/{filename}",
+        headers={"X-Workdash": "1"},
+    )
+    request.environ["REMOTE_ADDR"] = "127.0.0.1"
+    response = request.get_response(app)
+    assert response.status_int == 200
+    assert response.content_type == content_type
+    assert response.headers["Content-Encoding"] == "gzip"
+    assert response.body == compressed
+    assert gzip.decompress(response.body) == original
+
+
 @pytest.mark.parametrize("symlinked_worktree", [False, True])
 def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
     worktree = tmp_path / "checkout"

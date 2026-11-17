@@ -327,7 +327,8 @@ curl -H 'X-Workdash: 1' 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/f
 
 The listing is a JSON success envelope with `result.entries`, a sorted array of
 names. Files are returned with a Content-Type inferred from the requested filename,
-or `application/octet-stream` when unknown; only files inside the existing
+or `application/octet-stream` when unknown, and include Content-Encoding when the
+filename indicates compression. Only files inside the existing
 worktree's `.workdash/` directory are available. These endpoints are read-only
 and use the same peer access checks as the control API.
 
