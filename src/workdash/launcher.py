@@ -30,7 +30,7 @@ _BROWSER_OPEN_COMMANDS = ("xdg-open", "open")
 _BROWSER_OPEN_TIMEOUT_SECONDS = 4
 _WORKDASH_LOCAL_BIN = LOCAL_BIN_PATH
 # A Zellij session that is still starting answers unusably for a moment, so a pane
-# listing is retried up to three times, two seconds apart, before it counts as
+# listing is attempted up to three times, two seconds apart, before it counts as
 # unavailable. Callers list panes while holding the session lock, so a persistent
 # failure delays them for about ten seconds in total.
 _ZELLIJ_PANE_READ_ATTEMPTS = 3
