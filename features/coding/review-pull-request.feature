@@ -4,7 +4,7 @@ Feature: Review a pull request
 
   Rules:
     - An issue without a linked open pull request, or a closed or merged pull request, has nothing to review.
-    - A review reports major findings as inline comments and submits an appropriate review when permitted.
+    - A review reports new major findings as inline comments beginning with 🤖 and submits an appropriate review when permitted.
     - A review of one's own pull request is comment-only.
     - The agent summarizes the outcome and posted inline comments in a fresh review document; success requires an explicit confirmation that the review and all required postings succeeded.
     - Starting a new review removes prior generated review documents in its worktree, except documents belonging to reviews still in progress; other files are preserved.
@@ -16,6 +16,13 @@ Feature: Review a pull request
     - A review needs a known Zellij session.
     - A review uses the pull request's current head, including after a force-push and when it belongs to a fork; its checkout must not contain local changes to tracked source files. If it cannot review safely, it fails without discarding local work.
     - The code menu offers `(r) auto review`, which asks which configured analysis agent reviews the selected item, shows a progress dialog until the review finishes, and then reports the outcome.
+
+  @id:F-CODING-REVIEW-S009
+  Scenario: Review findings are marked as automated
+    Given an open pull request has two major findings
+    When the reviewer completes an autonomous review
+    Then both inline comments begin with 🤖
+    And the review document lists both posted comments
 
   @id:F-CODING-REVIEW-S001
   Scenario: Start a review of an open pull request

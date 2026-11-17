@@ -531,7 +531,9 @@ agent is selected by default. The agent needs GitHub access and permission to
 post reviews; a restricted analysis command may not be suitable.
 
 The agent is instructed to post only major findings as inline review comments,
-and submit a changes-requested review or approval as appropriate. For your own
+each beginning with 🤖, and submit a changes-requested review or approval as
+appropriate. It checks existing review threads and does not repeat
+already-described problems, regardless of who wrote them. For your own
 PR, based on the authenticated identity used to submit the review rather than
 the configured username, it submits a comment-only review, since GitHub does not
 permit self-approval or self-requested changes. If it cannot determine that
