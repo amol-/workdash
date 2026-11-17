@@ -512,6 +512,8 @@ def _user_opens_item_in_browser(scenario_state: dict[str, Any]) -> None:
     opened: list[str] = []
 
     async def interactions(app, pilot) -> None:
+        await pilot.press("v")
+        await pilot.pause()
         await pilot.press("o")
         for _ in range(20):
             await pilot.pause()

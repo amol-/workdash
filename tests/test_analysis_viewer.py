@@ -9,8 +9,16 @@ from unittest.mock import MagicMock
 import pytest
 from webob import Request
 
-from workdash import control, launcher
+from workdash import control, launcher, markdownview
 from workdash.config import WorkdashConfig, WorkdashConfigValidationError
+
+
+@pytest.fixture(autouse=True)
+def _viewer_config(monkeypatch):
+    """Keep the viewer's link handling independent of the developer's own config."""
+    monkeypatch.setattr(
+        markdownview, "load_config", lambda: WorkdashConfig(open_command="xdg-open")
+    )
 
 
 def test_analysis_viewer_is_required():
@@ -351,30 +359,57 @@ def test_markdown_viewer_fragment_navigates_within_analysis(tmp_path, monkeypatc
     assert run_markdownview(str(path)) == 0
 
 
-def test_markdown_viewer_external_link_keeps_analysis_open(tmp_path, monkeypatch):
-    import asyncio
+def test_markdown_link_keeps_long_running_viewer_alive(monkeypatch):
+    import subprocess
 
-    from textual.app import App
-    from textual.widgets import Markdown
+    processes = []
+    popen = subprocess.Popen
 
-    from workdash.markdownview import run_markdownview
+    def start(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        processes.append(process)
+        return process
 
-    path = tmp_path / "analysis.md"
-    path.write_text("# Analysis\n\n[Source](https://example.com/source)\n", encoding="utf-8")
+    monkeypatch.setattr(launcher.subprocess, "Popen", start)
+    app = markdownview._MarkdownApp(
+        "# Document", shlex.join([sys.executable, "-c", "import time; time.sleep(30)"]), False
+    )
+    notices = []
+    monkeypatch.setattr(app, "notify", lambda message, **kwargs: notices.append(message))
+    try:
+        app.open_url("https://example.com")
+        assert processes[0].poll() is None
+        assert notices == [f"Opened https://example.com with {app._open_command}"]
+    finally:
+        if processes and processes[0].poll() is None:
+            processes[0].terminate()
+            processes[0].wait(timeout=5)
+
+
+def test_markdown_link_opens_configured_pane(monkeypatch):
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "session")
     opened = MagicMock()
-    monkeypatch.setattr(App, "open_url", opened)
+    monkeypatch.setattr(launcher.zellij, "open_viewer", opened)
+    app = markdownview._MarkdownApp("# Document", "viewer", True)
+    notices = []
+    monkeypatch.setattr(app, "notify", lambda message, **kwargs: notices.append(message))
 
-    def run(app):
-        async def exercise():
-            async with app.run_test(size=(80, 24)) as pilot:
-                await pilot.pause()
-                await pilot.click(Markdown, offset=(2, 4))
-                await pilot.pause()
-                assert app.is_running
-                assert "Analysis" in app.export_screenshot()
+    app.open_url("https://example.com")
 
-        asyncio.run(exercise())
+    opened.assert_called_once_with("session", ["viewer", "https://example.com"])
+    assert notices == ["Opened https://example.com with viewer"]
 
-    monkeypatch.setattr(App, "run", run)
-    assert run_markdownview(str(path)) == 0
-    opened.assert_called_once_with("https://example.com/source")
+
+def test_markdown_link_reports_immediate_command_failure(monkeypatch):
+    process = MagicMock()
+    process.wait.return_value = 7
+    monkeypatch.setattr(launcher.subprocess, "Popen", MagicMock(return_value=process))
+    app = markdownview._MarkdownApp("# Document", "viewer", False)
+    notices = []
+    monkeypatch.setattr(app, "notify", lambda message, **kwargs: notices.append(message))
+
+    app.open_url("https://example.com")
+
+    assert notices == [
+        "Failed to open https://example.com: Failed to open URL via viewer: exit code 7"
+    ]

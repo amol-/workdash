@@ -640,6 +640,18 @@ def test_dispatch_reports_a_failed_linked_issue_lookup_as_a_github_error():
     assert session.autodispatch_sessions() == []
 
 
+async def _choose_open(pilot, opened: list) -> None:
+    """Pick the view menu's open choice and wait for the open callback to run."""
+    count = len(opened)
+    await pilot.press("v")
+    await pilot.pause()
+    await pilot.press("o")
+    for _ in range(20):
+        await pilot.pause()
+        if len(opened) > count:
+            return
+
+
 def _tui_session(*items: WorkItem) -> MagicMock:
     """Return a fake session whose dashboard shows the given work items."""
 
@@ -2470,7 +2482,7 @@ def test_tui_short_pane_keeps_a_work_item_visible_with_progress():
             await pilot.pause()
             rows = [strip.text for strip in app.screen._compositor.render_strips()]
             assert any("IS 10" in row for row in rows[table.region.y : status.region.y])
-            await pilot.press("o")
+            await _choose_open(pilot, opened)
             assert opened[-1].number == 10
 
     asyncio.run(exercise())
@@ -2497,7 +2509,7 @@ def test_tui_selected_item_remains_visible_after_resize(with_progress):
             await pilot.pause()
             rows = [strip.text for strip in app.screen._compositor.render_strips()]
             assert any("IS 40" in row for row in rows)
-            await pilot.press("o")
+            await _choose_open(pilot, opened)
             assert opened[-1].number == 40
 
     asyncio.run(exercise())
@@ -2530,7 +2542,7 @@ def test_tui_scrolling_remains_visible_when_progress_changes(size):
                 await pilot.pause()
                 assert not entries or progress.region.y == 0
                 assert table.region.bottom <= footer.region.y < status.region.y
-                await pilot.press("o")
+                await _choose_open(pilot, opened)
                 assert opened[-1].number == 40
                 row_y = (
                     table.region.y + table._get_row_region(table.cursor_row).y - int(table.scroll_y)
@@ -2550,7 +2562,7 @@ def test_tui_scrolling_remains_visible_when_progress_changes(size):
                         assert table.region.y <= row_y < footer.region.y
                         rows = [strip.text for strip in app.screen._compositor.render_strips()]
                         assert f"IS {number} " in rows[row_y]
-                    await pilot.press("o")
+                    await _choose_open(pilot, opened)
                 assert [item.number for item in opened[-2:]] == [1, 40]
 
     asyncio.run(exercise())

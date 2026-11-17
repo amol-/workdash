@@ -27,6 +27,7 @@ from .models import REVIEW_KINDS, WorkItem, WorkItemKind, WorkItemType, display_
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _BROWSER_OPEN_COMMANDS = ("xdg-open", "open")
+_ITEM_DOCUMENT_COMMAND = ("workdash", "view")
 _BROWSER_OPEN_TIMEOUT_SECONDS = 4
 _WORKDASH_LOCAL_BIN = LOCAL_BIN_PATH
 # A Zellij session that is still starting answers unusably for a moment, so a pane
@@ -70,7 +71,7 @@ def _run_browser_open(
     zellij_session: str | None = None,
     close_on_exit: bool = False,
     direct_nonblocking: bool = False,
-) -> None:
+) -> str:
     try:
         command_tokens = (
             shlex.split(command) if command is not None else [_resolve_browser_open_command()]
@@ -87,10 +88,18 @@ def _run_browser_open(
                 f"Failed to open {kind} via {command_name}: viewer requires an active Zellij session."
             )
         try:
-            if command_tokens == ["workdash", "mdview"]:
+            if command_tokens in (["workdash", "mdview"], list(_ITEM_DOCUMENT_COMMAND)):
                 executable = shutil.which(command_tokens[0])
                 if executable:
                     command_tokens[0] = os.path.abspath(executable)
+            if command == " ".join(_ITEM_DOCUMENT_COMMAND):
+                command_tokens = [
+                    "sh",
+                    "-c",
+                    '"$@" || { printf "\\nPress Enter to close this pane.\\n"; read -r _; }',
+                    "workdash-view",
+                    *command_tokens,
+                ]
             if close_on_exit:
                 zellij.open_viewer(session, [*command_tokens, target], close_on_exit=True)
             else:
@@ -102,7 +111,7 @@ def _run_browser_open(
             ) from error
         except (OSError, RuntimeError) as error:
             raise RuntimeError(f"Failed to open {kind} via {command_name}: {error}") from error
-        return
+        return command_name
     try:
         if direct_nonblocking:
             process = subprocess.Popen(
@@ -120,7 +129,7 @@ def _run_browser_open(
                     raise RuntimeError(
                         f"Failed to open {kind} via {command_name}: exit code {returncode}"
                     )
-            return
+            return command_name
         subprocess.run(
             [*command_tokens, target],
             check=True,
@@ -141,6 +150,7 @@ def _run_browser_open(
         if not details:
             details = f"exit code {error.returncode}"
         raise RuntimeError(f"Failed to open {kind} via {command_name}: {details}") from error
+    return command_name
 
 
 def open_in_browser(
@@ -149,12 +159,38 @@ def open_in_browser(
     *,
     needs_pane: bool = False,
     zellij_session: str | None = None,
-) -> None:
+    direct_nonblocking: bool = False,
+) -> str:
+    """Open a URL, returning the name of the command that was used."""
     if not isinstance(url, str) or not url.strip():
         raise ValueError("URL must be a non-empty string.")
-    _run_browser_open(
-        url, command=command, kind="URL", needs_pane=needs_pane, zellij_session=zellij_session
+    return _run_browser_open(
+        url,
+        command=command,
+        kind="URL",
+        needs_pane=needs_pane,
+        zellij_session=zellij_session,
+        direct_nonblocking=direct_nonblocking,
     )
+
+
+def open_item_document(url: str, *, zellij_session: str | None) -> str:
+    """Show a GitHub issue or pull request as an item document in a full-size pane."""
+
+    return _run_browser_open(
+        url,
+        command=" ".join(_ITEM_DOCUMENT_COMMAND),
+        kind="URL",
+        needs_pane=True,
+        zellij_session=zellij_session,
+        close_on_exit=True,
+    )
+
+
+def become_item_document(url: str) -> None:
+    """Replace this process with the item document viewer for ``url``."""
+
+    os.execvp(_ITEM_DOCUMENT_COMMAND[0], [*_ITEM_DOCUMENT_COMMAND, url])
 
 
 _HTML_TEMPLATE = """\

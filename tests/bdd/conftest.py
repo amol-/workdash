@@ -71,6 +71,9 @@ from .steps import (
     triage as _triage,
 )
 from .steps import (
+    view as _view,
+)
+from .steps import (
     worktrees as _worktrees,
 )
 
@@ -96,6 +99,7 @@ for _step_module in (
     _ready,
     _review,
     _dispatch,
+    _view,
 ):
     for _name in dir(_step_module):
         if _name.startswith("pytestbdd_stepdef_") or _name in {
