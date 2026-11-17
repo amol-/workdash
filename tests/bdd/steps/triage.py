@@ -127,7 +127,7 @@ def _long_title_details_visible(scenario_state: dict[str, Any]) -> None:
 @then("the action bar highlights its shortcut keys above the loaded item count")
 def _dashboard_controls_visible(scenario_state: dict[str, Any]) -> None:
     hint = scenario_state["dashboard_hint"]
-    for key in "/oracdiwq":
+    for key in "/vracdiwq":
         index = hint.plain.index(f"({key})") + 1
         assert any(
             span.start <= index < span.end and "bold" in str(span.style) for span in hint.spans
@@ -1668,10 +1668,6 @@ def _user_presses_key(
         from . import analysis
 
         analysis.run_analyze_dialog_scenario(scenario_state, work_items)
-    elif key == "o":
-        from . import browse
-
-        browse.run_open_scenario(scenario_state, work_items, monkeypatch)
     elif key == "c":
         from . import coding
 
@@ -2532,7 +2528,7 @@ def _no_included_items(scenario_state: dict[str, Any]) -> None:
 _SEARCH_TITLE_FRAGMENT = "parser"
 _SEARCH_UNMATCHED_TEXT = "nothing-here-matches-this"
 _SEARCH_ACTION_HINT = "(/)search"
-_FULL_ACTION_BAR = "(/)search (o)pen (r)efresh (a)nalyze (c)ode (d)ispatch (i)nclude (w)todo (q)uit"
+_FULL_ACTION_BAR = "(/)search (v)iew (r)efresh (a)nalyze (c)ode (d)ispatch (i)nclude (w)todo (q)uit"
 
 
 async def _apply_search_filter(app, pilot, query: str) -> None:
@@ -2878,6 +2874,7 @@ def _autodispatch_rows(work_items: list[WorkItem]) -> None:
 @when("autodispatch stops working on the leaf issue after its title changes")
 def _autodispatch_stops(work_items: list[WorkItem], scenario_state: dict[str, Any]) -> None:
     from dataclasses import replace
+    from time import monotonic
     from unittest.mock import MagicMock
 
     backend = MagicMock()
@@ -2912,11 +2909,27 @@ def _autodispatch_stops(work_items: list[WorkItem], scenario_state: dict[str, An
         assert "magenta" in table.get_row("issue:owner/repo#2")[2].style
         table.move_cursor(row=35)
         await pilot.pause()
-        position = table.scroll_offset
-        selected = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-        assert position.y > 0
+
+        def snapshot():
+            progress = app.query_one("#autodispatch-scroll")
+            return {
+                "selected": table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value,
+                "cursor": table.cursor_coordinate,
+                "scroll": table.scroll_offset,
+                "table_region": table.region,
+                "table_virtual_size": table.virtual_size,
+                "max_scroll": (table.max_scroll_x, table.max_scroll_y),
+                "progress_region": progress.region,
+                "progress_display": progress.display,
+                "refreshing": app._autodispatch_refreshing,
+                "pending": set(app._pending_autodispatch),
+            }
+
+        before = snapshot()
+        assert before["scroll"].y > 0
+        started = monotonic()
         session.stop_autodispatch(str(entry["id"]))
-        for _ in range(150):
+        for attempt in range(150):
             await pilot.pause(0.02)
             row = table.get_row("issue:owner/repo#2")
             if "Finished leaf" in str(row[2]) and "magenta" not in str(row[2].style):
@@ -2928,10 +2941,12 @@ def _autodispatch_stops(work_items: list[WorkItem], scenario_state: dict[str, An
             and "closed" in str(row[2]).lower()
             and "magenta" not in str(row[2].style)
         )
-        scenario_state["selection_preserved"] = (
-            table.coordinate_to_cell_key(table.cursor_coordinate).row_key == selected
-            and table.scroll_offset == position
-        )
+        scenario_state["selection_diagnostics"] = {
+            "before": before,
+            "after": snapshot(),
+            "stop_elapsed_seconds": round(monotonic() - started, 3),
+            "poll_attempts": attempt + 1,
+        }
 
     run_app(work_items=work_items, interactions=interactions, session=session)
 
@@ -2943,7 +2958,11 @@ def _autodispatch_updated(scenario_state: dict[str, Any]) -> None:
 
 @then("the selected row and scroll position remain unchanged")
 def _autodispatch_selection_preserved(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["selection_preserved"]
+    diagnostics = scenario_state["selection_diagnostics"]
+    before, after = diagnostics["before"], diagnostics["after"]
+    assert before["selected"] == after["selected"] and before["scroll"] == after["scroll"], (
+        diagnostics
+    )
 
 
 @given("the dashboard has more work items than fit on screen and autodispatch progress is shown")
@@ -2969,6 +2988,8 @@ def _scroll_work_items(scenario_state: dict[str, Any], work_items: list[WorkItem
         assert progress.region.height > 0
         assert "Failed: failed (owner/repo)" in progress.render().plain
         for index in range(table.row_count):
+            await pilot.press("v")
+            await pilot.pause()
             await pilot.press("o")
             row_y = table.region.y + table._get_row_region(index).y - int(table.scroll_y)
             rows = [strip.text for strip in app.screen._compositor.render_strips()]

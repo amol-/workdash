@@ -423,6 +423,37 @@ def test_main_passes_configured_agent_choices_and_separate_viewers_to_tui(
     else:
         assert commands == [[*viewer_argv, item.url], ["analysis-viewer", html_path.as_uri()]]
 
+    # An item document always needs a pane of its own, whatever the open command does.
+    commands.clear()
+    captured_kwargs["view_callback"](item)
+    assert commands == [
+        [
+            "/usr/bin/zellij",
+            "--session",
+            "workdash-selected",
+            "action",
+            "new-pane",
+            "-f",
+            "-x",
+            "0",
+            "-y",
+            "0",
+            "--width",
+            "100%",
+            "--height",
+            "100%",
+            "--close-on-exit",
+            "--",
+            "sh",
+            "-c",
+            '"$@" || { printf "\\nPress Enter to close this pane.\\n"; read -r _; }',
+            "workdash-view",
+            "/usr/bin/workdash",
+            "view",
+            item.url,
+        ]
+    ]
+
 
 def test_main_tui_analyze_callback_uses_worktree_and_backend(
     monkeypatch: pytest.MonkeyPatch,

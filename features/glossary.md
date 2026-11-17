@@ -29,6 +29,8 @@ Canonical product vocabulary used by the feature files.
 - Work directory: The local directory where the system keeps per-repository clones and per-item worktrees.
 - Main clone: The local clone of a tracked repository that lives directly under the work directory.
 - Worktree: A per-work-item git worktree used for analysis and coding sessions, rooted under the work directory.
+- Item document: One Markdown rendering of a GitHub issue or pull request, with its metadata, description, sub-issues, referenced items, comments and, for a pull request, its CI, reviews and review threads. Shown by `workdash view` and by activating a GitHub link in the built-in Markdown viewer.
+- View menu: The TUI menu opened with `v` for the selected work item, offering `view` (read it as an item document) and `open` (open its GitHub URL with the configured viewer).
 - Analysis: A cached AI-generated summary and recommendation for a work item, viewable as rendered HTML.
 - Analysis cache: The local store of previously generated analyses, keyed so that GitHub updates invalidate stale entries.
 - Coding session: An interactive session with a supported coding agent, launched in the item's worktree and preloaded with work item context.

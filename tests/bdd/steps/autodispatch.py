@@ -623,17 +623,22 @@ def dashboard_failure(scenario_state, monkeypatch):
 
     async def interact(app, pilot):
         await pilot.press("d")
-        for _ in range(100):
+        progress = app.query_one("#autodispatch-progress", Static)
+        footer = app.query_one("#status-footer", Static)
+
+        def reports_failure() -> bool:
+            return all(
+                "GitHub unavailable" in widget.render().plain for widget in (progress, footer)
+            )
+
+        # The footer keeps the dispatch action's "Started autodispatch" text until the
+        # next progress tick reports the failure, which can follow the error line.
+        for _ in range(150):
             await pilot.pause(0.02)
-            if (
-                "GitHub unavailable"
-                in app.query_one("#autodispatch-progress", Static).render().plain
-            ):
+            if reports_failure():
                 break
-        scenario_state["failure_display"] = (
-            app.query_one("#autodispatch-progress", Static).render().plain
-        )
-        scenario_state["failure_footer"] = app.query_one("#status-footer", Static).render().plain
+        scenario_state["failure_display"] = progress.render().plain
+        scenario_state["failure_footer"] = footer.render().plain
 
     run_app(work_items=[item], session=session, interactions=interact)
 

@@ -21,6 +21,7 @@ from workdash.tui import (
     CodeDialog,
     ReviewDialog,
     SearchDialog,
+    ViewDialog,
     WorkdashApp,
 )
 
@@ -124,7 +125,7 @@ def test_dashboard_initial_layout_and_shortcuts() -> None:
             assert table.scroll_x == 0
             assert table.cursor_row == 1
             hint = command.render()
-            for key in "/oracdiwq":
+            for key in "/vracdiwq":
                 index = hint.plain.index(f"({key})") + 1
                 assert any(
                     span.start <= index < span.end and str(span.style) == "bold"
@@ -429,7 +430,7 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
             # PR #22 is row 0 (sorted by updated_at desc: 2/25 before 2/20)
             await pilot.pause()
 
-            await pilot.press("o")
+            await _choose_open(pilot)
             await pilot.pause()
 
             # Press "a" to open the AnalyzeDialog, then "1" to choose Claude
@@ -688,7 +689,7 @@ def test_workdash_app_footer_shows_success_status_for_actions(
             footer = app.query_one("#status-footer", Static)
             assert footer.render().plain == "Loaded 1 item(s)."
 
-            await pilot.press("o")
+            await _choose_open(pilot)
             await pilot.pause()
             assert footer.render().plain == "Opened pr owner/repo#22."
 
@@ -837,7 +838,7 @@ def test_workdash_app_shows_command_hint_bar() -> None:
         async with app.run_test() as pilot:
             command_bar = app.query_one("#command-footer", Static)
             assert command_bar.render().plain == (
-                "(/)search (o)pen (r)efresh (a)nalyze (c)ode (d)ispatch (i)nclude (w)todo (q)uit"
+                "(/)search (v)iew (r)efresh (a)nalyze (c)ode (d)ispatch (i)nclude (w)todo (q)uit"
             )
             await pilot.press("q")
 
@@ -859,6 +860,14 @@ async def _wait_for_busy_message(expected: str, pilot) -> None:
             assert message == expected
             return
     raise AssertionError(f"no busy screen shown; expected {expected!r}")
+
+
+async def _choose_open(pilot) -> None:
+    """Pick the menu's ``open`` choice, which needs the view menu first."""
+    await pilot.press("v")
+    await pilot.pause()
+    await pilot.press("o")
+    await pilot.pause()
 
 
 async def _wait_for_footer(footer: Static, expected: str, pilot) -> None:
@@ -1367,7 +1376,7 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
         async with app.run_test() as pilot:
             footer = app.query_one("#status-footer", Static)
 
-            await pilot.press("o")
+            await _choose_open(pilot)
             await _wait_for_footer(footer, "Open failed: xdg-open failed", pilot)
             _assert_no_modal_screens(app)
 
@@ -1867,7 +1876,7 @@ def test_workdash_app_actions_use_the_row_selected_in_the_filtered_list() -> Non
             await _submit_search(app, pilot, "parser")
             assert table.cursor_row == 0
             assert app._selected_item() is work_items[0]
-            await pilot.press("o")
+            await _choose_open(pilot)
             await _wait_for_footer(
                 app.query_one("#status-footer", Static),
                 "Opened issue owner/repo#11.",
@@ -1879,8 +1888,8 @@ def test_workdash_app_actions_use_the_row_selected_in_the_filtered_list() -> Non
             await pilot.pause()
             await _submit_search(app, pilot, "no-such-item")
             assert app._selected_item() is None
-            await pilot.press("o")
-            await _wait_for_footer(app.query_one("#status-footer", Static), "Open skipped.", pilot)
+            await pilot.press("v")
+            await _wait_for_footer(app.query_one("#status-footer", Static), "View skipped.", pilot)
             assert opened == [work_items[0]]
             await pilot.press("q")
 
@@ -2062,7 +2071,7 @@ def test_workdash_app_clearing_the_search_filter_keeps_the_selected_item() -> No
             assert app._selected_item() is work_items[4]
             assert table.cursor_row == 4
 
-            await pilot.press("o")
+            await _choose_open(pilot)
             await _wait_for_footer(
                 app.query_one("#status-footer", Static),
                 "Opened issue owner/repo#5.",
@@ -3642,6 +3651,97 @@ def test_progress_selects_and_stops_a_blocked_session():
             session.stop_autodispatch.assert_called_once_with("blocked")
 
     asyncio.run(run())
+
+
+def test_view_menu_offers_view_and_open_for_the_selected_item() -> None:
+    work_item = WorkItem(
+        kind=WorkItemKind.TRACKED_PR,
+        item_type=WorkItemType.PR,
+        repo="owner/repo",
+        number=22,
+        title="Implement renderer",
+        created_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
+        url="https://example.com/pull/22",
+    )
+    viewed: list[WorkItem] = []
+    opened: list[WorkItem] = []
+    app = WorkdashApp(
+        work_items=[work_item],
+        view_callback=viewed.append,
+        open_callback=opened.append,
+        now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+
+            await pilot.press("v")
+            await pilot.pause()
+            assert any(isinstance(screen, ViewDialog) for screen in app.screen_stack)
+            menu = [str(widget.render()) for widget in app.screen.query(Static)]
+            assert "(v) view" in menu and "(o) open" in menu
+
+            await pilot.press("v")
+            await _wait_for_footer(footer, "Opened viewer for pr owner/repo#22.", pilot)
+            assert viewed == [work_item]
+            _assert_no_modal_screens(app)
+
+            await _choose_open(pilot)
+            await _wait_for_footer(footer, "Opened pr owner/repo#22.", pilot)
+            assert opened == [work_item]
+
+            await pilot.press("v")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            _assert_no_modal_screens(app)
+            assert viewed == [work_item] and opened == [work_item]
+
+            # "o" alone no longer opens anything.
+            await pilot.press("o")
+            await pilot.pause()
+            _assert_no_modal_screens(app)
+            assert opened == [work_item]
+
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
+
+
+def test_view_menu_reports_a_failing_viewer() -> None:
+    def failing_view_callback(_: WorkItem) -> None:
+        raise RuntimeError("zellij pane failed")
+
+    app = WorkdashApp(
+        work_items=[
+            WorkItem(
+                kind=WorkItemKind.TRACKED_ISSUE,
+                item_type=WorkItemType.ISSUE,
+                repo="owner/repo",
+                number=11,
+                title="Fix parser",
+                created_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+                updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
+                url="https://example.com/issues/11",
+            )
+        ],
+        view_callback=failing_view_callback,
+        now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
+    )
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+            await pilot.press("v")
+            await pilot.pause()
+            await pilot.press("v")
+            await _wait_for_footer(footer, "View failed: zellij pane failed", pilot)
+            _assert_no_modal_screens(app)
+            await pilot.press("q")
+
+    asyncio.run(run_smoke())
 
 
 def test_progress_arrows_reach_empty_sessions_on_short_screen():

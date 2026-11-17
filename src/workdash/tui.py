@@ -294,6 +294,43 @@ class CodeDialog(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class ViewDialog(ModalScreen[str | None]):
+    """Modal dialog for choosing how to open the selected item."""
+
+    DEFAULT_CSS = """
+        #view-shell {
+            align: center middle;
+            width: 40;
+            height: auto;
+            max-height: 9;
+            border: solid $accent;
+            background: $surface;
+            padding: 1 2;
+        }
+        .view-line {
+            width: 100%;
+        }
+        """
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="view-shell"):
+            yield Static("View menu:", classes="view-line")
+            yield Static("")
+            yield Static("(v) view", classes="view-line")
+            yield Static("(o) open", classes="view-line")
+            yield Static("")
+            yield Static("(Esc) Cancel", classes="view-line")
+
+    def on_key(self, event) -> None:
+        if event.key in {"v", "o"}:
+            event.stop()
+            self.dismiss(event.key)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class IncludeDialog(ModalScreen[str | None]):
     """Modal dialog that accepts a GitHub issue or pull request URL."""
 
@@ -461,11 +498,11 @@ class WorkdashApp(App[None]):
         """
     SEARCH_HINT_TEXT = "(/)search"
     COMMAND_HINT_TEXT = (
-        f"{SEARCH_HINT_TEXT} (o)pen (r)efresh (a)nalyze (c)ode (d)ispatch (i)nclude (w)todo (q)uit"
+        f"{SEARCH_HINT_TEXT} (v)iew (r)efresh (a)nalyze (c)ode (d)ispatch (i)nclude (w)todo (q)uit"
     )
     BINDINGS = [
         ("/", "search_items", "Search"),
-        ("o", "open_link", "Open"),
+        ("v", "view_item", "View"),
         ("r", "refresh_items", "Refresh"),
         ("a", "analyze_item", "Analyze"),
         ("c", "launch_code", "Code"),
@@ -493,6 +530,7 @@ class WorkdashApp(App[None]):
         open_callback: Callable[[WorkItem], None] | None = None,
         open_markdown_callback: Callable[[str], None] | None = None,
         open_url_callback: Callable[[str], None] | None = None,
+        view_callback: Callable[[WorkItem], None] | None = None,
         refresh_callback: Callable[[], RefreshCallbackResult] | None = None,
         analyze_callback: Callable[[WorkItem, str], AnalyzeCallbackResult] | None = None,
         launch_callback: Callable[[WorkItem, str], dict[str, object]] | None = None,
@@ -520,6 +558,7 @@ class WorkdashApp(App[None]):
         self._open_callback = open_callback
         self._open_markdown_callback = open_markdown_callback or open_markdown
         self._open_url_callback = open_url_callback or open_in_browser
+        self._view_callback = view_callback
         self._refresh_callback = refresh_callback
         self._analyze_callback = analyze_callback
         self._launch_callback = launch_callback
@@ -1035,6 +1074,36 @@ class WorkdashApp(App[None]):
             )
 
         await self.push_screen(SearchDialog(), callback=_on_dialog_result)
+
+    async def action_view_item(self) -> None:
+        selected_item = self._selected_item()
+        if selected_item is None:
+            self._update_status("View skipped.")
+            return
+
+        def _on_dialog_result(choice: str | None) -> None:
+            if choice == "v":
+                self._run_after_dialog(lambda: self._perform_view(selected_item))
+            elif choice == "o":
+                self._run_after_dialog(self.action_open_link)
+
+        await self.push_screen(ViewDialog(), callback=_on_dialog_result)
+
+    async def _perform_view(self, item: WorkItem) -> None:
+        """Show ``item`` as a document in its own viewer pane."""
+        if self._view_callback is None:
+            self._update_status("View skipped.")
+            return
+        try:
+            await self._run_with_busy_screen(
+                message="Opening viewer...",
+                callback=lambda: self._view_callback(item),
+            )
+        except Exception as error:  # noqa: BLE001 - keep TUI alive on callback errors
+            self._update_status(f"View failed: {error}")
+            self.notify(f"View failed: {error}", severity="error", timeout=10, markup=False)
+            return
+        self._update_status(f"Opened viewer for {item.item_type.value} {item.repo}#{item.number}.")
 
     async def action_open_link(self) -> None:
         selected_item = self._selected_item()

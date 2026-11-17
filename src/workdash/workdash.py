@@ -27,6 +27,7 @@ from .github_client import GitHubClient, parse_github_item_url
 from .launcher import (
     inject_workdash_local_bin_into_path,
     open_in_browser,
+    open_item_document,
     open_markdown,
 )
 from .models import WorkItem, WorkItemType, format_type_label
@@ -71,6 +72,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .markdownview import run_markdownview
 
         return run_markdownview(options.target)
+    if options.command == "view":
+        from .view import run_view
+
+        inject_workdash_local_bin_into_path()
+        return run_view(options.target)
     if options.command == "branchdiff":
         from .branchdiff import run_branchdiff
 
@@ -476,6 +482,7 @@ class WorkdashCommands:
                 needs_pane=config.open_needs_pane,
                 zellij_session=zellij_session,
             ),
+            view_callback=lambda item: open_item_document(item.url, zellij_session=zellij_session),
             open_markdown_callback=lambda path: open_markdown(
                 path,
                 config.analysis_viewer["command"],
@@ -942,6 +949,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     )
     mdview_parser = subparsers.add_parser("mdview", help="View a Markdown document.")
     mdview_parser.add_argument("target", metavar="PATH")
+    view_parser = subparsers.add_parser(
+        "view",
+        help="View a GitHub issue or pull request as a document.",
+    )
+    view_parser.add_argument(
+        "target",
+        metavar="TARGET",
+        help="GitHub issue or pull request URL, owner/repo#NUMBER, or a number.",
+    )
     branchdiff_parser = subparsers.add_parser(
         "branchdiff",
         help="Show side-by-side diff of current branch vs upstream.",
