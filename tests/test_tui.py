@@ -3543,6 +3543,52 @@ def test_include_closed_todo_is_pruned_on_refresh(tmp_path, duplicate: bool) -> 
     asyncio.run(run_test())
 
 
+def test_progress_command_hint_tracks_selection_and_focus():
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    running = {
+        "id": "running",
+        "status": "running",
+        "scope": "owner/repo#1",
+        "current_item": "owner/repo#1",
+        "selected_group": None,
+        "stage": "developing",
+        "launch_reason": None,
+        "iteration": 1,
+        "elapsed_seconds": 0,
+        "error": None,
+        "automerge": True,
+    }
+    blocked = {**running, "id": "blocked", "status": "blocked"}
+    failed = {**running, "id": "failed", "status": "failed", "error": "failed"}
+    session.autodispatch_sessions = MagicMock(return_value=[running, blocked, failed])
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test() as pilot:
+            footer = app.query_one("#command-footer", Static)
+            assert "(d)ispatch" in footer.render().plain
+            await pilot.press("shift+tab")
+            assert "(m)erge off" in footer.render().plain
+            assert "(d)ispatch" not in footer.render().plain
+            await pilot.press("down")
+            assert "(s)top" in footer.render().plain
+            assert "(m)erge" not in footer.render().plain
+            await pilot.press("down")
+            assert all(
+                hint not in footer.render().plain for hint in ("(s)top", "(m)erge", "(d)ispatch")
+            )
+            await pilot.press("tab")
+            assert "(d)ispatch" in footer.render().plain
+
+    asyncio.run(run())
+
+
 def test_progress_selects_and_stops_a_blocked_session():
     session = WorkdashSession(
         config=_DEFAULT_TUI_CONFIG,

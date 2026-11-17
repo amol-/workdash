@@ -873,6 +873,74 @@ def dashboard_toggle_automerge(autodispatch_state):
     run_app(work_items=[autodispatch_state["item"]], session=session, interactions=interact)
 
 
+@given("the dashboard has different sessions selected in the work table and progress")
+def dashboard_different_sessions(autodispatch_state):
+    session = autodispatch_state["session"]
+    item = make_work_item(item_type=WorkItemType.ISSUE, number=1)
+    session.work_items = [item]
+    autodispatch_state["item"] = item
+    first = session.start_autodispatch(scope="owner/repo#ISSUE-1")["id"]
+    wait_for(lambda: len(autodispatch_state["panes"]) == 1)
+    second = session.start_autodispatch(scope="owner/repo#ISSUE-2")["id"]
+    wait_for(lambda: len(autodispatch_state["panes"]) == 2)
+    autodispatch_state["ids"] = (first, second)
+
+
+@when("the user presses m with progress focused")
+def toggle_progress_automerge(autodispatch_state):
+    async def interact(app, pilot):
+        await pilot.press("shift+tab")
+        autodispatch_state["focused"] = app.query_one("#autodispatch-scroll").has_focus
+        await pilot.press("down")
+        autodispatch_state["index"] = app._progress_index
+        autodispatch_state["hint_before"] = app.query_one("#command-footer", Static).render().plain
+        await pilot.press("m")
+        await pilot.pause()
+        autodispatch_state["footer"] = app.query_one("#status-footer", Static).render().plain
+        autodispatch_state["hint_after"] = app.query_one("#command-footer", Static).render().plain
+        autodispatch_state["after_progress"] = {
+            entry["id"]: entry["automerge"]
+            for entry in autodispatch_state["session"].autodispatch_sessions()
+        }
+        await pilot.press("tab")
+        autodispatch_state["table_hint"] = app.query_one("#command-footer", Static).render().plain
+        await pilot.press("m")
+        autodispatch_state["table_footer"] = app.query_one("#status-footer", Static).render().plain
+
+    run_app(
+        work_items=[autodispatch_state["item"]],
+        session=autodispatch_state["session"],
+        interactions=interact,
+    )
+
+
+@then("only the selected progress session changes and the dashboard identifies it")
+def progress_automerge_visible(autodispatch_state):
+    first, second = autodispatch_state["ids"]
+    assert autodispatch_state["focused"]
+    assert autodispatch_state["index"] == 1
+    entries = {
+        entry["id"]: entry for entry in autodispatch_state["session"].autodispatch_sessions()
+    }
+    assert not autodispatch_state["after_progress"][first]
+    assert autodispatch_state["after_progress"][second]
+    assert entries[first]["automerge"]
+    assert entries[second]["automerge"]
+    assert second in autodispatch_state["footer"]
+    assert "enabled" in autodispatch_state["footer"]
+    assert first in autodispatch_state["table_footer"]
+
+
+@then("the command hint shows the selected session's automerge state")
+def progress_automerge_hint(autodispatch_state):
+    assert "(m)erge off" not in autodispatch_state["hint_before"]
+    assert "(m)erge" in autodispatch_state["hint_before"]
+    assert "(m)erge off" in autodispatch_state["hint_after"]
+    assert "(d)ispatch" not in autodispatch_state["hint_after"]
+    assert "(m)erge" in autodispatch_state["table_hint"]
+    assert "(m)erge off" not in autodispatch_state["table_hint"]
+
+
 @when(parsers.parse("the user toggles automerge {times}"))
 def dashboard_toggle_for_merge(autodispatch_state, times):
     async def interact(app, pilot):
