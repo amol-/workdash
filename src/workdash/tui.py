@@ -122,6 +122,16 @@ class BusyScreen(ModalScreen[None]):
         super().__init__()
         self._message = message
 
+    @property
+    def message(self) -> str:
+        return self._message
+
+    @message.setter
+    def message(self, message: str) -> None:
+        self._message = message
+        if self.is_mounted:
+            self.query_one("#busy-message", Static).update(message)
+
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="busy-shell"):
             yield Static(self._message, id="busy-message", markup=False)
@@ -464,10 +474,12 @@ class WorkItemsTable(DataTable):
 
 class DashboardScreen(Screen):
     def on_screen_suspend(self) -> None:
-        self.app._update_autodispatch_progress()
+        # A dialog can be pushed while a blocking operation holds the session lock,
+        # so the redraw reads the snapshot the poll fetched in a thread.
+        self.app._update_autodispatch_progress(self.app._autodispatch_sessions)
 
     def on_screen_resume(self) -> None:
-        self.app._update_autodispatch_progress()
+        self.app._update_autodispatch_progress(self.app._autodispatch_sessions)
 
 
 class WorkdashApp(App[None]):
@@ -578,6 +590,11 @@ class WorkdashApp(App[None]):
         self._autodispatch_refreshing = False
         self._progress_index = 0
         self._progress_entries: list[dict[str, object]] = []
+        self._known_autodispatch: set[str] = set()
+        # Latest autodispatch snapshot. The 1s poll fills it from a thread, so redraws
+        # never take the session lock, which `code` and `analyze` hold for seconds.
+        self._autodispatch_sessions: list[dict[str, object]] = []
+        self._busy_screen: BusyScreen | None = None
         self._row_keys: dict[tuple[WorkItemType, str, int], str] = {}
 
     def get_default_screen(self) -> Screen:
@@ -593,17 +610,68 @@ class WorkdashApp(App[None]):
     def on_mount(self) -> None:
         self.query_one("#work-items", DataTable).focus()
         if self._session is not None:
-            self.set_interval(1, self._update_autodispatch_progress)
-            self._update_autodispatch_progress()
+            self.set_interval(1, self._poll_autodispatch_progress)
+            self.set_interval(0.2, self._sync_busy_screen)
+            # Sessions already running at startup are not newly started.
+            sessions = self._session.autodispatch_sessions()
+            self._autodispatch_sessions = sessions
+            self._known_autodispatch.update(str(entry["id"]) for entry in sessions)
+            self._update_autodispatch_progress(sessions)
             self.refresh_from_session()
         else:
             self._render_table()
         self._update_status(f"Loaded {len(self._work_items)} item(s).")
 
-    def _update_autodispatch_progress(self) -> None:
+    async def _sync_busy_screen(self) -> None:
+        """Show the operation holding the session, and clear it when the session frees up.
+
+        Only the dialog this poll pushed is removed, so the dialogs of actions the
+        dashboard runs itself stay up until those actions return.
+        """
+
         if self._session is None:
             return
-        sessions = self._session.autodispatch_sessions()
+        message = self._session.busy_message()
+        if message is None:
+            if self.screen is self._busy_screen:
+                self._busy_screen = None
+                await self.pop_screen()
+        elif self._busy_screen is not None:
+            # Operations overlap, so the dialog names the one that took over.
+            self._busy_screen.message = message
+        elif len(self.screen_stack) == 1:
+            # A dialog the user opened keeps the keys they are typing.
+            busy_screen = BusyScreen(message=message)
+            await self.push_screen(busy_screen)
+            # Another screen may arrive while this one mounts, so the dialog to remove
+            # later is the one pushed here, not whatever is on top by then.
+            self._busy_screen = busy_screen
+
+    async def _poll_autodispatch_progress(self) -> None:
+        if self._session is not None:
+            sessions = await asyncio.to_thread(self._session.autodispatch_sessions)
+            self._autodispatch_sessions = sessions
+            for entry in sessions:
+                # A session first seen already finished is reported by its outcome, not
+                # as started, which would hide that outcome from the status bar.
+                if (
+                    entry["status"] in {"running", "blocked"}
+                    and str(entry["id"]) not in self._known_autodispatch
+                ):
+                    self._update_status(
+                        f"Started autodispatch for {entry['scope']}: {entry['id']}."
+                    )
+            self._known_autodispatch.update(str(entry["id"]) for entry in sessions)
+            self._update_autodispatch_progress(sessions)
+
+    def _update_autodispatch_progress(
+        self, sessions: list[dict[str, object]] | None = None
+    ) -> None:
+        if self._session is None:
+            return
+        if sessions is None:
+            sessions = self._session.autodispatch_sessions()
+            self._autodispatch_sessions = sessions
         running = [entry for entry in sessions if entry["status"] in {"running", "blocked"}]
         current = {
             self._session._scope_identity(str(entry["current_item"]))
@@ -748,13 +816,13 @@ class WorkdashApp(App[None]):
 
     def on_descendant_focus(self, event: events.DescendantFocus) -> None:
         if event.widget.id == "autodispatch-scroll":
-            self._update_autodispatch_progress()
+            self._update_autodispatch_progress(self._autodispatch_sessions)
         if self.query("#command-footer"):
             self.query_one("#command-footer", Static).update(self._command_hint())
 
     def on_descendant_blur(self, event: events.DescendantBlur) -> None:
         if event.widget.id == "autodispatch-scroll":
-            self._update_autodispatch_progress()
+            self._update_autodispatch_progress(self._autodispatch_sessions)
         if self.query("#command-footer"):
             self.query_one("#command-footer", Static).update(self._command_hint())
 
@@ -767,7 +835,7 @@ class WorkdashApp(App[None]):
             0, min(count - 1, self._progress_index + (1 if event.key == "down" else -1))
         )
         scroll.scroll_to(y=self._progress_index, animate=False)
-        self._update_autodispatch_progress()
+        self._update_autodispatch_progress(self._progress_entries)
         event.prevent_default()
         event.stop()
 
@@ -782,7 +850,7 @@ class WorkdashApp(App[None]):
                 self._session.stop_autodispatch(str(entries[index]["id"]))
             except Exception as error:
                 self._update_status(f"Could not stop autodispatch: {error}")
-            self._update_autodispatch_progress()
+            self._update_autodispatch_progress(self._autodispatch_sessions)
 
     def _item_identity(self, item: WorkItem) -> tuple[str, int]:
         repo = self._session.config.todo_repository if item.todo_target else item.repo
@@ -888,7 +956,7 @@ class WorkdashApp(App[None]):
         identities.update((item.repo.lower(), number) for number in item.closing_issue_numbers)
         return [
             entry
-            for entry in self._session.autodispatch_sessions()
+            for entry in self._autodispatch_sessions
             if entry["status"] == "running"
             and any(
                 value and self._session._scope_identity(str(value)) in identities
@@ -1236,11 +1304,13 @@ class WorkdashApp(App[None]):
         except (KeyError, RuntimeError) as error:
             self._update_status(f"Automerge toggle failed: {error}")
             return
+        # The cached snapshot carries the toggle until the next poll replaces it.
+        entry["automerge"] = enabled
         self._update_status(
             f"Automerge {'enabled' if enabled else 'disabled'} for {entry['scope']} ({entry['id']})."
             + (" A merge already in progress may still complete." if not enabled else "")
         )
-        self._update_autodispatch_progress()
+        self._update_autodispatch_progress(self._autodispatch_sessions)
         self.query_one("#command-footer", Static).update(self._command_hint())
 
     async def action_dispatch_item(self) -> None:
@@ -1268,6 +1338,8 @@ class WorkdashApp(App[None]):
             self.notify("Cannot dispatch a pull request without a linked issue.", severity="error")
             return
         self._dispatch_session_ids.add(str(started["id"]))
+        # The dashboard already announced this session, so the poll must not repeat it.
+        self._known_autodispatch.add(str(started["id"]))
         self._update_status(f"Started autodispatch for {started['scope']}: {started['id']}.")
 
     async def action_show_branchdiff(self, item: WorkItem | None = None) -> None:

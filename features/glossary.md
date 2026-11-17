@@ -62,6 +62,7 @@ Canonical product vocabulary used by the feature files.
 - Configuration: The user settings stored at `~/.config/workdash/config.json`.
 - Configuration wizard: The interactive flow started by `--configure` that fills in any missing configuration fields, including the agents.
 - TUI: The interactive terminal interface shown by default when the system starts.
+- Blocking dialog: The dialog the TUI shows while an operation it cannot interrupt is in progress, naming that operation. It clears when the operation ends, whether it succeeded or failed.
 - List command: The non-interactive listing emitted by `workdash list`, intended for automation and for agents that need to read the active server-backed dashboard without driving the TUI.
 - Show-config command: The command and API capability that reports configured analysis and coding agents plus the selected default server address.
 - Recent activity: A work item whose last update is within the last 24 hours.
