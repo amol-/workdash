@@ -1285,23 +1285,27 @@ def _zellij_cannot_report_panes(scenario_state: dict[str, Any]) -> None:
     scenario_state["zellij_unavailable"] = True
 
 
-@given("Zellij answers the first pane listing unusably")
-def _zellij_answers_first_listing_unusably(
-    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+def _install_unusable_pane_listings(
+    scenario_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    count: int,
 ) -> None:
     import workdash.launcher as launcher_module
 
     scenario_state["zellij_reads_real_panes"] = True
     panes = scenario_state.setdefault("panes", [])
-    answers = [subprocess.CompletedProcess([], 0, stdout="Session 'workdash-main' not found.\n")]
+    answers = [
+        subprocess.CompletedProcess([], 0, stdout="Session 'workdash-main' not found.\n")
+    ] * count
 
     def run(command, **_kwargs):
         if answers:
             return answers.pop()
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps(panes))
 
-    def assert_unusable_answer_consumed():
-        assert not answers, "the unusable pane listing was never read"
+    def assert_unusable_answers_consumed():
+        assert not answers, "an unusable pane listing was never read"
 
     monkeypatch.setattr(launcher_module, "subprocess", SimpleNamespace(run=run))
     monkeypatch.setattr(launcher_module, "_resolve_zellij_binary", lambda: "zellij")
@@ -1309,7 +1313,21 @@ def _zellij_answers_first_listing_unusably(
     monkeypatch.setattr(
         launcher_module.zellij, "load_zellij_panes", launcher_module.Zellij.load_zellij_panes
     )
-    request.addfinalizer(assert_unusable_answer_consumed)
+    request.addfinalizer(assert_unusable_answers_consumed)
+
+
+@given("Zellij answers the first pane listing unusably")
+def _zellij_answers_first_listing_unusably(
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    _install_unusable_pane_listings(scenario_state, monkeypatch, request, 1)
+
+
+@given("Zellij answers the first two pane listings unusably")
+def _zellij_answers_first_two_listings_unusably(
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    _install_unusable_pane_listings(scenario_state, monkeypatch, request, 2)
 
 
 @given("launched agent panes never become visible in Zellij")
@@ -1451,6 +1469,8 @@ def _artifact_item(scenario_state, work_items, tmp_path, monkeypatch):
     artifacts.mkdir(parents=True)
     (artifacts / "PR_REVIEW.md").write_text("Review contents")
     (artifacts / "alias.md").symlink_to("PR_REVIEW.md")
+    (artifacts / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\xff")
+    (artifacts / "data.unknownworkdash").write_bytes(b"\x00\xff")
 
 
 @when("a client lists and reads the item's worktree artifacts")
@@ -1459,7 +1479,13 @@ def _get_artifacts(scenario_state, work_items, tmp_path):
         _make_turbogears_app(ensure_api_session(scenario_state, work_items, tmp_path))
     )
     responses = []
-    for suffix in ("", ".workdash/PR_REVIEW.md", ".workdash/alias.md"):
+    for suffix in (
+        "",
+        ".workdash/PR_REVIEW.md",
+        ".workdash/alias.md",
+        ".workdash/image.png",
+        ".workdash/data.unknownworkdash",
+    ):
         req = Request.blank(
             f"/api/items/owner/repo%23ISSUE-1/files/{suffix}", headers={"X-Workdash": "1"}
         )
@@ -1472,11 +1498,26 @@ def _get_artifacts(scenario_state, work_items, tmp_path):
 
 @then("the listing names the artifact and its alias and the API returns their contents")
 def _check_artifacts(scenario_state):
-    listing, artifact, alias = scenario_state["artifact_responses"]
+    listing, artifact, alias, image, unknown = scenario_state["artifact_responses"]
     assert listing.status_int == 200
-    assert listing.json["result"]["entries"] == ["PR_REVIEW.md", "alias.md"]
-    assert artifact.status_int == alias.status_int == 200
+    assert listing.json["result"]["entries"] == [
+        "PR_REVIEW.md",
+        "alias.md",
+        "data.unknownworkdash",
+        "image.png",
+    ]
+    assert artifact.status_int == alias.status_int == image.status_int == unknown.status_int == 200
     assert artifact.text == alias.text == "Review contents"
+    assert image.body == b"\x89PNG\r\n\x1a\n\x00\xff"
+    assert unknown.body == b"\x00\xff"
+
+
+@then("file responses identify their content type from their filenames")
+def _check_artifact_content_types(scenario_state):
+    _, artifact, alias, image, unknown = scenario_state["artifact_responses"]
+    assert artifact.content_type == alias.content_type == "text/markdown"
+    assert image.content_type == "image/png"
+    assert unknown.content_type == "application/octet-stream"
 
 
 @when("a client requests the list API and the item's artifact with and without the Workdash header")
@@ -1510,13 +1551,14 @@ def _request_control_with_and_without_header(scenario_state, work_items, tmp_pat
     scenario_state["header_responses"] = responses
 
 
-@then("only requests with `X-Workdash: 1` succeed")
+@then("control requests require `X-Workdash: 1` but artifact GETs do not")
 def _check_control_header(scenario_state):
     responses = scenario_state["header_responses"]
-    for method in ("POST", "GET"):
-        assert responses[method, None].status_int == 403
-        assert responses[method, "wrong"].status_int == 403
-        assert responses[method, "1"].status_int == 200
+    assert responses["POST", None].status_int == 403
+    assert responses["POST", "wrong"].status_int == 403
+    assert responses["POST", "1"].status_int == 200
+    for header in (None, "wrong", "1"):
+        assert responses["GET", header].status_int == 200
     assert responses["POST", "1"].json["ok"] is True
     assert responses["GET", "1"].text == "Review contents"
 

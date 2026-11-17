@@ -1,5 +1,6 @@
 """Autonomous review scenarios at external boundaries."""
 
+import json
 import re
 import subprocess
 import threading
@@ -112,6 +113,73 @@ def review_state(monkeypatch, tmp_path, scenario_state):
 @given("an open pull request is available for review")
 def pr_available(review_state):
     pass
+
+
+@given("an open pull request has two major findings")
+def two_findings(review_state, monkeypatch):
+    posts = []
+    original = subprocess.run
+
+    def github(command, **kwargs):
+        if command[:2] == ["gh", "api"]:
+            posts.append(json.loads(kwargs["input"]))
+            return subprocess.CompletedProcess(command, 0, "{}", "")
+        return original(command, **kwargs)
+
+    def run_in_pane(*, item, prompt, command_tokens, cwd, work_action, zellij_session, group):
+        assert "Start each comment with 🤖" in prompt
+        subprocess.run(
+            ["gh", "api", "repos/owner/repo/pulls/2/reviews", "--input", "-"],
+            input=json.dumps(
+                {
+                    "event": "REQUEST_CHANGES",
+                    "body": "Two defects",
+                    "comments": [
+                        {"path": "app.py", "line": 3, "body": "🤖 First defect"},
+                        {"path": "app.py", "line": 7, "body": "🤖 Second defect"},
+                    ],
+                }
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+        )
+        path = re.search(r"completion document at (\S+)", prompt).group(1)
+        Path(path).write_text(
+            "Review outcome: success\n"
+            "Outcome: REQUEST_CHANGES\n"
+            "Inline comments:\n"
+            "- app.py:3: 🤖 First defect\n"
+            "- app.py:7: 🤖 Second defect\n"
+        )
+        return ""
+
+    monkeypatch.setattr(subprocess, "run", github)
+    monkeypatch.setattr(agent_execution.executor, "run_in_pane", run_in_pane)
+    review_state["posts"] = posts
+
+
+@when("the reviewer completes an autonomous review")
+def complete_review(review_state):
+    review_state["result"] = review_state["session"].review(target="owner/repo#PR-2")
+
+
+@then("both inline comments begin with 🤖")
+def marked_comments(review_state):
+    (post,) = review_state["posts"]
+    assert post["event"] == "REQUEST_CHANGES"
+    assert [comment["body"] for comment in post["comments"]] == [
+        "🤖 First defect",
+        "🤖 Second defect",
+    ]
+
+
+@then("the review document lists both posted comments")
+def listed_comments(review_state):
+    content = review_state["result"]["content"]
+    assert content.startswith("Review outcome: success\n")
+    assert "🤖 First defect" in content and "🤖 Second defect" in content
 
 
 @when("the reviewer requests an autonomous review")

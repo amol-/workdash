@@ -15,7 +15,7 @@ import pytest
 import workdash.control as control_module
 import workdash.github_client as github_client_module
 import workdash.workdash as workdash_module
-from workdash.config import AgentConfig, WorkdashConfig
+from workdash.config import AgentConfig, WorkdashConfig, load_config, save_config
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.workdash import _print_work_items, _print_work_items_result
 
@@ -167,6 +167,7 @@ def test_main_bare_interactive_uses_own_zellij_session_from_environment(
 def test_main_server_refresh_before_tui_run_updates_session_and_repaints_when_running(
     monkeypatch: pytest.MonkeyPatch,
     listeners,
+    tmp_path,
 ) -> None:
     initial_item = _issue(number=1)
     early_refresh_item = _issue(number=2)
@@ -224,7 +225,12 @@ def test_main_server_refresh_before_tui_run_updates_session_and_repaints_when_ru
 
     monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
-    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    config_path = tmp_path / "config.json"
+    save_config(
+        replace(_VALID_CONFIG, listens=tuple(f"{host}@{','.join(ips)}" for host, ips in listeners)),
+        config_path,
+    )
+    monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(workdash_module, "WorkdashControlServer", FakeControlServer)
     monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
@@ -234,10 +240,7 @@ def test_main_server_refresh_before_tui_run_updates_session_and_repaints_when_ru
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
 
-    argv = []
-    for host, ips in listeners:
-        argv.extend(["--listen", f"{host}@{','.join(ips)}"])
-    assert workdash_module.main(argv) == 0
+    assert workdash_module.main([]) == 0
     assert captured["listeners"] == listeners
 
     assert captured["app_session"].items_changed_callback is not None
@@ -732,7 +735,7 @@ def test_main_rejects_missing_or_malformed_viewer_before_zellij_wrapping(
     assert "workdash --configure" in captured.err
 
 
-@pytest.mark.parametrize("argv", [[], ["--listen", "127.0.0.2@192.0.2.1"]])
+@pytest.mark.parametrize("argv", [[]])
 def test_main_exits_with_config_guidance_when_startup_config_command_is_malformed(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
 ) -> None:
@@ -1532,6 +1535,20 @@ def test_main_info_json_outputs_server_response(
     assert json.loads(capsys.readouterr().out) == response
 
 
+def test_main_configure_reports_invalid_listeners(monkeypatch, tmp_path, capsys):
+    from workdash.config import configure
+
+    path = tmp_path / "config.json"
+    original = '{"listens": "127.0.0.2@127.0.0.4"}'
+    path.write_text(original)
+    monkeypatch.setattr(workdash_module, "configure", lambda **kwargs: configure(path))
+
+    assert workdash_module.main(["--configure"]) == 1
+    error = capsys.readouterr().err
+    assert "listens" in error and "list" in error and str(path) in error
+    assert path.read_text() == original
+
+
 def test_main_configure_runs_setup_and_exits(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1882,73 +1899,26 @@ def test_print_work_items_uses_review_label_for_review_requested_pr(
 
 
 @pytest.mark.parametrize(
-    "argv",
+    "listener",
     [
-        ["--listen"],
-        *[
-            ["--listen", value]
-            for value in (
-                "",
-                "127.0.0.2",
-                "@192.0.2.1",
-                "127.0.0.2@",
-                "127.0.0.2@,192.0.2.1",
-                "127.0.0.2@192.0.2.1,",
-                "127.0.0.2@192.0.2.1,,192.0.2.2",
-                "127.0.0.2@client.lan",
-                "127.0.0.2@192.0.2.0/33",
-                "127.0.0.2@999.0.0.1",
-                "127.0.0.2@192.0.2.1@192.0.2.2",
-                "0.0.0.0@192.0.2.1",
-                "*@192.0.2.1",
-                "::@192.0.2.1",
-                "dashboard.lan:9000@192.0.2.1",
-            )
-        ],
+        "",
+        "127.0.0.2",
+        "127.0.0.2@",
+        "127.0.0.2@192.0.2.1,",
+        "127.0.0.2@client.lan",
+        "0.0.0.0@192.0.2.1",
+        "*@192.0.2.1",
+        "dashboard.lan:9000@192.0.2.1",
     ],
 )
-def test_main_rejects_invalid_listeners_before_loading_local_state(
-    monkeypatch, capsys, argv
-) -> None:
-    def unexpected_preflight():
-        raise AssertionError("invalid CLI reached GitHub preflight")
-
-    monkeypatch.setattr(
-        workdash_module.GitHubClient, "check_authentication", lambda self: unexpected_preflight()
-    )
-    with pytest.raises(SystemExit) as error:
-        workdash_module.main(argv)
-    assert error.value.code == 2
-    assert "--listen" in capsys.readouterr().err
-
-
-def test_server_listener_flags_reach_the_zellij_dashboard(monkeypatch, tmp_path) -> None:
-    import workdash.launcher as launcher_module
-
+def test_invalid_configured_listeners_abort_startup(monkeypatch, capsys, listener):
+    monkeypatch.setenv("ZELLIJ", "1")
     monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
-    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
-    monkeypatch.setattr(launcher_module, "_resolve_zellij_binary", lambda: "/usr/bin/zellij")
-    monkeypatch.delenv("ZELLIJ", raising=False)
-    captured = {}
-
-    def capture_layout(command, *, session_name):
-        captured["command"] = command
-        return str(tmp_path / "layout.kdl")
-
-    def execvp(_file, _args):
-        raise SystemExit(0)
-
-    monkeypatch.setattr(launcher_module, "_write_zellij_startup_layout", capture_layout)
     monkeypatch.setattr(
-        launcher_module.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")
+        workdash_module, "load_config", lambda: replace(_VALID_CONFIG, listens=(listener,))
     )
-    monkeypatch.setattr(launcher_module.os, "execvp", execvp)
-    argv = ["--listen", "dashboard.lan@192.0.2.1", "--listen", "192.0.2.5@192.0.2.2"]
-    with pytest.raises(SystemExit) as error:
-        workdash_module.main(argv)
-    assert error.value.code == 0
-    assert captured["command"][-len(argv) :] == argv
-    assert "--direct" not in captured["command"]
+    assert workdash_module.main([]) == 1
+    assert "listens" in capsys.readouterr().err
 
 
 def test_environment_address_and_explicit_host_precedence(monkeypatch, capsys):
@@ -2237,27 +2207,7 @@ def test_todo_rejects_invalid_arguments(arguments, capsys):
     assert "todo requires TEXT or --close ITEM" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    "args", [[], ["show-config"], ["branchdiff"], ["branchinfo"], ["--configure"]]
-)
-def test_listener_allowed_without_client_command(monkeypatch, args):
-    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:9999")
-    options = workdash_module._parse_args(["--listen", "127.0.0.2@192.0.2.0/24", *args])
-    assert options.listeners == (("127.0.0.2", ("192.0.2.0/24",)),)
-    if not args or args == ["show-config"]:
-        assert options.host == "127.0.0.1:9999"
-
-
-def test_listener_rejected_with_client_command(monkeypatch, capsys):
-    monkeypatch.delenv("WORKDASH_HOST", raising=False)
-    with pytest.raises(SystemExit) as error:
-        workdash_module.main(["--listen", "127.0.0.2@192.0.2.1", "list"])
-    assert error.value.code == 2
-    message = capsys.readouterr().err
-    assert "--listen" in message and "client" in message
-
-
-@pytest.mark.parametrize("flag", ["--server", "--direct"])
+@pytest.mark.parametrize("flag", ["--server", "--direct", "--listen"])
 def test_removed_flags_are_rejected(flag, capsys):
     with pytest.raises(SystemExit) as error:
         workdash_module.main([flag])

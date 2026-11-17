@@ -2097,6 +2097,75 @@ def _pin_test_worktree(stack, path):
     return path, fd
 
 
+@pytest.mark.parametrize(
+    ("filename", "content_type", "encoding", "compression"),
+    [
+        ("image.svgz", "image/svg+xml", "gzip", "gzip"),
+        ("image.svg.bz2", "application/x-bzip2", None, "bzip2"),
+        ("image.svg.xz", "application/x-xz", None, "xz"),
+        ("archive.tar.gz", "application/gzip", None, "gzip"),
+        ("data.unknownworkdash.gz", "application/gzip", None, "gzip"),
+        ("archive.tar.bz2", "application/x-bzip2", None, "bzip2"),
+    ],
+)
+def test_compressed_item_file_response(
+    tmp_path, monkeypatch, filename, content_type, encoding, compression
+):
+    import bz2
+    import gzip
+    import lzma
+
+    worktree = tmp_path / "checkout"
+    artifacts = worktree / ".workdash"
+    artifacts.mkdir(parents=True)
+    original = b"artifact contents"
+    compressor = {"bzip2": bz2, "gzip": gzip, "xz": lzma}[compression]
+    compressed = compressor.compress(original)
+    (artifacts / filename).write_bytes(compressed)
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="one")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    monkeypatch.setattr(
+        control_module,
+        "existing_worktree_path",
+        lambda *args, pinned, git: _pin_test_worktree(pinned, worktree),
+    )
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    path = f"/api/items/owner/repo%23ISSUE-1/files/.workdash/{filename}"
+    request = Request.blank(path)
+    request.environ["REMOTE_ADDR"] = "127.0.0.1"
+    response = request.get_response(app)
+    request.environ["REMOTE_ADDR"] = "192.0.2.1"
+    assert request.get_response(app).status_int == 403
+    for method in ("POST", "OPTIONS"):
+        request = Request.blank(path, method=method)
+        request.environ["REMOTE_ADDR"] = "127.0.0.1"
+        assert request.get_response(app).status_int == 403
+    assert response.status_int == 200
+    assert response.content_type == content_type
+    policy = {
+        words[0]: words[1:]
+        for directive in response.headers["Content-Security-Policy"].split(";")
+        if (words := directive.split())
+    }
+    assert policy == {
+        "sandbox": [],
+        "default-src": ["'none'"],
+        "img-src": ["http:", "https:", "data:"],
+        "style-src": ["'unsafe-inline'"],
+    }
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers.get("Content-Encoding") == encoding
+    assert response.body == compressed
+    assert compressor.decompress(response.body) == original
+
+
 @pytest.mark.parametrize("symlinked_worktree", [False, True])
 def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
     worktree = tmp_path / "checkout"
@@ -2144,7 +2213,7 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
     base = "/api/items/owner/repo%23ISSUE-1/files/"
     response = get(base + ".workdash/review.md")
     assert response.status_int == 200 and response.text == "real review", response.text
-    assert response.content_type == "text/plain"
+    assert response.content_type == "text/markdown"
     assert get(base + ".workdash/nested/review.md").text == "nested review"
     assert get(base + ".workdash/alias").text == "real review"
     assert get(base + ".workdash/nested-alias/relative-alias").text == "real review"
@@ -4365,12 +4434,17 @@ def test_control_boundary_requires_header_except_analysis_documents():
     short_item = "/api/items"
     for path, method in (
         (control, "POST"),
-        (artifact, "GET"),
+        (artifact, "POST"),
         (analysis, "POST"),
         (short_item, "GET"),
     ):
         assert call(path, method).status_int == 403
         assert call(path, method, {"X-Workdash": "wrong"}).status_int == 403
+    form = call(
+        control, "POST", {"Content-Type": "application/x-www-form-urlencoded", "Origin": "null"}
+    )
+    assert form.status_int == 403
+    assert "Access-Control-Allow-Origin" not in form.headers
     session.show_config.assert_not_called()
     assert call(control, "POST", {"X-Workdash": "1"}).status_int == 200
     for path in (analysis, analysis + "/html"):
@@ -4407,7 +4481,7 @@ def test_control_boundary_allows_trailing_slash_analysis_documents():
         assert call(path).status_int == 200, path
     assert call(f"{item}/analysis/").body == b"# Analysis"
     for path, method in (
-        (f"{item}/files/", "GET"),
+        (f"{item}/files/", "POST"),
         (f"{item}/analysis/extra/", "GET"),
         ("/api/v0/show-config/", "POST"),
     ):

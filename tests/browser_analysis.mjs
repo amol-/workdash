@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 
-const [browser, profile, url, control, attacker] = process.argv.slice(2);
+const [browser, profile, url, control, attacker, ...artifacts] = process.argv.slice(2);
 const chrome = spawn(browser, [
   '--headless', '--no-sandbox', '--disable-gpu', '--no-first-run',
   '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
@@ -57,7 +57,20 @@ try {
     expression: `fetch(${JSON.stringify(control)}, {method:'POST', headers:{'X-Workdash':'1', 'Content-Type':'application/json'}, body:'{}'}).then(() => 'allowed', () => 'blocked')`,
     awaitPromise: true, returnByValue: true,
   });
-  console.log(JSON.stringify({ images: images.result.value, attack: attack.result.value }));
+  const active = [];
+  for (const artifact of artifacts) {
+    await navigate(artifact);
+    const result = await send('Runtime.evaluate', {
+      expression: 'window.pwned === true', returnByValue: true,
+    });
+    active.push(result.result.value);
+    const submission = await send('Runtime.evaluate', {
+      expression: `document.querySelector('form').submit()`,
+    });
+    if (submission.exceptionDetails) throw new Error('Artifact form submission failed to run');
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+  console.log(JSON.stringify({ images: images.result.value, attack: attack.result.value, active }));
   socket.close();
 } finally {
   chrome.kill();

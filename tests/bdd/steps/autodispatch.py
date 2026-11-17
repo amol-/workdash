@@ -470,6 +470,16 @@ def dashboard_pr_without_issue(dashboard_dispatch, scenario_state):
 def dashboard_pr_not_ready(dashboard_dispatch, scenario_state):
     dashboard_pr(dashboard_dispatch, scenario_state)
     scenario_state["github"].issues["other/repo#3"]["state"] = "CLOSED"
+    scenario_state["expect_no_ready"] = True
+
+
+@given("an issue blocked by an open dependency selected in the dashboard")
+def dashboard_blocked_issue(dashboard_dispatch, scenario_state):
+    dashboard_issue(dashboard_dispatch, scenario_state)
+    github = scenario_state["github"]
+    github.add_issue("other/repo#4")
+    github.issues["other/repo#3"]["blocked_by"] = ("other/repo#4",)
+    scenario_state["expect_no_ready"] = True
 
 
 @given(
@@ -520,7 +530,11 @@ def dashboard_press_dispatch(scenario_state):
         await pilot.press("d")
         for _ in range(100):
             await pilot.pause(0.02)
-            if footer.render().plain != before:
+            status = footer.render().plain
+            if scenario_state.get("expect_no_ready"):
+                if "no work available to dispatch" in status.lower():
+                    break
+            elif status != before:
                 break
         scenario_state["dispatch_status"] = footer.render().plain
 
@@ -554,6 +568,13 @@ def dashboard_launched_compatible(scenario_state):
     assert scenario_state["dashboard_session"].autodispatch_sessions()[0]["agent"] == "pi"
 
 
+@then("the dashboard reports that no work is available to dispatch")
+def dashboard_no_ready_tasks(scenario_state):
+    status = scenario_state["dispatch_status"].lower()
+    assert "no work available to dispatch" in status
+    assert "other/repo#3" in status
+
+
 @then("the dashboard reports that the pull request has no linked issue and starts no session")
 def dashboard_no_linked_issue(scenario_state):
     assert "without a linked issue" in scenario_state["dispatch_status"]
@@ -574,6 +595,7 @@ def dashboard_dispatch_unavailable(scenario_state):
     assert scenario_state["dashboard_session"].autodispatch_sessions() == []
 
 
+@then("an autodispatch session starts for the selected issue")
 @then("an autodispatch session starts for the linked issue")
 def dashboard_session_started(scenario_state):
     session = scenario_state["dashboard_session"]
@@ -876,6 +898,74 @@ def dashboard_toggle_automerge(autodispatch_state):
         )
 
     run_app(work_items=[autodispatch_state["item"]], session=session, interactions=interact)
+
+
+@given("the dashboard has different sessions selected in the work table and progress")
+def dashboard_different_sessions(autodispatch_state):
+    session = autodispatch_state["session"]
+    item = make_work_item(item_type=WorkItemType.ISSUE, number=1)
+    session.work_items = [item]
+    autodispatch_state["item"] = item
+    first = session.start_autodispatch(scope="owner/repo#ISSUE-1")["id"]
+    wait_for(lambda: len(autodispatch_state["panes"]) == 1)
+    second = session.start_autodispatch(scope="owner/repo#ISSUE-2")["id"]
+    wait_for(lambda: len(autodispatch_state["panes"]) == 2)
+    autodispatch_state["ids"] = (first, second)
+
+
+@when("the user presses m with progress focused")
+def toggle_progress_automerge(autodispatch_state):
+    async def interact(app, pilot):
+        await pilot.press("shift+tab")
+        autodispatch_state["focused"] = app.query_one("#autodispatch-scroll").has_focus
+        await pilot.press("down")
+        autodispatch_state["index"] = app._progress_index
+        autodispatch_state["hint_before"] = app.query_one("#command-footer", Static).render().plain
+        await pilot.press("m")
+        await pilot.pause()
+        autodispatch_state["footer"] = app.query_one("#status-footer", Static).render().plain
+        autodispatch_state["hint_after"] = app.query_one("#command-footer", Static).render().plain
+        autodispatch_state["after_progress"] = {
+            entry["id"]: entry["automerge"]
+            for entry in autodispatch_state["session"].autodispatch_sessions()
+        }
+        await pilot.press("tab")
+        autodispatch_state["table_hint"] = app.query_one("#command-footer", Static).render().plain
+        await pilot.press("m")
+        autodispatch_state["table_footer"] = app.query_one("#status-footer", Static).render().plain
+
+    run_app(
+        work_items=[autodispatch_state["item"]],
+        session=autodispatch_state["session"],
+        interactions=interact,
+    )
+
+
+@then("only the selected progress session changes and the dashboard identifies it")
+def progress_automerge_visible(autodispatch_state):
+    first, second = autodispatch_state["ids"]
+    assert autodispatch_state["focused"]
+    assert autodispatch_state["index"] == 1
+    entries = {
+        entry["id"]: entry for entry in autodispatch_state["session"].autodispatch_sessions()
+    }
+    assert not autodispatch_state["after_progress"][first]
+    assert autodispatch_state["after_progress"][second]
+    assert entries[first]["automerge"]
+    assert entries[second]["automerge"]
+    assert second in autodispatch_state["footer"]
+    assert "enabled" in autodispatch_state["footer"]
+    assert first in autodispatch_state["table_footer"]
+
+
+@then("the command hint shows the selected session's automerge state")
+def progress_automerge_hint(autodispatch_state):
+    assert "(m)erge off" not in autodispatch_state["hint_before"]
+    assert "(m)erge" in autodispatch_state["hint_before"]
+    assert "(m)erge off" in autodispatch_state["hint_after"]
+    assert "(d)ispatch" not in autodispatch_state["hint_after"]
+    assert "(m)erge" in autodispatch_state["table_hint"]
+    assert "(m)erge off" not in autodispatch_state["table_hint"]
 
 
 @when(parsers.parse("the user toggles automerge {times}"))

@@ -152,7 +152,6 @@ workdash
 Useful commands and flags:
 
 ```bash
-workdash --listen 192.168.1.5@192.168.1.10,192.168.1.11
 workdash list --host dashboard.lan --json  # connect to an explicit server host
 workdash list                # list server-backed dashboard items as plain text
 workdash list --refresh      # ask the server to refresh items before listing
@@ -313,7 +312,13 @@ written, startup fails and names the path instead of running without
 diagnostics. The log records server-side failures and where they happened, and
 omits raw command output and request bodies.
 
-For trusted LAN access, add repeatable `--listen HOST@IP1,IP2` options. Each listener needs a nonempty list of accepted source IPs or CIDR subnets
+For trusted LAN access, add listener entries to the `listens` list in `~/.config/workdash/config.json`, for example:
+
+```json
+"listens": ["192.168.1.5@192.168.1.10,192.168.1.11"]
+```
+
+Each listener needs a nonempty list of accepted source IPs or CIDR subnets
 (no hostnames). All supplied source IPs are shared across every
 listener, with localhost and the primary server IP always accepted.
 Access checks use the actual peer IP, never forwarding headers. Wildcard binds are
@@ -324,22 +329,25 @@ To list an item's `.workdash/` artifacts or retrieve one, URL-encode the `#` in
 its Workdash ID (otherwise it is interpreted as a URL fragment):
 
 ```bash
-curl -H 'X-Workdash: 1' 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/'
-curl -H 'X-Workdash: 1' 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/.workdash/PR_REVIEW.md'
+curl 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/'
+curl 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/.workdash/PR_REVIEW.md'
 ```
 
 The listing is a JSON success envelope with `result.entries`, a sorted array of
-names. Files are returned as `text/plain`; only files inside the existing
+names. Files are returned with a Content-Type inferred from the requested filename,
+or `application/octet-stream` when unknown. Compressed archives remain compressed
+when downloaded; compressed SVG images are decoded by the browser. Only files inside the existing
 worktree's `.workdash/` directory are available. These endpoints are read-only
 and use the same peer access checks as the control API.
 
-Control API requests, including artifact GETs, require `X-Workdash: 1`; the CLI
-sends it automatically. GETs of analysis Markdown and HTML documents are exempt
-for direct browser viewing, but still require an allowed source IP. Cross-origin
-preflight requests are denied. The header prevents browser images and cross-origin
-JavaScript from invoking control APIs; it is not authentication and non-browser
-clients can send it. HTML analyses block scripts but can load HTTP(S) images,
-which can request other URLs, including the read-only analysis documents.
+Control API requests require `X-Workdash: 1`; the CLI sends it automatically.
+Artifact GETs and GETs of analysis Markdown and HTML documents are exempt for
+browser viewing, but still require an allowed source IP. Cross-origin preflight
+requests are denied. The header prevents browser images and cross-origin JavaScript
+from invoking control APIs; it is not authentication and non-browser clients can
+send it. Artifact documents are sandboxed and cannot run scripts or submit forms.
+HTML analyses block scripts but can load HTTP(S) images, which can request other
+URLs, including read-only artifacts and analysis documents.
 
 **Trusted LAN only:** the API is intentionally unauthenticated plain HTTP.
 Allowed clients can execute dashboard actions; do not expose it to untrusted
@@ -465,8 +473,9 @@ other changes. Use GitHub-enforced branch protection for policies that must be
 enforced atomically at merge time; Workdash's recheck is not such a guarantee.
 
 `workdash info` and `workdash info --json` report sessions, their current task,
-status, elapsed time and any failure. The TUI shows running sessions and the three
-most recently started failed sessions, including failure details, above the work table. Press Shift+Tab to focus progress and use the arrow keys or End to scroll it; press Tab to return to the work table. After three reminders and a further idle window with no pull request, a stuck session is blocked and remains visible. Any change in pane content resumes it and starts a fresh reminder window, whether caused by the agent or by input through Workdash or Zellij. Successful input through Workdash also resumes it immediately, even if the screen remains unchanged. The TUI does not provide a pane-input action. With progress focused, select the blocked session with the arrow keys and press `s` to stop it and close its pane without changing the worktree. Stop a session with
+status, elapsed time and any failure. The TUI shows running sessions, the three
+most recently started failed sessions, including failure details, and the three most
+recently started sessions with no work on their first check above the work table. Press Shift+Tab to focus progress and use the arrow keys or End to scroll it; press Tab to return to the work table. After three reminders and a further idle window with no pull request, a stuck session is blocked and remains visible. Any change in pane content resumes it and starts a fresh reminder window, whether caused by the agent or by input through Workdash or Zellij. Successful input through Workdash also resumes it immediately, even if the screen remains unchanged. The TUI does not provide a pane-input action. With progress focused, select the blocked session with the arrow keys and press `s` to stop it and close its pane without changing the worktree. Stop a session with
 `workdash autodispatch-stop SESSION_ID`; stopping a blocked session closes its pane, while stopping a running session leaves its pane open. Starting another session for the same scope replaces the old one and also closes its pane if it is blocked. If the pane content has changed before either action closes it, the session still stops or is replaced, but that action leaves the recovered pane open. Starting an exact issue can still close its coding pane to dispatch ready work. A blocked pane is still checked for a later merged pull request.
 A dispatch already in progress may still finish launching its pane after stopping.
 Pane disappearance is not proof that the work was merged or completed.
@@ -525,7 +534,9 @@ agent is selected by default. The agent needs GitHub access and permission to
 post reviews; a restricted analysis command may not be suitable.
 
 The agent is instructed to post only major findings as inline review comments,
-and submit a changes-requested review or approval as appropriate. For your own
+each beginning with 🤖, and submit a changes-requested review or approval as
+appropriate. It checks existing review threads and does not repeat
+already-described problems, regardless of who wrote them. For your own
 PR, based on the authenticated identity used to submit the review rather than
 the configured username, it submits a comment-only review, since GitHub does not
 permit self-approval or self-requested changes. If it cannot determine that

@@ -116,9 +116,9 @@ def test_dashboard_initial_layout_and_shortcuts() -> None:
                 await pilot.resize_terminal(width, 10)
                 await pilot.pause()
                 rows = [strip.text for strip in app.screen._compositor.render_strips()]
-                assert "Age" in rows[0] and "Last Update" in rows[0], rows
+                assert "Updated" in rows[0], rows
                 long_row = next(row for row in rows if "Long title" in row)
-                assert len([word for word in long_row.split() if word.endswith("d")]) >= 2, rows
+                assert len([word for word in long_row.split() if word.endswith("d")]) >= 1, rows
             assert not table.show_horizontal_scrollbar
             await pilot.press("right", "right", "down")
             await pilot.pause()
@@ -179,8 +179,7 @@ def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_colum
                 "Type",
                 "Repo",
                 "Title",
-                "Age",
-                "Last Update",
+                "Updated",
             ]
             assert table.row_count == 2
             assert table.get_row_at(0)[2].style == "bold"
@@ -191,13 +190,11 @@ def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_colum
                 "owner/repo",
                 "Implement renderer",
                 "1d",
-                "1d",
             ]
             assert [str(c) for c in table.get_row_at(1)] == [
                 "  IS 11",
                 "owner/repo",
                 "* Fix parser",
-                "6d",
                 "6d",
             ]
 
@@ -321,7 +318,6 @@ def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label()
                 "owner/repo",
                 "Implement renderer",
                 "6d",
-                "6d",
             ]
 
             work_item.included = True
@@ -332,7 +328,6 @@ def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label()
                 "  VR+ 22",
                 "owner/repo",
                 "Implement renderer",
-                "6d",
                 "6d",
             ]
             await pilot.press("q")
@@ -366,7 +361,6 @@ def test_workdash_app_renders_review_for_review_requested_pr_type() -> None:
                 "  RV 22",
                 "owner/repo",
                 "Needs review",
-                "1d",
                 "1d",
             ]
 
@@ -481,7 +475,6 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
                 "owner/repo",
                 "Implement renderer",
                 "1d",
-                "1d",
             ]
 
     asyncio.run(run_smoke())
@@ -534,7 +527,6 @@ def test_workdash_app_refresh_keybinding_invokes_callback_and_reloads_rows() -> 
                 "owner/repo",
                 "* Ship refresh",
                 "0d",
-                "0d",
             ]
 
     asyncio.run(run_smoke())
@@ -586,7 +578,6 @@ def test_workdash_app_uses_session_state_for_first_render() -> None:
                 "  VR 33",
                 "owner/repo",
                 "* Session state before Textual starts",
-                "0d",
                 "0d",
             ]
             await pilot.press("q")
@@ -643,7 +634,6 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
                 "owner/repo",
                 "Fix parser",
                 "6d",
-                "6d",
             ]
 
             session.work_items = [refreshed_item]
@@ -655,7 +645,6 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
                 "  VR 33",
                 "owner/repo",
                 "* Ship refresh",
-                "0d",
                 "0d",
             ]
             await pilot.press("q")
@@ -835,7 +824,6 @@ def test_workdash_app_analyze_runs_without_blocking_ui_loop(
                 "  IS 11",
                 "owner/repo",
                 "Fix parser",
-                "6d",
                 "6d",
             ]
             await pilot.press("q")
@@ -1830,9 +1818,8 @@ def test_workdash_app_search_matches_rendered_columns_ignoring_case() -> None:
 
             await pilot.press("/")
             await pilot.pause()
-            # The Age and Last Update columns are never searched: "6d" is the
-            # rendered Last Update of the parser issue (and part of the "16d"
-            # age of the docs PR).
+            # The Updated column is never searched: "6d" is the rendered
+            # Updated value of the parser issue.
             await _submit_search(app, pilot, "6d")
             assert _listed_titles(app) == []
 
@@ -3565,6 +3552,52 @@ def test_include_closed_todo_is_pruned_on_refresh(tmp_path, duplicate: bool) -> 
     asyncio.run(run_test())
 
 
+def test_progress_command_hint_tracks_selection_and_focus():
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    running = {
+        "id": "running",
+        "status": "running",
+        "scope": "owner/repo#1",
+        "current_item": "owner/repo#1",
+        "selected_group": None,
+        "stage": "developing",
+        "launch_reason": None,
+        "iteration": 1,
+        "elapsed_seconds": 0,
+        "error": None,
+        "automerge": True,
+    }
+    blocked = {**running, "id": "blocked", "status": "blocked"}
+    failed = {**running, "id": "failed", "status": "failed", "error": "failed"}
+    session.autodispatch_sessions = MagicMock(return_value=[running, blocked, failed])
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test() as pilot:
+            footer = app.query_one("#command-footer", Static)
+            assert "(d)ispatch" in footer.render().plain
+            await pilot.press("shift+tab")
+            assert "(m)erge off" in footer.render().plain
+            assert "(d)ispatch" not in footer.render().plain
+            await pilot.press("down")
+            assert "(s)top" in footer.render().plain
+            assert "(m)erge" not in footer.render().plain
+            await pilot.press("down")
+            assert all(
+                hint not in footer.render().plain for hint in ("(s)top", "(m)erge", "(d)ispatch")
+            )
+            await pilot.press("tab")
+            assert "(d)ispatch" in footer.render().plain
+
+    asyncio.run(run())
+
+
 def test_progress_selects_and_stops_a_blocked_session():
     session = WorkdashSession(
         config=_DEFAULT_TUI_CONFIG,
@@ -3588,12 +3621,24 @@ def test_progress_selects_and_stops_a_blocked_session():
     blocked = {**entry, "id": "blocked", "scope": "owner/repo#2", "status": "blocked"}
     session.autodispatch_sessions = MagicMock(return_value=[entry, blocked])
     session.stop_autodispatch = MagicMock()
-    app = WorkdashApp(session=session)
+    app = WorkdashApp(session=session, todo_callback=MagicMock())
 
     async def run():
         async with app.run_test() as pilot:
+            progress = app.query_one("#autodispatch-progress", Static)
+            assert all(not row.startswith(">") for row in progress.render().plain.splitlines())
             await pilot.press("shift+tab")
+            assert progress.render().plain.splitlines()[0].startswith("> ")
             await pilot.press("down")
+            assert progress.render().plain.splitlines()[1].startswith("> ")
+            await pilot.press("w")
+            assert all(not row.startswith(">") for row in progress.render().plain.splitlines())
+            await pilot.press("escape")
+            assert progress.render().plain.splitlines()[1].startswith("> ")
+            await pilot.press("tab")
+            assert all(not row.startswith(">") for row in progress.render().plain.splitlines())
+            await pilot.press("shift+tab")
+            assert progress.render().plain.splitlines()[1].startswith("> ")
             footer = str(app.query_one("#command-footer").render())
             assert "(s)top" in footer
             assert "(d)ispatch" not in footer
@@ -3697,3 +3742,66 @@ def test_view_menu_reports_a_failing_viewer() -> None:
             await pilot.press("q")
 
     asyncio.run(run_smoke())
+
+
+def test_progress_arrows_reach_empty_sessions_on_short_screen():
+    session = MagicMock()
+    session.config = _DEFAULT_TUI_CONFIG
+    session.work_items = []
+    session.suggestion_markers = {}
+    session.take_completed_autodispatch_items.return_value = []
+    session.autodispatch_sessions.return_value = [
+        {"id": f"failed{n}", "status": "failed", "error": "error", "scope": f"owner/repo#{n}"}
+        for n in range(3)
+    ] + [
+        {"id": str(n), "status": "finished", "iteration": 1, "scope": f"owner/repo#{n}"}
+        for n in range(3)
+    ]
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test(size=(60, 8)) as pilot:
+            await pilot.press("shift+tab", *(["down"] * 5))
+            scroll = app.query_one("#autodispatch-scroll")
+            rows = app.query_one("#autodispatch-progress", Static).render().plain.splitlines()
+            assert rows[5].startswith("> ") and "owner/repo#2" in rows[5]
+            assert scroll.scroll_y > 0
+            await pilot.press("up")
+            rows = app.query_one("#autodispatch-progress", Static).render().plain.splitlines()
+            assert rows[4].startswith("> ")
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status", ["failed", "finished"])
+def test_narrow_progress_prioritizes_terminal_outcome_over_automerge(status):
+    session = MagicMock()
+    session.config = _DEFAULT_TUI_CONFIG
+    session.work_items = []
+    session.suggestion_markers = {}
+    session.take_completed_autodispatch_items.return_value = []
+    session.autodispatch_sessions.return_value = [
+        {
+            "id": "s",
+            "status": status,
+            "iteration": 1,
+            "scope": "owner/repo",
+            "error": "network error",
+            "automerge": True,
+        }
+    ]
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test(size=(36, 10)) as pilot:
+            row = app.query_one("#autodispatch-progress", Static).render().plain
+            if status == "failed":
+                assert row.startswith("  Failed: network error")
+            else:
+                assert row.startswith("  No work available to dispatch")
+            await pilot.resize_terminal(100, 10)
+            app._update_autodispatch_progress()
+            row = app.query_one("#autodispatch-progress", Static).render().plain
+            assert row.index("[automerge]") > row.index("owner/repo")
+
+    asyncio.run(run())

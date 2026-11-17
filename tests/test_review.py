@@ -835,6 +835,10 @@ def test_review_prompt_instructs_agent_how_to_submit(setup_review, monkeypatch):
         "Post findings as inline review comments on the pull request, not conversation comments"
         in prompt
     )
+    assert "Check existing review threads" in prompt
+    assert "regardless of who wrote them" in prompt
+    assert "Start each comment with 🤖" in prompt
+    assert "without first-person framing or commentary about the reviewer or the review" in prompt
     assert "authenticated GitHub identity used to submit the review" in prompt
     assert "compare it case-insensitively with the pull request author" in prompt
     assert (

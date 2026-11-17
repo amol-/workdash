@@ -31,10 +31,11 @@ _ITEM_DOCUMENT_COMMAND = ("workdash", "view")
 _BROWSER_OPEN_TIMEOUT_SECONDS = 4
 _WORKDASH_LOCAL_BIN = LOCAL_BIN_PATH
 # A Zellij session that is still starting answers unusably for a moment, so a pane
-# listing is retried once before it counts as unavailable. The whole read stays
-# short because callers list panes while holding the session lock.
-_ZELLIJ_PANE_READ_ATTEMPTS = 2
-_ZELLIJ_PANE_READ_RETRY_SECONDS = 0.25
+# listing is attempted up to three times, two seconds apart, before it counts as
+# unavailable. Callers list panes while holding the session lock, so a persistent
+# failure delays them for about ten seconds in total.
+_ZELLIJ_PANE_READ_ATTEMPTS = 3
+_ZELLIJ_PANE_READ_RETRY_SECONDS = 2.0
 _ZELLIJ_PANE_READ_TIMEOUT_SECONDS = 2.0
 # Terminal control sequences in text captured from a pane or an error message.
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
@@ -195,6 +196,7 @@ def become_item_document(url: str) -> None:
 _HTML_TEMPLATE = """\
 <!DOCTYPE html>
 <html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src http: https:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <title>{title}</title>
 <style>
@@ -205,6 +207,14 @@ code {{ background: #f0f0f0; padding: 0.2em 0.4em; border-radius: 3px; font-size
 pre code {{ background: none; padding: 0; }}
 blockquote {{ border-left: 4px solid #d0d7de; margin: 0; padding: 0.5em 1em; color: #656d76; }}
 table {{ border-collapse: collapse; }} th, td {{ border: 1px solid #d0d7de; padding: 6px 13px; }}
+@media (max-width: 1023px) {{
+  body {{ margin: 1em auto; padding: 0 0.75em; overflow-wrap: anywhere; }}
+  pre {{ padding: 0.75em; font-size: 0.85em; }}
+  pre, table {{ max-width: 100%; overflow-x: auto; }}
+  table {{ display: block; }}
+  th, td {{ padding: 4px 8px; }}
+  img {{ max-width: 100%; height: auto; }}
+}}
 </style></head>
 <body>{body}</body></html>
 """

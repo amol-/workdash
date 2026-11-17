@@ -11,7 +11,7 @@ Feature: Supervise an autoclosed coding pane
     - Supervision never takes over a pane that `code` did not just launch, so `already_running` enables nothing.
     - A pane is not judged while its output keeps changing, including output during a GitHub lookup before a blocked decision.
     - Five minutes without new output and without a Workdash message make the pane a candidate for a decision; every message Workdash sends restarts that wait.
-    - The decision uses the same GitHub work classification as `ready`; an actionable message includes the autonomous publishing rules.
+    - The decision uses the same GitHub work classification as `ready`; an actionable message includes the autonomous publishing rules and tells the agent to make reasonable decisions guided by the work goal to unblock progress.
     - A pull request merged for the supervised work closes its pane on the next check, even while the agent is still writing or a detailed work lookup is unavailable. A pull request merged before launch does not finish a reopened issue; a pane explicitly targeting that merged pull request is left alone. A merge during pane startup closes the pane only when GitHub's timestamp establishes that it happened after launch; a merge in the same second as launch is ambiguous and leaves the pane open.
     - Finished work (current-head CI passing or verifiably absent, clean mergeability, no outstanding feedback, no local work GitHub does not have: an edited file, a new file the agent never added, or an unpushed commit) closes its pane after the wait, rechecked immediately before closing, and the reason is logged when unpublished work keeps the pane open. Only the worktree's `.workdash/` artifact directory is left out of that check.
     - A pull request that opens and merges between checks is found within about five minutes and its pane is closed.
@@ -84,6 +84,7 @@ Feature: Supervise an autoclosed coding pane
     When another minute passes
     Then the supervised pane receives the `fix_ci` instruction
     And the instruction permits publishing
+    And the instruction asks the agent to decide how to unblock the work using its goal
 
   @id:F-CODING-AUTOCLOSE-S007
   Scenario: An unchanged GitHub state is never messaged twice
@@ -225,6 +226,7 @@ Feature: Supervise an autoclosed coding pane
     And a supervised coding pane for issue `owner/repo#42` with no pull request yet
     When 5 minutes pass
     Then the supervised pane receives the `implement` instruction
+    And the instruction asks the agent to decide how to unblock the work using its goal
     When 5 minutes pass
     Then the supervised pane receives the `implement` instruction again
     When 5 minutes pass

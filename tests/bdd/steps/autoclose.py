@@ -413,6 +413,15 @@ def _instruction_permits_publishing(scenario_state: dict[str, Any]) -> None:
     assert "--add-assignee" not in instruction
 
 
+@then("the instruction asks the agent to decide how to unblock the work using its goal")
+def _instruction_unblocks_work(scenario_state: dict[str, Any]) -> None:
+    instruction = scenario_state["sent"][-1][1]
+    assert "Make reasonable engineering decisions and continue" in instruction
+    assert "make the decision yourself" in instruction
+    assert "satisfies the requirements" in instruction
+    assert "achieve the goal of the work" in instruction
+
+
 @then(parsers.parse("the supervised pane receives the `{action}` instruction again"))
 def _pane_receives_instruction_again(action: str, scenario_state: dict[str, Any]) -> None:
     sent_count = scenario_state["sent_count"]
