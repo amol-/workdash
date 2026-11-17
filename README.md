@@ -152,7 +152,6 @@ workdash
 Useful commands and flags:
 
 ```bash
-workdash --listen 192.168.1.5@192.168.1.10,192.168.1.11
 workdash list --host dashboard.lan --json  # connect to an explicit server host
 workdash list                # list server-backed dashboard items as plain text
 workdash list --refresh      # ask the server to refresh items before listing
@@ -310,7 +309,13 @@ written, startup fails and names the path instead of running without
 diagnostics. The log records server-side failures and where they happened, and
 omits raw command output and request bodies.
 
-For trusted LAN access, add repeatable `--listen HOST@IP1,IP2` options. Each listener needs a nonempty list of accepted source IPs or CIDR subnets
+For trusted LAN access, add listener entries to the `listens` list in `~/.config/workdash/config.json`, for example:
+
+```json
+"listens": ["192.168.1.5@192.168.1.10,192.168.1.11"]
+```
+
+Each listener needs a nonempty list of accepted source IPs or CIDR subnets
 (no hostnames). All supplied source IPs are shared across every
 listener, with localhost and the primary server IP always accepted.
 Access checks use the actual peer IP, never forwarding headers. Wildcard binds are
