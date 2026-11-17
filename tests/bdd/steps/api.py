@@ -1533,13 +1533,14 @@ def _request_control_with_and_without_header(scenario_state, work_items, tmp_pat
     scenario_state["header_responses"] = responses
 
 
-@then("only requests with `X-Workdash: 1` succeed")
+@then("control requests require `X-Workdash: 1` but artifact GETs do not")
 def _check_control_header(scenario_state):
     responses = scenario_state["header_responses"]
-    for method in ("POST", "GET"):
-        assert responses[method, None].status_int == 403
-        assert responses[method, "wrong"].status_int == 403
-        assert responses[method, "1"].status_int == 200
+    assert responses["POST", None].status_int == 403
+    assert responses["POST", "wrong"].status_int == 403
+    assert responses["POST", "1"].status_int == 200
+    for header in (None, "wrong", "1"):
+        assert responses["GET", header].status_int == 200
     assert responses["POST", "1"].json["ok"] is True
     assert responses["GET", "1"].text == "Review contents"
 

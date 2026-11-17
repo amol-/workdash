@@ -2217,9 +2217,18 @@ def _make_turbogears_app(session: WorkdashSession):
                             )
                         content = artifact.read()
                     content_type, encoding = mimetypes.guess_type(parts[-1])
-                    response.content_type = content_type or "application/octet-stream"
-                    if encoding:
+                    if encoding == "gzip" and content_type == "image/svg+xml":
                         response.headers["Content-Encoding"] = encoding
+                    elif encoding == "bzip2":
+                        content_type = "application/x-bzip2"
+                    elif encoding:
+                        content_type = mimetypes.types_map.get(Path(parts[-1]).suffix.lower())
+                    response.content_type = content_type or "application/octet-stream"
+                    response.headers["Content-Security-Policy"] = (
+                        "sandbox; default-src 'none'; img-src http: https: data:; "
+                        "style-src 'unsafe-inline'"
+                    )
+                    response.headers["X-Content-Type-Options"] = "nosniff"
                     return content
             except WorkdashControlError as error:
                 response.status_int = error.status
@@ -2298,9 +2307,8 @@ def _handle_json_request(request, response, action) -> dict[str, object]:
 def _source_and_header_guarded_wsgi_app(app, accepted_ips: Collection[str] = ()):
     """Wrap ``app`` so only accepted source IPs and X-Workdash requests reach it.
 
-    Analysis documents skip the header check because browsers cannot attach it to
-    images or cross-origin requests. The header is not authentication: non-browser
-    clients can send it.
+    Read-only documents and artifacts skip the header check for browser viewing.
+    The header is not authentication: non-browser clients can send it.
     """
 
     allowed: set[ip_network] = {ip_network("127.0.0.1"), ip_network("::1")}
@@ -2324,16 +2332,16 @@ def _source_and_header_guarded_wsgi_app(app, accepted_ips: Collection[str] = ())
             accepted = False
         if not accepted:
             return reject("Workdash server does not accept this source IP.")
-        # The analysis route shape below mirrors ItemsController._default; keep both in sync.
+        # Route shapes mirror ItemsController._default; keep both in sync.
         # TurboGears serves these documents with or without a trailing slash.
         path = environ.get("PATH_INFO", "").rstrip("/").split("/")
-        analysis_document = (
+        browser_read = (
             environ.get("REQUEST_METHOD") == "GET"
             and path[1:3] == ["api", "items"]
-            and path[5:] in (["analysis"], ["analysis", "html"])
+            and (path[5:] in (["analysis"], ["analysis", "html"]) or path[5:6] == ["files"])
         )
         if environ.get("REQUEST_METHOD") == "OPTIONS" or (
-            not analysis_document and environ.get("HTTP_X_WORKDASH") != "1"
+            not browser_read and environ.get("HTTP_X_WORKDASH") != "1"
         ):
             return reject("X-Workdash: 1 is required.")
         return app(environ, start_response)

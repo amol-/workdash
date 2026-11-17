@@ -1,3 +1,5 @@
+import base64
+import gzip
 import json
 import os
 import shutil
@@ -62,13 +64,47 @@ def test_analysis_images_and_control_security_in_browser(tmp_path, monkeypatch):
         return observed
 
     monkeypatch.setattr(control, "_source_and_header_guarded_wsgi_app", observe)
+    worktree = tmp_path / "checkout"
+    artifacts = worktree / ".workdash"
+    artifacts.mkdir(parents=True)
+    (artifacts / "image.png").write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+nmZkAAAAASUVORK5CYII="
+        )
+    )
+    (artifacts / "image.svgz").write_bytes(
+        gzip.compress(b'<svg xmlns="http://www.w3.org/2000/svg" width="7" height="7"></svg>')
+    )
+
+    def pin_worktree(*args, pinned, git):
+        fd = os.open(worktree, os.O_RDONLY | os.O_DIRECTORY)
+        pinned.callback(os.close, fd)
+        return worktree, fd
+
+    monkeypatch.setattr(control, "existing_worktree_path", pin_worktree)
     server = control.WorkdashControlServer(session)
     try:
         server.start()
         base = f"http://127.0.0.1:{server._httpds[0].server_port}"
         action = f"{base}/api/v0/show-config"
+        payload = (
+            "window.pwned = true; "
+            f"fetch('{action}', {{method: 'POST', headers: {{'X-Workdash': '1'}}}}); "
+            "document.forms[0].submit()"
+        )
+        (artifacts / "active.html").write_text(
+            f'<form method="post" action="{action}"></form><script>{payload}</script>'
+        )
+        (artifacts / "active.svg").write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg">'
+            f'<foreignObject><form xmlns="http://www.w3.org/1999/xhtml" method="post" '
+            f'action="{action}"/></foreignObject><script>{payload}</script></svg>'
+        )
+        artifact = f"{base}/api/items/owner/repo%23ISSUE-1/files/.workdash"
         markdown = (
-            f"![image](http://127.0.0.1:{images.server_port}/image.svg)\n\n![attack]({action})"
+            f"![image](http://127.0.0.1:{images.server_port}/image.svg)\n\n"
+            f"![png]({artifact}/image.png)\n\n![svgz]({artifact}/image.svgz)\n\n"
+            f"![attack]({action})"
         )
         session.backend.analysis_cache.load_analysis.return_value = markdown
         local = tmp_path / "analysis.html"
@@ -85,13 +121,19 @@ def test_analysis_images_and_control_security_in_browser(tmp_path, monkeypatch):
                     url,
                     action,
                     f"http://127.0.0.1:{images.server_port}/attacker",
+                    f"{artifact}/active.html",
+                    f"{artifact}/active.svg",
                 ],
                 capture_output=True,
                 text=True,
                 timeout=30,
                 check=True,
             )
-            assert json.loads(result.stdout) == {"images": [7, 0], "attack": "blocked"}
+            assert json.loads(result.stdout) == {
+                "images": [7, 1, 7, 0],
+                "attack": "blocked",
+                "active": [False, False],
+            }
         assert image_requests.count("/image.svg") == 2
         assert [entry for entry in requests if entry[1] == "/api/v0/show-config"] == [
             ("GET", "/api/v0/show-config", "403 Forbidden"),
