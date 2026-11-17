@@ -115,9 +115,9 @@ def test_dashboard_initial_layout_and_shortcuts() -> None:
                 await pilot.resize_terminal(width, 10)
                 await pilot.pause()
                 rows = [strip.text for strip in app.screen._compositor.render_strips()]
-                assert "Age" in rows[0] and "Last Update" in rows[0], rows
+                assert "Updated" in rows[0], rows
                 long_row = next(row for row in rows if "Long title" in row)
-                assert len([word for word in long_row.split() if word.endswith("d")]) >= 2, rows
+                assert len([word for word in long_row.split() if word.endswith("d")]) >= 1, rows
             assert not table.show_horizontal_scrollbar
             await pilot.press("right", "right", "down")
             await pilot.pause()
@@ -178,8 +178,7 @@ def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_colum
                 "Type",
                 "Repo",
                 "Title",
-                "Age",
-                "Last Update",
+                "Updated",
             ]
             assert table.row_count == 2
             assert table.get_row_at(0)[2].style == "bold"
@@ -190,13 +189,11 @@ def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_colum
                 "owner/repo",
                 "Implement renderer",
                 "1d",
-                "1d",
             ]
             assert [str(c) for c in table.get_row_at(1)] == [
                 "  IS 11",
                 "owner/repo",
                 "* Fix parser",
-                "6d",
                 "6d",
             ]
 
@@ -320,7 +317,6 @@ def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label()
                 "owner/repo",
                 "Implement renderer",
                 "6d",
-                "6d",
             ]
 
             work_item.included = True
@@ -331,7 +327,6 @@ def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label()
                 "  VR+ 22",
                 "owner/repo",
                 "Implement renderer",
-                "6d",
                 "6d",
             ]
             await pilot.press("q")
@@ -365,7 +360,6 @@ def test_workdash_app_renders_review_for_review_requested_pr_type() -> None:
                 "  RV 22",
                 "owner/repo",
                 "Needs review",
-                "1d",
                 "1d",
             ]
 
@@ -480,7 +474,6 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
                 "owner/repo",
                 "Implement renderer",
                 "1d",
-                "1d",
             ]
 
     asyncio.run(run_smoke())
@@ -533,7 +526,6 @@ def test_workdash_app_refresh_keybinding_invokes_callback_and_reloads_rows() -> 
                 "owner/repo",
                 "* Ship refresh",
                 "0d",
-                "0d",
             ]
 
     asyncio.run(run_smoke())
@@ -585,7 +577,6 @@ def test_workdash_app_uses_session_state_for_first_render() -> None:
                 "  VR 33",
                 "owner/repo",
                 "* Session state before Textual starts",
-                "0d",
                 "0d",
             ]
             await pilot.press("q")
@@ -642,7 +633,6 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
                 "owner/repo",
                 "Fix parser",
                 "6d",
-                "6d",
             ]
 
             session.work_items = [refreshed_item]
@@ -654,7 +644,6 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
                 "  VR 33",
                 "owner/repo",
                 "* Ship refresh",
-                "0d",
                 "0d",
             ]
             await pilot.press("q")
@@ -834,7 +823,6 @@ def test_workdash_app_analyze_runs_without_blocking_ui_loop(
                 "  IS 11",
                 "owner/repo",
                 "Fix parser",
-                "6d",
                 "6d",
             ]
             await pilot.press("q")
@@ -1821,9 +1809,8 @@ def test_workdash_app_search_matches_rendered_columns_ignoring_case() -> None:
 
             await pilot.press("/")
             await pilot.pause()
-            # The Age and Last Update columns are never searched: "6d" is the
-            # rendered Last Update of the parser issue (and part of the "16d"
-            # age of the docs PR).
+            # The Updated column is never searched: "6d" is the rendered
+            # Updated value of the parser issue.
             await _submit_search(app, pilot, "6d")
             assert _listed_titles(app) == []
 

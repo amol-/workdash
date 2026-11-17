@@ -116,11 +116,11 @@ def _open_dashboard_at_80_columns(
     run_app(work_items=work_items, interactions=interactions)
 
 
-@then("the item age and last update are visible alongside its shortened title")
+@then("the last update is visible alongside its shortened title")
 def _long_title_details_visible(scenario_state: dict[str, Any]) -> None:
     rows = scenario_state["dashboard_rows"]
-    assert "Age" in rows[0] and "Last Update" in rows[0], rows
-    assert "A long work item title" in rows[1] and rows[1].count("10d") == 2, rows
+    assert "Updated" in rows[0], rows
+    assert "A long work item title" in rows[1] and rows[1].count("10d") == 1, rows
     assert "A long work item title " * 8 not in rows[1], rows
 
 

@@ -826,19 +826,12 @@ class WorkdashApp(App[None]):
         table.add_column("Type", key="type", width=max(4, type_width))
         table.add_column("Repo", key="repo")
         repo_width = max((cell_len(_repo_column(item)) for item in matched_items), default=4)
-        age_width = max(
-            (
-                len(f"{max(0, (self._now_utc - _to_utc(item.created_at)).days)}d")
-                for item in matched_items
-            ),
-            default=3,
-        )
         update_width = max(
             (
                 len(f"{max(0, (self._now_utc - _to_utc(item.updated_at)).days)}d")
                 for item in matched_items
             ),
-            default=11,
+            default=7,
         )
         title_width = max(
             1,
@@ -847,12 +840,10 @@ class WorkdashApp(App[None]):
             - 10
             - max(4, type_width)
             - max(4, repo_width)
-            - max(3, age_width)
-            - max(11, update_width),
+            - max(7, update_width),
         )
         table.add_column("Title", key="title", width=title_width)
-        table.add_column("Age", key="age")
-        table.add_column("Last Update", key="last_update")
+        table.add_column("Updated", key="last_update")
         self._sorted_work_items = matched_items
         cutoff = self._now_utc - timedelta(hours=24)
         issue_rows = (
@@ -866,7 +857,6 @@ class WorkdashApp(App[None]):
         )
         current_without_rows = self._current_autodispatch - issue_rows
         for item in self._sorted_work_items:
-            age_days = max(0, (self._now_utc - _to_utc(item.created_at)).days)
             update_days = max(0, (self._now_utc - _to_utc(item.updated_at)).days)
             row_key = f"{item.item_type.value}:{item.repo}#{item.number}"
             self._row_keys[(item.item_type, item.repo, item.number)] = row_key
@@ -875,7 +865,6 @@ class WorkdashApp(App[None]):
                     _type_column(item, bold=True, todo_repository=self._todo_repository),
                     Text(_repo_column(item), style="bold"),
                     self._title_cell(item, current_without_rows),
-                    Text(f"{age_days}d", style="bold"),
                     Text(f"{update_days}d", style="bold"),
                     key=row_key,
                 )
@@ -884,7 +873,6 @@ class WorkdashApp(App[None]):
                     _type_column(item, bold=False, todo_repository=self._todo_repository),
                     _repo_column(item),
                     self._title_cell(item, current_without_rows),
-                    f"{age_days}d",
                     f"{update_days}d",
                     key=row_key,
                 )
