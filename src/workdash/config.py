@@ -16,6 +16,7 @@ import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from io import BytesIO
+from ipaddress import ip_network
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -104,10 +105,40 @@ class WorkdashConfig:
     repositories: tuple[str, ...] = ()
     workdir: str = ""
     todo_repository: str = ""
+    listens: tuple[str, ...] = ()
+
+    def listener_addresses(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """Parse configured listeners and their accepted source networks."""
+        if not isinstance(self.listens, (list, tuple)):
+            raise ValueError("listens must be a list")
+        listeners = []
+        for listener in self.listens:
+            if not isinstance(listener, str):
+                raise ValueError("listener entries must be strings")
+            host, separator, sources = listener.partition("@")
+            if not host or not separator or ":" in host or host in ("*", "0.0.0.0"):
+                raise ValueError(
+                    f"invalid listener {listener!r}: expected HOST@IP1,IP2 without wildcard binds or custom ports"
+                )
+            try:
+                ips = tuple(
+                    str(net.network_address)
+                    if (net := ip_network(source, strict=False)).num_addresses == 1
+                    else str(net)
+                    for source in sources.split(",")
+                )
+            except ValueError as error:
+                raise ValueError(f"invalid listener {listener!r}: {error}") from error
+            listeners.append((host, ips))
+        return tuple(listeners)
 
     def require_valid(self) -> WorkdashConfig:
         missing = validate_config(self)
         invalid = _invalid_config_command_fields(self)
+        try:
+            self.listener_addresses()
+        except ValueError as error:
+            invalid.append(f"listens: {error}")
         if not isinstance(self.open_needs_pane, bool):
             invalid.append("open_needs_pane: expected a boolean")
         viewer = self.analysis_viewer
@@ -179,6 +210,7 @@ def _config_to_json(config: WorkdashConfig) -> str:
                 "repositories": list(config.repositories),
                 "workdir": config.workdir,
                 "todo_repository": config.todo_repository,
+                "listens": list(config.listens),
             },
             indent=2,
             ensure_ascii=True,
@@ -230,6 +262,9 @@ def load_config(path: Path = CONFIG_PATH) -> WorkdashConfig:
         repositories=repositories,
         workdir=raw.get("workdir", "") or raw.get("source_directory", ""),
         todo_repository=raw.get("todo_repository", ""),
+        listens=tuple(raw["listens"])
+        if isinstance(raw.get("listens"), list)
+        else raw.get("listens", ()),
     )
 
 
@@ -519,6 +554,8 @@ def configure(
     """
 
     config = load_config(path)
+    if not isinstance(config.listens, (list, tuple)):
+        raise WorkdashConfigValidationError([], [f"listens: expected a list; edit {path}"])
     install_zellij = install_zellij_fn or (
         lambda: install_zellij_binary(path.parent / "bin" / "zellij", github_client=github_client)
     )
@@ -659,9 +696,12 @@ def configure(
         repositories=repositories,
         workdir=workdir,
         todo_repository=todo_repository,
+        listens=config.listens,
     )
     save_config(new_config, path)
-    print(f"Configuration saved to {path}")
+    print(
+        f'Configuration saved to {path}. Add trusted LAN listeners to "listens", e.g. "10.0.0.50@10.0.0.213".'
+    )
     return new_config
 
 

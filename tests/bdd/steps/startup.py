@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import re
+import socket
 import subprocess
+from http.client import HTTPConnection
 from typing import Any
 
 import pytest
 from pytest_bdd import given, then, when
 
+import workdash.control as control_module
 import workdash.github_client as github_client_module
 import workdash.launcher as launcher_module
 import workdash.workdash as workdash_module
-from workdash.config import AgentConfig, WorkdashConfig
+from workdash.config import AgentConfig, WorkdashConfig, load_config, save_config
 
 
 @given("the GitHub CLI is not installed on PATH")
@@ -256,6 +260,7 @@ def _install_direct_start_fakes(
             repositories=("owner/repo",),
             workdir="~/wrk",
             todo_repository="testuser/todos",
+            listens=scenario_state.get("configured_listeners", ()),
         ),
     )
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
@@ -293,6 +298,10 @@ def _start_interactive_dashboard(
         raise SystemExit(0)
 
     _install_direct_start_fakes(scenario_state, monkeypatch)
+    if "config_path" in scenario_state:
+        config_path = scenario_state["config_path"]
+        save_config(workdash_module.load_config(), config_path)
+        monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
     monkeypatch.setattr(github_client_module.subprocess, "run", lambda *args, **kwargs: None)
     _install_startup_which(
         monkeypatch,
@@ -571,22 +580,27 @@ def _recovered_session(scenario_state):
     recovery = next(
         i for i, command in enumerate(actions) if command[-3:] == ["attach", "-b", "project"]
     )
-    dashboard = next(
-        i for i, command in enumerate(actions) if "new-pane" in command and "--listen" in command
-    )
+    dashboard = next(i for i, command in enumerate(actions) if "new-pane" in command)
     assert recovery < dashboard
     assert "-f" not in actions[recovery]
     assert not any("close-pane" in command or "terminal_5" in command for command in actions)
     assert scenario_state["exec_calls"][0][1] == ["/usr/bin/zellij", "attach", "project"]
 
 
-@when("the user starts the dashboard in the named session with extra listener options")
-def _start_named_session(scenario_state, monkeypatch, capsys):
+@when("the user starts the dashboard in the named session with configured listeners")
+def _start_named_session(scenario_state, monkeypatch, capsys, tmp_path):
+    scenario_state["configured_listeners"] = ("127.0.0.2@127.0.0.4",)
+    scenario_state["config_path"] = tmp_path / "config.json"
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        scenario_state["port"] = probe.getsockname()[1]
+    monkeypatch.setenv("WORKDASH_HOST", f"127.0.0.1:{scenario_state['port']}")
+    monkeypatch.setattr(launcher_module.sys, "argv", ["workdash"])
     _start_interactive_dashboard(
         scenario_state,
         monkeypatch,
         capsys,
-        argv=["--session", "project", "--listen", "127.0.0.2@192.0.2.0/24"],
+        argv=["--session", "project"],
     )
 
 
@@ -600,11 +614,57 @@ def _reports_options_ignored(scenario_state):
     assert "options are ignored" in scenario_state["output"]
 
 
-@then("the system starts a dashboard with extra listener options in that session")
+@then("the system starts a dashboard in that session")
 def _starts_dashboard_in_named_session(scenario_state):
     command = next(c for c in scenario_state["zellij_actions"] if "new-pane" in c)
     assert command[1:3] == ["--session", "project"]
-    assert "--listen" in command and "127.0.0.2@192.0.2.0/24" in command
+
+
+@then("the restarted dashboard accepts configured clients and rejects other clients")
+def _restarted_dashboard_accepts_configured_clients(scenario_state, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        workdash_module, "WorkdashControlServer", control_module.WorkdashControlServer
+    )
+    monkeypatch.setattr(control_module, "SERVER_LOG_PATH", tmp_path / "workdash.log")
+    monkeypatch.setenv("ZELLIJ", "1")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "project")
+    command = next(c for c in scenario_state["zellij_actions"] if "new-pane" in c)
+    launched = command[command.index("--") + 1 :]
+    assert launched[:2] == ["env", f"WORKDASH_HOST=127.0.0.1:{scenario_state['port']}"]
+    monkeypatch.setenv(*launched[1].split("=", 1))
+    assert launched[2:] == ["workdash", "--persistent-pane", "--session", "project"]
+    port = scenario_state["port"]
+
+    class Dashboard:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, *, mouse):
+            for source, expected in (("127.0.0.4", 200), ("127.0.0.9", 403)):
+                connection = HTTPConnection(
+                    "127.0.0.2", port, timeout=2, source_address=(source, 0)
+                )
+                try:
+                    connection.request(
+                        "POST",
+                        "/api/v0/list",
+                        "{}",
+                        {"Content-Type": "application/json", "X-Workdash": "1"},
+                    )
+                    response = connection.getresponse()
+                    assert response.status == expected
+                    payload = json.loads(response.read())
+                    if expected == 200:
+                        assert payload["result"]["items"] == []
+                    else:
+                        assert payload["error"]["code"] == "forbidden"
+                finally:
+                    connection.close()
+
+    monkeypatch.setattr(workdash_module, "WorkdashApp", Dashboard)
+    with pytest.raises(SystemExit) as exit_info:
+        workdash_module.main(launched[3:])
+    assert exit_info.value.code == 0
 
 
 @then("the previous dashboard pane is preserved")

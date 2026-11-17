@@ -14,7 +14,7 @@ Feature: Persistent dashboard Zellij session
   @id:F-STARTUP-ZELLIJ-WRAPPER-S013
   Scenario: Recover an exited selected session
     Given the selected Zellij session has exited with existing work panes
-    When the user starts the dashboard in the named session with extra listener options
+    When the user starts the dashboard in the named session with configured listeners
     Then the existing session is recovered with its work panes and a dashboard
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S001
@@ -48,16 +48,17 @@ Feature: Persistent dashboard Zellij session
   @id:F-STARTUP-ZELLIJ-WRAPPER-S010
   Scenario: Attach to a running dashboard in a named session
     Given the named session `project` already has a running dashboard
-    When the user starts the dashboard in the named session with extra listener options
+    When the user starts the dashboard in the named session with configured listeners
     Then the system attaches to the named session
     And the system reports that the new options are ignored
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S011
   Scenario: Restart a dashboard in an existing session
     Given the named session `project` has a stopped dashboard
-    When the user starts the dashboard in the named session with extra listener options
-    Then the system starts a dashboard with extra listener options in that session
+    When the user starts the dashboard in the named session with configured listeners
+    Then the system starts a dashboard in that session
     And the previous dashboard pane is preserved
+    And the restarted dashboard accepts configured clients and rejects other clients
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S012
   Scenario: Closing the terminal leaves the new session running
