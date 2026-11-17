@@ -142,6 +142,7 @@ def test_save_config_creates_parent_dirs_and_writes_json(tmp_path):
         "repositories": ["owner/repo"],
         "workdir": "~/src",
         "todo_repository": "octocat/todos",
+        "listens": [],
     }
 
 
@@ -518,6 +519,8 @@ def test_configure_fresh_adds_detected_agents_in_order_and_asks_username(tmp_pat
     assert "Detected 'codex' on PATH" in output
     assert "Detected 'pi' on PATH, using analyze: pi -p" in output
     assert "octocat/*" in output
+    assert json.loads(config_path.read_text())["listens"] == []
+    assert "listens" in output and "10.0.0.50@10.0.0.213" in output
 
 
 def test_configure_suggests_the_macos_open_command(tmp_path, monkeypatch):
@@ -984,6 +987,7 @@ def test_configure_preserves_existing_repositories(tmp_path):
                 "workdir": "~/src",
                 "todo_repository": "octocat/todos",
                 "open_needs_pane": False,
+                "listens": ["10.0.0.50@10.0.0.213"],
             }
         ),
         encoding="utf-8",
@@ -997,6 +1001,7 @@ def test_configure_preserves_existing_repositories(tmp_path):
 
     assert config.repositories == ("specific/repo",)
     assert config.workdir == "~/src"
+    assert json.loads(config_path.read_text())["listens"] == ["10.0.0.50@10.0.0.213"]
 
 
 def test_configure_tells_where_to_edit_agents_even_when_agents_are_configured(tmp_path, capsys):
@@ -1309,3 +1314,24 @@ def test_install_gh_binary_downloads_latest_platform_archive(
         "https://api.github.com/repos/cli/cli/releases/latest",
         "https://example.test/gh_2.90.0_macOS_arm64.zip",
     ]
+
+
+@pytest.mark.parametrize("value", ["127.0.0.2@127.0.0.4", None, 42])
+def test_configure_rejects_non_list_listeners_without_changing_file(tmp_path, value):
+    path = tmp_path / "config.json"
+    original = json.dumps({"listens": value})
+    path.write_text(original)
+
+    with pytest.raises(WorkdashConfigValidationError, match="listens.*list"):
+        configure(path)
+
+    assert path.read_text() == original
+
+
+def test_listeners_survive_config_round_trip(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"listens": ["10.0.0.50@10.0.0.0/24"]}))
+    config = load_config(path)
+    assert config.listens == ("10.0.0.50@10.0.0.0/24",)
+    save_config(config, path)
+    assert json.loads(path.read_text())["listens"] == ["10.0.0.50@10.0.0.0/24"]

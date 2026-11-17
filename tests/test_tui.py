@@ -3543,6 +3543,52 @@ def test_include_closed_todo_is_pruned_on_refresh(tmp_path, duplicate: bool) -> 
     asyncio.run(run_test())
 
 
+def test_progress_command_hint_tracks_selection_and_focus():
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    running = {
+        "id": "running",
+        "status": "running",
+        "scope": "owner/repo#1",
+        "current_item": "owner/repo#1",
+        "selected_group": None,
+        "stage": "developing",
+        "launch_reason": None,
+        "iteration": 1,
+        "elapsed_seconds": 0,
+        "error": None,
+        "automerge": True,
+    }
+    blocked = {**running, "id": "blocked", "status": "blocked"}
+    failed = {**running, "id": "failed", "status": "failed", "error": "failed"}
+    session.autodispatch_sessions = MagicMock(return_value=[running, blocked, failed])
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test() as pilot:
+            footer = app.query_one("#command-footer", Static)
+            assert "(d)ispatch" in footer.render().plain
+            await pilot.press("shift+tab")
+            assert "(m)erge off" in footer.render().plain
+            assert "(d)ispatch" not in footer.render().plain
+            await pilot.press("down")
+            assert "(s)top" in footer.render().plain
+            assert "(m)erge" not in footer.render().plain
+            await pilot.press("down")
+            assert all(
+                hint not in footer.render().plain for hint in ("(s)top", "(m)erge", "(d)ispatch")
+            )
+            await pilot.press("tab")
+            assert "(d)ispatch" in footer.render().plain
+
+    asyncio.run(run())
+
+
 def test_progress_selects_and_stops_a_blocked_session():
     session = WorkdashSession(
         config=_DEFAULT_TUI_CONFIG,
@@ -3566,12 +3612,24 @@ def test_progress_selects_and_stops_a_blocked_session():
     blocked = {**entry, "id": "blocked", "scope": "owner/repo#2", "status": "blocked"}
     session.autodispatch_sessions = MagicMock(return_value=[entry, blocked])
     session.stop_autodispatch = MagicMock()
-    app = WorkdashApp(session=session)
+    app = WorkdashApp(session=session, todo_callback=MagicMock())
 
     async def run():
         async with app.run_test() as pilot:
+            progress = app.query_one("#autodispatch-progress", Static)
+            assert all(not row.startswith(">") for row in progress.render().plain.splitlines())
             await pilot.press("shift+tab")
+            assert progress.render().plain.splitlines()[0].startswith("> ")
             await pilot.press("down")
+            assert progress.render().plain.splitlines()[1].startswith("> ")
+            await pilot.press("w")
+            assert all(not row.startswith(">") for row in progress.render().plain.splitlines())
+            await pilot.press("escape")
+            assert progress.render().plain.splitlines()[1].startswith("> ")
+            await pilot.press("tab")
+            assert all(not row.startswith(">") for row in progress.render().plain.splitlines())
+            await pilot.press("shift+tab")
+            assert progress.render().plain.splitlines()[1].startswith("> ")
             footer = str(app.query_one("#command-footer").render())
             assert "(s)top" in footer
             assert "(d)ispatch" not in footer
@@ -3638,9 +3696,9 @@ def test_narrow_progress_prioritizes_terminal_outcome_over_automerge(status):
         async with app.run_test(size=(36, 10)) as pilot:
             row = app.query_one("#autodispatch-progress", Static).render().plain
             if status == "failed":
-                assert row.startswith("> Failed: network error")
+                assert row.startswith("  Failed: network error")
             else:
-                assert row.startswith("> No work available to dispatch")
+                assert row.startswith("  No work available to dispatch")
             await pilot.resize_terminal(100, 10)
             app._update_autodispatch_progress()
             row = app.query_one("#autodispatch-progress", Static).render().plain

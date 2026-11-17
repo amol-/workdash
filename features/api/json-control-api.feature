@@ -10,10 +10,10 @@ Feature: Local JSON control API
     - The API server starts only after the initial dashboard items have loaded successfully.
     - The API server runs in the background and stops when the TUI process exits.
     - Multiple server-backed sessions can run on different addresses; a dashboard started inside Zellij uses its current session regardless of its name. If the current session is unknown, startup fails rather than selecting another session.
-    - The server listens on `WORKDASH_HOST` (IPv4 address or IPv4 address:port), defaulting to `127.0.0.1:8765`; repeatable `--listen HOST@IP1,IP2` adds listeners; it cannot be used with client commands.
+    - The server listens on `WORKDASH_HOST` (IPv4 address or IPv4 address:port), defaulting to `127.0.0.1:8765`; the configuration `listens` list adds listeners using `HOST@IP1,IP2` entries. Missing `listens` defaults to an empty list at startup and during configuration; existing entries are preserved.
     - Each listener requires a nonempty list of exact source IPs or CIDR subnets, not hostnames; missing, malformed, or empty entries are rejected.
-    - Listener hosts may be IPs or DNS hostnames; wildcard binds and ports in `--listen` are not supported. Extra listeners use the selected server port.
-    - All listeners share the union of accepted source IPs and CIDR subnets, automatically including localhost and the primary server IP. A `--listen` matching the primary IP adds its source IPs without binding a second listener.
+    - Listener hosts may be IPs or DNS hostnames; wildcard binds and ports in listener entries are not supported. Extra listeners use the selected server port.
+    - All listeners share the union of accepted source IPs and CIDR subnets, automatically including localhost and the primary server IP. An entry matching the primary IP adds its source IPs without binding a second listener.
     - Actual peer source IPs determine access, never forwarding headers; unlisted peers receive a forbidden JSON error without executing actions.
     - If any listener cannot bind, including a repeated non-primary listener address, startup fails without leaving other listeners active; exiting the TUI stops every listener.
     - Control requests require `X-Workdash: 1`; the CLI supplies it. GET requests for artifacts and analysis Markdown and HTML documents are exempt for direct browser viewing. Cross-origin preflights are denied. Artifact responses prevent active content from running scripts or invoking control actions. Gzip-compressed SVGs can be viewed in browsers; other compressed SVGs are served as compressed files.

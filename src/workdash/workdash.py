@@ -10,7 +10,6 @@ import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from ipaddress import ip_network
 
 from . import __version__, launcher
 from .backend import SuggestionMarkers, WorkdashBackend
@@ -43,7 +42,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         logging.basicConfig(level=logging.DEBUG)
 
     if options.configure:
-        configure(github_client=GitHubClient())
+        try:
+            configure(github_client=GitHubClient())
+        except WorkdashConfigValidationError as error:
+            _print_config_validation_error(error)
+            return 1
         return 0
 
     commands = WorkdashCommands(host=options.host)
@@ -108,7 +111,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"Error: {error}", file=sys.stderr, flush=True)
                 return 1
 
-    result = commands.interactive(listeners=options.listeners)
+    result = commands.interactive()
     if (options.persistent_pane or os.getenv("ZELLIJ")) and result == 0:
         print(
             "Dashboard exited. Ctrl+Q quits the entire Zellij session and all its panes.",
@@ -144,7 +147,6 @@ class CLIOptions:
     autoclose: bool = False
     automerge: bool = False
     host: str = "127.0.0.1"
-    listeners: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 class WorkdashCommands:
@@ -441,7 +443,7 @@ class WorkdashCommands:
             return False
         return True
 
-    def interactive(self, *, listeners: Sequence[tuple[str, Sequence[str]]] = ()) -> int:
+    def interactive(self) -> int:
         """Start the interactive dashboard and JSON server."""
 
         loaded = self._load_config_and_backend()
@@ -530,7 +532,7 @@ class WorkdashCommands:
                     raise
 
         session.items_changed_callback = refresh_tui_from_session
-        control_server = WorkdashControlServer(session, listeners=listeners)
+        control_server = WorkdashControlServer(session, listeners=config.listener_addresses())
         try:
             control_server.start()
         except RuntimeError as error:
@@ -676,13 +678,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     parser.add_argument("--session", help="Select the persistent Zellij session.")
     parser.add_argument("--persistent-pane", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--host", default=argparse.SUPPRESS, help="Workdash server HOST[:PORT].")
-    parser.add_argument(
-        "--listen",
-        action="append",
-        default=[],
-        metavar="HOST@IP1,IP2",
-        help="Add a trusted LAN listener with accepted source IPs or subnets.",
-    )
     parser.add_argument(
         "--json",
         dest="json_output",
@@ -996,25 +991,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
             parser.error(str(error))
         if host is None:
             host = os.environ.get("WORKDASH_HOST", "127.0.0.1")
-    if namespace.listen and namespace.command in client_commands:
-        parser.error("--listen cannot be used with client commands")
-    listeners = []
-    for listener in namespace.listen:
-        listener_host, separator, sources = listener.partition("@")
-        if not listener_host or not separator or ":" in listener_host or listener_host == "*":
-            parser.error("--listen requires HOST@IP1,IP2 without wildcard binds or custom ports")
-        try:
-            if listener_host == "0.0.0.0":
-                raise ValueError("wildcard listener binds are not allowed")
-            ips = tuple(
-                str(net.network_address)
-                if (net := ip_network(source, strict=False)).num_addresses == 1
-                else str(net)
-                for source in sources.split(",")
-            )
-        except ValueError as error:
-            parser.error(f"Invalid --listen {listener!r}: {error}")
-        listeners.append((listener_host, ips))
     return CLIOptions(
         debug=namespace.debug,
         refresh=namespace.refresh,
@@ -1036,7 +1012,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         autoclose=getattr(namespace, "autoclose", False),
         automerge=getattr(namespace, "automerge", False),
         host=host or "127.0.0.1",
-        listeners=tuple(listeners),
     )
 
 
