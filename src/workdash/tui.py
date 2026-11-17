@@ -14,7 +14,7 @@ from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import DataTable, Input, Static
 
 from .backend import IncludeResult, compute_suggestion_markers
@@ -423,6 +423,14 @@ class WorkItemsTable(DataTable):
         self.call_after_refresh(self.app._reserve_table_space)
 
 
+class DashboardScreen(Screen):
+    def on_screen_suspend(self) -> None:
+        self.app._update_autodispatch_progress()
+
+    def on_screen_resume(self) -> None:
+        self.app._update_autodispatch_progress()
+
+
 class WorkdashApp(App[None]):
     """Main Textual app shell."""
 
@@ -531,6 +539,9 @@ class WorkdashApp(App[None]):
         self._progress_entries: list[dict[str, object]] = []
         self._row_keys: dict[tuple[WorkItemType, str, int], str] = {}
 
+    def get_default_screen(self) -> Screen:
+        return DashboardScreen(id="_default")
+
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="autodispatch-scroll"):
             yield Static("", id="autodispatch-progress", markup=False)
@@ -632,7 +643,13 @@ class WorkdashApp(App[None]):
                 line = f"{entry['selected_group'] or 'automatic'}  {target}  {status}{reason}  {entry['iteration']}/{entry['elapsed_seconds']}s"
             if entry.get("automerge"):
                 line = f"[automerge] {line}"
-            marker = "> " if index == self._progress_index else "  "
+            marker = (
+                "> "
+                if self.query_one("#autodispatch-scroll", VerticalScroll).has_focus
+                and self.screen is widget.screen
+                and index == self._progress_index
+                else "  "
+            )
             text = Text(marker + " ".join(line.splitlines()))
             text.truncate(max(0, self.size.width - 4), overflow="ellipsis")
             rows.append(text)
@@ -640,10 +657,14 @@ class WorkdashApp(App[None]):
         self.query_one("#command-footer", Static).update(self._command_hint())
 
     def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        if event.widget.id == "autodispatch-scroll":
+            self._update_autodispatch_progress()
         if self.query("#command-footer"):
             self.query_one("#command-footer", Static).update(self._command_hint())
 
     def on_descendant_blur(self, event: events.DescendantBlur) -> None:
+        if event.widget.id == "autodispatch-scroll":
+            self._update_autodispatch_progress()
         if self.query("#command-footer"):
             self.query_one("#command-footer", Static).update(self._command_hint())
 

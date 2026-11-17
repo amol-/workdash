@@ -3612,12 +3612,24 @@ def test_progress_selects_and_stops_a_blocked_session():
     blocked = {**entry, "id": "blocked", "scope": "owner/repo#2", "status": "blocked"}
     session.autodispatch_sessions = MagicMock(return_value=[entry, blocked])
     session.stop_autodispatch = MagicMock()
-    app = WorkdashApp(session=session)
+    app = WorkdashApp(session=session, todo_callback=MagicMock())
 
     async def run():
         async with app.run_test() as pilot:
+            progress = app.query_one("#autodispatch-progress", Static)
+            assert all(not row.startswith(">") for row in progress.render().plain.splitlines())
             await pilot.press("shift+tab")
+            assert progress.render().plain.splitlines()[0].startswith("> ")
             await pilot.press("down")
+            assert progress.render().plain.splitlines()[1].startswith("> ")
+            await pilot.press("w")
+            assert all(not row.startswith(">") for row in progress.render().plain.splitlines())
+            await pilot.press("escape")
+            assert progress.render().plain.splitlines()[1].startswith("> ")
+            await pilot.press("tab")
+            assert all(not row.startswith(">") for row in progress.render().plain.splitlines())
+            await pilot.press("shift+tab")
+            assert progress.render().plain.splitlines()[1].startswith("> ")
             footer = str(app.query_one("#command-footer").render())
             assert "(s)top" in footer
             assert "(d)ispatch" not in footer

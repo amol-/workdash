@@ -47,6 +47,7 @@ Feature: First-time configuration
     - When a missing field has a default value, submitting an empty response accepts the default.
     - When a missing field has no default value, the wizard keeps prompting until the user provides a value.
     - When the repositories list is empty and a GitHub username is known, the wizard defaults the repositories to "<username>/*" and tells the user what was set.
+    - If `listens` is not a list, the wizard reports how to correct it and leaves the configuration file unchanged.
     - The wizard writes the resulting configuration to the configuration file and reports where it was saved.
 
   @id:F-SETUP-CONFIGURE-S001
