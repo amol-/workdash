@@ -7,19 +7,21 @@ the WorkdashBackend + AnalysisCache layer for cache-freshness scenarios.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from contextlib import nullcontext
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pytest_bdd import given, parsers, then, when
-from textual.widgets import Static
+from textual.widgets import Markdown, Static
 
 from workdash.analysis_cache import AnalysisCache
 from workdash.analyzer import Analyzer
@@ -27,6 +29,7 @@ from workdash.backend import WorkdashBackend
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession, format_work_item_id
 from workdash.launcher import open_markdown
+from workdash.markdownview import _MarkdownApp
 from workdash.models import WorkItem
 from workdash.tui import AnalyzeDialog, WorkdashApp
 
@@ -38,6 +41,51 @@ from .common import (
     make_work_item,
     modal_screen_names,
 )
+
+
+@given("a Markdown document is open in the viewer")
+def _open_markdown_document(scenario_state):
+    scenario_state["markdown_app"] = _MarkdownApp("Copy this sentence.", "xdg-open", False)
+
+
+@when("the user selects text and copies it")
+def _copy_markdown_text(scenario_state):
+    app = scenario_state["markdown_app"]
+
+    async def exercise():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            scenario_state["markdown_screen"] = app.export_screenshot()
+            await pilot.mouse_down(Markdown, offset=(2, 0))
+            await pilot.hover(Markdown, offset=(10, 0))
+            await pilot.mouse_up(Markdown, offset=(10, 0))
+            with patch.object(app._driver, "write", wraps=app._driver.write) as terminal_write:
+                await pilot.press("ctrl+c")
+                scenario_state["terminal_writes"] = terminal_write.call_args_list
+            scenario_state["markdown_clipboard"] = app.clipboard
+
+    asyncio.run(exercise())
+
+
+@then("the selected text is copied")
+def _selected_markdown_text_copied(scenario_state):
+    assert scenario_state["markdown_clipboard"] == "Copy this"
+    assert any(
+        call.args == ("\x1b]52;c;Q29weSB0aGlz\a",) for call in scenario_state["terminal_writes"]
+    )
+
+
+@then("the viewer shows Ctrl+C to copy and Q to quit at the bottom")
+def _markdown_commands_visible(scenario_state):
+    screen = ET.fromstring(scenario_state["markdown_screen"])
+    bottom = "".join(
+        element.text or ""
+        for element in screen.iter("{http://www.w3.org/2000/svg}text")
+        if element.get("clip-path", "").endswith("-line-23)")
+    ).replace("\N{NO-BREAK SPACE}", " ")
+    assert "^c Copy selected text" in bottom
+    assert "q Quit" in bottom
+
 
 # --------------------------------------------------------------------------
 # Shared helpers for analysis scenarios

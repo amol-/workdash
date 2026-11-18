@@ -24,6 +24,7 @@ Feature: Generate an analysis
     - Direct analysis viewers continue running until closed by the user without blocking Workdash; an early viewer failure is reported to the user.
     - Pane-based analysis viewers open in a full-size floating pane and close when the viewer exits.
     - The built-in Markdown viewer renders Markdown from local paths, file URLs, and HTTP or HTTPS URLs.
+    - The Markdown viewer shows Ctrl+C to copy selected text and Q to quit at the bottom, and allows copying selected text.
     - Links to headings within the analysis navigate to those headings; other links follow the viewer's own link handling.
     - The analysis API returns Markdown and HTML URLs based on the validated request host, including hostnames containing underscores and fully qualified DNS names ending in a dot; the CLI reports the Markdown URL.
     - HTML analyses retain useful formatting and display remote HTTP(S) images, locally and through the API, while preventing script execution. Images may request remote URLs, including the read-only analysis documents; control APIs require a header unavailable to cross-origin image requests.
@@ -31,6 +32,13 @@ Feature: Generate an analysis
     - An analysis viewer command, format, and pane choice are required configuration, separate from the viewer for work item links.
     - `workdash mdview PATH` opens a Markdown document without dashboard setup; `markdownview` is not a command.
     - When an analysis fails or produces no content, the system closes any progress overlay, reports the failure details to the user, and leaves any previous cached analysis untouched.
+
+  @id:F-ANALYSIS-GENERATE-S009
+  Scenario: Copy text from a Markdown document
+    Given a Markdown document is open in the viewer
+    When the user selects text and copies it
+    Then the selected text is copied
+    And the viewer shows Ctrl+C to copy and Q to quit at the bottom
 
   @id:F-ANALYSIS-GENERATE-S001
   Scenario: Fresh analysis is cached and opened by URL in the viewer

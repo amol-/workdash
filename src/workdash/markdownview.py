@@ -7,7 +7,8 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from textual.app import App, ComposeResult
-from textual.widgets import MarkdownViewer
+from textual.binding import Binding
+from textual.widgets import Footer, MarkdownViewer
 
 from . import launcher
 from .config import load_config
@@ -43,7 +44,10 @@ class _DocumentViewer(MarkdownViewer):
 
 
 class _MarkdownApp(App):
-    BINDINGS = [("q", "quit", "Quit")]
+    BINDINGS = [
+        Binding("ctrl+c", "screen.copy_text", "Copy selected text", priority=True),
+        ("q", "quit", "Quit"),
+    ]
 
     def __init__(self, content: str, open_command: str, open_needs_pane: bool) -> None:
         super().__init__()
@@ -53,6 +57,7 @@ class _MarkdownApp(App):
 
     def compose(self) -> ComposeResult:
         yield _DocumentViewer(self._content, show_table_of_contents=False)
+        yield Footer()
 
     def open_url(self, url: str, *, new_tab: bool = True) -> None:
         if url.startswith("#"):
