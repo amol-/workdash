@@ -1627,7 +1627,9 @@ def test_autodispatch_waits_for_selected_pull_request_review(monkeypatch, tmp_pa
     entered, release = threading.Event(), threading.Event()
     reviewed = []
 
-    def reviewer(*, item, prompt, command_tokens, cwd, work_action, zellij_session, group):
+    def reviewer(
+        *, item, prompt, command_tokens, cwd, work_action, zellij_session, group, pane_callback=None
+    ):
         reviewed.append(item.number)
         entered.set()
         assert release.wait(3)
@@ -1895,7 +1897,16 @@ def test_autodispatch_review_feedback_cycle(monkeypatch, tmp_path):
             zellij.panes.clear()
 
         def run_in_pane(
-            self, *, item, prompt, command_tokens, cwd, work_action, zellij_session, group
+            self,
+            *,
+            item,
+            prompt,
+            command_tokens,
+            cwd,
+            work_action,
+            zellij_session,
+            group,
+            pane_callback=None,
         ):
             if not github.finding:
                 github.finding = True

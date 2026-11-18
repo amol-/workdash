@@ -622,6 +622,9 @@ def test_workdash_app_refresh_from_session_reloads_visible_rows() -> None:
         def take_completed_autodispatch_items(self):
             return set()
 
+        def busy_message(self):
+            return None
+
     session = Session()
     app = WorkdashApp(
         work_items=[initial_item],

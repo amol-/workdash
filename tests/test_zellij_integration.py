@@ -193,7 +193,9 @@ def test_launch_pane_and_wait_blocks_until_the_pane_command_exits_in_its_group_t
         else:
             pytest.fail("Zellij did not start")
 
-        def wait_for(command, group):
+        reported = []
+
+        def wait_for(command, group, pane_callback=None):
             path = tmp_path / uuid.uuid4().hex
             path.mkdir()
             zellij_client.launch_pane_and_wait(
@@ -203,6 +205,7 @@ def test_launch_pane_and_wait_blocks_until_the_pane_command_exits_in_its_group_t
                 work_action="review",
                 zellij_session=name,
                 group=group,
+                pane_callback=pane_callback,
             )
             return path
 
@@ -218,6 +221,7 @@ def test_launch_pane_and_wait_blocks_until_the_pane_command_exits_in_its_group_t
                 wait_for(
                     f"while [ ! -e {release} ]; do sleep 0.05; done; echo grouped > grouped.txt",
                     "project",
+                    reported.append,
                 )
             )
         )
@@ -230,14 +234,17 @@ def test_launch_pane_and_wait_blocks_until_the_pane_command_exits_in_its_group_t
                     for pane in zellij_client.load_zellij_panes(name)
                     if not pane.get("is_plugin")
                 }
-                if "project" in tabs:
+                if "project" in tabs and reported:
                     break
                 time.sleep(0.1)
             else:
                 pytest.fail("the grouped pane did not open in its tab")
+            panes = zellij_client.load_zellij_panes(name)
+            assert any(f"terminal_{pane['id']}" == reported[0] for pane in panes)
         finally:
             release.touch()
             thread.join(20)
+        assert reported[-1] is None
         assert not thread.is_alive()
         assert (grouped[0] / "grouped.txt").read_text().strip() == "grouped"
     finally:

@@ -151,6 +151,7 @@ class WorkdashSession:
         self._active_reviews: dict[
             tuple[str, int], tuple[dict[str, object], Future[dict[str, object]]]
         ] = {}
+        self._review_panes = {}
         self._autodispatch_lock = threading.RLock()
         self._autodispatch: dict[str, _AutodispatchSession] = {}
         self._completed_autodispatch_items: set[str] = set()
@@ -434,6 +435,7 @@ class WorkdashSession:
         require_fresh: bool = False,
         detached: bool = False,
         require_agent: bool = False,
+        pane_callback=None,
     ) -> dict[str, object]:
         """Review an open pull request using a configured one-shot agent."""
         _validate_group(group)
@@ -499,10 +501,22 @@ class WorkdashSession:
                 }
                 future: Future[dict[str, object]] = Future()
                 self._active_reviews[key] = (started, future)
+                self._review_panes[key] = [None, []]
+            if pane_callback is not None:
+                pane, callbacks = self._review_panes[key]
+                callbacks.append(pane_callback)
+                if pane is not None:
+                    pane_callback(pane)
 
         if active is not None:
             started, future = active
             return started.copy() if background else future.result()
+
+        def report_pane(pane_id):
+            with self._review_lock:
+                self._review_panes[key][0] = pane_id
+                for callback in self._review_panes[key][1]:
+                    callback(pane_id)
 
         def run_review():
             def fetch_head():
@@ -662,6 +676,7 @@ class WorkdashSession:
                         git=self.git,
                         zellij_session=self.zellij_session,
                         group=selected_group,
+                        pane_callback=report_pane,
                     )
                     result["agent"] = selected
                     if require_fresh:
@@ -673,10 +688,12 @@ class WorkdashSession:
             except BaseException as error:
                 with self._review_lock:
                     del self._active_reviews[key]
+                    del self._review_panes[key]
                     future.set_exception(error)
                 raise
             with self._review_lock:
                 del self._active_reviews[key]
+                del self._review_panes[key]
                 future.set_result(result)
             return result
 
@@ -702,6 +719,7 @@ class WorkdashSession:
         except BaseException as error:
             with self._review_lock:
                 del self._active_reviews[key]
+                del self._review_panes[key]
                 future.set_exception(error)
             raise
         return started.copy()

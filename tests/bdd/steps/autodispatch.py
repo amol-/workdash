@@ -1208,6 +1208,47 @@ def selected_pane_focused(autodispatch_state):
     autodispatch_state["focused_pane"].assert_called_once_with("terminal_2")
 
 
+@given("an autodispatch session is reviewing after its coding pane closes")
+def reviewing_after_pane_closes(autodispatch_state, monkeypatch, request):
+    session = autodispatch_state["session"]
+    entered, release = threading.Event(), threading.Event()
+
+    def review(**kwargs):
+        kwargs["pane_callback"]("terminal_99")
+        entered.set()
+        assert release.wait(3)
+        return {"status": "nothing_to_review"}
+
+    monkeypatch.setattr(session, "review", review)
+    request.addfinalizer(release.set)
+    session.start_autodispatch(scope="owner/repo")
+    wait_for(lambda: len(autodispatch_state["panes"]) == 1)
+    autodispatch_state["panes"].clear()
+    assert entered.wait(3)
+
+
+@when("the user focuses the selected review session")
+def focus_review_session(autodispatch_state):
+    focused = MagicMock()
+
+    async def interact(app, pilot):
+        await pilot.press("shift+tab", "f")
+        await pilot.pause()
+
+    run_app(
+        work_items=[],
+        session=autodispatch_state["session"],
+        interactions=interact,
+        focus_callback=focused,
+    )
+    autodispatch_state["focused_review"] = focused
+
+
+@then("the active review pane is focused")
+def review_pane_focused(autodispatch_state):
+    autodispatch_state["focused_review"].assert_called_once_with("terminal_99")
+
+
 @given("a failed autodispatch session is selected in progress")
 def failed_selected_in_progress(autodispatch_state, monkeypatch):
     failed_session(autodispatch_state, monkeypatch)

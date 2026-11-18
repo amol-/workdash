@@ -19,7 +19,9 @@ from workdash.models import WorkItem, WorkItemKind, WorkItemType
 def install_agent(monkeypatch, run):
     """Fake the pane agent boundary with ``run(item, prompt, command_tokens, cwd)``."""
 
-    def run_in_pane(*, item, prompt, command_tokens, cwd, work_action, zellij_session, group):
+    def run_in_pane(
+        *, item, prompt, command_tokens, cwd, work_action, zellij_session, group, pane_callback=None
+    ):
         return run(item=item, prompt=prompt, command_tokens=command_tokens, cwd=cwd)
 
     monkeypatch.setattr(agent_execution, "executor", MagicMock(run_in_pane=run_in_pane))
@@ -1407,3 +1409,46 @@ def test_fresh_review_fetches_fork_head(setup_review, monkeypatch, detached, con
     assert result["head_sha"] == head
     reviewer.assert_called_once()
     assert git("rev-parse", "HEAD") == base
+
+
+def test_shared_review_reports_each_retry_pane(setup_review, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    session, _ = setup_review
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    def run_in_pane(*, prompt, pane_callback, **kwargs):
+        calls.append(prompt)
+        pane_callback(f"terminal_{len(calls)}")
+        if len(calls) == 1:
+            started.set()
+            assert release.wait(5)
+        else:
+            Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
+                "Review outcome: success\nreviewed"
+            )
+        pane_callback(None)
+        return ""
+
+    monkeypatch.setattr(agent_execution.executor, "run_in_pane", run_in_pane)
+    first_panes, shared_panes = [], []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(
+            session.review, target="owner/repo#PR-2", pane_callback=first_panes.append
+        )
+        try:
+            assert started.wait(5)
+            shared = pool.submit(
+                session.review, target="owner/repo#PR-2", pane_callback=shared_panes.append
+            )
+            for _ in range(100):
+                if shared_panes:
+                    break
+                threading.Event().wait(0.01)
+            assert shared_panes == ["terminal_1"]
+        finally:
+            release.set()
+        assert first.result(5)["status"] == shared.result(5)["status"] == "reviewed"
+    assert first_panes == shared_panes == ["terminal_1", None, "terminal_2", None]

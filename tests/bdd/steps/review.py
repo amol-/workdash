@@ -90,7 +90,9 @@ def review_state(monkeypatch, tmp_path, scenario_state):
     }
     launches = []
 
-    def run_in_pane(*, item, prompt, command_tokens, cwd, work_action, zellij_session, group):
+    def run_in_pane(
+        *, item, prompt, command_tokens, cwd, work_action, zellij_session, group, pane_callback=None
+    ):
         launches.append(
             {
                 "cwd": cwd,
@@ -126,7 +128,9 @@ def two_findings(review_state, monkeypatch):
             return subprocess.CompletedProcess(command, 0, "{}", "")
         return original(command, **kwargs)
 
-    def run_in_pane(*, item, prompt, command_tokens, cwd, work_action, zellij_session, group):
+    def run_in_pane(
+        *, item, prompt, command_tokens, cwd, work_action, zellij_session, group, pane_callback=None
+    ):
         assert "Start each comment with 🤖" in prompt
         subprocess.run(
             ["gh", "api", "repos/owner/repo/pulls/2/reviews", "--input", "-"],

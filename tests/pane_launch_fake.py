@@ -23,7 +23,9 @@ def install_pane_launch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, objec
 
     launches: list[dict[str, object]] = []
 
-    def launch_pane_and_wait(repo_path, command, *, context, work_action, zellij_session, group):
+    def launch_pane_and_wait(
+        repo_path, command, *, context, work_action, zellij_session, group, pane_callback=None
+    ):
         completed = _REAL_RUN(command, cwd=repo_path, capture_output=True, text=True)
         launches.append(
             {

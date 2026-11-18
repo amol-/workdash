@@ -66,7 +66,7 @@ Feature: Automatically dispatch ready work
     - Pressing "d" on a pull request that is not authored by you reports that dispatch is unavailable and starts no session.
     - After three reminders and a further idle window without a pull request, a session remains blocked and visible in the dashboard and info. Pane activity postpones the next reminder or block but does not reset the reminder limit. A change in blocked pane content or successful input through Workdash immediately resumes supervision with a fresh limit, even if the screen stays unchanged or GitHub is temporarily unavailable. If a later pull request merges, the pane closes and the session continues to the next ready task.
     - The selected progress entry is marked with ">" only while progress has focus; the marker is hidden while a dialog is open. Leaving and returning to progress preserves the selection.
-    - With progress focused, the command bar offers focus, merge and stop for the selected session instead of work-item actions. Merge reports the selected session's automerge state; failed sessions cannot toggle it. Stop removes running, blocked or failed sessions from progress for the lifetime of the server. A running session's pane stays open; stopping a blocked session closes its pane without changing the worktree. Starting another session for the same scope also closes the blocked pane before replacing the session. If the pane content has changed before either action closes it, the session still stops or is replaced, but that action leaves the recovered pane open. An exact-issue restart can still close it to dispatch ready work. Returning to the work table restores its command bar.
+    - With progress focused, the command bar offers focus, merge and stop for the selected session instead of work-item actions. Focus opens its active coding or review pane when available. Merge reports the selected session's automerge state; failed sessions cannot toggle it. Stop removes running, blocked or failed sessions from progress for the lifetime of the server. A running session's pane stays open; stopping a blocked session closes its pane without changing the worktree. Starting another session for the same scope also closes the blocked pane before replacing the session. If the pane content has changed before either action closes it, the session still stops or is replaced, but that action leaves the recovered pane open. An exact-issue restart can still close it to dispatch ready work. Returning to the work table restores its command bar.
     - The dashboard shows running and blocked sessions, the three most recently started failed sessions, and the three most recently started sessions that had no work at their first check. Their outcomes remain visible as other sessions finish; failure summaries are kept to one line each and full details remain available through info. Empty-start and failure status messages and progress rows show the outcome and scope, and shorten long failure reasons and scopes so the issue number and a meaningful reason remain visible at 80 columns.
     - When an autodispatch refresh updates a pull request row, its current linked issues determine later refreshes and worktree selection.
 
@@ -272,6 +272,12 @@ Feature: Automatically dispatch ready work
     Given the dashboard has different sessions selected in the work table and progress
     When the user focuses the selected progress session
     Then the selected progress session's pane is focused
+
+  @id:F-AUTODISPATCH-S032
+  Scenario: Focus the active review pane
+    Given an autodispatch session is reviewing after its coding pane closes
+    When the user focuses the selected review session
+    Then the active review pane is focused
 
   @id:F-AUTODISPATCH-S030
   Scenario: Stop a failed session from progress
