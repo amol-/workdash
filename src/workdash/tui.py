@@ -225,24 +225,59 @@ class ReviewDialog(ModalScreen[str | None]):
         """
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, *, choices: Sequence[WorkdashAgentChoice]) -> None:
+    def __init__(self, *, choices: Sequence[WorkdashAgentChoice], dispatch: bool = False) -> None:
         super().__init__()
         self._choices = tuple(choices)
-        self._choices_by_key = {choice.key: choice for choice in self._choices}
+        self._dispatch = dispatch
+        self._page = 0
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="review-shell"):
-            yield Static("Review with:", classes="review-line")
+            yield Static(
+                "Autodispatch with:" if self._dispatch else "Review with:", classes="review-line"
+            )
             yield Static("")
-            for choice in self._choices:
-                yield Static(f"({choice.key}) {choice.agent}", classes="review-line", markup=False)
+            if self._dispatch and len(self._choices) > 9:
+                yield Static(
+                    f"(←/→) Page {self._page + 1} of {(len(self._choices) + 8) // 9}",
+                    classes="review-line",
+                )
+            choices = (
+                self._choices[self._page * 9 : (self._page + 1) * 9]
+                if self._dispatch
+                else self._choices
+            )
+            for index, choice in enumerate(choices, 1):
+                key = str(index) if self._dispatch else choice.key
+                yield Static(f"({key}) {choice.agent}", classes="review-line", markup=False)
             if not self._choices:
-                yield Static("No analysis agents configured.", classes="review-line")
+                yield Static(
+                    "No compatible agents configured."
+                    if self._dispatch
+                    else "No analysis agents configured.",
+                    classes="review-line",
+                )
             yield Static("")
             yield Static("(Esc) Cancel", classes="review-line")
 
     def on_key(self, event) -> None:
-        choice = self._choices_by_key.get(event.key)
+        if self._dispatch:
+            if event.key in ("left", "right"):
+                self._page = max(
+                    0,
+                    min(
+                        (len(self._choices) - 1) // 9,
+                        self._page + (1 if event.key == "right" else -1),
+                    ),
+                )
+                self.refresh(recompose=True)
+                event.stop()
+                return
+            index = int(event.key) - 1 if event.key in "123456789" else -1
+            index = self._page * 9 + index if index >= 0 else -1
+            choice = self._choices[index] if 0 <= index < len(self._choices) else None
+        else:
+            choice = next((choice for choice in self._choices if choice.key == event.key), None)
         if choice is not None:
             event.stop()
             self.dismiss(choice.agent)
@@ -1324,10 +1359,25 @@ class WorkdashApp(App[None]):
             self._update_status("Dispatch is only available for issues and authored pull requests.")
             return
 
+        analyze_agents = self._session.config.configured_analyze_agents()
+        agents = [
+            name for name in self._session.config.configured_code_agents() if name in analyze_agents
+        ]
+        choices = [
+            WorkdashAgentChoice(str(i), name, name, name) for i, name in enumerate(agents, 1)
+        ]
+
+        def on_choice(choice: str | None) -> None:
+            if choice is not None:
+                self._run_after_dialog(lambda: self._start_dashboard_dispatch(item, choice))
+
+        await self.push_screen(ReviewDialog(choices=choices, dispatch=True), callback=on_choice)
+
+    async def _start_dashboard_dispatch(self, item: WorkItem, agent: str) -> None:
         try:
             started = await self._run_with_busy_screen(
                 message="Starting autodispatch...",
-                callback=lambda: self._session.start_autodispatch_for_item(item),
+                callback=lambda: self._session.start_autodispatch_for_item(item, agent=agent),
             )
         except Exception as error:
             self._update_status(f"Dispatch failed: {error}")

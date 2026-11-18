@@ -1107,11 +1107,12 @@ def test_concurrent_reviews_reuse_same_pr_but_allow_other_pr(setup_review, monke
                 "/api/v0/review",
                 method="POST",
                 content_type="application/json",
-                body=b'{"target":"owner/repo#PR-2"}',
+                body=b'{"target":"owner/repo#PR-2","agent":"other"}',
             )
             response = request.get_response(control._make_turbogears_app(session))
             assert response.status_int == 200
             assert response.json["result"]["status"] == "started"
+            assert response.json["result"]["agent"] == "agent"
             with pytest.raises(RuntimeError, match="already running review"):
                 session.review(target="owner/repo#PR-2", require_fresh=True)
             assert (

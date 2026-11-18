@@ -230,9 +230,9 @@ The `repositories` list in `config.json` accepts:
   dedicated git worktree for the item and starts the chosen tool in it, preloaded
   with context about the issue or PR. If an agent is already running in the
   item's worktree, choosing a numbered agent focuses its pane instead of launching another.
-- `d` — start an autodispatch session for the selected issue or a linked issue
+- `d` — choose an agent that can code and analyze to start an autodispatch session for the selected issue or a linked issue
   of an authored PR, including in another repository. A PR without a linked
-  issue cannot be dispatched. For work with a running session, `m` replaces `d` in the display; `d` still starts or replaces the session for the selected target.
+  issue cannot be dispatched. The chosen agent handles implementation, review, and rework; Esc cancels without starting a session. For work with a running session, `m` replaces `d` in the display; `d` still starts or replaces the session for the selected target.
 - `m` — toggle automerge for the selected work's running autodispatch session. If multiple sessions match, use `workdash info` and `workdash autodispatch-stop SESSION_ID` to leave only the intended session.
 - `w` — capture a todo. Opens a dialog asking for the todo text and an
   optional target repository.

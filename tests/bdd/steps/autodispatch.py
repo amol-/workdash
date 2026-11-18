@@ -518,6 +518,7 @@ def dashboard_other_pr(dashboard_dispatch, scenario_state, kind):
     )
 
 
+@when("the user presses d and chooses an autodispatch agent")
 @when("the user presses d to start autodispatch")
 def dashboard_press_dispatch(scenario_state):
     session = scenario_state["dashboard_session"]
@@ -527,7 +528,7 @@ def dashboard_press_dispatch(scenario_state):
     async def interact(app, pilot):
         footer = app.query_one("#status-footer", Static)
         before = footer.render().plain
-        await pilot.press("d")
+        await pilot.press("d", "1")
         for _ in range(100):
             await pilot.pause(0.02)
             status = footer.render().plain
@@ -539,6 +540,23 @@ def dashboard_press_dispatch(scenario_state):
         scenario_state["dispatch_status"] = footer.render().plain
 
     run_app(work_items=[item], session=session, interactions=interact)
+
+
+@when("the user cancels autodispatch agent selection")
+def dashboard_cancel_dispatch(scenario_state):
+    session = scenario_state["dashboard_session"]
+    item = scenario_state["dashboard_item"]
+    session.work_items = [item]
+
+    async def interact(app, pilot):
+        await pilot.press("d", "escape")
+
+    run_app(work_items=[item], session=session, interactions=interact)
+
+
+@then("no autodispatch session starts")
+def dashboard_cancelled(scenario_state):
+    assert scenario_state["dashboard_session"].autodispatch_sessions() == []
 
 
 @then("an autodispatch session launches that issue")
@@ -622,7 +640,7 @@ def dashboard_failure(scenario_state, monkeypatch):
     )
 
     async def interact(app, pilot):
-        await pilot.press("d")
+        await pilot.press("d", "1")
         progress = app.query_one("#autodispatch-progress", Static)
         footer = app.query_one("#status-footer", Static)
 
