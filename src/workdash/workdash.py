@@ -489,6 +489,7 @@ class WorkdashCommands:
                 format=config.analysis_viewer["format"],
                 needs_pane=config.analysis_viewer["needs_pane"],
                 zellij_session=zellij_session,
+                focus=True,
             ),
             refresh_callback=lambda: (
                 session.list_items(refresh=True)
