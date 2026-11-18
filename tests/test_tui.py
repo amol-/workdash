@@ -3263,7 +3263,12 @@ def test_loaded_linked_pr_tracks_autodispatch_stop() -> None:
             table.move_cursor(row=10)
             for _ in range(100):
                 await pilot.pause(0.02)
-                if table.scroll_y == table.scroll_target_y and table.scroll_y > 0:
+                if (
+                    table.scroll_y == table.scroll_target_y
+                    and table.scroll_y > 0
+                    and table._get_row_region(table.cursor_row).y - table.scroll_y
+                    < table.size.height
+                ):
                     break
             assert table.scroll_y == table.scroll_target_y
             assert table._get_row_region(table.cursor_row).y - table.scroll_y < table.size.height
@@ -3626,15 +3631,12 @@ def test_progress_command_hint_tracks_selection_and_focus():
             footer = app.query_one("#command-footer", Static)
             assert "(d)ispatch" in footer.render().plain
             await pilot.press("shift+tab")
-            assert "(m)erge off" in footer.render().plain
-            assert "(d)ispatch" not in footer.render().plain
-            await pilot.press("down")
-            assert "(s)top" in footer.render().plain
-            assert "(m)erge" not in footer.render().plain
-            await pilot.press("down")
-            assert all(
-                hint not in footer.render().plain for hint in ("(s)top", "(m)erge", "(d)ispatch")
-            )
+            for _ in range(3):
+                assert all(
+                    hint in footer.render().plain for hint in ("(f)ocus", "(m)erge", "(s)top")
+                )
+                assert "(d)ispatch" not in footer.render().plain
+                await pilot.press("down")
             await pilot.press("tab")
             assert "(d)ispatch" in footer.render().plain
 
@@ -3690,7 +3692,7 @@ def test_progress_selects_and_stops_a_blocked_session():
             app._selected_item.assert_not_called()
             assert "blocked (s)top" in str(app.query_one("#autodispatch-progress").render())
             await pilot.press("s")
-            session.stop_autodispatch.assert_called_once_with("blocked")
+            session.stop_autodispatch.assert_called_once_with("blocked", dismiss=True)
 
     asyncio.run(run())
 
@@ -4009,5 +4011,71 @@ def test_a_dispatch_started_from_the_dashboard_shows_one_blocking_dialog(monkeyp
             await press
             await _wait_for_no_dialog(app, pilot)
             _assert_no_modal_screens(app)
+
+    asyncio.run(run())
+
+
+def test_dismissed_failed_session_stays_gone_in_new_dashboard():
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    session.start_autodispatch(scope="owner/repo")
+    entry = next(iter(session._autodispatch.values()))
+    entry.thread.join(timeout=3)
+    assert entry.status == "failed"
+
+    async def run():
+        app = WorkdashApp(session=session)
+        async with app.run_test() as pilot:
+            assert app.query_one("#autodispatch-scroll").display
+            await pilot.press("shift+tab", "s")
+            assert not app.query_one("#autodispatch-scroll").display
+        app = WorkdashApp(session=session)
+        async with app.run_test():
+            assert not app.query_one("#autodispatch-scroll").display
+
+    asyncio.run(run())
+
+
+def test_progress_stops_selected_running_session_and_rejects_failed_merge():
+    session = WorkdashSession(
+        config=_DEFAULT_TUI_CONFIG,
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    running = {
+        "id": "running",
+        "status": "running",
+        "scope": "owner/repo#1",
+        "current_item": "owner/repo#1",
+        "selected_group": None,
+        "stage": "developing",
+        "launch_reason": None,
+        "iteration": 1,
+        "elapsed_seconds": 0,
+        "error": None,
+    }
+    failed = {**running, "id": "failed", "status": "failed", "error": "failed"}
+    session.autodispatch_sessions = MagicMock(return_value=[running, failed])
+    session.stop_autodispatch = MagicMock()
+    session.toggle_automerge = MagicMock(side_effect=RuntimeError("no longer running"))
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test() as pilot:
+            await pilot.press("shift+tab", "s")
+            session.stop_autodispatch.assert_called_once_with("running", dismiss=True)
+            await pilot.press("m")
+            session.toggle_automerge.assert_called_once_with("failed")
+            assert "no longer running" in app.query_one("#status-footer", Static).render().plain
+            await pilot.press("s")
+            session.stop_autodispatch.assert_called_with("failed", dismiss=True)
+            assert not app.query_one("#autodispatch-scroll").display
 
     asyncio.run(run())

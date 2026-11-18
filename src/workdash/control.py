@@ -1365,7 +1365,7 @@ class WorkdashSession:
                 entry.automerge = not entry.automerge
                 return entry.automerge
 
-    def stop_autodispatch(self, session_id: str) -> dict[str, object]:
+    def stop_autodispatch(self, session_id: str, *, dismiss: bool = False) -> dict[str, object]:
         with self._autodispatch_lock:
             entry = self._autodispatch.get(session_id)
             if entry is None:
@@ -1373,6 +1373,9 @@ class WorkdashSession:
                     "not_found", "Autodispatch session not found.", status=HTTPStatus.NOT_FOUND
                 )
             entry.stop(close_blocked=True)
+            if dismiss:
+                with entry.lock:
+                    entry.dismissed = True
             return entry.snapshot()
 
     def stop_autodispatch_sessions(self) -> None:

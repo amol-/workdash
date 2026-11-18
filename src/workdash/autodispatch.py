@@ -53,6 +53,7 @@ class _AutodispatchSession:
         self.launch_reason: str | None = None
         self.iteration = 0
         self.error: str | None = None
+        self.dismissed = False
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self.run, name=f"autodispatch-{self.id}", daemon=True)
@@ -69,6 +70,7 @@ class _AutodispatchSession:
                 "started_at": self.started_at,
                 "elapsed_seconds": int((self.ended or time.monotonic()) - self.started),
                 "current_item": self.current_item,
+                "pane_id": self.pane[1] if self.pane else None,
                 "scope_is_current_item": bool(
                     self.current_item
                     and self.owner._scope_identity(self.scope)
@@ -82,6 +84,7 @@ class _AutodispatchSession:
                 if self.status == self.Status.RUNNING and blocked
                 else str(self.status),
                 "error": self.error,
+                "dismissed": self.dismissed,
             }
 
     def stop(self, *, close_blocked: bool = False) -> None:

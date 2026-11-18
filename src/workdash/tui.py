@@ -556,6 +556,7 @@ class WorkdashApp(App[None]):
         ("d", "dispatch_item", "Dispatch"),
         ("m", "toggle_automerge", "Merge"),
         ("s", "stop_blocked", "Stop blocked"),
+        ("f", "focus_autodispatch", "Focus session"),
         ("i", "include_item", "Include"),
         ("w", "capture_todo", "Todo"),
         ("q", "quit_app", "Quit"),
@@ -625,6 +626,7 @@ class WorkdashApp(App[None]):
         self._autodispatch_refreshing = False
         self._progress_index = 0
         self._progress_entries: list[dict[str, object]] = []
+        self._dismissed_autodispatch: set[str] = set()
         self._known_autodispatch: set[str] = set()
         # Latest autodispatch snapshot. The 1s poll fills it from a thread, so redraws
         # never take the session lock, which `code` and `analyze` hold for seconds.
@@ -796,6 +798,14 @@ class WorkdashApp(App[None]):
         empty = [
             entry for entry in sessions if entry["status"] == "finished" and entry["iteration"] == 1
         ]
+        running = [
+            entry for entry in running if str(entry["id"]) not in self._dismissed_autodispatch
+        ]
+        failed = [entry for entry in failed if str(entry["id"]) not in self._dismissed_autodispatch]
+        empty = [entry for entry in empty if str(entry["id"]) not in self._dismissed_autodispatch]
+        running = [entry for entry in running if not entry.get("dismissed")]
+        failed = [entry for entry in failed if not entry.get("dismissed")]
+        empty = [entry for entry in empty if not entry.get("dismissed")]
         entries = running + failed[-3:] + empty[-3:]
         self._progress_entries = entries
         widget = self.query_one("#autodispatch-progress", Static)
@@ -870,7 +880,7 @@ class WorkdashApp(App[None]):
             0, min(count - 1, self._progress_index + (1 if event.key == "down" else -1))
         )
         scroll.scroll_to(y=self._progress_index, animate=False)
-        self._update_autodispatch_progress(self._progress_entries)
+        self._update_autodispatch_progress(self._autodispatch_sessions)
         event.prevent_default()
         event.stop()
 
@@ -880,12 +890,24 @@ class WorkdashApp(App[None]):
             return
         entries = self._progress_entries
         index = self._progress_index
-        if index < len(entries) and entries[index]["status"] == "blocked":
+        if index < len(entries):
+            session_id = str(entries[index]["id"])
             try:
-                self._session.stop_autodispatch(str(entries[index]["id"]))
+                self._session.stop_autodispatch(session_id, dismiss=True)
             except Exception as error:
                 self._update_status(f"Could not stop autodispatch: {error}")
+                return
+            self._dismissed_autodispatch.add(session_id)
+            self._autodispatch_sessions = [
+                entry for entry in self._autodispatch_sessions if str(entry["id"]) != session_id
+            ]
             self._update_autodispatch_progress(self._autodispatch_sessions)
+
+    async def action_focus_autodispatch(self) -> None:
+        if not self.query_one("#autodispatch-scroll", VerticalScroll).has_focus:
+            return
+        entries = self._progress_entries[self._progress_index : self._progress_index + 1]
+        await self._focus_pane(str(entries[0].get("pane_id") or "") if entries else "")
 
     def _item_identity(self, item: WorkItem) -> tuple[str, int]:
         repo = self._session.config.todo_repository if item.todo_target else item.repo
@@ -1002,13 +1024,8 @@ class WorkdashApp(App[None]):
     def _command_hint(self) -> Text:
         if self.query_one("#autodispatch-scroll", VerticalScroll).has_focus:
             entries = self._progress_entries[self._progress_index : self._progress_index + 1]
-            if entries and entries[0]["status"] == "running":
-                action = "(m)erge off" if entries[0].get("automerge") else "(m)erge"
-            else:
-                action = "(s)top" if entries and entries[0]["status"] == "blocked" else ""
-            hint_text = self.COMMAND_HINT_TEXT.replace(
-                " (d)ispatch", f" {action}" if action else ""
-            )
+            action = "(m)erge off" if entries and entries[0].get("automerge") else "(m)erge"
+            hint_text = f"(f)ocus {action} (s)top"
         else:
             entries = self._selected_autodispatch()
             action = (

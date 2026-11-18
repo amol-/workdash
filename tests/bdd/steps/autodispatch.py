@@ -1168,8 +1168,11 @@ def stop_blocked_session(scenario_state, work_items, monkeypatch):
     import workdash.autoclose as autoclose_module
 
     async def stop(app, pilot):
-        assert "blocked" in app.query_one("#autodispatch-progress", Static).render().plain
+        progress = app.query_one("#autodispatch-progress", Static)
+        assert "blocked" in progress.render().plain
         await pilot.press("shift+tab", "s")
+        await app._poll_autodispatch_progress()
+        assert not app.query_one("#autodispatch-scroll").display
 
     with monkeypatch.context() as patch:
         patch.setattr(autoclose_module.time, "monotonic", scenario_state["real_monotonic"])
@@ -1181,3 +1184,79 @@ def blocked_pane_closed(scenario_state):
     assert scenario_state["closed"] == [scenario_state["supervised_pane_id"]]
     assert scenario_state["api_session"].info()["autodispatch_sessions"][0]["status"] == "stopped"
     assert scenario_state["work"].read_text() == "keep this"
+
+
+@when("the user focuses the selected progress session")
+def focus_progress_session(autodispatch_state):
+    focused = MagicMock()
+
+    async def interact(app, pilot):
+        await pilot.press("shift+tab", "down", "f")
+        await pilot.pause()
+
+    run_app(
+        work_items=[autodispatch_state["item"]],
+        session=autodispatch_state["session"],
+        interactions=interact,
+        focus_callback=focused,
+    )
+    autodispatch_state["focused_pane"] = focused
+
+
+@then("the selected progress session's pane is focused")
+def selected_pane_focused(autodispatch_state):
+    autodispatch_state["focused_pane"].assert_called_once_with("terminal_2")
+
+
+@given("a failed autodispatch session is selected in progress")
+def failed_selected_in_progress(autodispatch_state, monkeypatch):
+    failed_session(autodispatch_state, monkeypatch)
+
+
+@when("the user stops the selected progress session")
+def stop_selected_progress(autodispatch_state):
+    async def interact(app, pilot):
+        await pilot.press("shift+tab", "s")
+        autodispatch_state["progress_after_stop"] = (
+            app.query_one("#autodispatch-progress", Static).render().plain
+        )
+        await app._poll_autodispatch_progress()
+        autodispatch_state["progress_after_poll"] = (
+            app.query_one("#autodispatch-progress", Static).render().plain
+        )
+
+    run_app(work_items=[], session=autodispatch_state["session"], interactions=interact)
+
+
+@then("the failed session disappears from progress")
+def failed_session_disappears(autodispatch_state):
+    assert "Failed:" not in autodispatch_state["progress_after_stop"]
+    assert "Failed:" not in autodispatch_state["progress_after_poll"]
+    assert autodispatch_state["session"].autodispatch_sessions()[0]["status"] == "failed"
+
+
+@when("the user returns focus to the work table")
+def return_to_work_table(autodispatch_state):
+    async def interact(app, pilot):
+        await pilot.press("shift+tab", "down")
+        autodispatch_state["progress_hint"] = (
+            app.query_one("#command-footer", Static).render().plain
+        )
+        await pilot.press("tab")
+        autodispatch_state["restored_hint"] = (
+            app.query_one("#command-footer", Static).render().plain
+        )
+
+    run_app(
+        work_items=[autodispatch_state["item"]],
+        session=autodispatch_state["session"],
+        interactions=interact,
+    )
+
+
+@then("the work-item command bar is restored")
+def work_item_bar_restored(autodispatch_state):
+    assert "(f)ocus" in autodispatch_state["progress_hint"]
+    assert "(f)ocus" not in autodispatch_state["restored_hint"]
+    assert "(v)iew" in autodispatch_state["restored_hint"]
+    assert "(m)erge" in autodispatch_state["restored_hint"]
