@@ -48,6 +48,20 @@ def _open_markdown_document(scenario_state):
     scenario_state["markdown_app"] = _MarkdownApp("Copy this sentence.", "xdg-open", False)
 
 
+@given("a Markdown document is open in the viewer on macOS outside Zellij")
+def _open_mac_markdown_document(scenario_state):
+    _open_markdown_document(scenario_state)
+    scenario_state["mac_clipboard"] = MagicMock()
+
+
+@given(
+    "a Markdown document is open in the viewer on macOS outside Zellij with an unavailable clipboard"
+)
+def _open_mac_markdown_without_clipboard(scenario_state):
+    _open_mac_markdown_document(scenario_state)
+    scenario_state["mac_clipboard"].side_effect = FileNotFoundError("pbcopy")
+
+
 @when("the user selects text and copies it")
 def _copy_markdown_text(scenario_state):
     app = scenario_state["markdown_app"]
@@ -59,9 +73,22 @@ def _copy_markdown_text(scenario_state):
             await pilot.mouse_down(Markdown, offset=(2, 0))
             await pilot.hover(Markdown, offset=(10, 0))
             await pilot.mouse_up(Markdown, offset=(10, 0))
-            with patch.object(app._driver, "write", wraps=app._driver.write) as terminal_write:
-                await pilot.press("ctrl+c")
+            with (
+                patch.object(app._driver, "write", wraps=app._driver.write) as terminal_write,
+                patch.object(app, "notify", wraps=app.notify) as notify,
+            ):
+                if "mac_clipboard" in scenario_state:
+                    with (
+                        patch("sys.platform", "darwin"),
+                        patch.dict("os.environ", {"ZELLIJ_SESSION_NAME": ""}),
+                        patch("subprocess.run", scenario_state["mac_clipboard"]),
+                    ):
+                        await pilot.press("ctrl+c")
+                else:
+                    with patch.dict("os.environ", {"ZELLIJ_SESSION_NAME": "test"}):
+                        await pilot.press("ctrl+c")
                 scenario_state["terminal_writes"] = terminal_write.call_args_list
+                scenario_state["notifications"] = notify.call_args_list
             scenario_state["markdown_clipboard"] = app.clipboard
 
     asyncio.run(exercise())
@@ -73,6 +100,20 @@ def _selected_markdown_text_copied(scenario_state):
     assert any(
         call.args == ("\x1b]52;c;Q29weSB0aGlz\a",) for call in scenario_state["terminal_writes"]
     )
+
+
+@then("the selected text reaches the system clipboard")
+def _mac_selected_text_copied(scenario_state):
+    scenario_state["mac_clipboard"].assert_called_once()
+    call = scenario_state["mac_clipboard"].call_args
+    assert call.args[0] == ["pbcopy"]
+    assert call.kwargs["input"] == "Copy this"
+    assert not scenario_state["notifications"]
+
+
+@then("the viewer reports that copying is unavailable")
+def _mac_clipboard_unavailable(scenario_state):
+    assert any("copy" in str(call).lower() for call in scenario_state["notifications"])
 
 
 @then("the viewer shows Ctrl+C to copy and Q to quit at the bottom")

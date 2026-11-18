@@ -1,5 +1,6 @@
 import json
 import shlex
+import subprocess
 import sys
 import threading
 import time
@@ -19,6 +20,20 @@ def _viewer_config(monkeypatch):
     monkeypatch.setattr(
         markdownview, "load_config", lambda: WorkdashConfig(open_command="xdg-open")
     )
+
+
+def test_mac_clipboard_command_failure_is_reported(monkeypatch):
+    app = markdownview._MarkdownApp("text", "xdg-open", False)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+    monkeypatch.setattr(
+        subprocess, "run", MagicMock(side_effect=subprocess.CalledProcessError(1, "pbcopy"))
+    )
+    app.notify = MagicMock()
+
+    app.copy_to_clipboard("text")
+
+    assert "unavailable" in app.notify.call_args.args[0].lower()
 
 
 def test_analysis_viewer_is_required():
