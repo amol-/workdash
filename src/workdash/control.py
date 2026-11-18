@@ -433,6 +433,7 @@ class WorkdashSession:
         group: str | None = None,
         require_fresh: bool = False,
         detached: bool = False,
+        require_agent: bool = False,
     ) -> dict[str, object]:
         """Review an open pull request using a configured one-shot agent."""
         _validate_group(group)
@@ -447,6 +448,10 @@ class WorkdashSession:
             active = self._active_reviews.get(key)
             if active is not None and require_fresh:
                 raise RuntimeError("Cannot automerge using an already running review.")
+            if active is not None and require_agent and agent != active[0]["agent"]:
+                raise RuntimeError(
+                    f"Pull request is already being reviewed by {active[0]['agent']}."
+                )
             if active is None:
                 context = self.backend.github_client.fetch_launch_context(item)
                 if context.get("state", "").upper() != "OPEN":
@@ -1154,7 +1159,9 @@ class WorkdashSession:
             entry.thread.start()
         return entry.snapshot()
 
-    def start_autodispatch_for_item(self, item: WorkItem) -> dict[str, object] | None:
+    def start_autodispatch_for_item(
+        self, item: WorkItem, *, agent: str | None = None
+    ) -> dict[str, object] | None:
         """Start an autodispatch session scoped to the item's issue.
 
         An authored pull request dispatches the issue it closes, in whatever
@@ -1181,11 +1188,12 @@ class WorkdashSession:
             repo, number = min(linked, key=lambda issue: (issue[0].lower(), issue[1]))
             scope = f"{repo}#ISSUE-{number}"
         # A session reviews its own work, so its agent must analyze as well as code.
-        analyze_agents = self.config.configured_analyze_agents()
-        agent = next(
-            (name for name in self.config.configured_code_agents() if name in analyze_agents),
-            None,
-        )
+        if agent is None:
+            analyze_agents = self.config.configured_analyze_agents()
+            agent = next(
+                (name for name in self.config.configured_code_agents() if name in analyze_agents),
+                None,
+            )
         return self.start_autodispatch(scope=scope, agent=agent)
 
     def prepare_autodispatch(self, scope: str) -> None:

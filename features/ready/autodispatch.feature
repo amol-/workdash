@@ -57,7 +57,9 @@ Feature: Automatically dispatch ready work
   JSON and the control API retain the underlying progress fields.
 
   Rules:
-    - Pressing "d" on an issue starts an autodispatch session scoped to that issue, replacing a session for the same target. For selected work with a running session, "m" controls automerge and is displayed instead of "d".
+    - Pressing "d" on an issue asks the user to choose an agent that can both code and analyze. The chosen agent handles implementation, review, and rework in an autodispatch session scoped to that issue, replacing a session for the same target. Cancelling starts no session. For selected work with a running session, "m" controls automerge and is displayed instead of "d".
+    - The dashboard chooser offers every compatible agent, with numbered single-key selection and navigation between pages when necessary.
+    - If a different agent is already reviewing the pull request, the session fails rather than using that review.
     - Pressing "d" on an authored pull request scopes the session to a linked issue, regardless of its repository or readiness. If there is no linked issue, the TUI reports an error.
     - A pull request that closes several issues is dispatched as the lowest one by repository name, then by issue number, which is the issue coding the same pull request would code.
     - When GitHub cannot report a pull request's linked issues, the TUI reports that lookup failure instead of claiming the pull request has no linked issue.
@@ -90,38 +92,44 @@ Feature: Automatically dispatch ready work
   @id:F-AUTODISPATCH-S013
   Scenario: Start autodispatch from an issue in the dashboard
     Given a ready issue selected in the dashboard
-    When the user presses d to start autodispatch
+    When the user presses d and chooses an autodispatch agent
     Then an autodispatch session launches that issue
 
   @id:F-AUTODISPATCH-S009
-  Scenario: Dashboard chooses an agent that can both code and review
+  Scenario: Choose an agent that can both code and review
     Given a ready issue selected in the dashboard
     And the default coding agent cannot analyze but another agent can code and analyze
-    When the user presses d to start autodispatch
+    When the user presses d and chooses an autodispatch agent
     Then an autodispatch session launches that issue with the compatible agent
+
+  @id:F-AUTODISPATCH-S028
+  Scenario: Cancel choosing an autodispatch agent
+    Given a ready issue selected in the dashboard
+    When the user cancels autodispatch agent selection
+    Then no autodispatch session starts
 
   @id:F-AUTODISPATCH-S005
   Scenario: Start autodispatch from an authored pull request linked to an issue in another repository
     Given an authored pull request selected in the dashboard linked only to an issue in another repository
-    When the user presses d to start autodispatch
+    When the user presses d and chooses an autodispatch agent
     Then an autodispatch session launches that linked issue
 
   @id:F-AUTODISPATCH-S008
   Scenario: An authored pull request without a linked issue cannot start a session
     Given an authored pull request without a linked issue in the dashboard
-    When the user presses d to start autodispatch
+    When the user presses d and chooses an autodispatch agent
     Then the dashboard reports that the pull request has no linked issue and starts no session
 
   @id:F-AUTODISPATCH-S010
   Scenario: A pull request closing several issues is dispatched as the lowest one
     Given an authored pull request selected in the dashboard linked to issues in several repositories
-    When the user presses d to start autodispatch
+    When the user presses d and chooses an autodispatch agent
     Then an autodispatch session launches the lowest linked issue
 
   @id:F-AUTODISPATCH-S011
   Scenario: A linked issue lookup failure is reported instead of a missing linked issue
     Given an authored pull request selected in the dashboard whose linked issues GitHub denies
-    When the user presses d to start autodispatch
+    When the user presses d and chooses an autodispatch agent
     Then the dashboard reports the linked issue lookup failure and starts no session
 
   @id:F-AUTODISPATCH-S012
@@ -138,14 +146,14 @@ Feature: Automatically dispatch ready work
   @id:F-AUTODISPATCH-S007
   Scenario: Start a session for a linked issue that is not ready
     Given an authored pull request linked to an issue that is not ready
-    When the user presses d to start autodispatch
+    When the user presses d and chooses an autodispatch agent
     Then an autodispatch session starts for the linked issue
     And the dashboard reports that no work is available to dispatch
 
   @id:F-AUTODISPATCH-S027
   Scenario: Report when an issue has no ready work because of a dependency
     Given an issue blocked by an open dependency selected in the dashboard
-    When the user presses d to start autodispatch
+    When the user presses d and chooses an autodispatch agent
     Then an autodispatch session starts for the selected issue
     And the dashboard reports that no work is available to dispatch
 

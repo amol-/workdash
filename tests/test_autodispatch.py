@@ -659,6 +659,8 @@ def _tui_session(*items: WorkItem) -> MagicMock:
     session.work_items = list(items)
     session.suggestion_markers = {}
     session.busy_message.return_value = None
+    session.config.configured_code_agents.return_value = ["pi"]
+    session.config.configured_analyze_agents.return_value = ["pi"]
     return session
 
 
@@ -779,7 +781,7 @@ def test_tui_reports_the_failure_of_the_session_the_user_started():
     async def exercise():
         async with app.run_test() as pilot:
             footer = app.query_one("#status-footer", Static)
-            await pilot.press("d")
+            await pilot.press("d", "1")
             await pilot.pause()
             assert footer.render().plain == (
                 "Started autodispatch for owner/repo#ISSUE-42: session-1."
@@ -827,7 +829,7 @@ def test_dispatch_outcome_is_visible_on_narrow_screen(status, error, expected):
 
     async def exercise():
         async with app.run_test(size=(45, 24)) as pilot:
-            await pilot.press("d")
+            await pilot.press("d", "1")
             session.autodispatch_sessions.return_value = [
                 {**running, "status": status, "error": error}
             ]
@@ -865,8 +867,8 @@ def test_tui_reports_overlapping_dispatch_outcomes(finish_together):
     async def exercise():
         async with app.run_test() as pilot:
             footer = app.query_one("#status-footer", Static)
-            await pilot.press("d")
-            await pilot.press("d")
+            await pilot.press("d", "1")
+            await pilot.press("d", "1")
             assert session.start_autodispatch_for_item.call_count == 2
             a = {**running, "id": "a", "status": "finished"}
             failed_b = {**b, "status": "failed", "error": "GitHub unavailable"}
@@ -889,7 +891,7 @@ def test_tui_does_not_reannounce_the_session_it_started():
     session = _tui_session(_visible_task())
     sessions: list[dict[str, object]] = []
 
-    def start(_item) -> dict[str, object]:
+    def start(_item, *, agent) -> dict[str, object]:
         started = _started_session("session-1", "owner/repo#ISSUE-42")
         sessions.append(started)
         return started
@@ -901,7 +903,7 @@ def test_tui_does_not_reannounce_the_session_it_started():
     async def exercise():
         async with app.run_test() as pilot:
             footer = app.query_one("#status-footer", Static)
-            await pilot.press("d")
+            await pilot.press("d", "1")
             await pilot.pause()
             assert (
                 footer.render().plain == "Started autodispatch for owner/repo#ISSUE-42: session-1."
@@ -924,7 +926,7 @@ def test_tui_reports_a_dispatch_that_cannot_start():
     async def exercise():
         async with app.run_test() as pilot:
             footer = app.query_one("#status-footer", Static)
-            await pilot.press("d")
+            await pilot.press("d", "1")
             for _ in range(100):
                 await pilot.pause(0.02)
                 if "Dispatch failed" in footer.render().plain:
@@ -1031,7 +1033,7 @@ def test_tui_long_failure_shows_scope_and_reason_at_80_columns(scope):
 
     async def exercise():
         async with app.run_test(size=(80, 24)) as pilot:
-            await pilot.press("d")
+            await pilot.press("d", "1")
             session.autodispatch_sessions.return_value = [
                 {**running, "status": "failed", "error": "GitHub unavailable " * 20}
             ]
@@ -1093,7 +1095,7 @@ def test_tui_narrow_failure_footer_keeps_the_issue_number():
 
     async def exercise():
         async with app.run_test(size=(40, 24)) as pilot:
-            await pilot.press("d")
+            await pilot.press("d", "1")
             session.autodispatch_sessions.return_value = [
                 {**running, "status": "failed", "error": "GitHub unavailable " * 20}
             ]
@@ -2745,9 +2747,12 @@ def test_tui_dispatch_replaces_selected_running_session():
         async with app.run_test() as pilot:
             assert "(m)erge" in app._command_hint().plain
             assert "(d)ispatch" not in app._command_hint().plain
-            await pilot.press("d")
+            await pilot.press("d", "escape")
+            session.start_autodispatch_for_item.assert_not_called()
+            assert session.autodispatch_sessions()[0]["id"] == "old"
+            await pilot.press("d", "1")
             await pilot.pause()
-            session.start_autodispatch_for_item.assert_called_once_with(item)
+            session.start_autodispatch_for_item.assert_called_once_with(item, agent="pi")
 
     asyncio.run(exercise())
 
@@ -2757,7 +2762,7 @@ def test_tui_toggles_automerge_for_the_session_it_just_dispatched():
     session = _tui_session(item)
     sessions: list[dict[str, object]] = []
 
-    def start(_item) -> dict[str, object]:
+    def start(_item, *, agent) -> dict[str, object]:
         started = _started_session("new", "owner/repo#ISSUE-1", current_item="owner/repo#ISSUE-1")
         sessions.append(started)
         return started
@@ -2769,7 +2774,7 @@ def test_tui_toggles_automerge_for_the_session_it_just_dispatched():
 
     async def exercise():
         async with app.run_test() as pilot:
-            await pilot.press("d")
+            await pilot.press("d", "1")
             await pilot.pause()
             # The dashboard learns the new session from the polled snapshot.
             await app._poll_autodispatch_progress()
@@ -3555,3 +3560,104 @@ def test_automerge_does_not_resume_after_disabled_observation(monkeypatch, disab
     assert entry.status == "finished", entry.error
     github.merge_pull_request.assert_not_called()
     assert github.work_pull_request.call_count == (0 if disable_before_lookup else 1)
+
+
+def test_autodispatch_does_not_reuse_another_agents_review(monkeypatch):
+    from concurrent.futures import Future
+
+    issue = _issue_item(1)
+    pr = WorkItem(
+        kind=WorkItemKind.AUTHORED_PR,
+        item_type=WorkItemType.PR,
+        repo=issue.repo,
+        number=2,
+        title="PR",
+        created_at=issue.created_at,
+        updated_at=issue.updated_at,
+        url="https://github.com/owner/repo/pull/2",
+    )
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[issue, pr],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    review = Future()
+    session._active_reviews[("owner/repo", 2)] = ({"agent": "other"}, review)
+    dispatch = MagicMock(
+        side_effect=[
+            {
+                "status": "launched",
+                "item_id": "owner/repo#ISSUE-1",
+                "pr_id": "owner/repo#PR-2",
+                "pane_id": "terminal_1",
+                "session": "workdash",
+            },
+            {"status": "no_ready_task"},
+        ]
+    )
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    monkeypatch.setattr("workdash.launcher.zellij", MagicMock(load_zellij_panes=lambda _: []))
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.001)
+    started = session.start_autodispatch(scope="owner/repo", agent="pi")
+    entry = session._autodispatch[started["id"]]
+    try:
+        entry.thread.join(2)
+        assert entry.status == "failed"
+        assert "review" in entry.error and "other" in entry.error
+        assert dispatch.call_count == 1
+    finally:
+        review.set_result({"status": "reviewed", "item_id": "owner/repo#PR-2"})
+        entry.thread.join(3)
+
+
+def test_tui_dispatch_chooser_pages_and_selects_tenth():
+    item = _issue_item(1)
+    session = _tui_session(item)
+    agents = [f"agent-{i}" for i in range(1, 21)]
+    session.config.configured_code_agents.return_value = agents
+    session.config.configured_analyze_agents.return_value = agents
+    session.autodispatch_sessions.return_value = []
+    session.start_autodispatch_for_item.return_value = _started_session("new", "owner/repo#ISSUE-1")
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            await pilot.press("d")
+            lines = [widget.render().plain for widget in app.screen.query(".review-line")]
+            assert "(9) agent-9" in lines
+            assert not any("agent-10" in line for line in lines)
+            await pilot.press("right")
+            lines = [widget.render().plain for widget in app.screen.query(".review-line")]
+            assert "(1) agent-10" in lines
+            await pilot.press("right")
+            lines = [widget.render().plain for widget in app.screen.query(".review-line")]
+            assert "(2) agent-20" in lines
+            await pilot.press("left", "left")
+            lines = [widget.render().plain for widget in app.screen.query(".review-line")]
+            assert "(9) agent-9" in lines
+            await pilot.press("right", "1")
+            await pilot.pause()
+            session.start_autodispatch_for_item.assert_called_once_with(item, agent="agent-10")
+
+    asyncio.run(exercise())
+
+
+def test_tui_empty_dispatch_chooser_does_not_start_session():
+    session = _tui_session(_issue_item(1))
+    session.config.configured_code_agents.return_value = ["code-only"]
+    session.config.configured_analyze_agents.return_value = ["analyze-only"]
+    session.autodispatch_sessions.return_value = []
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            await pilot.press("d")
+            lines = [widget.render().plain for widget in app.screen.query(".review-line")]
+            assert "No compatible agents configured." in lines
+            await pilot.press("1", "escape")
+            session.start_autodispatch_for_item.assert_not_called()
+            assert session.autodispatch_sessions() == []
+
+    asyncio.run(exercise())

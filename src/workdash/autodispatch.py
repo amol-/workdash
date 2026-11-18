@@ -172,7 +172,9 @@ class _AutodispatchSession:
                         stage = "review"
                         with self.lock:
                             require_fresh = self.automerge
-                        review_options = {"detached": True} if retry_head else {}
+                        review_options = {"require_agent": True}
+                        if retry_head:
+                            review_options["detached"] = True
                         review = self.owner.review(
                             target=target,
                             agent=selected,

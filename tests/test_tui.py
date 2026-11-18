@@ -3985,7 +3985,7 @@ def test_a_dispatch_started_from_the_dashboard_shows_one_blocking_dialog(monkeyp
     session.work_items = _search_work_items()[:1]
     release = threading.Event()
 
-    def start(_item) -> dict[str, object]:
+    def start(_item, *, agent) -> dict[str, object]:
         # The session reports the operation the dashboard's own dialog names.
         with session._blocking("Starting autodispatch..."):
             release.wait(5)
@@ -3996,7 +3996,8 @@ def test_a_dispatch_started_from_the_dashboard_shows_one_blocking_dialog(monkeyp
 
     async def run() -> None:
         async with app.run_test() as pilot:
-            press = asyncio.create_task(pilot.press("d"))
+            await pilot.press("d")
+            press = asyncio.create_task(pilot.press("1"))
             await _wait_for_busy_message("Starting autodispatch...", pilot)
             # Let several busy-screen polls run while the session reports the operation.
             await asyncio.sleep(0.6)
