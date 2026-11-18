@@ -670,7 +670,11 @@ class WorkdashApp(App[None]):
             return
         message = self._session.busy_message()
         if message is None:
-            if self.screen is self._busy_screen:
+            if (
+                self._busy_screen is not None
+                and self.screen_stack
+                and self.screen is self._busy_screen
+            ):
                 self._busy_screen = None
                 await self.pop_screen()
         elif self._busy_screen is not None:

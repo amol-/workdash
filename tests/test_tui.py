@@ -3821,6 +3821,23 @@ def test_progress_arrows_reach_empty_sessions_on_short_screen():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("busy_dialog", [False, True])
+def test_busy_poll_after_dashboard_shutdown(busy_dialog: bool) -> None:
+    session = _dashboard_session()
+    app = WorkdashApp(session=session)
+
+    async def run() -> None:
+        async with app.run_test():
+            if busy_dialog:
+                with session._blocking("Checking ready work..."):
+                    await app._sync_busy_screen()
+                assert isinstance(app.screen, BusyScreen)
+        assert not app.screen_stack
+        await app._sync_busy_screen()
+
+    asyncio.run(run())
+
+
 def test_dashboard_keeps_its_own_progress_dialog_while_the_session_is_idle() -> None:
     session = _dashboard_session()
     release = threading.Event()
