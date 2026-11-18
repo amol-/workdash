@@ -1086,25 +1086,56 @@ class Zellij:
         work_action: str,
         zellij_session: str | None,
         group: str | None,
+        pane_callback: Callable[[str | None], None] | None = None,
     ) -> None:
         """Run a command in a new Zellij pane and wait for it to exit."""
         target_session = (zellij_session or "").strip()
         if not target_session:
             raise RuntimeError(f"{context}: running an agent in a pane requires a Zellij session.")
         zellij = _resolve_zellij_binary()
-        completed = subprocess.run(
-            _build_zellij_new_pane_command(
-                zellij,
-                repo_path,
-                command,
-                work_action=work_action,
-                zellij_session=target_session,
-                tab_id=self._group_tab_id(zellij, target_session, group, context=context),
-                blocking=True,
-            ),
-            capture_output=True,
-            text=True,
-        )
+        with tempfile.TemporaryDirectory(prefix="workdash-pane-") as directory:
+            pane_file = Path(directory) / "pane"
+            if pane_callback:
+                command = [
+                    "/bin/sh",
+                    "-c",
+                    'printf "%s" "$ZELLIJ_PANE_ID" > "$1"; shift; exec "$@"',
+                    "workdash-pane",
+                    str(pane_file),
+                    *command,
+                ]
+            done = threading.Event()
+
+            def report_pane():
+                while not done.wait(0.05):
+                    if pane_file.exists():
+                        pane_id = pane_file.read_text().strip()
+                        if pane_id:
+                            pane_callback(_format_zellij_pane_id(pane_id))
+                            return
+
+            if pane_callback:
+                reporter = threading.Thread(target=report_pane, daemon=True)
+                reporter.start()
+            try:
+                completed = subprocess.run(
+                    _build_zellij_new_pane_command(
+                        zellij,
+                        repo_path,
+                        command,
+                        work_action=work_action,
+                        zellij_session=target_session,
+                        tab_id=self._group_tab_id(zellij, target_session, group, context=context),
+                        blocking=True,
+                    ),
+                    capture_output=True,
+                    text=True,
+                )
+            finally:
+                if pane_callback:
+                    done.set()
+                    reporter.join()
+                    pane_callback(None)
         # Zellij reports its own failures on stderr while still exiting zero when it
         # cannot find the session, so the status alone does not tell whether the
         # command ran and the caller must check what the pane left behind.

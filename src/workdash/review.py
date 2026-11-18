@@ -19,6 +19,7 @@ def review_pull_request(
     git: GitHelper,
     zellij_session: str,
     group: str | None,
+    pane_callback=None,
 ) -> dict:
     """Run a review and return the fresh completion document."""
     exclude = git.get_git_path("info/exclude", Path(cwd))
@@ -62,6 +63,7 @@ def review_pull_request(
                 work_action="review",
                 zellij_session=zellij_session,
                 group=group,
+                **({"pane_callback": pane_callback} if pane_callback else {}),
             )
             if document.is_file():
                 content = document.read_text(encoding="utf-8", errors="replace")

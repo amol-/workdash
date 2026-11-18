@@ -38,6 +38,7 @@ class Analyzer:
         work_action: str,
         zellij_session: str,
         group: str | None,
+        pane_callback=None,
     ) -> str:
         return agent_execution.executor.run_in_pane(
             item=item,
@@ -47,6 +48,7 @@ class Analyzer:
             work_action=work_action,
             zellij_session=zellij_session,
             group=group,
+            **({"pane_callback": pane_callback} if pane_callback else {}),
         )
 
     def _collect_github_context(self, item: WorkItem) -> dict[str, Any]:

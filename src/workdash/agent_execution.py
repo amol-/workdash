@@ -67,6 +67,7 @@ class AgentExecution:
         work_action: str,
         zellij_session: str,
         group: str | None,
+        pane_callback=None,
     ) -> str:
         """Run a one-shot agent in a Zellij pane and return what it printed.
 
@@ -104,6 +105,7 @@ class AgentExecution:
                 work_action=work_action,
                 zellij_session=zellij_session,
                 group=group,
+                **({"pane_callback": pane_callback} if pane_callback else {}),
             )
             # Zellij can exit zero without running the pane at all, so the files the
             # pane writes are the proof that it ran.

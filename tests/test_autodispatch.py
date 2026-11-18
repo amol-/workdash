@@ -17,6 +17,8 @@ from rich.cells import cell_len
 from textual.widgets import DataTable, Static
 from webob import Request
 
+from bdd.steps.autodispatch import autodispatch_state as autodispatch_state
+from bdd.steps.autodispatch import blocked_session, wait_for
 from gh_work_state_fake import HEAD_SHA, check_run, comment, install_fake_github, thread, todo_body
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashControlError, WorkdashSession, _make_turbogears_app
@@ -84,6 +86,56 @@ def test_autodispatch_supervises_reminders_blocking_and_recovery(monkeypatch, tm
         session.stop_autodispatch(started["id"])
         entry.thread.join(timeout=3)
         assert not entry.thread.is_alive()
+
+
+def test_dashboard_stops_only_selected_running_session(request, monkeypatch):
+    autodispatch_state = request.getfixturevalue("autodispatch_state")
+    session = autodispatch_state["session"]
+    closed = MagicMock()
+    monkeypatch.setattr("workdash.autodispatch.launcher.zellij.close_zellij_pane", closed)
+    first = session.start_autodispatch(scope="owner/first")["id"]
+    second = session.start_autodispatch(scope="owner/second")["id"]
+    wait_for(lambda: len(autodispatch_state["panes"]) == 2)
+    wait_for(
+        lambda: all(entry["stage"] == "developing" for entry in session.autodispatch_sessions())
+    )
+
+    async def run():
+        app = WorkdashApp(session=session)
+        async with app.run_test() as pilot:
+            await pilot.press("shift+tab", "down", "s")
+            await app._poll_autodispatch_progress()
+            progress = app.query_one("#autodispatch-progress", Static).render().plain
+            assert "owner/first" in progress
+            assert "owner/second" not in progress
+            entries = {entry["id"]: entry for entry in session.autodispatch_sessions()}
+            assert entries[first]["status"] == "running"
+            assert entries[second]["status"] == "stopped"
+            assert len(autodispatch_state["panes"]) == 2
+            closed.assert_not_called()
+
+    asyncio.run(run())
+
+
+def test_dashboard_toggles_automerge_for_selected_blocked_session(monkeypatch, tmp_path, caplog):
+    import workdash.autoclose as autoclose_module
+
+    state = {}
+    blocked_session(state, [], tmp_path, monkeypatch, caplog)
+    session = state["api_session"]
+
+    async def run():
+        app = WorkdashApp(session=session)
+        async with app.run_test() as pilot:
+            await pilot.press("shift+tab", "m")
+            assert session.autodispatch_sessions()[0]["automerge"] is True
+            await app._poll_autodispatch_progress()
+            progress = app.query_one("#autodispatch-progress", Static).render().plain
+            assert "blocked" in progress and "[automerge]" in progress
+
+    with monkeypatch.context() as patch:
+        patch.setattr(autoclose_module.time, "monotonic", state["real_monotonic"])
+        asyncio.run(run())
 
 
 def test_api_starts_reports_and_stops_session_without_closing_pane(monkeypatch):
@@ -1575,7 +1627,9 @@ def test_autodispatch_waits_for_selected_pull_request_review(monkeypatch, tmp_pa
     entered, release = threading.Event(), threading.Event()
     reviewed = []
 
-    def reviewer(*, item, prompt, command_tokens, cwd, work_action, zellij_session, group):
+    def reviewer(
+        *, item, prompt, command_tokens, cwd, work_action, zellij_session, group, pane_callback=None
+    ):
         reviewed.append(item.number)
         entered.set()
         assert release.wait(3)
@@ -1843,7 +1897,16 @@ def test_autodispatch_review_feedback_cycle(monkeypatch, tmp_path):
             zellij.panes.clear()
 
         def run_in_pane(
-            self, *, item, prompt, command_tokens, cwd, work_action, zellij_session, group
+            self,
+            *,
+            item,
+            prompt,
+            command_tokens,
+            cwd,
+            work_action,
+            zellij_session,
+            group,
+            pane_callback=None,
         ):
             if not github.finding:
                 github.finding = True

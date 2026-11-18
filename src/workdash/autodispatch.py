@@ -53,6 +53,7 @@ class _AutodispatchSession:
         self.launch_reason: str | None = None
         self.iteration = 0
         self.error: str | None = None
+        self.dismissed = False
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self.run, name=f"autodispatch-{self.id}", daemon=True)
@@ -69,6 +70,7 @@ class _AutodispatchSession:
                 "started_at": self.started_at,
                 "elapsed_seconds": int((self.ended or time.monotonic()) - self.started),
                 "current_item": self.current_item,
+                "pane_id": self.pane[1] if self.pane else None,
                 "scope_is_current_item": bool(
                     self.current_item
                     and self.owner._scope_identity(self.scope)
@@ -82,6 +84,7 @@ class _AutodispatchSession:
                 if self.status == self.Status.RUNNING and blocked
                 else str(self.status),
                 "error": self.error,
+                "dismissed": self.dismissed,
             }
 
     def stop(self, *, close_blocked: bool = False) -> None:
@@ -163,6 +166,7 @@ class _AutodispatchSession:
                 if not self.stop_event.is_set():
                     with self.lock:
                         self.stage = "reviewing"
+                        self.pane = None
                         self.launch_reason = None
                     target = str(result.get("pr_id", result["item_id"]))
                     retry_head = False
@@ -172,7 +176,13 @@ class _AutodispatchSession:
                         stage = "review"
                         with self.lock:
                             require_fresh = self.automerge
-                        review_options = {"require_agent": True}
+
+                        def pane_callback(pane_id, session=str(result["session"])):
+                            with self.lock:
+                                if not self.stop_event.is_set():
+                                    self.pane = (session, pane_id) if pane_id else None
+
+                        review_options = {"require_agent": True, "pane_callback": pane_callback}
                         if retry_head:
                             review_options["detached"] = True
                         review = self.owner.review(
