@@ -34,8 +34,9 @@ GH_LATEST_RELEASE_PAGE_URL = "https://github.com/cli/cli/releases/latest"
 
 _REQUIRED_FIELDS = ("github_username", "repositories", "workdir")
 _ANALYSIS_VIEWER_COMMAND = "workdash view"
-# Viewer commands that no longer exist, so a configuration naming one is repaired.
-_REMOVED_VIEWER_COMMANDS = frozenset({"workdash mdview", "workdash markdownview"})
+# (executable name, subcommand) pairs that no longer exist, so a configuration naming one
+# is repaired. Compared as tokens, so a full path or extra arguments are repaired too.
+_REMOVED_VIEWER_COMMANDS = frozenset({("workdash", "mdview"), ("workdash", "markdownview")})
 # Agents the wizard detects on PATH, in detection order, with their (analyze, launch) commands.
 _DETECTABLE_AGENTS = {
     "claude": ("claude -p", "claude"),
@@ -342,7 +343,8 @@ def _analysis_viewer_problem(viewer: object) -> str | None:
         or not isinstance(viewer.get("needs_pane"), bool)
     ):
         return "expected command, format (markdown or html), and needs_pane boolean"
-    if viewer["command"] in _REMOVED_VIEWER_COMMANDS:
+    tokens = shlex.split(viewer["command"])
+    if len(tokens) > 1 and (Path(tokens[0]).name, tokens[1]) in _REMOVED_VIEWER_COMMANDS:
         return f"{viewer['command']!r} was removed; use {_ANALYSIS_VIEWER_COMMAND}"
     return None
 

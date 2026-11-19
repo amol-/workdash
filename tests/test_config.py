@@ -919,7 +919,16 @@ def test_configure_fills_only_missing_fields(tmp_path):
     assert config.repositories == ("existing-user/*",)
 
 
-@pytest.mark.parametrize("removed", ["workdash mdview", "workdash markdownview"])
+@pytest.mark.parametrize(
+    "removed",
+    [
+        "workdash mdview",
+        "workdash markdownview",
+        "/home/u/.local/bin/workdash mdview",
+        "workdash  mdview",
+        "workdash mdview --extra",
+    ],
+)
 def test_configure_repairs_the_removed_markdown_viewer(tmp_path, removed):
     """The single view command replaces the removed Markdown-only viewer."""
 
@@ -957,6 +966,23 @@ def test_configure_repairs_the_removed_markdown_viewer(tmp_path, removed):
         "format": "markdown",
         "needs_pane": True,
     }
+
+
+@pytest.mark.parametrize(
+    "command", ["workdash view", "workdash view --reuse-window", "myworkdash mdview"]
+)
+def test_analysis_viewer_accepts_a_command_that_is_not_the_removed_viewer(command):
+    config = WorkdashConfig(
+        github_username="octocat",
+        open_command="xdg-open",
+        analysis_viewer={"command": command, "format": "markdown", "needs_pane": True},
+        agents={"claude": AgentConfig(analyze="claude -p", launch="claude")},
+        repositories=("owner/repo",),
+        workdir="~/wrk",
+        todo_repository="octocat/todos",
+    )
+
+    config.require_valid()
 
 
 def test_removed_markdown_viewer_configuration_is_invalid():

@@ -8,6 +8,7 @@ document's own links and keeps the documents it visited in a history.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import http.client
 import json
 import os
@@ -15,12 +16,13 @@ import re
 import ssl
 import subprocess
 import sys
+import threading
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -171,7 +173,10 @@ class _MarkdownApp(App):
         if parse_github_item_url(target) is not None or (
             url.path.lower().endswith(_DOCUMENT_SUFFIXES) and url.hostname not in _GITHUB_HOSTS
         ):
-            await self._load(target)
+            # A section of the linked document is scrolled to after that document loads.
+            anchor = url.fragment
+            target = urlunsplit((url.scheme, url.netloc, url.path, url.query, ""))
+            await self._load(target, anchor)
             return
         try:
             command = launcher.open_in_browser(
@@ -202,11 +207,11 @@ class _MarkdownApp(App):
         except (OSError, subprocess.SubprocessError):
             self.notify("Copy unavailable: could not access the system clipboard", severity="error")
 
-    async def _load(self, target: str) -> None:
+    async def _load(self, target: str, anchor: str = "") -> None:
         previous = self._document
         self._set_status(f"Loading {target}...")
         try:
-            document = await asyncio.to_thread(load_document, target)
+            document = await _read_document(target)
         except (OSError, RuntimeError) as error:
             if self._document is previous:
                 # The loader's message already names the target and the reason.
@@ -216,18 +221,46 @@ class _MarkdownApp(App):
             # The reader went back while this document was loading.
             return
         self._history.append(previous)
-        await self._show(document)
+        await self._show(document, anchor)
 
-    async def _show(self, document: Document) -> None:
+    async def _show(self, document: Document, anchor: str = "") -> None:
         self._document = document
         viewer = self.query_one(_DocumentViewer)
         await viewer.document.update(document.content)
-        viewer.scroll_home(animate=False)
+        if not (anchor and viewer.document.goto_anchor(anchor)):
+            viewer.scroll_home(animate=False)
         self._set_status("")
         self.refresh_bindings()
 
     def _set_status(self, message: str) -> None:
         self.query_one("#status", Static).update(message)
+
+
+async def _read_document(target: str) -> Document:
+    """Read a document in a daemon thread, so quitting never waits for a slow read."""
+    loop = asyncio.get_running_loop()
+    result: asyncio.Future[Document] = loop.create_future()
+
+    def settle(document: Document | None, error: Exception | None) -> None:
+        if result.done():
+            return
+        if error is not None:
+            result.set_exception(error)
+        elif document is not None:
+            result.set_result(document)
+
+    def read() -> None:
+        try:
+            outcome: tuple[Document | None, Exception | None] = (load_document(target), None)
+        except Exception as error:  # noqa: BLE001 - re-raised where the read was awaited
+            outcome = (None, error)
+        # The loop is closed when the viewer quits before the read finishes.
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(settle, *outcome)
+
+    # Not the loop's executor: that one is joined on shutdown, which would stall quitting.
+    threading.Thread(target=read, daemon=True).start()
+    return await result
 
 
 def _github_item(target: str) -> tuple[str, int] | None:

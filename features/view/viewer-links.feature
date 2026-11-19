@@ -15,6 +15,7 @@ Feature: Follow links from the built-in Markdown viewer
     - A link that cannot be loaded or opened is reported in the viewer's status line, and the current document stays on screen.
     - `b` returns to the previous document and is offered only while there is a previous document.
     - Links to headings within the document scroll to those headings and are not previous documents.
+    - A link to a heading of another document opens that document and scrolls to the heading.
 
   @id:F-VIEW-LINKS-S001
   Scenario: A GitHub issue link opens that issue in the same viewer
@@ -95,3 +96,9 @@ Feature: Follow links from the built-in Markdown viewer
     When the user activates the Markdown link
     Then the viewer reports that the document could not be loaded
     And the current document stays open
+
+  @id:F-VIEW-LINKS-S012
+  Scenario: A link to a section of another document opens that document at the section
+    Given the built-in Markdown viewer shows a document linking to a section of another Markdown document
+    When the user activates the Markdown section link
+    Then the viewer shows the linked document at the section

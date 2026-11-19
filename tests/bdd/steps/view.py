@@ -297,6 +297,7 @@ async def _settle(pilot, condition, app) -> None:
     for _ in range(200):
         await pilot.pause()
         if condition(app):
+            await pilot.pause()
             return
     raise AssertionError("the viewer did not finish following the link")
 
@@ -321,6 +322,17 @@ def _viewer_links_a_web_page(scenario_state: dict[str, Any], tmp_path) -> None:
 def _viewer_links_a_markdown_document(scenario_state: dict[str, Any], tmp_path) -> None:
     _viewer_document(scenario_state, tmp_path, "linked.md")
     (tmp_path / "linked.md").write_text("# Replacement\n\nlinked body\n", encoding="utf-8")
+
+
+@given(
+    "the built-in Markdown viewer shows a document linking to a section of another "
+    "Markdown document"
+)
+def _viewer_links_a_markdown_section(scenario_state: dict[str, Any], tmp_path) -> None:
+    _viewer_document(scenario_state, tmp_path, "guide.md#part")
+    (tmp_path / "guide.md").write_text(
+        "# Guide\n\n" + "Paragraph\n\n" * 40 + "# Part\n\nsection body\n", encoding="utf-8"
+    )
 
 
 @given("the built-in Markdown viewer shows a document linking to a missing Markdown document")
@@ -386,6 +398,20 @@ def _activate_markdown_link(
         monkeypatch,
         lambda app: "Replacement" in _viewer_source(app) or _settled_status(app) != "",
     )
+
+
+@when("the user activates the Markdown section link")
+def _activate_markdown_section_link(
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def shows_the_section(app) -> bool:
+        return (
+            _viewer_source(app).startswith("# Guide")
+            and _viewer_status(app) == ""
+            and "Part" in app.export_screenshot()
+        )
+
+    _activate_link(scenario_state, monkeypatch, shows_the_section)
 
 
 @when("the user activates the heading link")
@@ -534,6 +560,13 @@ def _viewer_no_back_before(scenario_state: dict[str, Any]) -> None:
 @then("the viewer scrolls to that heading")
 def _viewer_scrolled(scenario_state: dict[str, Any]) -> None:
     assert "Destination" in scenario_state["link_records"]["screenshot"]
+
+
+@then("the viewer shows the linked document at the section")
+def _viewer_shows_linked_section(scenario_state: dict[str, Any]) -> None:
+    records = scenario_state["link_records"]
+    assert records["source"].startswith("# Guide\n"), records["source"]
+    assert "Part" in records["screenshot"], records["screenshot"]
 
 
 @then("the viewer reports that the document is loading")

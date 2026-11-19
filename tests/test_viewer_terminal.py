@@ -58,3 +58,43 @@ sys.exit(view.run_view(sys.argv[2]))
                 process.wait()
             os.close(master)
             os.close(slave)
+
+
+def test_quitting_during_a_load_returns_to_the_shell(tmp_path):
+    """`q` while a document loads must not wait for the read to finish."""
+    script = tmp_path / "quit_during_load.py"
+    script.write_text(
+        """import asyncio
+import threading
+
+from workdash import view
+
+
+def read(target):
+    threading.Event().wait()
+
+
+view.load_document = read
+view._MarkdownApp._set_status = lambda self, message: None
+
+
+async def main():
+    app = view._MarkdownApp(view.Document("# First", "file:///first.md"), "xdg-open", False)
+    loading = asyncio.create_task(app._load("file:///second.md"))
+    await asyncio.sleep(0.2)
+    loading.cancel()
+    await asyncio.wait([loading])
+
+
+asyncio.run(main())
+print("quit")
+""",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=15
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip().endswith("quit")
