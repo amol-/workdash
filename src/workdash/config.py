@@ -33,6 +33,9 @@ GH_LATEST_RELEASE_API_URL = "https://api.github.com/repos/cli/cli/releases/lates
 GH_LATEST_RELEASE_PAGE_URL = "https://github.com/cli/cli/releases/latest"
 
 _REQUIRED_FIELDS = ("github_username", "repositories", "workdir")
+_ANALYSIS_VIEWER_COMMAND = "workdash view"
+# Viewer commands that no longer exist, so a configuration naming one is repaired.
+_REMOVED_VIEWER_COMMANDS = frozenset({"workdash mdview", "workdash markdownview"})
 # Agents the wizard detects on PATH, in detection order, with their (analyze, launch) commands.
 _DETECTABLE_AGENTS = {
     "claude": ("claude -p", "claude"),
@@ -141,16 +144,9 @@ class WorkdashConfig:
             invalid.append(f"listens: {error}")
         if not isinstance(self.open_needs_pane, bool):
             invalid.append("open_needs_pane: expected a boolean")
-        viewer = self.analysis_viewer
-        if viewer and (
-            not isinstance(viewer, dict)
-            or not _is_configured_command(viewer.get("command"))
-            or viewer.get("format") not in ("markdown", "html")
-            or not isinstance(viewer.get("needs_pane"), bool)
-        ):
-            invalid.append(
-                "analysis_viewer: expected command, format (markdown or html), and needs_pane boolean"
-            )
+        viewer_problem = _analysis_viewer_problem(self.analysis_viewer)
+        if self.analysis_viewer and viewer_problem:
+            invalid.append(f"analysis_viewer: {viewer_problem}")
         # A hand-edited todo repository that is present but not owner/repo is
         # invalid rather than missing, so the message tells the user what to fix.
         if self.todo_repository and not is_repository_name(self.todo_repository):
@@ -336,6 +332,19 @@ def _invalid_config_command_fields(config: WorkdashConfig) -> list[str]:
 
 def _is_configured_command(command: object) -> bool:
     return isinstance(command, str) and command.strip() and _config_command_problem(command) is None
+
+
+def _analysis_viewer_problem(viewer: object) -> str | None:
+    if (
+        not isinstance(viewer, dict)
+        or not _is_configured_command(viewer.get("command"))
+        or viewer.get("format") not in ("markdown", "html")
+        or not isinstance(viewer.get("needs_pane"), bool)
+    ):
+        return "expected command, format (markdown or html), and needs_pane boolean"
+    if viewer["command"] in _REMOVED_VIEWER_COMMANDS:
+        return f"{viewer['command']!r} was removed; use {_ANALYSIS_VIEWER_COMMAND}"
+    return None
 
 
 def _config_command_tokens(field: str, command: object) -> list[str]:
@@ -620,16 +629,11 @@ def configure(
     print(f"For advanced viewer commands, edit 'open' and 'open_needs_pane' in {path}.")
 
     analysis_viewer = config.analysis_viewer
-    if (
-        not isinstance(analysis_viewer, dict)
-        or not _is_configured_command(analysis_viewer.get("command"))
-        or analysis_viewer.get("format") not in ("markdown", "html")
-        or not isinstance(analysis_viewer.get("needs_pane"), bool)
-    ):
-        command = input_fn("Analysis viewer [workdash mdview]: ").strip() or "workdash mdview"
+    if _analysis_viewer_problem(analysis_viewer):
+        command = _prompt_with_default(input_fn, "Analysis viewer", _ANALYSIS_VIEWER_COMMAND)
         while not _is_configured_command(command):
             command = input_fn("Analysis viewer command (required): ").strip()
-        if command == "workdash mdview":
+        if command == _ANALYSIS_VIEWER_COMMAND:
             analysis_viewer = {"command": command, "format": "markdown", "needs_pane": True}
         else:
             fmt = input_fn("Analysis format (markdown/html): ").strip().lower()

@@ -93,7 +93,7 @@ def make_valid_config(agents: dict[str, AgentConfig] | None = None) -> WorkdashC
         github_username="testuser",
         open_command="xdg-open",
         analysis_viewer={
-            "command": "workdash mdview",
+            "command": "workdash view",
             "format": "markdown",
             "needs_pane": True,
         },
@@ -380,7 +380,7 @@ def api_config(tmp_path: Path) -> WorkdashConfig:
         github_username="testuser",
         open_command="xdg-open",
         analysis_viewer={
-            "command": "workdash mdview",
+            "command": "workdash view",
             "format": "markdown",
             "needs_pane": True,
         },

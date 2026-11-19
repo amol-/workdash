@@ -4,40 +4,6 @@ import subprocess
 import sys
 
 
-def test_viewer_restores_terminal_before_replacing_process(tmp_path):
-    result = tmp_path / "terminal"
-    script = """
-import os, termios
-from pathlib import Path
-from workdash.markdownview import _MarkdownApp
-before = termios.tcgetattr(0)
-def replace(file, args):
-    Path(os.environ["RESULT"]).write_text(str(termios.tcgetattr(0) == before))
-    os._exit(0)
-os.execvp = replace
-app = _MarkdownApp("# Document", "xdg-open", False)
-app.call_after_refresh(lambda: app.open_url("https://github.com/owner/repo/issues/12"))
-app.run()
-"""
-    master, slave = pty.openpty()
-    env = {**os.environ, "RESULT": str(result), "TERM": "xterm-256color"}
-    env.pop("ZELLIJ_SESSION_NAME", None)
-    try:
-        subprocess.run(
-            [sys.executable, "-c", script],
-            stdin=slave,
-            stdout=slave,
-            stderr=slave,
-            env=env,
-            timeout=10,
-            check=True,
-        )
-        assert result.read_text() == "True"
-    finally:
-        os.close(master)
-        os.close(slave)
-
-
 def test_item_viewer_pane_keeps_lookup_error_until_dismissed(monkeypatch, tmp_path):
     import select
 
@@ -58,7 +24,7 @@ def gh(command, **kwargs):
     return subprocess.CompletedProcess(command, 0, stdout=json.dumps(data))
 
 view.subprocess.run = gh
-view.show_markdown = lambda document: print(document)
+view.show_document = lambda document: print(document.content)
 sys.exit(view.run_view(sys.argv[2]))
 """)
     executable.chmod(0o755)

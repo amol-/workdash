@@ -130,7 +130,7 @@ def _custom_analysis_viewer(scenario_state: dict[str, Any]) -> None:
 @then("the saved analysis viewer uses Markdown in a terminal pane")
 def _default_analysis_saved(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["written_config"].analysis_viewer == {
-        "command": "workdash mdview",
+        "command": "workdash view",
         "format": "markdown",
         "needs_pane": True,
     }
@@ -635,6 +635,23 @@ def _saved_configuration_keeps_agents_in_order(scenario_state: dict[str, Any]) -
     assert list(written.agents) == ["pi", "aider", "claude"]
 
 
+@given("the user has a configuration naming the removed Markdown viewer")
+def _existing_config_with_removed_viewer(scenario_state, config_path):
+    _configuration_with_agents(scenario_state, config_path)
+    raw = json.loads(config_path.read_text())
+    raw["analysis_viewer"] = {
+        "command": "workdash mdview",
+        "format": "markdown",
+        "needs_pane": True,
+    }
+    config_path.write_text(json.dumps(raw))
+
+
+@then("the wizard asks for the analysis viewer with the single view command default")
+def _wizard_asks_for_view_default(scenario_state):
+    assert scenario_state["prompts"] == ["Analysis viewer [workdash view]: "]
+
+
 @given("the user has an existing configuration missing the analysis viewer")
 def _existing_config_without_analysis_viewer(scenario_state, config_path):
     _configuration_with_agents(scenario_state, config_path)
@@ -662,7 +679,7 @@ def _startup_directs_configure(scenario_state):
 
 @then("the wizard asks for an analysis viewer and saves the default")
 def _wizard_saves_default_viewer(scenario_state):
-    assert scenario_state["prompts"] == ["Analysis viewer [workdash mdview]: "]
+    assert scenario_state["prompts"] == ["Analysis viewer [workdash view]: "]
     _default_analysis_saved(scenario_state)
 
 

@@ -1,16 +1,22 @@
+import asyncio
+import http.client
 import json
 import subprocess
+import urllib.error
+import urllib.request
 from unittest.mock import MagicMock
 
 import pytest
+from textual.app import App
+from textual.widgets import Static
 
 from view_fake import fake_gh_view_run, issue, issue_routes
-from workdash import view
+from workdash import launcher, view
 
 
-def _capture(monkeypatch) -> list[str]:
-    documents: list[str] = []
-    monkeypatch.setattr(view, "show_markdown", documents.append)
+def _capture(monkeypatch) -> list[view.Document]:
+    documents: list[view.Document] = []
+    monkeypatch.setattr(view, "show_document", documents.append)
     return documents
 
 
@@ -84,7 +90,7 @@ def test_view_pull_request_document_reports_ci_reviews_and_threads(monkeypatch):
 
     assert view.run_view("owner/repo#12") == 0
 
-    document = documents[0]
+    document = documents[0].content
     assert "**Draft:** yes" in document
     assert "**Mergeable:** MERGEABLE" in document
     assert "**Merge state:** CLEAN" in document
@@ -124,8 +130,8 @@ def test_view_reports_error_status_as_failing_ci(monkeypatch):
     monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes))
 
     assert view.run_view("owner/repo#12") == 0
-    assert "## CI — failure" in documents[0]
-    assert "- [build](https://ci/build) — ERROR" in documents[0]
+    assert "## CI — failure" in documents[0].content
+    assert "- [build](https://ci/build) — ERROR" in documents[0].content
 
 
 @pytest.mark.parametrize("check_count", [20, 21])
@@ -162,7 +168,7 @@ def test_view_truncates_long_check_and_thread_lists(monkeypatch, check_count):
 
     assert view.run_view("owner/repo#12") == 0
 
-    document = documents[0]
+    document = documents[0].content
     assert "**Review:** none" in document
     assert "## Reviews (0)" in document
     assert "*No reviews.*" in document
@@ -186,8 +192,8 @@ def test_view_preserves_description_without_guessing_references(monkeypatch):
     monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes, recorded=commands))
 
     assert view.run_view("owner/repo#12") == 0
-    assert f"## Description\n\n{body}\n" in documents[0]
-    assert "## Referenced items" not in documents[0]
+    assert f"## Description\n\n{body}\n" in documents[0].content
+    assert "## Referenced items" not in documents[0].content
     assert ["gh", "api", "repos/owner/repo/issues/34"] not in commands
 
 
@@ -226,8 +232,8 @@ def test_view_loads_all_pages_of_subissues_and_comments(monkeypatch):
 
     monkeypatch.setattr(view.subprocess, "run", gh)
     assert view.run_view("owner/repo#12") == 0
-    assert "Later child" in documents[0]
-    assert "Later comment" in documents[0]
+    assert "Later child" in documents[0].content
+    assert "Later comment" in documents[0].content
 
 
 def test_view_shows_thread_replies_and_comment_truncation(monkeypatch):
@@ -265,9 +271,9 @@ def test_view_shows_thread_replies_and_comment_truncation(monkeypatch):
     }
     monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes))
     assert view.run_view("owner/repo#12") == 0
-    assert "**@one**" in documents[0] and "**@two**" in documents[0]
-    assert "reply" in documents[0]
-    assert "comments truncated" in documents[0].lower()
+    assert "**@one**" in documents[0].content and "**@two**" in documents[0].content
+    assert "reply" in documents[0].content
+    assert "comments truncated" in documents[0].content.lower()
 
 
 def test_view_command_finds_workdash_local_gh(monkeypatch, tmp_path):
@@ -292,18 +298,8 @@ def test_view_command_finds_workdash_local_gh(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
 
     assert workdash.main(["view", "owner/repo#12"]) == 0
-    assert "# Crash on startup" in documents[0]
-    assert "No references." in documents[0]
-
-
-def test_view_command_runs_without_dashboard_setup(monkeypatch):
-    from workdash import workdash
-
-    run = MagicMock(return_value=0)
-    monkeypatch.setattr(view, "run_view", run)
-
-    assert workdash.main(["view", "owner/repo#12"]) == 0
-    run.assert_called_once_with("owner/repo#12")
+    assert "# Crash on startup" in documents[0].content
+    assert "No references." in documents[0].content
 
 
 @pytest.mark.parametrize("state", ["FAILURE", "PENDING"])
@@ -355,9 +351,9 @@ def test_view_counts_checks_beyond_first_page(monkeypatch, state):
 
     monkeypatch.setattr(view.subprocess, "run", gh)
     assert view.run_view("owner/repo#12") == 0
-    assert f"## CI — {state.lower()}" in documents[0]
-    assert "100 of 101 checks passing." in documents[0]
-    assert ("[late](https://ci/late)" in documents[0]) == (state == "FAILURE")
+    assert f"## CI — {state.lower()}" in documents[0].content
+    assert "100 of 101 checks passing." in documents[0].content
+    assert ("[late](https://ci/late)" in documents[0].content) == (state == "FAILURE")
 
 
 def test_view_uses_github_rollup_independently_of_check_states(monkeypatch):
@@ -379,9 +375,9 @@ def test_view_uses_github_rollup_independently_of_check_states(monkeypatch):
     monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes, rollup_state="PENDING"))
 
     assert view.run_view("owner/repo#12") == 0
-    assert "## CI — pending" in documents[0]
-    assert "0 of 1 checks passing." in documents[0]
-    assert "- [build](https://ci/build) — FAILURE" in documents[0]
+    assert "## CI — pending" in documents[0].content
+    assert "0 of 1 checks passing." in documents[0].content
+    assert "- [build](https://ci/build) — FAILURE" in documents[0].content
 
 
 def test_view_nested_subissues_across_repositories(monkeypatch):
@@ -409,9 +405,118 @@ def test_view_nested_subissues_across_repositories(monkeypatch):
     assert view.run_view("owner/repo#12") == 0
     assert (
         "| └─ [other/project#13](https://github.com/other/project/issues/13) | open |"
-        in documents[0]
+        in documents[0].content
     )
     assert (
         "| └─ └─ [other/project#14](https://github.com/other/project/issues/14) | closed |"
-        in documents[0]
+        in documents[0].content
     )
+
+
+def test_view_reads_a_local_file_without_contacting_github(monkeypatch, tmp_path):
+    documents = _capture(monkeypatch)
+    commands = []
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run({}, recorded=commands))
+    path = tmp_path / "notes.md"
+    path.write_text("# Local notes\n\nlocal body", encoding="utf-8")
+
+    assert view.run_view(str(path)) == 0
+
+    assert commands == []
+    assert documents[0].content == "# Local notes\n\nlocal body"
+    assert documents[0].source == path.resolve().as_uri()
+
+
+def test_view_reads_a_file_url(monkeypatch, tmp_path):
+    documents = _capture(monkeypatch)
+    path = tmp_path / "notes with spaces.md"
+    path.write_text("# Local notes", encoding="utf-8")
+
+    assert view.run_view(path.as_uri()) == 0
+
+    assert documents[0].content == "# Local notes"
+    assert documents[0].source == path.resolve().as_uri()
+
+
+@pytest.mark.parametrize(
+    ("target", "message"),
+    [
+        ("missing.md", "Failed to read missing.md"),
+        ("file://elsewhere/missing.md", "Unsupported file URL"),
+        ("ftp://example.test/document.md", "Unsupported target ftp://example.test/document.md"),
+    ],
+)
+def test_view_reports_a_target_it_cannot_read(monkeypatch, capsys, tmp_path, target, message):
+    monkeypatch.chdir(tmp_path)
+    documents = _capture(monkeypatch)
+
+    assert view.run_view(target) == 1
+
+    assert documents == []
+    assert message in capsys.readouterr().err
+
+
+def test_view_reports_a_document_it_cannot_decode(monkeypatch, capsys, tmp_path):
+    documents = _capture(monkeypatch)
+    path = tmp_path / "latin.md"
+    path.write_bytes("# Caf\xe9".encode("latin-1"))
+
+    assert view.run_view(str(path)) == 1
+
+    assert documents == []
+    assert f"Failed to read {path}" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (urllib.error.URLError("no route to host"), "<urlopen error no route to host>"),
+        (http.client.IncompleteRead(b"# partial"), "IncompleteRead(9 bytes read)"),
+    ],
+)
+def test_view_reports_a_remote_document_it_cannot_fetch(monkeypatch, capsys, error, reason):
+    documents = _capture(monkeypatch)
+    monkeypatch.setattr(urllib.request, "urlopen", MagicMock(side_effect=error))
+
+    assert view.run_view("https://docs.example/guide.md") == 1
+
+    assert documents == []
+    assert f"Failed to read https://docs.example/guide.md: {reason}" in capsys.readouterr().err
+
+
+def _run_viewer(monkeypatch, exercise) -> None:
+    """Patch ``App.run`` so ``exercise(pilot, app)`` runs under ``run_test``."""
+
+    def run(app):
+        async def session():
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                await exercise(pilot, app)
+
+        asyncio.run(session())
+
+    monkeypatch.setattr(App, "run", run)
+
+
+def test_viewer_opens_a_github_item_link_without_launching_anything(monkeypatch):
+    from view_fake import ISSUE_URL
+
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes()))
+    launched = []
+    monkeypatch.setattr(launcher, "open_in_browser", lambda *args, **kwargs: launched.append(args))
+    app = view._MarkdownApp(view.Document("# Analysis", "file:///analysis.md"), "xdg-open", False)
+    shown = []
+
+    async def exercise(pilot, app):
+        await app.follow(ISSUE_URL)
+        shown.append(app.query_one(view._DocumentViewer).document.source)
+        shown.append(app.query_one("#status", Static).render().plain)
+        shown.append("b" in app.screen.active_bindings)
+
+    _run_viewer(monkeypatch, exercise)
+    app.run()
+
+    assert shown[0].startswith("# Crash on startup\n")
+    assert shown[1] == ""
+    assert shown[2] is True
+    assert launched == []

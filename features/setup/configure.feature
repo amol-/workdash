@@ -14,7 +14,8 @@ Feature: First-time configuration
     - The configuration lives at ~/.config/workdash/config.json.
     - Required configuration fields are the GitHub username, open command, at least one repository selector, the work directory, the todo repository, and at least one agent.
     - Every required field must be present for the system to start; the wizard backfills missing required fields, using a default when one exists.
-    - The analysis viewer is required; the wizard defaults to `workdash mdview` for Markdown in a terminal pane.
+    - The analysis viewer is required; the wizard defaults to `workdash view` for Markdown in a terminal pane.
+    - A configuration naming the removed `workdash mdview` or `workdash markdownview` viewer is repaired to the default `workdash view`.
     - When the open command is missing, malformed, or its executable is unavailable, the wizard prompts until a valid executable command is supplied, allowing arguments and explicit executable paths.
     - The wizard suggests only an available platform opener: `xdg-open` on Linux or `open` on macOS, explicitly explaining that Enter accepts it. Without a suggestion, empty input is rejected.
     - For a missing or invalid viewer terminal choice, the wizard asks "Does the viewer require its own terminal window? [y/N]", defaulting to No and preserving explicit boolean choices.
@@ -208,6 +209,13 @@ Feature: First-time configuration
     Then startup directs the user to run --configure
     And the wizard asks for an analysis viewer and saves the default
     And the other configuration settings are preserved
+
+  @id:F-SETUP-CONFIGURE-S023
+  Scenario: Repair a configuration naming the removed Markdown viewer
+    Given the user has a configuration naming the removed Markdown viewer
+    When the user runs the system with "--configure"
+    Then the wizard asks for the analysis viewer with the single view command default
+    And the saved analysis viewer uses Markdown in a terminal pane
 
   @id:F-SETUP-CONFIGURE-S020
   Scenario: Accept the default analysis viewer

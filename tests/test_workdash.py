@@ -30,7 +30,7 @@ def _fake_dashboard_server(monkeypatch):
 _VALID_CONFIG = WorkdashConfig(
     github_username="testuser",
     open_command="xdg-open",
-    analysis_viewer={"command": "workdash mdview", "format": "markdown", "needs_pane": True},
+    analysis_viewer={"command": "workdash view", "format": "markdown", "needs_pane": True},
     agents={
         "codex": AgentConfig(analyze="codex exec", launch="codex"),
         "claude": AgentConfig(analyze="claude -p", launch="claude"),
