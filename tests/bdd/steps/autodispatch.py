@@ -43,7 +43,7 @@ def autodispatch_state(monkeypatch):
     calls = []
     panes = []
 
-    def dispatch(*, scope, agent, group, before_launch):
+    def dispatch(*, scope, agent, group, before_launch, on_ready):
         events.append(("dispatch", scope))
         calls.append((scope, group))
         if scope == "owner/empty":
@@ -295,6 +295,8 @@ def restart_failed(autodispatch_state, monkeypatch):
     monkeypatch.setattr(
         session, "dispatch_once", MagicMock(return_value={"status": "no_ready_task"})
     )
+    monkeypatch.setattr(session, "_require_item", lambda scope: make_work_item(number=42))
+    session.backend.github_client.open_issue_blockers.return_value = []
     session.start_autodispatch(scope="owner/repo#ISSUE-42")
 
 
@@ -533,11 +535,17 @@ def dashboard_press_dispatch(scenario_state):
             await pilot.pause(0.02)
             status = footer.render().plain
             if scenario_state.get("expect_no_ready"):
-                if "no work available to dispatch" in status.lower():
+                if (
+                    "no work available to dispatch" in status.lower()
+                    or "blocked by" in status.lower()
+                ):
                     break
             elif status != before:
                 break
         scenario_state["dispatch_status"] = footer.render().plain
+        scenario_state["dispatch_progress"] = (
+            app.query_one("#autodispatch-progress", Static).render().plain
+        )
 
     run_app(work_items=[item], session=session, interactions=interact)
 
@@ -591,6 +599,15 @@ def dashboard_no_ready_tasks(scenario_state):
     status = scenario_state["dispatch_status"].lower()
     assert "no work available to dispatch" in status
     assert "other/repo#3" in status
+
+
+@then("the dashboard reports that the issue is blocked by its open dependency")
+def dashboard_blocked_by_dependency(scenario_state):
+    assert "blocked by other/repo#4" in scenario_state["dispatch_status"].lower()
+    assert "blocked by other/repo#4" in scenario_state["dispatch_progress"].lower()
+    snapshot = scenario_state["dashboard_session"].autodispatch_sessions()[0]
+    assert snapshot["outcome"] == "blocked by other/repo#4"
+    assert not scenario_state.get("agent_launches")
 
 
 @then("the dashboard reports that the pull request has no linked issue and starts no session")
@@ -1301,3 +1318,45 @@ def work_item_bar_restored(autodispatch_state):
     assert "(f)ocus" not in autodispatch_state["restored_hint"]
     assert "(v)iew" in autodispatch_state["restored_hint"]
     assert "(m)erge" in autodispatch_state["restored_hint"]
+
+
+@given("an issue blocked by an open issue in another repository")
+def cross_repo_blocker(dashboard_dispatch, scenario_state):
+    github = scenario_state["github"]
+    github.add_issue("another/repo#5")
+    github.issues["other/repo#3"]["blocked_by"] = ("another/repo#5",)
+
+
+@when("the user starts autodispatch for the issue with JSON output")
+def start_blocked_json(scenario_state, monkeypatch, capsys):
+    from webob import Request
+
+    from workdash.control import _make_turbogears_app
+    from workdash.workdash import main
+
+    app = _make_turbogears_app(scenario_state["dashboard_session"])
+
+    def request(endpoint, payload):
+        response = Request.blank(
+            f"/api/v0/{endpoint}",
+            method="POST",
+            content_type="application/json",
+            body=json.dumps(payload).encode(),
+        ).get_response(app)
+        assert response.status_int == 200
+        return json.loads(response.body)["result"]
+
+    monkeypatch.setattr(
+        "workdash.workdash.WorkdashControlClient",
+        lambda *args, **kwargs: MagicMock(request=request),
+    )
+    scenario_state["cli_exit"] = main(["autodispatch", "other/repo#3", "--json"])
+    scenario_state["cli_result"] = json.loads(capsys.readouterr().out)
+
+
+@then("the JSON result reports the blocking issue")
+def blocked_json_result(scenario_state):
+    assert scenario_state["cli_exit"] == 0
+    assert scenario_state["cli_result"]["status"] == "finished"
+    assert scenario_state["cli_result"]["outcome"] == "blocked by another/repo#5"
+    assert not scenario_state.get("agent_launches")

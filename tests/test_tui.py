@@ -97,6 +97,79 @@ def test_dashboard_todo_type_and_search() -> None:
     asyncio.run(exercise())
 
 
+def test_dashboard_reports_finished_blocker_at_startup() -> None:
+    session = MagicMock()
+    session.config = _DEFAULT_TUI_CONFIG
+    session.work_items = []
+    session.suggestion_markers = {}
+    session.busy_message.return_value = None
+    session.autodispatch_sessions.return_value = [
+        {
+            "id": "session-1",
+            "status": "finished",
+            "scope": "owner/repo#ISSUE-42",
+            "current_item": None,
+            "iteration": 1,
+            "outcome": "blocked by other/repo#4",
+        }
+    ]
+    app = WorkdashApp(session=session)
+
+    async def exercise() -> None:
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+            assert "blocked by other/repo#4" in footer.render().plain
+            await pilot.pause(1.2)
+            assert "blocked by other/repo#4" in footer.render().plain
+
+    asyncio.run(exercise())
+
+
+def test_dashboard_preserves_blocker_reported_during_start() -> None:
+    session = MagicMock()
+    session.config = _DEFAULT_TUI_CONFIG
+    session.work_items = []
+    session.suggestion_markers = {}
+    session.busy_message.return_value = None
+    session.autodispatch_sessions.return_value = []
+    app = WorkdashApp(session=session)
+    started = {"id": "session-1", "scope": "owner/repo#ISSUE-42"}
+    finished = {
+        **started,
+        "status": "finished",
+        "current_item": None,
+        "iteration": 1,
+        "outcome": "blocked by other/repo#4",
+    }
+
+    async def exercise() -> None:
+        async with app.run_test():
+            starting = asyncio.Event()
+            release = asyncio.Event()
+
+            async def start_with_busy_screen(**kwargs):
+                starting.set()
+                await release.wait()
+                return started
+
+            app._run_with_busy_screen = start_with_busy_screen
+            task = asyncio.create_task(app._start_dashboard_dispatch(MagicMock(), "claude"))
+            await starting.wait()
+            session.autodispatch_sessions.return_value = [finished]
+            await app._poll_autodispatch_progress()
+            assert (
+                "blocked by other/repo#4" in app.query_one("#status-footer", Static).render().plain
+            )
+            release.set()
+            await task
+            await app._poll_autodispatch_progress()
+            assert (
+                "blocked by other/repo#4" in app.query_one("#status-footer", Static).render().plain
+            )
+
+    asyncio.run(exercise())
+
+
 def test_dashboard_initial_layout_and_shortcuts() -> None:
     items = _search_work_items()
     items[0] = replace(items[0], title="Long title " * 15)
@@ -3977,9 +4050,11 @@ def test_autodispatch_dispatch_iterations_leave_the_dashboard_interactive(monkey
     dispatching, release = threading.Event(), threading.Event()
 
     def find_ready_work(**_kwargs):
+        from workdash.work_state import ScopedReadyWork
+
         dispatching.set()
         release.wait(5)
-        return []
+        return ScopedReadyWork([])
 
     session.backend.github_client.find_ready_work.side_effect = find_ready_work
     monkeypatch.setattr(launcher_module, "zellij", MagicMock(list_workdash_panes=lambda _: []))

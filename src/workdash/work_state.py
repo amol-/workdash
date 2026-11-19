@@ -116,6 +116,14 @@ class ReadyWork:
         return (self.item,)
 
 
+@dataclass(frozen=True, slots=True)
+class ScopedReadyWork:
+    """Ready candidates and the issue defining their scope, if any."""
+
+    items: list[ReadyWork]
+    scope_issue: IssueWorkState | None = None
+
+
 def select_ready_work(
     issues: list[IssueWorkState],
     states: dict[tuple[str, int], PullRequestWorkState],

@@ -20,7 +20,6 @@ from collections.abc import Callable, Collection, Iterator, Sequence
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager, suppress
 from datetime import UTC, datetime
-from functools import partial
 from http import HTTPStatus
 from ipaddress import IPv4Address, ip_address, ip_network
 from pathlib import Path
@@ -62,7 +61,7 @@ from .repo_worktree import (
 )
 from .review import review_pull_request
 from .work_instruction import autostart_briefing
-from .work_state import ReadyWork
+from .work_state import ReadyWork, ScopedReadyWork
 
 logger = logging.getLogger(__name__)
 
@@ -1062,7 +1061,7 @@ class WorkdashSession:
             return {
                 "scope": scope,
                 "items": [
-                    _ready_work_payload(work) for work in self._ready(scope, fail_unconfirmed)
+                    _ready_work_payload(work) for work in self._ready(scope, fail_unconfirmed).items
                 ],
             }
 
@@ -1073,7 +1072,7 @@ class WorkdashSession:
         *,
         include_shared_pr_issues: bool = False,
         panes: Sequence[dict[str, object]] | None = None,
-    ) -> list[ReadyWork]:
+    ) -> ScopedReadyWork:
         """Return the ready work of a scope; ``panes`` overrides the live panes that claim it."""
 
         issue = None
@@ -1100,7 +1099,7 @@ class WorkdashSession:
             item = self._require_item(scope)
             repositories, issue = [], (item.repo, item.number)
         try:
-            candidates = self.backend.github_client.find_ready_work(
+            readiness = self.backend.github_client.find_ready_work(
                 repositories=repositories,
                 issue=issue,
                 github_username=self.config.github_username,
@@ -1117,7 +1116,7 @@ class WorkdashSession:
             panes = self._live_panes() if panes is None else panes
             now = time.monotonic()
             if fail_unconfirmed:
-                for work in candidates:
+                for work in readiness.items:
                     for claim in work.claims:
                         path = existing_worktree_path(self.config.workdir, claim, git=self.git)
                         if path is not None:
@@ -1127,7 +1126,7 @@ class WorkdashSession:
             # An agent launch `code` has not confirmed yet holds its worktree too.
             unclaimed = [
                 work
-                for work in candidates
+                for work in readiness.items
                 if not any(
                     (path := existing_worktree_path(self.config.workdir, claim, git=self.git))
                     is not None
@@ -1138,7 +1137,7 @@ class WorkdashSession:
                     for claim in work.claims
                 )
             ]
-        return unclaimed
+        return ScopedReadyWork(unclaimed, readiness.scope_issue)
 
     def start_autodispatch(
         self,
@@ -1175,7 +1174,7 @@ class WorkdashSession:
                 del self._autodispatch[old.id]
             self._autodispatch[entry.id] = entry
             entry.thread.start()
-        return entry.snapshot()
+        return {**entry.snapshot(), "issue_scope": isinstance(identity, tuple)}
 
     def start_autodispatch_for_item(
         self, item: WorkItem, *, agent: str | None = None
@@ -1233,7 +1232,9 @@ class WorkdashSession:
             # Local panes are ignored: the pane this session is about to close must not
             # hide the work it holds.
             ready = self._ready(item_id, True, panes=[])
-            work = next((work for work in ready if format_work_item_id(work.item) == item_id), None)
+            work = next(
+                (work for work in ready.items if format_work_item_id(work.item) == item_id), None
+            )
             if work is None:
                 return
             # The agent may work in a worktree named after the pull request or a linked
@@ -1374,6 +1375,11 @@ class WorkdashSession:
         with self._autodispatch_lock:
             return [entry.snapshot() for entry in self._autodispatch.values()]
 
+    def autodispatch_status(self, session_id: str) -> dict[str, object]:
+        with self._autodispatch_lock:
+            entry = self._autodispatch.get(session_id)
+            return {"session": entry.snapshot() if entry else None}
+
     def toggle_automerge(self, session_id: str) -> bool:
         with self._autodispatch_lock:
             entry = self._autodispatch[session_id]
@@ -1408,19 +1414,30 @@ class WorkdashSession:
         agent: str | None = None,
         group: str | None = None,
         before_launch: Callable[[str], None] | None = None,
+        on_ready: Callable[[], None] | None = None,
     ) -> dict[str, object]:
         """Launch at most one currently ready issue, in ready order."""
         if group is not None and (not isinstance(group, str) or not group.strip()):
             raise WorkdashControlError(
                 "bad_request", "Group must be a non-empty string.", status=HTTPStatus.BAD_REQUEST
             )
-        candidates = self._ready(scope, True, include_shared_pr_issues=True)
-        for candidate in candidates:
+        readiness = self._ready(
+            scope,
+            True,
+            include_shared_pr_issues=True,
+        )
+        if (
+            readiness.items
+            and on_ready
+            and not (readiness.scope_issue and readiness.scope_issue.blocked)
+        ):
+            on_ready()
+        for candidate in readiness.items:
             candidate_id = format_work_item_id(candidate.item)
             had_pull_request = candidate.pull_request is not None
             current = self._ready(candidate_id, True)
             candidate = next(
-                (work for work in current if format_work_item_id(work.item) == candidate_id),
+                (work for work in current.items if format_work_item_id(work.item) == candidate_id),
                 None,
             )
             if candidate is None or (had_pull_request and candidate.pull_request is None):
@@ -1429,6 +1446,13 @@ class WorkdashSession:
                 candidate.pull_request.item if candidate.pull_request else candidate.item
             )
             selected_group = group or _default_group(implementation)
+
+            def notify_before_launch(item_id: str = candidate_id) -> None:
+                if before_launch:
+                    before_launch(item_id)
+                if on_ready:
+                    on_ready()
+
             launch = self.code(
                 target=candidate_id,
                 agent=agent,
@@ -1436,14 +1460,20 @@ class WorkdashSession:
                 autostart=True,
                 autoclose=True,
                 include_launch_reason=True,
-                **(
-                    {"before_launch": partial(before_launch, candidate_id)} if before_launch else {}
-                ),
+                **({"before_launch": notify_before_launch} if before_launch or on_ready else {}),
             )
             if launch["status"] == "already_running":
                 continue
             return {**_ready_work_payload(candidate), **launch, "group": selected_group}
-        return {"status": "no_ready_task", "scope": scope}
+        result = {"status": "no_ready_task", "scope": scope}
+        if (
+            readiness.scope_issue
+            and readiness.scope_issue.is_open
+            and readiness.scope_issue.blocked
+        ):
+            item = readiness.scope_issue.item
+            result["blocked_issue"] = (item.repo, item.number)
+        return result
 
     def pane_content(self, *, pane_id: str, full: bool = False) -> dict[str, object]:
         """Return visible or full scrollback content for a Zellij pane."""
@@ -2118,11 +2148,19 @@ def _make_turbogears_app(session: WorkdashSession):
             return _handle_json_request(
                 request,
                 response,
-                lambda payload: self._session.dispatch_once(
-                    scope=_required_text(payload, "scope"),
-                    agent=_optional_text(payload, "agent"),
-                    **({"group": _required_text(payload, "group")} if "group" in payload else {}),
-                ),
+                lambda payload: {
+                    key: value
+                    for key, value in self._session.dispatch_once(
+                        scope=_required_text(payload, "scope"),
+                        agent=_optional_text(payload, "agent"),
+                        **(
+                            {"group": _required_text(payload, "group")}
+                            if "group" in payload
+                            else {}
+                        ),
+                    ).items()
+                    if key != "blocked_issue"
+                },
             )
 
         @expose("json")
@@ -2136,6 +2174,14 @@ def _make_turbogears_app(session: WorkdashSession):
                     agent=_optional_text(payload, "agent"),
                     automerge=_optional_bool(payload, "automerge"),
                 ),
+            )
+
+        @expose("json")
+        def autodispatch_status(self):
+            return _handle_json_request(
+                request,
+                response,
+                lambda payload: self._session.autodispatch_status(_required_text(payload, "id")),
             )
 
         @expose("json")

@@ -113,7 +113,9 @@ def test_running_ready_descendant_is_not_reported_as_missing(scenario_state, mon
     scenario_state["panes"].append(
         {"id": 42, "title": "code_other_repo_4", "pane_cwd": str(worktree)}
     )
-    assert [work.item.number for work in session._ready("other/repo#3", True, panes=[])] == [4]
+    assert [work.item.number for work in session._ready("other/repo#3", True, panes=[]).items] == [
+        4
+    ]
     app = WorkdashApp(session=session)
 
     async def exercise():
@@ -207,3 +209,349 @@ def test_dashboard_selects_agent_or_cancels(scenario_state, monkeypatch, tmp_pat
             assert "merge conflicts" in scenario_state["agent_launches"][1][1]
 
     asyncio.run(exercise())
+
+
+@pytest.mark.usefixtures("dashboard_dispatch")
+def test_blocker_is_reported_by_cli_and_info(scenario_state, capsys, monkeypatch):
+    import json
+    from unittest.mock import MagicMock
+
+    from webob import Request
+
+    from workdash.control import _make_turbogears_app
+    from workdash.workdash import WorkdashCommands, _print_pane_info
+
+    session = scenario_state["dashboard_session"]
+    github = scenario_state["github"]
+    github.add_issue("other/repo#4", state="CLOSED")
+    github.add_issue("another/repo#5")
+    github.issues["other/repo#3"]["blocked_by"] = ("other/repo#4", "another/repo#5")
+    github.page_size = 1
+    start = session.start_autodispatch
+
+    def start_before_initial_check(**kwargs):
+        result = start(**kwargs)
+        result["initial_check_complete"] = False
+        return result
+
+    monkeypatch.setattr(session, "start_autodispatch", start_before_initial_check)
+    monkeypatch.setattr(
+        session, "info", MagicMock(side_effect=RuntimeError("pane info unavailable"))
+    )
+    app = _make_turbogears_app(session)
+
+    def request(endpoint, payload):
+        response = Request.blank(
+            f"/api/v0/{endpoint}",
+            method="POST",
+            content_type="application/json",
+            body=json.dumps(payload).encode(),
+        ).get_response(app)
+        assert response.status_int == 200
+        return json.loads(response.body)["result"]
+
+    commands = WorkdashCommands()
+    commands._client = MagicMock(request=request)
+    assert (
+        commands.autodispatch_cli(
+            target="other/repo#3", agent="pi", group=None, stop=False, json_output=False
+        )
+        == 0
+    )
+    assert "blocked by another/repo#5" in capsys.readouterr().out
+    snapshot = session.autodispatch_sessions()[0]
+    assert snapshot["status"] == "finished"
+    assert snapshot["outcome"] == "blocked by another/repo#5"
+    _print_pane_info({"session": "workdash", "panes": [], "autodispatch_sessions": [snapshot]})
+    assert "blocked by another/repo#5" in capsys.readouterr().out
+
+
+@pytest.mark.usefixtures("dashboard_dispatch")
+@pytest.mark.parametrize("state", ["closed", "unblocked", "blocked"])
+def test_no_ready_issue_reports_blocker_check_failure(scenario_state, monkeypatch, state):
+    session = scenario_state["dashboard_session"]
+    github = scenario_state["github"]
+    github.add_issue("other/repo#4")
+    if state == "closed":
+        github.issues["other/repo#3"]["state"] = "CLOSED"
+        github.issues["other/repo#3"]["blocked_by"] = ("other/repo#4",)
+    elif state == "unblocked":
+        github.pull_requests["owner/repo#9"]["author"] = "someone-else"
+    else:
+        github.issues["other/repo#3"]["blocked_by"] = ("other/repo#4",)
+
+    client = session.backend.github_client
+    from unittest.mock import MagicMock
+
+    check = MagicMock(side_effect=RuntimeError("GitHub unavailable"))
+    monkeypatch.setattr(client, "open_issue_blockers", check)
+    result = session.start_autodispatch(scope="other/repo#3")
+    deadline = time.monotonic() + 2
+    while not result["initial_check_complete"]:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+        result = session.autodispatch_sessions()[0]
+    if state == "blocked":
+        assert result["status"] == "failed"
+        assert "GitHub unavailable" in result["error"]
+        check.assert_called_once()
+    else:
+        assert result["status"] == "finished"
+        assert result["outcome"] is None
+        check.assert_not_called()
+
+
+@pytest.mark.usefixtures("dashboard_dispatch")
+def test_blockers_clear_after_readiness(scenario_state, monkeypatch):
+    session = scenario_state["dashboard_session"]
+    github = scenario_state["github"]
+    github.add_issue("other/repo#4")
+    github.issues["other/repo#3"]["blocked_by"] = ("other/repo#4",)
+    query = github._IssueBlockers
+
+    def clear_blocker(query_text):
+        github.issues["other/repo#4"]["state"] = "CLOSED"
+        return query(query_text)
+
+    monkeypatch.setattr(github, "_IssueBlockers", clear_blocker)
+    result = session.start_autodispatch(scope="other/repo#3")
+    deadline = time.monotonic() + 2
+    while not result["initial_check_complete"]:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+        result = session.autodispatch_sessions()[0]
+    assert result["status"] == "finished"
+    assert result["outcome"] is None
+
+
+@pytest.mark.usefixtures("dashboard_dispatch")
+@pytest.mark.parametrize("json_output", [False, True])
+def test_blocker_lookup_failure_is_reported(scenario_state, monkeypatch, capsys, json_output):
+    import json
+    from unittest.mock import MagicMock
+
+    from webob import Request
+
+    from workdash.control import _make_turbogears_app
+    from workdash.workdash import main
+
+    session = scenario_state["dashboard_session"]
+    github = scenario_state["github"]
+    github.add_issue("other/repo#4")
+    github.issues["other/repo#3"]["blocked_by"] = ("other/repo#4",)
+
+    def fail(query):
+        raise RuntimeError("GitHub unavailable")
+
+    monkeypatch.setattr(github, "_IssueBlockers", fail)
+    app = _make_turbogears_app(session)
+
+    def request(endpoint, payload):
+        response = Request.blank(
+            f"/api/v0/{endpoint}",
+            method="POST",
+            content_type="application/json",
+            body=json.dumps(payload).encode(),
+        ).get_response(app)
+        assert response.status_int == 200
+        return json.loads(response.body)["result"]
+
+    monkeypatch.setattr(
+        "workdash.workdash.WorkdashControlClient",
+        lambda *args, **kwargs: MagicMock(request=request),
+    )
+    args = ["autodispatch", "other/repo#3"] + (["--json"] if json_output else [])
+    assert main(args) == 1
+    output = capsys.readouterr()
+    if json_output:
+        result = json.loads(output.out)
+        assert result["status"] == "failed"
+        assert "GitHub unavailable" in result["error"]
+    else:
+        assert "GitHub unavailable" in output.out + output.err
+
+
+@pytest.mark.usefixtures("dashboard_dispatch")
+@pytest.mark.parametrize("seen_running", [False, True])
+def test_cli_session_blocker_reaches_dashboard_status_once(scenario_state, seen_running):
+    session = scenario_state["dashboard_session"]
+    github = scenario_state["github"]
+    github.add_issue("other/repo#4")
+    github.issues["other/repo#3"]["blocked_by"] = ("other/repo#4",)
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            if seen_running:
+                # Hold the initial lookup until the dashboard observes the new session.
+                import threading
+                from unittest.mock import patch
+
+                ready = threading.Event()
+                original = session.dispatch_once
+                with patch.object(
+                    session,
+                    "dispatch_once",
+                    side_effect=lambda **kw: (ready.wait(2), original(**kw))[1],
+                ):
+                    session.start_autodispatch(scope="other/repo#3")
+                    await app._poll_autodispatch_progress()
+                    ready.set()
+                    for _ in range(100):
+                        if session.autodispatch_sessions()[0]["status"] == "finished":
+                            break
+                        await pilot.pause(0.02)
+            else:
+                session.start_autodispatch(scope="other/repo#3")
+                for _ in range(100):
+                    if session.autodispatch_sessions()[0]["status"] == "finished":
+                        break
+                    await pilot.pause(0.02)
+            await app._poll_autodispatch_progress()
+            assert (
+                "blocked by other/repo#4" in app.query_one("#status-footer", Static).render().plain
+            )
+            app._update_status("Other status")
+            await app._poll_autodispatch_progress()
+            assert app.query_one("#status-footer", Static).render().plain == "Other status"
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.usefixtures("dashboard_dispatch")
+def test_no_ready_issue_with_only_closed_blocker(scenario_state):
+    session = scenario_state["dashboard_session"]
+    github = scenario_state["github"]
+    github.add_issue("other/repo#4", state="CLOSED")
+    github.issues["other/repo#3"]["blocked_by"] = ("other/repo#4",)
+    github.pull_requests["owner/repo#9"]["author"] = "someone-else"
+    session.start_autodispatch(scope="other/repo#3")
+    deadline = time.monotonic() + 2
+    while not (result := session.autodispatch_sessions()[0])["initial_check_complete"]:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert result["status"] == "finished"
+    assert result["outcome"] is None
+
+
+@pytest.mark.usefixtures("dashboard_dispatch")
+def test_cli_issue_readiness_failure_exits_nonzero(scenario_state, monkeypatch, capsys):
+    import json
+    from unittest.mock import MagicMock
+
+    from webob import Request
+
+    from workdash.control import _make_turbogears_app
+    from workdash.workdash import main
+
+    session = scenario_state["dashboard_session"]
+    monkeypatch.setattr(
+        session, "dispatch_once", MagicMock(side_effect=RuntimeError("readiness unavailable"))
+    )
+    app = _make_turbogears_app(session)
+
+    def request(endpoint, payload):
+        response = Request.blank(
+            f"/api/v0/{endpoint}",
+            method="POST",
+            content_type="application/json",
+            body=json.dumps(payload).encode(),
+        ).get_response(app)
+        assert response.status_int == 200
+        return json.loads(response.body)["result"]
+
+    monkeypatch.setattr(
+        "workdash.workdash.WorkdashControlClient",
+        lambda *args, **kwargs: MagicMock(request=request),
+    )
+    assert main(["autodispatch", "other/repo#3"]) == 1
+    assert "readiness unavailable" in capsys.readouterr().err
+
+
+@pytest.mark.usefixtures("dashboard_dispatch")
+def test_cli_repository_scope_does_not_poll(scenario_state, monkeypatch, capsys):
+    import json
+    import threading
+    from unittest.mock import MagicMock
+
+    from webob import Request
+
+    from workdash.control import _make_turbogears_app
+    from workdash.workdash import main
+
+    session = scenario_state["dashboard_session"]
+    ready = threading.Event()
+    monkeypatch.setattr(
+        session, "dispatch_once", lambda **kwargs: (ready.wait(2), {"status": "no_ready_task"})[1]
+    )
+    app = _make_turbogears_app(session)
+    endpoints = []
+
+    def request(endpoint, payload):
+        endpoints.append(endpoint)
+        response = Request.blank(
+            f"/api/v0/{endpoint}",
+            method="POST",
+            content_type="application/json",
+            body=json.dumps(payload).encode(),
+        ).get_response(app)
+        assert response.status_int == 200
+        return json.loads(response.body)["result"]
+
+    monkeypatch.setattr(
+        "workdash.workdash.WorkdashControlClient",
+        lambda *args, **kwargs: MagicMock(request=request),
+    )
+    try:
+        assert main(["autodispatch", "owner/repo"]) == 0
+        assert endpoints == ["autodispatch"]
+        assert "running" in capsys.readouterr().out
+    finally:
+        ready.set()
+
+
+@pytest.mark.usefixtures("dashboard_dispatch")
+@pytest.mark.parametrize("json_output", [False, True])
+def test_cli_stops_failed_session_successfully(scenario_state, monkeypatch, capsys, json_output):
+    import json
+    from unittest.mock import MagicMock
+
+    from webob import Request
+
+    from workdash.control import _make_turbogears_app
+    from workdash.workdash import main
+
+    session = scenario_state["dashboard_session"]
+    monkeypatch.setattr(
+        session, "dispatch_once", MagicMock(side_effect=RuntimeError("readiness unavailable"))
+    )
+    started = session.start_autodispatch(scope="other/repo#3")
+    deadline = time.monotonic() + 2
+    while session.autodispatch_status(started["id"])["session"]["status"] != "failed":
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    app = _make_turbogears_app(session)
+
+    def request(endpoint, payload):
+        response = Request.blank(
+            f"/api/v0/{endpoint}",
+            method="POST",
+            content_type="application/json",
+            body=json.dumps(payload).encode(),
+        ).get_response(app)
+        assert response.status_int == 200
+        return json.loads(response.body)["result"]
+
+    monkeypatch.setattr(
+        "workdash.workdash.WorkdashControlClient",
+        lambda *args, **kwargs: MagicMock(request=request),
+    )
+    args = ["autodispatch-stop", started["id"]] + (["--json"] if json_output else [])
+    assert main(args) == 0
+    output = capsys.readouterr()
+    if json_output:
+        assert json.loads(output.out)["status"] == "failed"
+        assert "readiness unavailable" in json.loads(output.out)["error"]
+    else:
+        assert "failed" in output.out
+        assert "readiness unavailable" in output.err

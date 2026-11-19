@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -333,6 +334,16 @@ class WorkdashCommands:
             payload["automerge"] = True
         try:
             result = self._client.request("autodispatch_stop" if stop else "autodispatch", payload)
+            if not stop and result.pop("issue_scope", False):
+                session_id = result["id"]
+                while not result["initial_check_complete"]:
+                    time.sleep(0.1)
+                    result = self._client.request("autodispatch_status", {"id": session_id})[
+                        "session"
+                    ]
+                    if result is None:
+                        print("Autodispatch session was replaced or removed.", file=sys.stderr)
+                        return 1
         except WorkdashControlError as error:
             _print_control_error(error)
             return 1
@@ -342,7 +353,11 @@ class WorkdashCommands:
             print(
                 f"Autodispatch {result['id']}: {result['status']} ({result['scope']}, {result['group'] or 'automatic'})"
             )
-        return 0
+            if result.get("outcome"):
+                print(result["outcome"])
+            if result.get("error"):
+                print(f"Error: {result['error']}", file=sys.stderr, flush=True)
+        return 1 if not stop and result["status"] == "failed" else 0
 
     def todo_cli(
         self,
@@ -1190,6 +1205,8 @@ def _print_pane_info(info: dict[str, object]) -> None:
         )
         if entry.get("error"):
             print(f"  Error: {entry['error']}")
+        if entry.get("outcome"):
+            print(f"  {entry['outcome']}")
     if not panes:
         print("No Workdash-owned panes found.")
         return
