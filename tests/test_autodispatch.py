@@ -25,7 +25,7 @@ from workdash.control import WorkdashControlError, WorkdashSession, _make_turbog
 from workdash.github_client import GitHubClient
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import _MAX_PROGRESS_ERROR_WIDTH, WorkdashApp
-from workdash.work_state import ReadyWork
+from workdash.work_state import ReadyWork, ScopedReadyWork
 
 
 def _issue_item(number: int) -> WorkItem:
@@ -1247,7 +1247,13 @@ def test_cli_starts_and_stops_through_server(monkeypatch, capsys):
     )
     assert json.loads(capsys.readouterr().out)["id"] == "abc"
     client.request.assert_called_with(
-        "autodispatch", {"scope": "owner/repo", "group": "team", "agent": "pi", "automerge": True}
+        "autodispatch",
+        {
+            "scope": "owner/repo",
+            "group": "team",
+            "agent": "pi",
+            "automerge": True,
+        },
     )
     assert main(["autodispatch-stop", "abc"]) == 0
     client.request.assert_called_with("autodispatch_stop", {"id": "abc"})
@@ -1808,11 +1814,11 @@ def test_autodispatch_review_feedback_cycle(monkeypatch, tmp_path):
 
         def find_ready_work(self, **kwargs):
             if self.stale_ready and not self.resolved:
-                return [ReadyWork(issue)]
+                return ScopedReadyWork([ReadyWork(issue)])
             state = self.work_pull_request(issue)
             if state is None:
-                return [ReadyWork(issue)]
-            return [ReadyWork(issue, state)] if state.ready else []
+                return ScopedReadyWork([ReadyWork(issue)])
+            return ScopedReadyWork([ReadyWork(issue, state)] if state.ready else [])
 
         def work_pull_request(self, item, **kwargs):
             if not self.opened:
@@ -2029,7 +2035,9 @@ def test_explicit_issue_does_not_dispatch_if_pane_close_is_unconfirmed(monkeypat
         suggestion_markers={},
         zellij_session="workdash",
     )
-    monkeypatch.setattr(session, "_ready", MagicMock(return_value=[ReadyWork(item=item)]))
+    monkeypatch.setattr(
+        session, "_ready", MagicMock(return_value=ScopedReadyWork([ReadyWork(item=item)]))
+    )
     monkeypatch.setattr("workdash.control.existing_worktree_path", lambda *a, **kw: str(tmp_path))
     pane = {"id": 7, "title": f"code_{tmp_path.name}", "exited": False}
     monkeypatch.setattr(session, "_live_panes", lambda: [pane])
@@ -2085,7 +2093,9 @@ def test_prepare_autodispatch_closes_agent_pane_in_a_pull_request_worktree(monke
         feedback=(),
     )
     monkeypatch.setattr(
-        session, "_ready", MagicMock(return_value=[ReadyWork(item=item, pull_request=state)])
+        session,
+        "_ready",
+        MagicMock(return_value=ScopedReadyWork([ReadyWork(item=item, pull_request=state)])),
     )
     # Both the issue and the pull request have a worktree, and the agent works in the
     # pull request one.
@@ -2746,11 +2756,11 @@ def test_automerge_retries_conflicting_pull_request(monkeypatch, permission_erro
     ]
     ready = MagicMock(
         side_effect=[
-            [ReadyWork(issue)],
-            [ReadyWork(issue)],
-            [ReadyWork(issue, state)],
-            [ReadyWork(issue, state)],
-            [],
+            ScopedReadyWork([ReadyWork(issue)]),
+            ScopedReadyWork([ReadyWork(issue)]),
+            ScopedReadyWork([ReadyWork(issue, state)]),
+            ScopedReadyWork([ReadyWork(issue, state)]),
+            ScopedReadyWork([]),
         ]
     )
     monkeypatch.setattr(owner, "_ready", ready)
@@ -3724,3 +3734,267 @@ def test_tui_empty_dispatch_chooser_does_not_start_session():
             assert session.autodispatch_sessions() == []
 
     asyncio.run(exercise())
+
+
+def test_initial_check_returns_before_slow_preparation_for_unblocked_issue(monkeypatch):
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    issue = _issue_item(1)
+    scope_issue = SimpleNamespace(item=issue, is_open=True, blocked=False)
+    monkeypatch.setattr(session, "prepare_autodispatch", lambda _: None)
+    monkeypatch.setattr(
+        session, "_ready", lambda *args, **kwargs: ScopedReadyWork([ReadyWork(issue)], scope_issue)
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_code(**kwargs):
+        entered.set()
+        assert release.wait(3)
+        return {"status": "already_running"}
+
+    monkeypatch.setattr(session, "code", slow_code)
+    started = session.start_autodispatch(scope="owner/repo#1", agent="pi")
+    entry = session._autodispatch[started["id"]]
+    try:
+        assert entered.wait(1)
+        assert entry.initial_check.wait(0.2)
+    finally:
+        release.set()
+        entry.thread.join(3)
+
+
+def test_initial_check_waits_for_blocker_when_candidate_disappears(monkeypatch):
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    issue = _issue_item(1)
+    child = _issue_item(2)
+    scope_issue = SimpleNamespace(item=issue, is_open=True, blocked=True)
+    monkeypatch.setattr(session, "prepare_autodispatch", lambda _: None)
+    monkeypatch.setattr(
+        session,
+        "_ready",
+        MagicMock(
+            side_effect=[ScopedReadyWork([ReadyWork(child)], scope_issue), ScopedReadyWork([])]
+        ),
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blockers(*args):
+        entered.set()
+        assert release.wait(3)
+        return ["owner/repo#3"]
+
+    session.backend.github_client.open_issue_blockers.side_effect = blockers
+    started = session.start_autodispatch(scope="owner/repo#1", agent="pi")
+    entry = session._autodispatch[started["id"]]
+    try:
+        assert entered.wait(1)
+        assert not entry.initial_check.is_set()
+    finally:
+        release.set()
+        entry.thread.join(3)
+    assert entry.initial_check.is_set()
+    assert entry.snapshot()["outcome"] == "blocked by owner/repo#3"
+
+
+def test_initial_check_waits_for_blocker_when_candidate_is_claimed(monkeypatch):
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    issue = _issue_item(1)
+    child = _issue_item(2)
+    scope_issue = SimpleNamespace(item=issue, is_open=True, blocked=True)
+    monkeypatch.setattr(session, "prepare_autodispatch", lambda _: None)
+    monkeypatch.setattr(
+        session, "_ready", lambda *args, **kwargs: ScopedReadyWork([ReadyWork(child)], scope_issue)
+    )
+    monkeypatch.setattr(session, "code", lambda **kwargs: {"status": "already_running"})
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blockers(*args):
+        entered.set()
+        assert release.wait(3)
+        return ["owner/repo#3"]
+
+    session.backend.github_client.open_issue_blockers.side_effect = blockers
+    started = session.start_autodispatch(scope="owner/repo#1", agent="pi")
+    entry = session._autodispatch[started["id"]]
+    try:
+        assert entered.wait(1)
+        assert not entry.initial_check.is_set()
+    finally:
+        release.set()
+        entry.thread.join(3)
+    assert entry.snapshot()["outcome"] == "blocked by owner/repo#3"
+
+
+def test_repository_start_does_not_wait_for_initial_check(autodispatch_state, monkeypatch):
+    session = autodispatch_state["session"]
+    entered = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+
+    def dispatch(**kwargs):
+        entered.set()
+        release.wait(3)
+        return {"status": "no_ready_task"}
+
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    thread = threading.Thread(
+        target=lambda: (
+            session.start_autodispatch(scope="owner/repo"),
+            returned.set(),
+        )
+    )
+    thread.start()
+    try:
+        assert entered.wait(1)
+        assert returned.wait(1)
+    finally:
+        release.set()
+        thread.join(3)
+
+
+def test_issue_start_request_does_not_block_control_server(autodispatch_state, monkeypatch):
+    from webob import Request
+
+    from workdash.control import _make_turbogears_app
+
+    session = autodispatch_state["session"]
+    entered = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+
+    def dispatch(**kwargs):
+        entered.set()
+        release.wait(3)
+        return {"status": "no_ready_task"}
+
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    app = _make_turbogears_app(session)
+
+    def start():
+        response = Request.blank(
+            "/api/v0/autodispatch",
+            method="POST",
+            content_type="application/json",
+            body=json.dumps({"scope": "owner/repo#1", "wait_initial": True}).encode(),
+        ).get_response(app)
+        assert response.status_int == 200
+        returned.set()
+
+    thread = threading.Thread(target=start)
+    thread.start()
+    try:
+        assert entered.wait(1)
+        assert returned.wait(1)
+    finally:
+        release.set()
+        thread.join(3)
+
+
+def test_issue_cli_returns_while_ready_work_is_launching(autodispatch_state, monkeypatch, capsys):
+    from workdash.workdash import WorkdashCommands
+
+    session = autodispatch_state["session"]
+    monkeypatch.setattr(session, "dispatch_once", WorkdashSession.dispatch_once.__get__(session))
+    monkeypatch.setattr(session, "prepare_autodispatch", lambda scope: None)
+    monkeypatch.setattr(
+        session, "_ready", lambda *args, **kwargs: ScopedReadyWork([ReadyWork(_issue_item(1))])
+    )
+    entered, release, returned = threading.Event(), threading.Event(), threading.Event()
+
+    def code(**kwargs):
+        kwargs["before_launch"]()
+        entered.set()
+        release.wait(5)
+        return {
+            "status": "launched",
+            "item_id": "owner/repo#ISSUE-1",
+            "pane_id": "terminal_1",
+            "session": "workdash",
+        }
+
+    monkeypatch.setattr(session, "code", code)
+    commands = WorkdashCommands()
+    commands._client = MagicMock(
+        request=lambda endpoint, payload: (
+            session.start_autodispatch(**payload)
+            if endpoint == "autodispatch"
+            else session.autodispatch_status(payload["id"])
+        )
+    )
+    thread = threading.Thread(
+        target=lambda: (
+            commands.autodispatch_cli(
+                target="owner/repo#1", agent="pi", group=None, stop=False, json_output=False
+            ),
+            returned.set(),
+        )
+    )
+    thread.start()
+    try:
+        assert entered.wait(2)
+        assert returned.wait(1)
+        assert "running" in capsys.readouterr().out
+    finally:
+        release.set()
+        thread.join(3)
+
+
+def test_stopping_session_releases_issue_cli_waiting_for_readiness(
+    autodispatch_state, monkeypatch, capsys
+):
+    from workdash.workdash import WorkdashCommands
+
+    session = autodispatch_state["session"]
+    entered, release, returned = threading.Event(), threading.Event(), threading.Event()
+
+    def dispatch(**kwargs):
+        entered.set()
+        release.wait(5)
+        return {"status": "no_ready_task"}
+
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    commands = WorkdashCommands()
+    commands._client = MagicMock(
+        request=lambda endpoint, payload: (
+            session.start_autodispatch(**payload)
+            if endpoint == "autodispatch"
+            else session.autodispatch_status(payload["id"])
+        )
+    )
+    thread = threading.Thread(
+        target=lambda: (
+            commands.autodispatch_cli(
+                target="owner/repo#1", agent="pi", group=None, stop=False, json_output=False
+            ),
+            returned.set(),
+        )
+    )
+    thread.start()
+    try:
+        assert entered.wait(2)
+        session.stop_autodispatch(session.autodispatch_sessions()[0]["id"])
+        assert returned.wait(1)
+        assert "stopped" in capsys.readouterr().out
+    finally:
+        release.set()
+        thread.join(3)

@@ -620,6 +620,7 @@ class WorkdashApp(App[None]):
         self._now_utc = now_utc or datetime.now(UTC)
         self._focus_callback = focus_callback
         self._dispatch_session_ids: set[str] = set()
+        self._reported_dispatch_outcomes: set[str] = set()
         self._status_message = "Ready."
         self._current_autodispatch: set[tuple[str, int] | str] = set()
         self._pending_autodispatch: set[str] = set()
@@ -653,11 +654,12 @@ class WorkdashApp(App[None]):
             sessions = self._session.autodispatch_sessions()
             self._autodispatch_sessions = sessions
             self._known_autodispatch.update(str(entry["id"]) for entry in sessions)
-            self._update_autodispatch_progress(sessions)
             self.refresh_from_session()
+            self._update_status(f"Loaded {len(self._work_items)} item(s).")
+            self._update_autodispatch_progress(sessions)
         else:
             self._render_table()
-        self._update_status(f"Loaded {len(self._work_items)} item(s).")
+            self._update_status(f"Loaded {len(self._work_items)} item(s).")
 
     async def _sync_busy_screen(self) -> None:
         """Show the operation holding the session, and clear it when the session frees up.
@@ -783,24 +785,32 @@ class WorkdashApp(App[None]):
 
         failed = [entry for entry in sessions if entry["status"] == "failed"]
         self._dispatch_session_ids.intersection_update(entry.get("id") for entry in sessions)
+        self._reported_dispatch_outcomes.intersection_update(entry.get("id") for entry in sessions)
         for entry in sessions:
-            if entry.get("id") not in self._dispatch_session_ids or entry["status"] not in {
-                "failed",
-                "finished",
-                "stopped",
-            }:
+            session_id = str(entry["id"])
+            if (
+                session_id in self._reported_dispatch_outcomes
+                or not (
+                    session_id in self._dispatch_session_ids
+                    or (entry["status"] == "finished" and entry.get("outcome"))
+                )
+                or entry["status"] not in {"failed", "finished", "stopped"}
+            ):
                 continue
-            self._dispatch_session_ids.remove(entry["id"])
+            self._dispatch_session_ids.discard(session_id)
+            self._reported_dispatch_outcomes.add(session_id)
             if entry["status"] == "failed":
                 self._update_status(failure(entry, "Dispatch failed: ", self.size.width - 2))
                 break
-            if entry["status"] == "finished" and entry["iteration"] == 1:
+            if entry["status"] == "finished" and (entry["iteration"] == 1 or entry.get("outcome")):
                 self._update_status(
-                    f"Dispatch: no work available to dispatch. ({short(entry['scope'])})"
+                    f"Dispatch: {entry.get('outcome') or 'no work available to dispatch'}. ({short(entry['scope'])})"
                 )
                 break
         empty = [
-            entry for entry in sessions if entry["status"] == "finished" and entry["iteration"] == 1
+            entry
+            for entry in sessions
+            if entry["status"] == "finished" and (entry["iteration"] == 1 or entry.get("outcome"))
         ]
         running = [
             entry for entry in running if str(entry["id"]) not in self._dismissed_autodispatch
@@ -824,7 +834,7 @@ class WorkdashApp(App[None]):
                 if cell_len(line + suffix) <= self.size.width - 6:
                     line += suffix
             elif entry["status"] == "finished":
-                line = f"No work available to dispatch: {short(entry['scope'])}  ({entry['id']})"
+                line = f"{entry.get('outcome') or 'No work available to dispatch'}: {short(entry['scope'])}  ({entry['id']})"
             else:
                 scope = short(entry["scope"])
                 item = short(entry["current_item"]) if entry["current_item"] else None
@@ -1408,10 +1418,11 @@ class WorkdashApp(App[None]):
             self._update_status("Cannot dispatch a pull request without a linked issue.")
             self.notify("Cannot dispatch a pull request without a linked issue.", severity="error")
             return
-        self._dispatch_session_ids.add(str(started["id"]))
-        # The dashboard already announced this session, so the poll must not repeat it.
-        self._known_autodispatch.add(str(started["id"]))
-        self._update_status(f"Started autodispatch for {started['scope']}: {started['id']}.")
+        session_id = str(started["id"])
+        if session_id not in self._reported_dispatch_outcomes:
+            self._dispatch_session_ids.add(session_id)
+            self._update_status(f"Started autodispatch for {started['scope']}: {started['id']}.")
+        self._known_autodispatch.add(session_id)
 
     async def action_show_branchdiff(self, item: WorkItem | None = None) -> None:
         """Launch branchdiff command in a new zellij pane for ``item``.

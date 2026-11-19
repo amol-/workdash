@@ -404,7 +404,7 @@ def _concurrent(scenario_state, monkeypatch, tmp_path):
     def synchronized_ready(scope, fail_unconfirmed, **kwargs):
         result = ready(scope, fail_unconfirmed, **kwargs)
         if scope == "owner/repo":
-            observations.append(control.format_work_item_id(result[0].item))
+            observations.append(control.format_work_item_id(result.items[0].item))
             barrier.wait(timeout=10)
         return result
 

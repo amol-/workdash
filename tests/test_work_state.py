@@ -23,6 +23,32 @@ from workdash.models import WorkItemKind
 PR = "owner/repo#51"
 
 
+def test_open_issue_blockers_sends_balanced_queries(monkeypatch):
+    github = install_fake_github(monkeypatch)
+    github.page_size = 1
+    github.add_issue("owner/repo#1", blocked_by=("owner/repo#2", "other/repo#3"))
+    github.add_issue("owner/repo#2")
+    github.add_issue("other/repo#3")
+    answer = github._IssueBlockers
+    queries = []
+
+    def check_query(query):
+        queries.append(query)
+        depth = 0
+        for char in query:
+            depth += (char == "{") - (char == "}")
+            assert depth >= 0
+        assert depth == 0
+        return answer(query)
+
+    monkeypatch.setattr(github, "_IssueBlockers", check_query)
+    assert GitHubClient().open_issue_blockers("owner/repo", 1) == [
+        "owner/repo#2",
+        "other/repo#3",
+    ]
+    assert len(queries) == 2
+
+
 def _evaluate(*refs: str):
     return GitHubClient().evaluate_pull_requests(
         [(ref.partition("#")[0], int(ref.partition("#")[2])) for ref in refs or (PR,)],
@@ -380,10 +406,14 @@ def test_repository_scope_reads_every_page(monkeypatch) -> None:
             f"team/b#{number}", checks={HEAD_SHA: [check_run("tests", "FAILURE")]}
         )
 
-    ready = GitHubClient().find_ready_work(
-        repositories=["team/*", "team/a"],
-        github_username="testuser",
-        todo_repository="testuser/todos",
+    ready = (
+        GitHubClient()
+        .find_ready_work(
+            repositories=["team/*", "team/a"],
+            github_username="testuser",
+            todo_repository="testuser/todos",
+        )
+        .items
     )
 
     assert [(work.item.repo, work.item.number) for work in ready] == [
@@ -402,7 +432,7 @@ def test_review_feedback_changes_readiness_for_the_same_pull_request(monkeypatch
             repositories=["owner/repo"],
             github_username="testuser",
             todo_repository="testuser/todos",
-        )
+        ).items
 
     assert ready() == []
     pr["threads"].append(thread(comment("reviewer", created=AFTER_PUSH)))
@@ -430,8 +460,14 @@ def test_actionable_issues_are_ordered_by_pull_request_age(monkeypatch) -> None:
         mergeable="CONFLICTING",
     )
 
-    ready = GitHubClient().find_ready_work(
-        repositories=["owner/repo"], github_username="testuser", todo_repository="testuser/todos"
+    ready = (
+        GitHubClient()
+        .find_ready_work(
+            repositories=["owner/repo"],
+            github_username="testuser",
+            todo_repository="testuser/todos",
+        )
+        .items
     )
 
     assert [work.item.number for work in ready] == [2, 1]
@@ -442,8 +478,14 @@ def test_items_created_together_are_ordered_by_number(monkeypatch) -> None:
     github.add_issue("owner/repo#2")
     github.add_issue("owner/repo#1")
 
-    ready = GitHubClient().find_ready_work(
-        repositories=["owner/repo"], github_username="testuser", todo_repository="testuser/todos"
+    ready = (
+        GitHubClient()
+        .find_ready_work(
+            repositories=["owner/repo"],
+            github_username="testuser",
+            todo_repository="testuser/todos",
+        )
+        .items
     )
 
     assert [work.item.number for work in ready] == [1, 2]
@@ -455,8 +497,12 @@ def test_owner_repositories_without_open_work_are_never_queried(monkeypatch) -> 
     github.add_issue("team/a#1")
     github.add_issue("team/empty#1", state="CLOSED")
 
-    ready = GitHubClient().find_ready_work(
-        repositories=["team/*"], github_username="testuser", todo_repository="testuser/todos"
+    ready = (
+        GitHubClient()
+        .find_ready_work(
+            repositories=["team/*"], github_username="testuser", todo_repository="testuser/todos"
+        )
+        .items
     )
 
     assert [(work.item.repo, work.item.number) for work in ready] == [("team/a", 1)]
@@ -474,8 +520,12 @@ def test_only_a_missing_todo_repository_counts_as_empty(monkeypatch) -> None:
     )
 
     def ready(repo: str):
-        return GitHubClient().find_ready_work(
-            repositories=[repo], github_username="testuser", todo_repository="testuser/todos"
+        return (
+            GitHubClient()
+            .find_ready_work(
+                repositories=[repo], github_username="testuser", todo_repository="testuser/todos"
+            )
+            .items
         )
 
     assert ready("testuser/todos") == []
@@ -497,8 +547,12 @@ def test_issue_scope_follows_sub_issues_across_repositories(monkeypatch) -> None
     github.add_pull_request("other/lib#9", closes=("other/lib#1", "other/lib#4"), checks=failed_ci)
     github.add_pull_request("owner/repo#10", closes=("owner/repo#6",), checks=failed_ci)
 
-    ready = GitHubClient().find_ready_work(
-        issue=("owner/repo", 1), github_username="testuser", todo_repository="testuser/todos"
+    ready = (
+        GitHubClient()
+        .find_ready_work(
+            issue=("owner/repo", 1), github_username="testuser", todo_repository="testuser/todos"
+        )
+        .items
     )
 
     assert [(work.item.repo, work.item.number, work.action) for work in ready] == [
@@ -516,26 +570,44 @@ def test_a_ready_pull_request_is_listed_once_for_eligible_issues_in_scope(monkey
         PR, closes=("other/lib#1", "owner/repo#42"), checks={HEAD_SHA: [check_run("t", "FAILURE")]}
     )
 
-    works = GitHubClient().find_ready_work(
-        repositories=["owner/repo", "other/lib"],
-        github_username="testuser",
-        todo_repository="testuser/todos",
+    works = (
+        GitHubClient()
+        .find_ready_work(
+            repositories=["owner/repo", "other/lib"],
+            github_username="testuser",
+            todo_repository="testuser/todos",
+        )
+        .items
     )
 
     assert [
         (work.item.repo, work.item.number, work.pull_request.item.number) for work in works
     ] == [("other/lib", 1, 51)]
-    repository = GitHubClient().find_ready_work(
-        repositories=["owner/repo"], github_username="testuser", todo_repository="testuser/todos"
+    repository = (
+        GitHubClient()
+        .find_ready_work(
+            repositories=["owner/repo"],
+            github_username="testuser",
+            todo_repository="testuser/todos",
+        )
+        .items
     )
     assert [(work.item.repo, work.item.number) for work in repository] == [("other/lib", 1)]
 
-    scoped = GitHubClient().find_ready_work(
-        issue=("owner/repo", 100), github_username="testuser", todo_repository="testuser/todos"
+    scoped = (
+        GitHubClient()
+        .find_ready_work(
+            issue=("owner/repo", 100), github_username="testuser", todo_repository="testuser/todos"
+        )
+        .items
     )
     assert [(work.item.repo, work.item.number) for work in scoped] == [("other/lib", 1)]
-    leaf = GitHubClient().find_ready_work(
-        issue=("owner/repo", 42), github_username="testuser", todo_repository="testuser/todos"
+    leaf = (
+        GitHubClient()
+        .find_ready_work(
+            issue=("owner/repo", 42), github_username="testuser", todo_repository="testuser/todos"
+        )
+        .items
     )
     assert [(work.item.repo, work.item.number) for work in leaf] == [("owner/repo", 42)]
 
@@ -547,8 +619,14 @@ def test_repository_scope_fetches_nested_subtrees_once(monkeypatch) -> None:
     github.add_issue("owner/repo#1")
     github.add_issue("owner/repo#4", parent="owner/repo#3")
 
-    ready = GitHubClient().find_ready_work(
-        repositories=["owner/repo"], github_username="testuser", todo_repository="testuser/todos"
+    ready = (
+        GitHubClient()
+        .find_ready_work(
+            repositories=["owner/repo"],
+            github_username="testuser",
+            todo_repository="testuser/todos",
+        )
+        .items
     )
 
     assert [work.item.number for work in ready] == [4]
@@ -560,8 +638,12 @@ def test_issue_scope_of_a_parent_with_only_closed_sub_issues_is_ready(monkeypatc
     github.add_issue("owner/repo#1")
     github.add_issue("owner/repo#2", parent="owner/repo#1", state="CLOSED")
 
-    ready = GitHubClient().find_ready_work(
-        issue=("owner/repo", 1), github_username="testuser", todo_repository="testuser/todos"
+    ready = (
+        GitHubClient()
+        .find_ready_work(
+            issue=("owner/repo", 1), github_username="testuser", todo_repository="testuser/todos"
+        )
+        .items
     )
 
     assert [work.item.number for work in ready] == [1]
@@ -582,7 +664,7 @@ def test_a_partial_graphql_answer_fails_the_lookup(monkeypatch) -> None:
             repositories=["owner/repo"],
             github_username="testuser",
             todo_repository="testuser/todos",
-        )
+        ).items
 
 
 def test_a_malformed_github_answer_fails_the_lookup(monkeypatch) -> None:
@@ -638,10 +720,14 @@ def test_ready_returns_issues_with_actionable_authored_prs_and_completed_parents
     github.add_pull_request("owner/repo#53", checks={HEAD_SHA: [check_run("t", "FAILURE")]})
 
     def ready():
-        return GitHubClient().find_ready_work(
-            repositories=["owner/repo"],
-            github_username="testuser",
-            todo_repository="testuser/todos",
+        return (
+            GitHubClient()
+            .find_ready_work(
+                repositories=["owner/repo"],
+                github_username="testuser",
+                todo_repository="testuser/todos",
+            )
+            .items
         )
 
     result = ready()
@@ -706,7 +792,7 @@ def test_client_owns_work_state_github_access(monkeypatch):
     client = Client()
     [work] = client.find_ready_work(
         issue=("owner/repo", 42), github_username="testuser", todo_repository="testuser/todos"
-    )
+    ).items
     assert work.reasons == ("fix_merge_conflicts", "fix_ci")
     assert work.pull_request.failing_checks == ("test",)
     assert f"owner/repo@{HEAD_SHA}" in calls
@@ -740,3 +826,22 @@ def test_opinion_query_requests_pagination_metadata():
 
     selection = _PULL_REQUEST_FRAGMENT.split("latestOpinionatedReviews")[1].split("reviews(last")[0]
     assert "hasNextPage" in selection
+
+
+def test_readiness_keeps_scope_issue_with_eligible_descendants(monkeypatch) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_issue("owner/repo#2", parent="owner/repo#1")
+    client = GitHubClient()
+
+    scoped = client.find_ready_work(
+        issue=("owner/repo", 1), github_username="testuser", todo_repository="testuser/todos"
+    )
+    assert scoped.scope_issue.item.number == 1
+    assert scoped.scope_issue.has_open_descendants
+    assert [work.item.number for work in scoped.items] == [2]
+    repository = client.find_ready_work(
+        repositories=["owner/repo"], github_username="testuser", todo_repository="testuser/todos"
+    )
+    assert repository.scope_issue is None
+    assert [work.item.number for work in repository.items] == [2]

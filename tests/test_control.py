@@ -2814,14 +2814,61 @@ def test_dispatch_skips_claim_before_checking_launch_limit(monkeypatch, tmp_path
     panes = [{"id": 5, "title": "code_owner_repo_1", "pane_cwd": str(tmp_path / "owner_repo_1")}]
     session, _worktree, _ensure, launch = _coding_session(monkeypatch, tmp_path, panes)
     candidate = SimpleNamespace(item=session.work_items[0], pull_request=None)
-    monkeypatch.setattr(session, "_ready", lambda *args, **kwargs: [candidate])
-    limit = MagicMock(side_effect=RuntimeError("limit reached"))
+    from workdash.work_state import ScopedReadyWork
 
-    result = session.dispatch_once(scope="owner/repo", agent="pi", before_launch=limit)
+    scope_issue = SimpleNamespace(item=session.work_items[0], is_open=True, blocked=True)
+    monkeypatch.setattr(
+        session, "_ready", lambda *args, **kwargs: ScopedReadyWork([candidate], scope_issue)
+    )
+    limit = MagicMock(side_effect=RuntimeError("limit reached"))
+    on_ready = MagicMock()
+
+    result = session.dispatch_once(
+        scope="owner/repo", agent="pi", before_launch=limit, on_ready=on_ready
+    )
 
     assert result["status"] == "no_ready_task"
     limit.assert_not_called()
+    on_ready.assert_not_called()
     launch.assert_not_called()
+
+
+def test_dispatch_notifies_after_launch_limit_check(monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    session, _worktree, _ensure, launch = _coding_session(monkeypatch, tmp_path, [])
+    from workdash.work_state import ReadyWork, ScopedReadyWork
+
+    candidate = ReadyWork(session.work_items[0])
+    scope_issue = SimpleNamespace(item=session.work_items[0], is_open=True, blocked=True)
+    monkeypatch.setattr(
+        session, "_ready", lambda *args, **kwargs: ScopedReadyWork([candidate], scope_issue)
+    )
+    calls = []
+
+    def limit(item_id):
+        calls.append(item_id)
+        raise RuntimeError("limit reached")
+
+    with pytest.raises(RuntimeError, match="limit reached"):
+        session.dispatch_once(
+            scope="owner/repo",
+            agent="pi",
+            before_launch=limit,
+            on_ready=lambda: calls.append("ready"),
+        )
+    assert calls == ["owner/repo#ISSUE-1"]
+    launch.assert_not_called()
+
+    calls.clear()
+    result = session.dispatch_once(
+        scope="owner/repo",
+        agent="pi",
+        before_launch=lambda item_id: calls.append(item_id),
+        on_ready=lambda: calls.append("ready"),
+    )
+    assert result["status"] == "launched"
+    assert calls == ["owner/repo#ISSUE-1", "ready"]
 
 
 def test_remote_dispatch_cli_through_http(monkeypatch, tmp_path, capsys):
@@ -3875,7 +3922,7 @@ def test_dispatch_rejects_unverified_branch_worktree_before_pull(monkeypatch, tm
 
 def test_ready_and_code_share_replaceable_github_state(monkeypatch, tmp_path):
     from workdash.backend import WorkdashBackend
-    from workdash.work_state import PullRequestWorkState, ReadyWork
+    from workdash.work_state import PullRequestWorkState, ReadyWork, ScopedReadyWork
 
     panes = []
     session, _, _, launch, _ = _authored_session(monkeypatch, tmp_path, panes)
@@ -3905,7 +3952,9 @@ def test_ready_and_code_share_replaceable_github_state(monkeypatch, tmp_path):
 
         def find_ready_work(self, **kwargs):
             self.lookups.append("ready")
-            return [ReadyWork(item=item, pull_request=self.state)] if self.state.ready else []
+            return ScopedReadyWork(
+                [ReadyWork(item=item, pull_request=self.state)] if self.state.ready else []
+            )
 
         def work_pull_request(self, item, **kwargs):
             self.lookups.append("linked PR")
@@ -5180,3 +5229,24 @@ def test_close_todo_api_updates_tui_table():
             github.close_todo.assert_called_once_with(todo_repository="testuser/todos", number=10)
 
     asyncio.run(exercise())
+
+
+def test_dispatch_api_does_not_expose_blocked_scope_metadata(monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#2")
+    github.add_issue("owner/repo#1", blocked_by=("owner/repo#2",))
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: [])
+    session = _ready_session(tmp_path)
+    assert session.dispatch_once(scope="owner/repo#1")["blocked_issue"] == ("owner/repo", 1)
+    request = Request.blank(
+        "/api/v0/dispatch",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps({"scope": "owner/repo#1"}).encode(),
+    )
+    response = request.get_response(control_module._make_turbogears_app(session))
+    assert response.status_int == 200
+    assert json.loads(response.text)["result"] == {
+        "status": "no_ready_task",
+        "scope": "owner/repo#1",
+    }

@@ -252,6 +252,11 @@ class FakeGitHub:
         }
         return {"repository": {"issue": node}}
 
+    def _IssueBlockers(self, query: str) -> dict:
+        ref = f"{_queried_repository(query)}#{re.search(r'issue\(number: (\d+)\)', query)[1]}"
+        nodes = [self._issue_node(blocker) for blocker in self.issues[ref]["blocked_by"]]
+        return {"repository": {"issue": {"blockedBy": self._page(query, nodes)}}}
+
     def _ReadyPullRequests(self, query: str) -> dict:
         return {
             alias: {"pullRequest": self._pull_request_node(f"{owner}/{name}#{number}")}

@@ -17,7 +17,7 @@ import workdash.control as control_module
 import workdash.launcher as launcher_module
 from workdash.control import WorkdashControlServer, WorkdashSession
 from workdash.tui import BusyScreen, SearchDialog
-from workdash.work_state import ReadyWork
+from workdash.work_state import ReadyWork, ScopedReadyWork
 
 from .common import make_work_item, run_app
 
@@ -132,7 +132,9 @@ def _run_request(state, monkeypatch, tmp_path, operation: str, *, press_keys=Fal
     if operation == "an analysis":
         session.backend.analyze_item.side_effect = _hold(state, str(state["analysis_path"]))
     else:
-        session.backend.github_client.find_ready_work.side_effect = _hold(state, [])
+        session.backend.github_client.find_ready_work.side_effect = _hold(
+            state, ScopedReadyWork([])
+        )
 
     async def interact(app, pilot):
         request = threading.Thread(
@@ -235,7 +237,7 @@ def autodispatch_can_launch(blocking_state, monkeypatch):
     )
     blocking_state["ready"] = [ReadyWork(item=session.work_items[0])]
     session.backend.github_client.find_ready_work.side_effect = _hold(
-        blocking_state, blocking_state["ready"]
+        blocking_state, ScopedReadyWork(blocking_state["ready"])
     )
 
 
@@ -278,7 +280,9 @@ def start_autodispatch_while_searching(blocking_state, monkeypatch, tmp_path):
 @when("the user opens search and types while a readiness check is requested through the API")
 def search_while_readiness_check_requested(blocking_state, monkeypatch, tmp_path):
     session = blocking_state["session"]
-    session.backend.github_client.find_ready_work.side_effect = _hold(blocking_state, [])
+    session.backend.github_client.find_ready_work.side_effect = _hold(
+        blocking_state, ScopedReadyWork([])
+    )
 
     async def interact(app, pilot):
         await pilot.press("/")

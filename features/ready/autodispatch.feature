@@ -7,7 +7,13 @@ Feature: Automatically dispatch ready work
   for that dispatch if it remains open, or a currently linked open pull request
   otherwise, before selecting more ready work. A pane counts as gone only once two
   consecutive checks miss it, so a listing that omits a live pane does not end
-  supervision. It finishes when no ready work remains. A user can stop a session
+  supervision. It finishes when no ready work remains. A closed or unblocked issue
+  with no ready work finishes without a blocker outcome. If an open blocked issue's
+  blocking issue cannot be identified, the session reports the lookup failure. If GitHub
+  cannot check readiness, the session fails rather than reporting an empty result.
+  If blockers have cleared by the time they are identified, the session finishes without
+  a blocker outcome.
+  A user can stop a session
   without closing its agent pane. If a review is already running when stopped,
   the dashboard refreshes the issue again after that review ends, including on failure.
   If an in-progress dispatch launches after stopping, the dashboard refreshes its issue.
@@ -53,6 +59,16 @@ Feature: Automatically dispatch ready work
   time. While checking for another task, it retains the last selected group until
   the next task selects a group. Issue URLs are shortened, and an issue shown as both scope and current
   item appears only once, even when the issue number has leading zeroes; different scope and current item are labeled.
+  Starting an issue-scoped session from the CLI reports its first readiness outcome;
+  when an unblocked issue has ready work, it returns without waiting for preparation or launch.
+  Stopping the session
+  also releases a CLI waiting for the first check. Successfully stopping a failed session
+  exits successfully, even though the response retains its failure details. If the first
+  check fails, the start command reports the error and exits unsuccessfully. Other scopes
+  return without waiting for the first check. The dashboard status bar reports a
+  blocker outcome from a CLI-started session once, even if it first sees the session
+  after it finishes. A dashboard-started session's blocker outcome remains visible
+  when its first check finishes during startup.
   Human-readable `workdash info` shows the same progress alongside session status and full failure details.
   JSON and the control API retain the underlying progress fields.
 
@@ -155,7 +171,13 @@ Feature: Automatically dispatch ready work
     Given an issue blocked by an open dependency selected in the dashboard
     When the user presses d and chooses an autodispatch agent
     Then an autodispatch session starts for the selected issue
-    And the dashboard reports that no work is available to dispatch
+    And the dashboard reports that the issue is blocked by its open dependency
+
+  @id:F-AUTODISPATCH-S033
+  Scenario: Starting a blocked issue from the CLI reports its cross-repository dependency
+    Given an issue blocked by an open issue in another repository
+    When the user starts autodispatch for the issue with JSON output
+    Then the JSON result reports the blocking issue
 
   @id:F-AUTODISPATCH-S001
   Scenario: An autodispatch session continues until no work is ready

@@ -22,7 +22,7 @@ from .models import WorkItem, WorkItemKind, WorkItemType
 from .work_state import (
     IssueWorkState,
     PullRequestWorkState,
-    ReadyWork,
+    ScopedReadyWork,
     _actionable_feedback,
     parse_github_datetime,
     select_ready_work,
@@ -300,6 +300,10 @@ _REPOSITORY_AUTHORIZATION_SUBSTRINGS = (
     "must grant your oauth token access",
     "organization has enabled oauth app access restrictions",
 )
+
+
+class BlockerLookupError(RuntimeError):
+    """An open blocked issue's blockers could not be identified."""
 
 
 class MergeHeadChangedError(RuntimeError):
@@ -1022,7 +1026,7 @@ class GitHubClient:
         github_username: str,
         todo_repository: str,
         include_shared_pr_issues: bool = False,
-    ) -> list[ReadyWork]:
+    ) -> ScopedReadyWork:
         """Return ready issues, actionable pull request work first, oldest first in each group.
 
         :param Sequence repositories: ``owner/repo`` or ``owner/*`` selectors.
@@ -1032,7 +1036,9 @@ class GitHubClient:
         states: dict[tuple[str, int], PullRequestWorkState] = {}
         if issue is not None:
             issues = self.resolve_issue_scope(*issue, todo_repository=todo_repository)
+            scope_issue = issues[0]
         else:
+            scope_issue = None
             names: dict[str, str] = {}
             for selector in repositories:
                 owner, _, name = selector.partition("/")
@@ -1118,7 +1124,10 @@ class GitHubClient:
                 )
             }
         )
-        return select_ready_work(issues, states, github_username, include_shared_pr_issues)
+        return ScopedReadyWork(
+            select_ready_work(issues, states, github_username, include_shared_pr_issues),
+            scope_issue,
+        )
 
     def resolve_issue_scope(
         self,
@@ -2323,6 +2332,32 @@ class GitHubClient:
             url=url,
             included=True,
         )
+
+    def open_issue_blockers(self, repo: str, number: int) -> list[str]:
+        """Return open GitHub blockers of an issue."""
+        owner, name = repo.split("/", 1)
+        subject = f"{repo}#{number}"
+        try:
+            nodes = self._all_nodes(
+                subject,
+                lambda after: (
+                    f"query IssueBlockers {{ repository(owner: {json.dumps(owner)}, "
+                    f"name: {json.dumps(name)}) {{ issue(number: {number}) {{ "
+                    f"blockedBy(first: 100, after: {after}) {{ {_PAGE_INFO} "
+                    "nodes { number state repository { nameWithOwner } } } } } }"
+                ),
+                ("repository", "issue", "blockedBy"),
+            )
+            with _github_payload(subject):
+                return [
+                    f"{node['repository']['nameWithOwner']}#{node['number']}"
+                    for node in nodes
+                    if node["state"] == "OPEN"
+                ]
+        except RuntimeError as error:
+            raise BlockerLookupError(
+                f"Could not identify blockers for {subject}: {error}"
+            ) from error
 
     def _issue_tree(self, repo: str, number: int) -> dict:
         owner, _, name = repo.partition("/")

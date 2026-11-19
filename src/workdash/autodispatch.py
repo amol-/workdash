@@ -53,6 +53,8 @@ class _AutodispatchSession:
         self.launch_reason: str | None = None
         self.iteration = 0
         self.error: str | None = None
+        self.outcome: str | None = None
+        self.initial_check = threading.Event()
         self.dismissed = False
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
@@ -84,7 +86,9 @@ class _AutodispatchSession:
                 if self.status == self.Status.RUNNING and blocked
                 else str(self.status),
                 "error": self.error,
+                "outcome": self.outcome,
                 "dismissed": self.dismissed,
+                "initial_check_complete": self.initial_check.is_set(),
             }
 
     def stop(self, *, close_blocked: bool = False) -> None:
@@ -92,6 +96,7 @@ class _AutodispatchSession:
             if close_blocked and self.pane and self.owner.autoclose.blocked(*self.pane):
                 self.owner.autoclose.stop_blocked(*self.pane)
             self.stop_event.set()
+            self.initial_check.set()
             if self.status == self.Status.RUNNING:
                 self.status = self.Status.STOPPED
                 self.ended = time.monotonic()
@@ -126,8 +131,18 @@ class _AutodispatchSession:
                     self.launch_reason = None
                 stage = "dispatch"
                 result = self.owner.dispatch_once(
-                    scope=self.scope, group=self.group, agent=selected, before_launch=check_limit
+                    scope=self.scope,
+                    group=self.group,
+                    agent=selected,
+                    before_launch=check_limit,
+                    on_ready=self.initial_check.set,
                 )
+                outcome = None
+                blocked_issue = result.get("blocked_issue")
+                if result["status"] == "no_ready_task" and blocked_issue:
+                    blockers = self.owner.backend.github_client.open_issue_blockers(*blocked_issue)
+                    if blockers:
+                        outcome = f"blocked by {blockers[0]}"
                 with self.lock:
                     if self.stop_event.is_set():
                         if result["status"] == "launched":
@@ -135,9 +150,11 @@ class _AutodispatchSession:
                         return
                     if result["status"] == "no_ready_task":
                         logger.info("Session %s finished", self.id)
+                        self.outcome = outcome
                         self.status = self.Status.FINISHED
                         self.current_item = None
                         self.ended = time.monotonic()
+                        self.initial_check.set()
                         return
                     logger.info("Session %s launched pane %s", self.id, result["pane_id"])
                     self.current_item = str(result["item_id"])
@@ -147,6 +164,7 @@ class _AutodispatchSession:
                     self.stage = "developing"
                     consecutive = consecutive + 1 if self.current_item == previous else 1
                     previous = self.current_item
+                    self.initial_check.set()
                 stage = "pane polling"
                 absent = 0
                 while not self.stop_event.wait(_AUTODISPATCH_POLL_SECONDS):
@@ -286,6 +304,7 @@ class _AutodispatchSession:
                     self.ended = time.monotonic()
                     self.owner.completed_autodispatch_item(self.current_item)
         finally:
+            self.initial_check.set()
             with self.lock:
                 if stage in {"review", "merge"} and self.stop_event.is_set():
                     self.owner.completed_autodispatch_item(self.current_item)
