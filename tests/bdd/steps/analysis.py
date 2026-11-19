@@ -456,6 +456,22 @@ def _analysis_needs_zellij(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["pane_launches"] == []
 
 
+@given("the analysis viewer opens in a pane")
+def _pane_viewer(scenario_state, monkeypatch):
+    from workdash.launcher import zellij
+
+    scenario_state["pane_viewer"] = True
+    scenario_state["viewer_run"] = MagicMock(return_value="terminal_17")
+    scenario_state["viewer_focus"] = MagicMock()
+    monkeypatch.setattr(zellij, "open_viewer", scenario_state["viewer_run"])
+    monkeypatch.setattr(zellij, "focus_zellij_pane", scenario_state["viewer_focus"])
+
+
+@then("the analysis viewer pane receives focus")
+def _viewer_receives_focus(scenario_state):
+    scenario_state["viewer_focus"].assert_called_once_with("workdash-main", "terminal_17")
+
+
 @given("the next fresh analysis will fail")
 def _next_fresh_fails(scenario_state: dict[str, Any]) -> None:
     scenario_state["_fresh_fails"] = True
@@ -552,7 +568,8 @@ def _run_generate_fresh(
             else agent_popen(argv, **kwargs)
         ),
     )
-    scenario_state["viewer_run"] = viewer_run
+    if not scenario_state.get("pane_viewer"):
+        scenario_state["viewer_run"] = viewer_run
     busy_messages: list[str] = []
 
     async def interactions(app, pilot) -> None:
@@ -561,7 +578,11 @@ def _run_generate_fresh(
         for _ in range(40):
             await pilot.pause()
             status = app.query_one("#status-footer", Static).render().plain
-            if opened_paths or "Analyze failed" in status:
+            if (
+                opened_paths
+                or (scenario_state.get("pane_viewer") and scenario_state["viewer_focus"].called)
+                or "Analyze failed" in status
+            ):
                 break
         scenario_state["analyze_status"] = app.query_one("#status-footer", Static).render().plain
         scenario_state["modal_screen_names"] = modal_screen_names(app)
@@ -573,7 +594,12 @@ def _run_generate_fresh(
         worktree_callback=worktree_callback,
         analyze_callback=analyze_callback,
         open_markdown_callback=partial(
-            open_markdown, command="term-view --quiet", format="markdown"
+            open_markdown,
+            command="term-view --quiet",
+            format="markdown",
+            needs_pane=scenario_state.get("pane_viewer", False),
+            zellij_session="workdash-main",
+            focus=True,
         ),
         session=session,
         interactions=interactions,
@@ -612,7 +638,8 @@ def _choose_open_cached(
         )
     )
     monkeypatch.setattr(subprocess, "Popen", viewer_run)
-    scenario_state["viewer_run"] = viewer_run
+    if not scenario_state.get("pane_viewer"):
+        scenario_state["viewer_run"] = viewer_run
 
     def analyze_callback(item_: WorkItem, tool: str = "codex") -> str | None:
         assert tool == "cached", tool
@@ -634,7 +661,9 @@ def _choose_open_cached(
         dialog.action_open_analysis()
         for _ in range(40):
             await pilot.pause()
-            if opened_paths:
+            if opened_paths or (
+                scenario_state.get("pane_viewer") and scenario_state["viewer_focus"].called
+            ):
                 break
 
     from .common import run_app
@@ -646,6 +675,9 @@ def _choose_open_cached(
             open_markdown,
             command="term-view --quiet",
             format=scenario_state.get("analysis_format", "markdown"),
+            needs_pane=scenario_state.get("pane_viewer", False),
+            zellij_session="workdash-main",
+            focus=True,
         ),
         session=session,
         interactions=interactions,
@@ -692,13 +724,18 @@ def _generated_cached(scenario_state: dict[str, Any]) -> None:
 def _analysis_url_opened(scenario_state: dict[str, Any]) -> None:
     item: WorkItem = scenario_state["selected_item"]
     expected_url = scenario_state["cache"].build_analysis_path(item).resolve().as_uri()
-    scenario_state["viewer_run"].assert_called_once_with(
-        ["term-view", "--quiet", expected_url],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    assert scenario_state["opened_paths"] == [expected_url]
+    if scenario_state.get("pane_viewer"):
+        scenario_state["viewer_run"].assert_called_once_with(
+            "workdash-main", ["term-view", "--quiet", expected_url], close_on_exit=True
+        )
+    else:
+        scenario_state["viewer_run"].assert_called_once_with(
+            ["term-view", "--quiet", expected_url],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        assert scenario_state["opened_paths"] == [expected_url]
 
 
 @then("the cached analysis URL is opened with the configured viewer")

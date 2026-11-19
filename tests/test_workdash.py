@@ -419,6 +419,7 @@ def test_main_passes_configured_agent_choices_and_separate_viewers_to_tui(
                 "analysis-viewer",
                 html_path.as_uri(),
             ],
+            [*prefix, "focus-pane-id", "terminal_17"],
         ]
     else:
         assert commands == [[*viewer_argv, item.url], ["analysis-viewer", html_path.as_uri()]]

@@ -71,6 +71,7 @@ def _run_browser_open(
     zellij_session: str | None = None,
     close_on_exit: bool = False,
     direct_nonblocking: bool = False,
+    focus: bool = False,
 ) -> str:
     try:
         command_tokens = (
@@ -101,9 +102,11 @@ def _run_browser_open(
                     *command_tokens,
                 ]
             if close_on_exit:
-                zellij.open_viewer(session, [*command_tokens, target], close_on_exit=True)
+                pane_id = zellij.open_viewer(session, [*command_tokens, target], close_on_exit=True)
             else:
-                zellij.open_viewer(session, [*command_tokens, target])
+                pane_id = zellij.open_viewer(session, [*command_tokens, target])
+            if focus:
+                zellij.focus_zellij_pane(session, pane_id)
         except subprocess.CalledProcessError as error:
             details = (error.stderr or "").strip() or (error.stdout or "").strip()
             raise RuntimeError(
@@ -232,6 +235,7 @@ def open_markdown(
     needs_pane: bool = False,
     zellij_session: str | None = None,
     format: str = "html",
+    focus: bool = False,
 ) -> None:
     """Open a local analysis in the requested format."""
 
@@ -251,6 +255,7 @@ def open_markdown(
         kind="file",
         close_on_exit=True,
         direct_nonblocking=True,
+        focus=focus,
         needs_pane=needs_pane,
         zellij_session=zellij_session,
     )
@@ -651,7 +656,7 @@ def _read_zellij_panes(session: str) -> list[dict[str, object]]:
 class Zellij:
     """All Zellij interactions must go through this object."""
 
-    def open_viewer(self, session: str, command: list[str], *, close_on_exit: bool = False) -> None:
+    def open_viewer(self, session: str, command: list[str], *, close_on_exit: bool = False) -> str:
         completed = subprocess.run(
             [
                 _resolve_zellij_binary(),
@@ -680,6 +685,7 @@ class Zellij:
             raise RuntimeError(
                 completed.stderr.strip() or "Zellij did not return the viewer pane ID."
             )
+        return completed.stdout.strip()
 
     @staticmethod
     def exec_zellij_wrapped_workdash(

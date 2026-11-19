@@ -22,7 +22,7 @@ Feature: Generate an analysis
     - Opening a cached analysis also uses the configured analysis viewer without requiring the HTTP server.
     - The analysis URL is passed literally after configured viewer arguments; opening an analysis does not prepare a worktree.
     - Direct analysis viewers continue running until closed by the user without blocking Workdash; an early viewer failure is reported to the user.
-    - Pane-based analysis viewers open in a full-size floating pane and close when the viewer exits.
+    - Pane-based analysis viewers open in a full-size floating pane and close when the viewer exits. Dashboard-initiated fresh and cached opens focus the viewer pane; CLI and API analysis requests do not change focus.
     - The built-in Markdown viewer renders Markdown from local paths, file URLs, and HTTP or HTTPS URLs.
     - The Markdown viewer shows Ctrl+C to copy selected text and Q to quit at the bottom, and allows copying selected text. On macOS outside Zellij, copying reaches the system clipboard or reports that copying is unavailable.
     - Links to headings within the analysis navigate to those headings; other links follow the viewer's own link handling.
@@ -55,18 +55,22 @@ Feature: Generate an analysis
   @id:F-ANALYSIS-GENERATE-S001
   Scenario: Fresh analysis is cached and opened by URL in the viewer
     Given the user has the analyze dialog open on a work item
+    And the analysis viewer opens in a pane
     When the user chooses to generate a fresh analysis with a configured analysis agent
     Then the system prepares the work item's worktree
     And the analysis agent starts inside that worktree with access to the code and the work item's discussion
     And the system shows that the analysis is in progress
     And the generated analysis is cached
     And the analysis URL is opened with the configured viewer
+    And the analysis viewer pane receives focus
 
   @id:F-ANALYSIS-GENERATE-S002
   Scenario: Opening a cached analysis opens its URL
     Given the selected work item has a cached analysis
+    And the analysis viewer opens in a pane
     When the user chooses to open the cached analysis
     Then the cached analysis URL is opened with the configured viewer
+    And the analysis viewer pane receives focus
 
   @id:F-ANALYSIS-GENERATE-S007
   Scenario: Open cached HTML analysis without a server

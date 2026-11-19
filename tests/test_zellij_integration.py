@@ -11,6 +11,7 @@ import signal
 import struct
 import subprocess
 import sys
+import tempfile
 import termios
 import time
 import uuid
@@ -528,6 +529,12 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
     from workdash import launcher
 
     zellij = shutil.which("zellij")
+    sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
+    monkeypatch.setenv("ZELLIJ_SOCKET_DIR", sockets.name)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    config = tmp_path / "config.kdl"
+    config.write_text("")
+    monkeypatch.setenv("ZELLIJ_CONFIG_FILE", str(config))
     name = f"workdash-viewer-test-{uuid.uuid4().hex}"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -556,12 +563,23 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
 
     def action(*args):
         return subprocess.run(
-            [zellij, "--session", name, "action", *args], capture_output=True, text=True, env=env
+            [zellij, "--session", name, "action", *args],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=5,
         )
 
     def wait_for(predicate):
         deadline = time.monotonic() + 15
+        output = b""
+        result = None
         while time.monotonic() < deadline:
+            if select.select([fd], [], [], 0)[0]:
+                try:
+                    output += os.read(fd, 65536)
+                except OSError:
+                    break
             result = action("list-panes", "--json", "--all")
             if result.stdout.strip().startswith("["):
                 panes = json.loads(result.stdout)
@@ -571,14 +589,8 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
                 break
             time.sleep(0.1)
         status = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-        os.set_blocking(fd, False)
-        try:
-            output = os.read(fd, 65536).decode(errors="replace")
-        except (BlockingIOError, OSError):
-            output = ""
         pytest.fail(
-            f"Zellij pane state not reached (client status: {status}): "
-            f"{result.stdout} {result.stderr}; {output}"
+            f"Zellij pane state not reached (client status: {status}): {result}; PTY: {output!r}"
         )
 
     try:
@@ -590,6 +602,7 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
             format="markdown",
             needs_pane=True,
             zellij_session=name,
+            focus=True,
         )
         panes = wait_for(
             lambda panes: any(
@@ -620,7 +633,7 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
             assert text in screen
         assert "# Analysis heading" not in screen
         assert "```" not in screen
-        assert action("send-keys", "--pane-id", pane_id, "End").returncode == 0
+        assert action("send-keys", "End").returncode == 0
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             screen = action("dump-screen", "--pane-id", pane_id).stdout
@@ -628,6 +641,7 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
                 break
             time.sleep(0.1)
         assert "End of analysis" in screen
+
         assert action("write-chars", "--pane-id", pane_id, "q").returncode == 0
         panes = wait_for(
             lambda panes: all(p["is_plugin"] or p["id"] != viewer["id"] for p in panes)
@@ -635,6 +649,221 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
         assert initial_ids <= {p["id"] for p in panes if not p["is_plugin"]}
     finally:
         _cleanup_sessions(zellij, env, [(name, pid, fd)])
+        sockets.cleanup()
+
+
+@pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
+def test_cli_and_api_analysis_preserve_focus_in_real_zellij(tmp_path, monkeypatch):
+    import socket
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import nullcontext
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    from workdash.backend import WorkdashBackend
+    from workdash.config import AgentConfig, WorkdashConfig
+    from workdash.control import WorkdashControlClient, WorkdashControlServer, WorkdashSession
+    from workdash.models import WorkItem, WorkItemKind, WorkItemType
+    from workdash.workdash import main
+
+    zellij = shutil.which("zellij")
+    sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
+    monkeypatch.setenv("ZELLIJ_SOCKET_DIR", sockets.name)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    config = tmp_path / "config.kdl"
+    config.write_text("")
+    monkeypatch.setenv("ZELLIJ_CONFIG_FILE", str(config))
+    name = f"workdash-analysis-focus-{uuid.uuid4().hex[:8]}"
+    document = tmp_path / "analysis.md"
+    document.write_text("# Analysis")
+    env = os.environ.copy()
+    for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
+        env.pop(key, None)
+    env.update(TERM="xterm-256color", SHELL="/bin/sh")
+    pid, fd = pty.fork()
+    if pid == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        os.execve(zellij, [zellij, "--session", name], env)
+
+    def action(*args):
+        return subprocess.run(
+            [zellij, "--session", name, "action", *args],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=5,
+        )
+
+    def wait_for(predicate):
+        deadline = time.monotonic() + 15
+        output = b""
+        result = None
+        while time.monotonic() < deadline:
+            if select.select([fd], [], [], 0)[0]:
+                try:
+                    output += os.read(fd, 65536)
+                except OSError:
+                    break
+            result = action("list-panes", "--json", "--all")
+            if result.stdout.strip().startswith("["):
+                panes = json.loads(result.stdout)
+                if predicate(panes):
+                    return panes
+            if os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT):
+                break
+            time.sleep(0.1)
+        status = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        pytest.fail(
+            f"Zellij pane state not reached (client status: {status}): {result}; PTY: {output!r}"
+        )
+
+    try:
+        initial = wait_for(lambda panes: any(not p["is_plugin"] for p in panes))
+        original = next(p for p in initial if not p["is_plugin"])
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        monkeypatch.setenv("WORKDASH_HOST", f"127.0.0.1:{port}")
+        item = WorkItem(
+            kind=WorkItemKind.TRACKED_ISSUE,
+            item_type=WorkItemType.ISSUE,
+            repo="owner/repo",
+            number=1,
+            title="Analysis",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            url="https://github.com/owner/repo/issues/1",
+            analysis="# Analysis",
+        )
+        backend = MagicMock()
+        backend.analyze_item.return_value = str(document)
+        session = WorkdashSession(
+            config=WorkdashConfig(),
+            backend=backend,
+            work_items=[item],
+            suggestion_markers={},
+            zellij_session=name,
+        )
+        server = WorkdashControlServer(session)
+        server.start()
+        try:
+            client = WorkdashControlClient(f"127.0.0.1:{port}")
+            assert action("focus-pane-id", f"terminal_{original['id']}").returncode == 0
+            for index, request in enumerate(
+                (
+                    lambda: client.request("analyze", {"target": "owner/repo#ISSUE-1"})[
+                        "cache_used"
+                    ],
+                    lambda: main(["analyze", "owner/repo#ISSUE-1", "--json"]) == 0,
+                )
+            ):
+                assert request()
+                marker = f"CACHED_FOCUS_{index}"
+                assert action("write-chars", f"echo {marker}\n").returncode == 0
+                time.sleep(0.2)
+                assert (
+                    marker
+                    in action("dump-screen", "--pane-id", f"terminal_{original['id']}").stdout
+                )
+        finally:
+            server.stop()
+
+        release = tmp_path / "release-analysis"
+        started = tmp_path / "analysis-started"
+        agent = tmp_path / "analysis-agent"
+        agent.write_text(
+            f"#!/bin/sh\nsleep 1\ntouch {shlex.quote(str(started))}\n"
+            f"while [ ! -e {shlex.quote(str(release))} ]; do sleep 0.05; done\n"
+            "echo 'Fresh analysis result'\n"
+        )
+        agent.chmod(0o755)
+        config = WorkdashConfig(agents={"test": AgentConfig(analyze=str(agent))})
+        github = MagicMock()
+        github.fetch_analysis_context.return_value = {"body": "Issue context"}
+        backend = WorkdashBackend(
+            cache_root=tmp_path / "cache", github_client=github, config=config
+        )
+        monkeypatch.setattr(
+            "workdash.control.analysis_worktree", lambda *a, **kw: nullcontext(str(tmp_path))
+        )
+        item.analysis = None
+        session = WorkdashSession(
+            config=config,
+            backend=backend,
+            work_items=[item],
+            suggestion_markers={},
+            zellij_session=name,
+        )
+        server = WorkdashControlServer(session)
+        server.start()
+        try:
+            client = WorkdashControlClient(f"127.0.0.1:{port}")
+            for index, request in enumerate(
+                (
+                    lambda: (
+                        client.request("analyze", {"target": "owner/repo#ISSUE-1"})["status"]
+                        == "generated"
+                    ),
+                    lambda: main(["analyze", "owner/repo#ISSUE-1", "--json"]) == 0,
+                )
+            ):
+                release.unlink(missing_ok=True)
+                started.unlink(missing_ok=True)
+                backend.analysis_cache.build_cache_path(item).unlink(missing_ok=True)
+                item.analysis = None
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(request)
+                    try:
+                        wait_for(
+                            lambda panes: any(
+                                p.get("title") == f"analyse_{tmp_path.name}" for p in panes
+                            )
+                        )
+                        deadline = time.monotonic() + 15
+                        while (
+                            not started.exists()
+                            and not future.done()
+                            and time.monotonic() < deadline
+                        ):
+                            time.sleep(0.05)
+                        if not started.exists():
+                            panes = action("list-panes", "--json", "--all")
+                            screen = action("dump-screen")
+                            outcome = repr(future.exception()) if future.done() else "still running"
+                            pytest.fail(
+                                f"analysis agent {index} did not start; request: {outcome}; "
+                                f"panes: {panes.stdout!r} {panes.stderr!r}; "
+                                f"screen: {screen.stdout!r} {screen.stderr!r}"
+                            )
+                        marker = f"RUNNING_FOCUS_{index}"
+                        assert action("write-chars", f"echo {marker}\n").returncode == 0
+                        time.sleep(0.2)
+                        assert (
+                            marker
+                            in action(
+                                "dump-screen", "--pane-id", f"terminal_{original['id']}"
+                            ).stdout
+                        )
+                    finally:
+                        release.touch()
+                    assert future.result(timeout=15)
+                    assert (
+                        backend.analysis_cache.build_analysis_path(item).read_text().strip()
+                        == "Fresh analysis result"
+                    )
+                    marker = f"FINISHED_FOCUS_{index}"
+                    assert action("write-chars", f"echo {marker}\n").returncode == 0
+                    time.sleep(0.2)
+                    assert (
+                        marker
+                        in action("dump-screen", "--pane-id", f"terminal_{original['id']}").stdout
+                    )
+        finally:
+            server.stop()
+
+    finally:
+        _cleanup_sessions(zellij, env, [(name, pid, fd)])
+        sockets.cleanup()
 
 
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
@@ -970,3 +1199,118 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
                     pass
                 os.waitpid(pid, 0)
                 os.close(fd)
+
+
+@pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
+@pytest.mark.parametrize("choice", ["a", "1"])
+@pytest.mark.parametrize("repeat", range(2))
+def test_dashboard_analysis_focuses_viewer_in_real_zellij(tmp_path, choice, repeat):
+    import socket
+
+    sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
+    config = tmp_path / "config.kdl"
+    config.write_text("show_release_notes false\nshow_startup_tips false\n")
+    zellij = shutil.which("zellij")
+    name = f"dashboard-focus-{uuid.uuid4().hex[:8]}"
+    document = tmp_path / "analysis.md"
+    document.write_text("# Dashboard analysis\n\nViewer has focus.\n")
+    harness = tmp_path / "dashboard.py"
+    harness.write_text(
+        "from datetime import UTC, datetime\n"
+        "from pathlib import Path\n"
+        "import os\n"
+        f"Path({str(tmp_path / 'host')!r}).write_text(os.environ['WORKDASH_HOST'])\n"
+        "import workdash.workdash as cli\n"
+        "import workdash.control as control\n"
+        "from workdash.config import WorkdashConfig, AgentConfig\n"
+        "from workdash.models import WorkItem, WorkItemKind, WorkItemType\n"
+        "now = datetime.now(UTC)\n"
+        "item = WorkItem(kind=WorkItemKind.ASSIGNED_ISSUE, item_type=WorkItemType.ISSUE, "
+        "repo='owner/repo', number=1, title='Test issue', created_at=now, updated_at=now, "
+        "url='https://example.com/1', analyzed_at=now)\n"
+        "cli.GitHubClient.check_authentication = lambda self: None\n"
+        "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
+        f"analysis_viewer={{'command': '{sys.executable} -m workdash mdview', "
+        "'format': 'markdown', 'needs_pane': True}, "
+        "agents={'agent': AgentConfig(analyze='unused')}, repositories=('owner/repo',), "
+        f"workdir={str(tmp_path)!r}, todo_repository='test/todos')\n"
+        "cli.WorkdashBackend.load_items = lambda self, progress_callback=None: ([item], {})\n"
+        "def analyze(self, **kwargs):\n"
+        f"    Path({str(tmp_path / 'choice')!r}).write_text(str(kwargs['prefer_cache']))\n"
+        f"    return {{'path': {str(document)!r}}}\n"
+        "control.WorkdashSession.analyze = analyze\n"
+        f"control.SERVER_LOG_PATH = Path({str(tmp_path / 'workdash.log')!r})\n"
+        "raise SystemExit(cli.main([]))\n"
+    )
+    shell = tmp_path / "shell"
+    shell.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(harness))}\n")
+    shell.chmod(0o755)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    env = os.environ.copy()
+    for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
+        env.pop(key, None)
+    env.update(
+        TERM="xterm-256color",
+        SHELL=str(shell),
+        WORKDASH_HOST=f"127.0.0.1:{port}",
+        ZELLIJ_SOCKET_DIR=sockets.name,
+        ZELLIJ_CONFIG_FILE=str(config),
+        XDG_CACHE_HOME=str(tmp_path / "cache"),
+    )
+    pid, fd = pty.fork()
+    if pid == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        os.execve(zellij, [zellij, "--session", name], env)
+
+    def action(*args):
+        return subprocess.run(
+            [zellij, "--session", name, "action", *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+    try:
+        deadline = time.monotonic() + 20
+        output = b""
+        while time.monotonic() < deadline and b"Test issue" not in output:
+            if select.select([fd], [], [], 0.1)[0]:
+                try:
+                    output += os.read(fd, 65536)
+                except OSError:
+                    break
+        if b"Test issue" not in output:
+            result = action("dump-screen")
+            pytest.fail(f"dashboard did not start: stderr={result.stderr!r}, PTY={output!r}")
+        assert action("write-chars", "a").returncode == 0
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            screen = action("dump-screen").stdout
+            if "Open analysis" in screen:
+                break
+            time.sleep(0.1)
+        assert "Open analysis" in screen
+        assert action("write-chars", choice).returncode == 0
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            screen = action("dump-screen").stdout
+            if "Dashboard analysis" in screen:
+                break
+            time.sleep(0.1)
+        assert "Dashboard analysis" in screen
+        assert (tmp_path / "choice").read_text() == str(choice == "a")
+        assert (tmp_path / "host").read_text() == env["WORKDASH_HOST"]
+        assert action("write-chars", "q").returncode == 0
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            screen = action("dump-screen").stdout
+            if "Test issue" in screen:
+                break
+            time.sleep(0.1)
+        assert "Test issue" in screen
+    finally:
+        _cleanup_sessions(zellij, env, [(name, pid, fd)])
+        sockets.cleanup()
