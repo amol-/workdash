@@ -412,7 +412,7 @@ def test_markdown_link_keeps_long_running_viewer_alive(monkeypatch):
     statuses = []
 
     async def follow(pilot):
-        await app.follow("https://example.com")
+        app.follow("https://example.com")
         statuses.append(_viewer_status(app))
 
     try:
@@ -433,7 +433,7 @@ def test_external_link_honours_the_configured_pane_viewer(monkeypatch):
     statuses = []
 
     async def follow(pilot):
-        await app.follow("https://example.com")
+        app.follow("https://example.com")
         statuses.append(_viewer_status(app))
 
     _drive_viewer(monkeypatch, app, follow)
@@ -450,7 +450,7 @@ def test_markdown_link_reports_immediate_command_failure(monkeypatch):
     statuses = []
 
     async def follow(pilot):
-        await app.follow("https://example.com")
+        app.follow("https://example.com")
         statuses.append(_viewer_status(app))
 
     _drive_viewer(monkeypatch, app, follow)
@@ -476,7 +476,8 @@ def test_markdown_viewer_resolves_relative_links_against_the_document_url(monkey
     sources = []
 
     async def follow(pilot):
-        await app.follow("other.md")
+        app.follow("other.md")
+        await _settle(pilot, lambda: _viewer_source(app) == "# Next")
         sources.append(_viewer_source(app))
 
     _drive_viewer(monkeypatch, app, follow)
@@ -494,7 +495,7 @@ def test_github_markdown_page_opens_with_the_configured_command(monkeypatch):
     statuses = []
 
     async def follow(pilot):
-        await app.follow("https://github.com/owner/repo/blob/main/README.md")
+        app.follow("https://github.com/owner/repo/blob/main/README.md")
         statuses.append(_viewer_status(app))
 
     _drive_viewer(monkeypatch, app, follow)
@@ -640,26 +641,31 @@ def test_back_during_loading_keeps_the_previous_document(tmp_path, monkeypatch):
     (tmp_path / "third.md").write_text("# Third\n", encoding="utf-8")
     real_load_document = view.load_document
     started = threading.Event()
+    finished = threading.Event()
     release = threading.Event()
 
     def slow_load_document(target):
         started.set()
         assert release.wait(timeout=10)
+        finished.set()
         return real_load_document(target)
 
     observed = {}
 
     async def exercise(pilot, app):
-        await app.follow("second.md")
+        app.follow("second.md")
+        await _settle(pilot, lambda: _viewer_source(app).startswith("# Second"))
         monkeypatch.setattr(view, "load_document", slow_load_document)
-        loading = asyncio.create_task(app.follow("third.md"))
-        while not _viewer_status(app).startswith("Loading "):
+        app.follow("third.md")
+        while not started.is_set():
             await pilot.pause()
-        assert started.is_set()
+        assert _viewer_status(app).startswith("Loading ")
         await app.action_back()
         assert _viewer_source(app).startswith("# First\n")
         release.set()
-        await loading
+        while not finished.is_set():
+            await pilot.pause()
+        await pilot.pause()
         observed["source"] = _viewer_source(app)
         observed["back"] = "b" in app.screen.active_bindings
 
@@ -711,7 +717,8 @@ def test_markdown_viewer_resolves_relative_links_against_the_redirected_url(monk
     app = view._MarkdownApp(document, "xdg-open", False)
 
     async def follow(pilot):
-        await app.follow("other.md")
+        app.follow("other.md")
+        await _settle(pilot, lambda: _viewer_source(app) == "# Next")
 
     _drive_viewer(monkeypatch, app, follow)
 
@@ -730,7 +737,8 @@ def test_markdown_viewer_reports_a_github_link_that_cannot_be_fetched(monkeypatc
     observed = {}
 
     async def follow(pilot):
-        await app.follow(ISSUE_URL)
+        app.follow(ISSUE_URL)
+        await _settle(pilot, lambda: _viewer_status(app) != "")
         observed["status"] = _viewer_status(app)
         observed["source"] = _viewer_source(app)
 
@@ -747,22 +755,27 @@ def test_back_during_a_failed_load_keeps_the_status_clear(tmp_path, monkeypatch)
     first.write_text("# First\n\n[Next](second.md)\n", encoding="utf-8")
     (tmp_path / "second.md").write_text("# Second\n\n[Broken](missing.md)\n", encoding="utf-8")
     release = threading.Event()
+    finished = threading.Event()
 
     def failing_load_document(target):
         assert release.wait(timeout=10)
+        finished.set()
         raise RuntimeError(f"Failed to read {target}: broken")
 
     observed = {}
 
     async def exercise(pilot, app):
-        await app.follow("second.md")
+        app.follow("second.md")
+        await _settle(pilot, lambda: _viewer_source(app).startswith("# Second"))
         monkeypatch.setattr(view, "load_document", failing_load_document)
-        loading = asyncio.create_task(app.follow("missing.md"))
+        app.follow("missing.md")
         while not _viewer_status(app).startswith("Loading "):
             await pilot.pause()
         await app.action_back()
         release.set()
-        await loading
+        while not finished.is_set():
+            await pilot.pause()
+        await pilot.pause()
         observed["status"] = _viewer_status(app)
         observed["source"] = _viewer_source(app)
 

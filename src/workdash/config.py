@@ -343,9 +343,13 @@ def _analysis_viewer_problem(viewer: object) -> str | None:
         or not isinstance(viewer.get("needs_pane"), bool)
     ):
         return "expected command, format (markdown or html), and needs_pane boolean"
-    tokens = shlex.split(viewer["command"])
+    return _removed_viewer_problem(viewer["command"])
+
+
+def _removed_viewer_problem(command: str) -> str | None:
+    tokens = shlex.split(command)
     if len(tokens) > 1 and (Path(tokens[0]).name, tokens[1]) in _REMOVED_VIEWER_COMMANDS:
-        return f"{viewer['command']!r} was removed; use {_ANALYSIS_VIEWER_COMMAND}"
+        return f"{command!r} was removed; use {_ANALYSIS_VIEWER_COMMAND}"
     return None
 
 
@@ -633,7 +637,12 @@ def configure(
     analysis_viewer = config.analysis_viewer
     if _analysis_viewer_problem(analysis_viewer):
         command = _prompt_with_default(input_fn, "Analysis viewer", _ANALYSIS_VIEWER_COMMAND)
-        while not _is_configured_command(command):
+        while True:
+            if _is_configured_command(command):
+                removed = _removed_viewer_problem(command)
+                if removed is None:
+                    break
+                print(removed)
             command = input_fn("Analysis viewer command (required): ").strip()
         if command == _ANALYSIS_VIEWER_COMMAND:
             analysis_viewer = {"command": command, "format": "markdown", "needs_pane": True}

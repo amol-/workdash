@@ -968,6 +968,53 @@ def test_configure_repairs_the_removed_markdown_viewer(tmp_path, removed):
     }
 
 
+@pytest.mark.parametrize("removed", ["workdash mdview", "/home/u/bin/workdash markdownview --x"])
+def test_configure_refuses_the_removed_viewer_typed_again(tmp_path, removed):
+    """The repair cannot save the removed viewer it just rejected."""
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "github_username": "existing-user",
+                "open": "existing-open",
+                "open_needs_pane": False,
+                "analysis_viewer": {
+                    "command": "workdash mdview",
+                    "format": "markdown",
+                    "needs_pane": True,
+                },
+                "agents": {"claude": {"analyze": "claude -p", "launch": "claude"}},
+                "repositories": ["existing-user/*"],
+                "workdir": "~/src",
+                "todo_repository": "existing-user/todos",
+            }
+        ),
+        encoding="utf-8",
+    )
+    answers = iter([removed, "workdash view"])
+    prompts: list[str] = []
+
+    def input_fn(prompt: str) -> str:
+        prompts.append(prompt)
+        assert prompt.startswith("Analysis viewer"), prompt
+        return next(answers)
+
+    config = configure(
+        config_path,
+        input_fn=input_fn,
+        which_fn=_on_path("zellij", "gh", "existing-open", "claude"),
+    )
+
+    assert prompts == ["Analysis viewer [workdash view]: ", "Analysis viewer command (required): "]
+    assert config.analysis_viewer == {
+        "command": "workdash view",
+        "format": "markdown",
+        "needs_pane": True,
+    }
+    load_config(config_path).require_valid()
+
+
 @pytest.mark.parametrize(
     "command", ["workdash view", "workdash view --reuse-window", "myworkdash mdview"]
 )

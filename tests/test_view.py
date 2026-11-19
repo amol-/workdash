@@ -508,7 +508,11 @@ def test_viewer_opens_a_github_item_link_without_launching_anything(monkeypatch)
     shown = []
 
     async def exercise(pilot, app):
-        await app.follow(ISSUE_URL)
+        app.follow(ISSUE_URL)
+        for _ in range(200):
+            await pilot.pause()
+            if app.query_one(view._DocumentViewer).document.source.startswith("# Crash"):
+                break
         shown.append(app.query_one(view._DocumentViewer).document.source)
         shown.append(app.query_one("#status", Static).render().plain)
         shown.append("b" in app.screen.active_bindings)

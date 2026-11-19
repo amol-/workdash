@@ -135,7 +135,7 @@ class _DocumentViewer(MarkdownViewer):
             # An in-document anchor scrolls the current document.
             await super().go(href)
             return
-        await self.app.follow(href)
+        self.app.follow(href)
 
 
 class _MarkdownApp(App):
@@ -162,7 +162,7 @@ class _MarkdownApp(App):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         return action != "back" or bool(self._history)
 
-    async def follow(self, href: str) -> None:
+    def follow(self, href: str) -> None:
         """Open a link found in the current document."""
         try:
             target = urljoin(self._document.source, href)
@@ -176,7 +176,7 @@ class _MarkdownApp(App):
             # A section of the linked document is scrolled to after that document loads.
             anchor = url.fragment
             target = urlunsplit((url.scheme, url.netloc, url.path, url.query, ""))
-            await self._load(target, anchor)
+            self._load(target, anchor)
             return
         try:
             command = launcher.open_in_browser(
@@ -207,9 +207,12 @@ class _MarkdownApp(App):
         except (OSError, subprocess.SubprocessError):
             self.notify("Copy unavailable: could not access the system clipboard", severity="error")
 
-    async def _load(self, target: str, anchor: str = "") -> None:
-        previous = self._document
+    def _load(self, target: str, anchor: str = "") -> None:
+        """Read a target off the message pump, then show it when the read lands."""
         self._set_status(f"Loading {target}...")
+        self.run_worker(self._fetch(target, self._document, anchor), exclusive=True)
+
+    async def _fetch(self, target: str, previous: Document, anchor: str) -> None:
         try:
             document = await _read_document(target)
         except (OSError, RuntimeError) as error:

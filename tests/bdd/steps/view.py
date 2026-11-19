@@ -7,6 +7,7 @@ import io
 import os
 import shutil
 import subprocess
+import threading
 import urllib.request
 from typing import Any
 from unittest.mock import MagicMock
@@ -350,6 +351,12 @@ def _viewer_links_a_heading(scenario_state: dict[str, Any], tmp_path) -> None:
     scenario_state["viewer_path"] = path
 
 
+@given("the built-in Markdown viewer shows a document linking to a slow Markdown document")
+def _viewer_links_a_slow_document(scenario_state: dict[str, Any], tmp_path) -> None:
+    _viewer_document(scenario_state, tmp_path, "slow.md")
+    (tmp_path / "slow.md").write_text("# Slow\n", encoding="utf-8")
+
+
 @given("the user is inside a Zellij session")
 def _inside_zellij(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-current")
@@ -419,6 +426,55 @@ def _activate_heading_link(scenario_state: dict[str, Any], monkeypatch: pytest.M
     _activate_link(
         scenario_state, monkeypatch, lambda app: "Destination" in app.export_screenshot()
     )
+
+
+@when("the user activates the Markdown link and presses the quit key")
+def _activate_slow_link_and_quit(
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = threading.Event()
+    real_load_document = view.load_document
+
+    def slow_load_document(target):
+        release.wait(timeout=30)
+        return real_load_document(target)
+
+    monkeypatch.setattr(view, "load_config", lambda: WorkdashConfig(open_command="xdg-open"))
+    records: dict[str, Any] = {}
+
+    def run(app):
+        # Only the link's document is slow; the viewer's own document was read before this.
+        monkeypatch.setattr(view, "load_document", slow_load_document)
+
+        async def exercise():
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                # Not awaited: a viewer that swallows the quit would hold this click.
+                asyncio.create_task(pilot.click(Markdown, offset=(2, 4)))
+                # Sleep rather than pilot.pause: a busy viewer pump would hold the pause.
+                for _ in range(100):
+                    if _viewer_status(app).startswith("Loading "):
+                        break
+                    await asyncio.sleep(0.01)
+                records["loading"] = _viewer_status(app).startswith("Loading ")
+                pressed = asyncio.create_task(pilot.press("q"))
+                for _ in range(100):
+                    if not app.is_running:
+                        break
+                    await asyncio.sleep(0.01)
+                records["running"] = app.is_running
+                # Let a viewer that ignored the quit finish, so it shuts down cleanly.
+                release.set()
+                await asyncio.wait({pressed}, timeout=10)
+
+        asyncio.run(exercise())
+
+    monkeypatch.setattr(App, "run", run)
+    try:
+        assert view.run_view(str(scenario_state["viewer_path"])) == 0
+    finally:
+        release.set()
+    scenario_state["quit_records"] = records
 
 
 @when("the user follows the Markdown link and presses the back key")
@@ -567,6 +623,11 @@ def _viewer_shows_linked_section(scenario_state: dict[str, Any]) -> None:
     records = scenario_state["link_records"]
     assert records["source"].startswith("# Guide\n"), records["source"]
     assert "Part" in records["screenshot"], records["screenshot"]
+
+
+@then("the viewer exits without waiting for the document")
+def _viewer_quit_while_loading(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["quit_records"] == {"loading": True, "running": False}
 
 
 @then("the viewer reports that the document is loading")

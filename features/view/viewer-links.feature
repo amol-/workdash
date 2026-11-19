@@ -11,7 +11,7 @@ Feature: Follow links from the built-in Markdown viewer
     - Activating a GitHub issue or pull request link opens that item in the same viewer as the item document.
     - Following a document or item link never opens a pane and never replaces the running viewer, with or without Zellij.
     - Activating any other link runs the configured `open` command without waiting for it to exit, and the viewer names the command it used in its status line.
-    - While a document is fetched the viewer shows that it is loading.
+    - While a document is fetched the viewer shows that it is loading and stays responsive: the quit key still exits at once.
     - A link that cannot be loaded or opened is reported in the viewer's status line, and the current document stays on screen.
     - `b` returns to the previous document and is offered only while there is a previous document.
     - Links to headings within the document scroll to those headings and are not previous documents.
@@ -102,3 +102,9 @@ Feature: Follow links from the built-in Markdown viewer
     Given the built-in Markdown viewer shows a document linking to a section of another Markdown document
     When the user activates the Markdown section link
     Then the viewer shows the linked document at the section
+
+  @id:F-VIEW-LINKS-S013
+  Scenario: The viewer can be quit while a document loads
+    Given the built-in Markdown viewer shows a document linking to a slow Markdown document
+    When the user activates the Markdown link and presses the quit key
+    Then the viewer exits without waiting for the document

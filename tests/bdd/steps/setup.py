@@ -237,7 +237,9 @@ def _run_configure_with_fakes(
     def input_fn(prompt: str) -> str:
         prompts.append(prompt)
         print(prompt)
-        if prompt.startswith(("Analysis viewer [", "Analysis format", "Does the analysis viewer")):
+        if prompt.startswith("Analysis viewer") or prompt.startswith(
+            ("Analysis format", "Does the analysis viewer")
+        ):
             return next(analysis_answers)
         if prompt.startswith(("Agents for", "Agent name")):
             try:
@@ -650,6 +652,19 @@ def _existing_config_with_removed_viewer(scenario_state, config_path):
 @then("the wizard asks for the analysis viewer with the single view command default")
 def _wizard_asks_for_view_default(scenario_state):
     assert scenario_state["prompts"] == ["Analysis viewer [workdash view]: "]
+
+
+@given("the user answers the analysis viewer prompt with the removed command")
+def _removed_analysis_viewer_answer(scenario_state: dict[str, Any]) -> None:
+    scenario_state["analysis_answers"] = ["workdash mdview", "workdash view"]
+
+
+@then("the wizard asks for the analysis viewer again")
+def _wizard_asks_for_view_again(scenario_state):
+    assert scenario_state["prompts"] == [
+        "Analysis viewer [workdash view]: ",
+        "Analysis viewer command (required): ",
+    ]
 
 
 @given("the user has an existing configuration missing the analysis viewer")

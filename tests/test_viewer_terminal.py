@@ -67,6 +67,8 @@ def test_quitting_during_a_load_returns_to_the_shell(tmp_path):
         """import asyncio
 import threading
 
+from textual.widgets import Markdown, Static
+
 from workdash import view
 
 
@@ -75,15 +77,18 @@ def read(target):
 
 
 view.load_document = read
-view._MarkdownApp._set_status = lambda self, message: None
 
 
 async def main():
-    app = view._MarkdownApp(view.Document("# First", "file:///first.md"), "xdg-open", False)
-    loading = asyncio.create_task(app._load("file:///second.md"))
-    await asyncio.sleep(0.2)
-    loading.cancel()
-    await asyncio.wait([loading])
+    document = view.Document("# First\\n\\n[Next](second.md)\\n", "file:///first.md")
+    app = view._MarkdownApp(document, "xdg-open", False)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        asyncio.create_task(pilot.click(Markdown, offset=(2, 4)))
+        while not app.query_one("#status", Static).render().plain.startswith("Loading "):
+            await pilot.pause()
+        await pilot.press("q")
+        assert not app.is_running, "q did not quit the viewer"
 
 
 asyncio.run(main())
