@@ -4,40 +4,6 @@ import subprocess
 import sys
 
 
-def test_viewer_restores_terminal_before_replacing_process(tmp_path):
-    result = tmp_path / "terminal"
-    script = """
-import os, termios
-from pathlib import Path
-from workdash.markdownview import _MarkdownApp
-before = termios.tcgetattr(0)
-def replace(file, args):
-    Path(os.environ["RESULT"]).write_text(str(termios.tcgetattr(0) == before))
-    os._exit(0)
-os.execvp = replace
-app = _MarkdownApp("# Document", "xdg-open", False)
-app.call_after_refresh(lambda: app.open_url("https://github.com/owner/repo/issues/12"))
-app.run()
-"""
-    master, slave = pty.openpty()
-    env = {**os.environ, "RESULT": str(result), "TERM": "xterm-256color"}
-    env.pop("ZELLIJ_SESSION_NAME", None)
-    try:
-        subprocess.run(
-            [sys.executable, "-c", script],
-            stdin=slave,
-            stdout=slave,
-            stderr=slave,
-            env=env,
-            timeout=10,
-            check=True,
-        )
-        assert result.read_text() == "True"
-    finally:
-        os.close(master)
-        os.close(slave)
-
-
 def test_item_viewer_pane_keeps_lookup_error_until_dismissed(monkeypatch, tmp_path):
     import select
 
@@ -58,7 +24,7 @@ def gh(command, **kwargs):
     return subprocess.CompletedProcess(command, 0, stdout=json.dumps(data))
 
 view.subprocess.run = gh
-view.show_markdown = lambda document: print(document)
+view.show_document = lambda document: print(document.content)
 sys.exit(view.run_view(sys.argv[2]))
 """)
     executable.chmod(0o755)
@@ -92,3 +58,48 @@ sys.exit(view.run_view(sys.argv[2]))
                 process.wait()
             os.close(master)
             os.close(slave)
+
+
+def test_quitting_during_a_load_returns_to_the_shell(tmp_path):
+    """`q` while a document loads must not wait for the read to finish."""
+    script = tmp_path / "quit_during_load.py"
+    script.write_text(
+        """import asyncio
+import threading
+
+from textual.widgets import Markdown, Static
+
+from workdash import view
+
+
+def read(target):
+    threading.Event().wait()
+
+
+view.load_document = read
+
+
+async def main():
+    document = view.Document("# First\\n\\n[Next](second.md)\\n", "file:///first.md")
+    app = view._MarkdownApp(document, "xdg-open", False)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        asyncio.create_task(pilot.click(Markdown, offset=(2, 4)))
+        while not app.query_one("#status", Static).render().plain.startswith("Loading "):
+            await pilot.pause()
+        await pilot.press("q")
+        assert not app.is_running, "q did not quit the viewer"
+
+
+asyncio.run(main())
+print("quit")
+""",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=15
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip().endswith("quit")

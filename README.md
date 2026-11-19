@@ -79,7 +79,7 @@ Separate viewers open selected issue/PR URLs (`v` then `o`) and analyses (fresh 
 {
   "open": "term-copy --quiet",
   "open_needs_pane": false,
-  "analysis_viewer": {"command": "workdash mdview", "format": "markdown", "needs_pane": true}
+  "analysis_viewer": {"command": "workdash view", "format": "markdown", "needs_pane": true}
 }
 ```
 
@@ -108,14 +108,14 @@ Re-running `--configure` otherwise only prompts for empty fields, except for
 Zellij and GitHub CLI: the wizard always checks for global binaries first and
 downloads fresh local copies when none are available.
 
-The analysis viewer is required and defaults to `workdash mdview` in the
-wizard. Existing configurations using `workdash markdownview` must be edited to
-use `workdash mdview`; the old command is no longer available. Choose `markdown`
-or `html` for a custom command and whether it needs
+The analysis viewer is required and defaults to `workdash view` in the wizard.
+The removed `workdash mdview` and `workdash markdownview` commands are no longer
+available, and a configuration naming either one is repaired to the default.
+Choose `markdown` or `html` for a custom command and whether it needs
 a terminal pane. Direct analysis viewers run without blocking Workdash or a time limit.
 Analyses are passed as local file URLs; the HTTP server is not
-required. `workdash mdview PATH` also accepts file, HTTP and HTTPS URLs;
-it intentionally does not verify HTTPS certificates.
+required. `workdash view` also reads local paths, file URLs and HTTP or HTTPS
+URLs, and it intentionally does not verify HTTPS certificates.
 
 ### Agents
 
@@ -170,7 +170,7 @@ workdash todo --close ITEM [--json]  # close a todo
 workdash read PANE_ID [--full] [--json]  # read text from a live pane
 workdash write PANE_ID TEXT [--raw] [--json]  # send text to a live pane
 workdash show-config [--json] # show configured agents and selected server address
-workdash view TARGET         # read an issue or pull request as a Markdown document
+workdash view TARGET         # read a document: a GitHub item, a local path, or a URL
 workdash --debug             # verbose logging
 workdash --configure         # run the interactive setup wizard
 workdash --session NAME      # use a named persistent Zellij session
@@ -703,24 +703,35 @@ clients.
 
 ## View command
 
-`workdash view TARGET` reads an issue or pull request from GitHub and shows it
-as one Markdown document in the built-in viewer. `TARGET` is a GitHub issue or
-pull request URL, `owner/repo#NUMBER`, or a bare `NUMBER` or `#NUMBER` resolved
-against the current directory's `origin` remote. Whether the target is an issue
-or a pull request comes from GitHub, not from the URL. The command needs no
-running server.
+`workdash view TARGET` shows one document in the built-in viewer. `TARGET` is a
+local path, a `file://` URL, an HTTP or HTTPS URL, a GitHub issue or pull
+request URL, `owner/repo#NUMBER`, or a bare `NUMBER` or `#NUMBER` resolved
+against the current directory's `origin` remote. Only GitHub targets are looked
+up with `gh`; a local file never contacts GitHub. Whether a GitHub target is an
+issue or a pull request comes from GitHub, not from the URL. The command needs
+no running server.
 
-The document starts with the title, a metadata line, and a labels, assignees,
-milestone and comments line. A pull request also reports draft, mergeable,
-merge state and review decision, plus CI, reviews and review threads (capped at
-50 threads, 100 comments per thread and 20 failing checks, with a truncation note). The description preserves its original
-Markdown; bare issue and pull request references are not converted to links.
-Sub-issues are listed as a table at every nesting level.
+A GitHub document starts with the title, a metadata line, and a labels,
+assignees, milestone and comments line. A pull request also reports draft,
+mergeable, merge state and review decision, plus CI, reviews and review threads
+(capped at 50 threads, 100 comments per thread and 20 failing checks, with a
+truncation note). The description preserves its original Markdown; bare issue
+and pull request references are not converted to links. Sub-issues are listed as
+a table at every nesting level.
 
-Inside the viewer, activating a GitHub issue or pull request link opens a viewer
-for that item: a new full-size floating pane inside Zellij, or a replacement of
-the current process outside it. Any other link runs the configured `open`
-command, and the viewer reports the command it used.
+Inside the viewer, activating a link to a Markdown document opens it in the same
+viewer, and activating a link to a GitHub issue or pull request shows that item
+the same way. A Markdown file hosted on GitHub is a repository page rather than
+a document, so that link goes to the configured `open` command. Relative links
+resolve against the directory of the viewed file or against the address of the
+remote document. Any other link runs the configured `open` command, and the
+viewer reports the command it used in its status line.
+While a document is fetched the viewer says that it is loading; when a link
+cannot be loaded or opened, the message goes to the status line and the current
+document stays on screen. `b` returns to the previous document and is offered
+only while there is one, and links to headings scroll within the current
+document. Following a document or item link never opens a pane and never
+replaces the running viewer, with or without Zellij.
 
 ## Analysis cache
 

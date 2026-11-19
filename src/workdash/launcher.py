@@ -89,7 +89,7 @@ def _run_browser_open(
                 f"Failed to open {kind} via {command_name}: viewer requires an active Zellij session."
             )
         try:
-            if command_tokens in (["workdash", "mdview"], list(_ITEM_DOCUMENT_COMMAND)):
+            if command_tokens == list(_ITEM_DOCUMENT_COMMAND):
                 executable = shutil.which(command_tokens[0])
                 if executable:
                     command_tokens[0] = os.path.abspath(executable)
@@ -188,12 +188,6 @@ def open_item_document(url: str, *, zellij_session: str | None) -> str:
         zellij_session=zellij_session,
         close_on_exit=True,
     )
-
-
-def become_item_document(url: str) -> None:
-    """Replace this process with the item document viewer for ``url``."""
-
-    os.execvp(_ITEM_DOCUMENT_COMMAND[0], [*_ITEM_DOCUMENT_COMMAND, url])
 
 
 _HTML_TEMPLATE = """\

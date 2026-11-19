@@ -30,7 +30,7 @@ Feature: Generate an analysis
     - HTML analyses retain useful formatting and display remote HTTP(S) images, locally and through the API, while preventing script execution. Images may request remote URLs, including the read-only analysis documents; control APIs require a header unavailable to cross-origin image requests.
     - HTML analyses fit phone screens, with long code blocks and wide tables scrolling independently; their desktop layout stays unchanged.
     - An analysis viewer command, format, and pane choice are required configuration, separate from the viewer for work item links.
-    - `workdash mdview PATH` opens a Markdown document without dashboard setup; `markdownview` is not a command.
+    - `workdash view TARGET` opens a document without dashboard setup, and `mdview` and `markdownview` are not commands.
     - When an analysis fails or produces no content, the system closes any progress overlay, reports the failure details to the user, and leaves any previous cached analysis untouched.
 
   @id:F-ANALYSIS-GENERATE-S009

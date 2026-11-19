@@ -29,9 +29,9 @@ from workdash.backend import WorkdashBackend
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession, format_work_item_id
 from workdash.launcher import open_markdown
-from workdash.markdownview import _MarkdownApp
 from workdash.models import WorkItem
 from workdash.tui import AnalyzeDialog, WorkdashApp
+from workdash.view import Document, _MarkdownApp
 
 from .common import (
     NOW_UTC,
@@ -45,7 +45,9 @@ from .common import (
 
 @given("a Markdown document is open in the viewer")
 def _open_markdown_document(scenario_state):
-    scenario_state["markdown_app"] = _MarkdownApp("Copy this sentence.", "xdg-open", False)
+    scenario_state["markdown_app"] = _MarkdownApp(
+        Document("Copy this sentence.", "file:///document.md"), "xdg-open", False
+    )
 
 
 @given("a Markdown document is open in the viewer on macOS outside Zellij")

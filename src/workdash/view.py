@@ -1,21 +1,37 @@
-"""Render a GitHub issue or pull request as one Markdown document.
+"""Show a document in the built-in Markdown viewer.
 
-`workdash view` reads the item with `gh` and shows it in the built-in Markdown
-viewer, with no server dependency.
+`workdash view` reads a GitHub issue or pull request with `gh`, a local file, or a
+remote document, and shows it with no server dependency. The viewer follows the
+document's own links and keeps the documents it visited in a history.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import http.client
 import json
+import os
 import re
+import ssl
 import subprocess
 import sys
+import threading
+import urllib.request
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.widgets import Footer, MarkdownViewer, Static
+
+from . import launcher
+from .config import load_config
 from .git import GitHelper
 from .github_client import parse_github_item_url
-from .markdownview import show_markdown
 
 _ITEM_REFERENCE_RE = re.compile(r"^(?P<repo>[\w.-]+/[\w.-]+)#(?P<number>\d+)$")
 _BARE_NUMBER_RE = re.compile(r"^#?(?P<number>\d+)$")
@@ -26,28 +42,232 @@ _FAILING_CHECKS = frozenset(
 _MAX_REVIEW_THREADS = 50
 _MAX_CHECKS = 20
 _DIFF_HUNK_LINES = 10
+_DOCUMENT_SUFFIXES = (".md", ".markdown")
+_DOCUMENT_FETCH_TIMEOUT_SECONDS = 10
+# A Markdown file on GitHub is a repository page, not a document to fetch.
+_GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
+
+
+@dataclass(frozen=True)
+class Document:
+    """A document's text and the address its relative links resolve against."""
+
+    content: str
+    source: str
 
 
 def run_view(target: str) -> int:
-    """Show a GitHub issue or pull request as one Markdown document."""
+    """Show the document named by a command-line target."""
     try:
-        repo, number = _resolve_target(target)
-        issue = _gh_json(["gh", "api", f"repos/{repo}/issues/{number}"])
-        pull = (
-            _gh_json(["gh", "pr", "view", str(number), "--repo", repo, "--json", _PR_JSON_FIELDS])
-            if "pull_request" in issue
-            else None
-        )
-        document = _document(repo, number, issue, pull)
-    except RuntimeError as error:
+        document = load_document(target)
+    except (OSError, RuntimeError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
-    show_markdown(document)
+    show_document(document)
     return 0
 
 
-def _resolve_target(target: str) -> tuple[str, int]:
-    """Return the ``owner/repo`` and number named by a command-line target."""
+def load_document(target: str) -> Document:
+    """Read the document that a target or an in-document link points at."""
+    try:
+        item = _github_item(target)
+        url = urlsplit(target)
+    except ValueError as error:
+        raise RuntimeError(f"Unsupported target {target}: {error}") from error
+    if item is not None:
+        repo, number = item
+        try:
+            issue = _gh_json(["gh", "api", f"repos/{repo}/issues/{number}"])
+            pull = (
+                _gh_json(
+                    ["gh", "pr", "view", str(number), "--repo", repo, "--json", _PR_JSON_FIELDS]
+                )
+                if "pull_request" in issue
+                else None
+            )
+            return Document(_document(repo, number, issue, pull), issue["html_url"])
+        except RuntimeError as error:
+            # A link's failure names the item it could not load.
+            raise RuntimeError(f"Failed to load {target}: {error}") from error
+    if url.scheme in ("http", "https"):
+        try:
+            with urllib.request.urlopen(
+                target,
+                context=ssl._create_unverified_context(),
+                timeout=_DOCUMENT_FETCH_TIMEOUT_SECONDS,
+            ) as response:
+                return Document(response.read().decode("utf-8"), response.geturl())
+        except (OSError, ValueError, http.client.HTTPException) as error:
+            raise RuntimeError(f"Failed to read {target}: {error}") from error
+    if url.scheme == "file":
+        if url.netloc not in ("", "localhost"):
+            raise RuntimeError(f"Unsupported file URL {target}: it does not name the local host.")
+        path = Path(unquote(url.path))
+    elif url.scheme:
+        raise RuntimeError(
+            f"Unsupported target {target}: expected a local path, a file URL, an HTTP(S) URL, "
+            "or a GitHub issue or pull request."
+        )
+    else:
+        path = Path(target)
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"Failed to read {target}: {error}") from error
+    return Document(content, path.resolve().as_uri())
+
+
+def show_document(document: Document) -> None:
+    """Show a document, following the links it contains."""
+    config = load_config()
+    _MarkdownApp(document, config.open_command, config.open_needs_pane).run()
+
+
+class _DocumentViewer(MarkdownViewer):
+    """Send every link to the app, which owns the document history."""
+
+    async def go(self, location: str | Path) -> None:
+        href = str(location)
+        if href in ("", "#"):
+            # An empty link names the document already on screen.
+            return
+        if href.startswith("#"):
+            # An in-document anchor scrolls the current document.
+            await super().go(href)
+            return
+        self.app.follow(href)
+
+
+class _MarkdownApp(App):
+    BINDINGS = [
+        Binding("ctrl+c", "screen.copy_text", "Copy selected text", priority=True),
+        Binding("b", "back", "Back"),
+        ("q", "quit", "Quit"),
+    ]
+
+    def __init__(self, document: Document, open_command: str, open_needs_pane: bool) -> None:
+        super().__init__()
+        self._document = document
+        self._open_command = open_command
+        self._open_needs_pane = open_needs_pane
+        self._history: list[Document] = []
+
+    def compose(self) -> ComposeResult:
+        yield _DocumentViewer(
+            self._document.content, show_table_of_contents=False, open_links=False
+        )
+        yield Static("", id="status", markup=False)
+        yield Footer()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        return action != "back" or bool(self._history)
+
+    def follow(self, href: str) -> None:
+        """Open a link found in the current document."""
+        try:
+            target = urljoin(self._document.source, href)
+            url = urlsplit(target)
+        except ValueError as error:
+            self._set_status(f"Failed to load {href}: {error}")
+            return
+        if parse_github_item_url(target) is not None or (
+            url.path.lower().endswith(_DOCUMENT_SUFFIXES) and url.hostname not in _GITHUB_HOSTS
+        ):
+            # A section of the linked document is scrolled to after that document loads.
+            anchor = url.fragment
+            target = urlunsplit((url.scheme, url.netloc, url.path, url.query, ""))
+            self._load(target, anchor)
+            return
+        try:
+            command = launcher.open_in_browser(
+                target,
+                self._open_command,
+                needs_pane=self._open_needs_pane,
+                zellij_session=os.getenv("ZELLIJ_SESSION_NAME"),
+                direct_nonblocking=True,
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            self._set_status(f"Failed to open {target}: {error}")
+        else:
+            self._set_status(f"Opened {target} with {command}")
+
+    async def action_back(self) -> None:
+        """Return to the previous document."""
+        if self._history:
+            await self._show(self._history.pop())
+
+    def copy_to_clipboard(self, text: str) -> None:
+        if sys.platform != "darwin" or os.getenv("ZELLIJ_SESSION_NAME"):
+            super().copy_to_clipboard(text)
+            return
+        try:
+            subprocess.run(
+                ["pbcopy"], input=text, text=True, check=True, stderr=subprocess.DEVNULL, timeout=5
+            )
+        except (OSError, subprocess.SubprocessError):
+            self.notify("Copy unavailable: could not access the system clipboard", severity="error")
+
+    def _load(self, target: str, anchor: str = "") -> None:
+        """Read a target off the message pump, then show it when the read lands."""
+        self._set_status(f"Loading {target}...")
+        self.run_worker(self._fetch(target, self._document, anchor), exclusive=True)
+
+    async def _fetch(self, target: str, previous: Document, anchor: str) -> None:
+        try:
+            document = await _read_document(target)
+        except (OSError, RuntimeError) as error:
+            if self._document is previous:
+                # The loader's message already names the target and the reason.
+                self._set_status(str(error))
+            return
+        if self._document is not previous:
+            # The reader went back while this document was loading.
+            return
+        self._history.append(previous)
+        await self._show(document, anchor)
+
+    async def _show(self, document: Document, anchor: str = "") -> None:
+        self._document = document
+        viewer = self.query_one(_DocumentViewer)
+        await viewer.document.update(document.content)
+        if not (anchor and viewer.document.goto_anchor(anchor)):
+            viewer.scroll_home(animate=False)
+        self._set_status("")
+        self.refresh_bindings()
+
+    def _set_status(self, message: str) -> None:
+        self.query_one("#status", Static).update(message)
+
+
+async def _read_document(target: str) -> Document:
+    """Read a document in a daemon thread, so quitting never waits for a slow read."""
+    loop = asyncio.get_running_loop()
+    result: asyncio.Future[Document] = loop.create_future()
+
+    def settle(document: Document | None, error: Exception | None) -> None:
+        if result.done():
+            return
+        if error is not None:
+            result.set_exception(error)
+        elif document is not None:
+            result.set_result(document)
+
+    def read() -> None:
+        try:
+            outcome: tuple[Document | None, Exception | None] = (load_document(target), None)
+        except Exception as error:  # noqa: BLE001 - re-raised where the read was awaited
+            outcome = (None, error)
+        # The loop is closed when the viewer quits before the read finishes.
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(settle, *outcome)
+
+    # Not the loop's executor: that one is joined on shutdown, which would stall quitting.
+    threading.Thread(target=read, daemon=True).start()
+    return await result
+
+
+def _github_item(target: str) -> tuple[str, int] | None:
+    """Return the ``owner/repo`` and number named by a GitHub target, or None."""
     parsed = parse_github_item_url(target)
     if parsed is not None:
         return parsed.repo, parsed.number
@@ -57,10 +277,7 @@ def _resolve_target(target: str) -> tuple[str, int]:
     number = _BARE_NUMBER_RE.match(target.strip())
     if number is not None:
         return _origin_repo(), int(number["number"])
-    raise RuntimeError(
-        f"Unrecognised target {target!r}: expected a GitHub issue or pull request URL, "
-        "owner/repo#NUMBER, or a number for the current repository."
-    )
+    return None
 
 
 def _origin_repo() -> str:

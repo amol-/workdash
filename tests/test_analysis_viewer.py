@@ -1,29 +1,33 @@
+import asyncio
+import io
 import json
 import shlex
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from html.parser import HTMLParser
 from unittest.mock import MagicMock
 
 import pytest
+from textual.app import App
+from textual.widgets import Markdown, Static
 from webob import Request
 
-from workdash import control, launcher, markdownview
+from workdash import control, launcher, view
 from workdash.config import WorkdashConfig, WorkdashConfigValidationError
 
 
 @pytest.fixture(autouse=True)
 def _viewer_config(monkeypatch):
     """Keep the viewer's link handling independent of the developer's own config."""
-    monkeypatch.setattr(
-        markdownview, "load_config", lambda: WorkdashConfig(open_command="xdg-open")
-    )
+    monkeypatch.setattr(view, "load_config", lambda: WorkdashConfig(open_command="xdg-open"))
 
 
 def test_mac_clipboard_command_failure_is_reported(monkeypatch):
-    app = markdownview._MarkdownApp("text", "xdg-open", False)
+    app = view._MarkdownApp(view.Document("text", "file:///text.md"), "xdg-open", False)
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
     monkeypatch.setattr(
@@ -242,143 +246,161 @@ def test_html_analysis_blocks_active_content_locally_and_over_http(tmp_path, mon
     )
 
 
-def test_markdownview_command_works_without_dashboard_setup(monkeypatch, tmp_path):
-    from workdash import markdownview, workdash
+def test_view_command_opens_a_local_document(monkeypatch, tmp_path):
+    from workdash import workdash
 
     document = tmp_path / "analysis.md"
     document.write_text("# analysis")
-    view = MagicMock(return_value=0)
-    monkeypatch.setattr(markdownview, "run_markdownview", view)
-    assert workdash.main(["mdview", str(document)]) == 0
-    view.assert_called_once_with(str(document))
+    shown = MagicMock()
+    monkeypatch.setattr(view, "show_document", shown)
+
+    assert workdash.main(["view", str(document)]) == 0
+
+    shown.assert_called_once_with(view.Document("# analysis", document.resolve().as_uri()))
 
 
-def test_old_markdownview_command_is_not_available(capsys):
+@pytest.mark.parametrize("command", ["mdview", "markdownview"])
+def test_old_document_commands_are_not_available(capsys, command):
     from workdash import workdash
 
     with pytest.raises(SystemExit) as error:
-        workdash.main(["markdownview", "analysis.md"])
+        workdash.main([command, "analysis.md"])
     assert error.value.code == 2
     assert "invalid choice" in capsys.readouterr().err
 
 
+def _viewer_source(app) -> str:
+    return app.query_one(view._DocumentViewer).document.source
+
+
+def _viewer_status(app) -> str:
+    return app.query_one("#status", Static).render().plain
+
+
+async def _settle(pilot, condition) -> None:
+    """Wait for work the viewer started in the background to reach the screen."""
+    for _ in range(200):
+        await pilot.pause()
+        if condition():
+            return
+    raise AssertionError("the viewer did not finish loading")
+
+
+def _run_viewer(monkeypatch, exercise) -> None:
+    """Patch ``App.run`` so ``exercise(pilot, app)`` runs under ``run_test``."""
+
+    def run(app):
+        async def session():
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                await exercise(pilot, app)
+
+        asyncio.run(session())
+
+    monkeypatch.setattr(App, "run", run)
+
+
+def _drive_viewer(monkeypatch, app, exercise) -> None:
+    """Run ``exercise(pilot)`` against ``app`` with a real Textual pilot."""
+    _run_viewer(monkeypatch, lambda pilot, _app: exercise(pilot))
+    app.run()
+
+
 @pytest.mark.parametrize("scheme", ["http", "https"])
 def test_markdown_viewer_loads_url(scheme, monkeypatch):
-    import asyncio
-    import io
     import ssl
     from unittest.mock import patch
 
-    from textual.app import App
-
-    from workdash.markdownview import run_markdownview
-
     document = io.BytesIO(b"# Remote heading\n\nremote body")
+    document.geturl = lambda: f"{scheme}://example.test/analysis"
     rendered = []
 
-    def run(app):
-        async def capture():
-            async with app.run_test(size=(80, 24)) as pilot:
-                await pilot.pause()
-                rendered.append(app.export_screenshot())
-
-        asyncio.run(capture())
+    async def capture(pilot, app):
+        rendered.append(app.export_screenshot())
 
     with patch("urllib.request.urlopen", return_value=document) as fetch:
-        monkeypatch.setattr(App, "run", run)
-        assert run_markdownview(f"{scheme}://example.test/analysis") == 0
+        _run_viewer(monkeypatch, capture)
+        assert view.run_view(f"{scheme}://example.test/analysis") == 0
     assert "Remote" in rendered[0] and "heading" in rendered[0] and "body" in rendered[0]
     assert fetch.call_args.kwargs["context"].verify_mode == ssl.CERT_NONE
+    assert fetch.call_args.kwargs["timeout"] == view._DOCUMENT_FETCH_TIMEOUT_SECONDS
 
 
 def test_markdown_viewer_loads_plain_file_path(tmp_path, monkeypatch):
-    import asyncio
-
-    from textual.app import App
-
-    from workdash.markdownview import run_markdownview
-
     path = tmp_path / "analysis with spaces.md"
     path.write_text("# Local heading\n\nlocal body", encoding="utf-8")
     rendered = []
 
-    def run(app):
-        async def capture():
-            async with app.run_test(size=(80, 24)) as pilot:
-                await pilot.pause()
-                rendered.append(app.export_screenshot())
+    async def capture(pilot, app):
+        rendered.append(app.export_screenshot())
 
-        asyncio.run(capture())
-
-    monkeypatch.setattr(App, "run", run)
-    assert run_markdownview(str(path)) == 0
+    _run_viewer(monkeypatch, capture)
+    assert view.run_view(str(path)) == 0
     assert "Local" in rendered[0] and "heading" in rendered[0] and "body" in rendered[0]
 
 
-@pytest.mark.parametrize("target", ["missing-file.md", "existing-file.md"])
-def test_markdown_viewer_relative_link_keeps_analysis_open(tmp_path, monkeypatch, target):
-    import asyncio
-
-    from textual.app import App
-    from textual.widgets import Markdown
-
-    from workdash.markdownview import run_markdownview
-
+def test_markdown_viewer_opens_relative_link_in_place(tmp_path, monkeypatch):
     path = tmp_path / "analysis.md"
-    path.write_text(f"# Analysis\n\n[Source]({target})\n", encoding="utf-8")
-    (tmp_path / "existing-file.md").write_text("# Replacement", encoding="utf-8")
+    path.write_text("# Analysis\n\n[Source](linked.md)\n", encoding="utf-8")
+    (tmp_path / "linked.md").write_text("# Replacement", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+    shown = []
 
-    def run(app):
-        async def exercise():
-            async with app.run_test(size=(80, 24)) as pilot:
-                await pilot.pause()
-                await pilot.click(Markdown, offset=(2, 4))
-                await pilot.pause()
-                assert app.is_running
-                screenshot = app.export_screenshot()
-                assert "Analysis" in screenshot
-                assert "Replacement" not in screenshot
+    async def exercise(pilot, app):
+        await pilot.click(Markdown, offset=(2, 4))
+        await _settle(pilot, lambda: "Replacement" in _viewer_source(app))
+        shown.append(_viewer_source(app))
+        assert "b" in app.screen.active_bindings
+        await pilot.press("b")
+        await pilot.pause()
+        shown.append(_viewer_source(app))
 
-        asyncio.run(exercise())
+    _run_viewer(monkeypatch, exercise)
+    assert view.run_view(str(path)) == 0
+    assert "Replacement" in shown[0] and "Analysis" not in shown[0]
+    assert "Analysis" in shown[1] and "Replacement" not in shown[1]
 
-    monkeypatch.setattr(App, "run", run)
-    assert run_markdownview(str(path)) == 0
+
+def test_markdown_viewer_reports_a_link_it_cannot_load(tmp_path, monkeypatch):
+    path = tmp_path / "analysis.md"
+    path.write_text("# Analysis\n\n[Source](missing-file.md)\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    observed = []
+
+    async def exercise(pilot, app):
+        await pilot.click(Markdown, offset=(2, 4))
+        await _settle(pilot, lambda: _viewer_status(app).startswith("Failed to read"))
+        observed.append(_viewer_status(app))
+        observed.append(_viewer_source(app))
+        assert "b" not in app.screen.active_bindings
+
+    _run_viewer(monkeypatch, exercise)
+    assert view.run_view(str(path)) == 0
+    assert observed[0].startswith("Failed to read "), observed[0]
+    assert "missing-file.md" in observed[0]
+    assert "Analysis" in observed[1]
 
 
 def test_markdown_viewer_fragment_navigates_within_analysis(tmp_path, monkeypatch):
-    import asyncio
-
-    from textual.app import App
-    from textual.widgets import Markdown
-
-    from workdash.markdownview import run_markdownview
-
     path = tmp_path / "analysis.md"
     path.write_text(
         "# Analysis\n\n[Jump](#destination)\n\n" + "Paragraph\n\n" * 30 + "# Destination\n"
     )
 
-    def run(app):
-        async def exercise():
-            async with app.run_test(size=(80, 24)) as pilot:
-                await pilot.pause()
-                await pilot.click(Markdown, offset=(2, 4))
-                await pilot.pause()
-                assert app.is_running
-                assert "Destination" in app.export_screenshot()
+    async def exercise(pilot, app):
+        await pilot.click(Markdown, offset=(2, 4))
+        await _settle(pilot, lambda: "Destination" in app.export_screenshot())
+        assert app.is_running
+        assert "b" not in app.screen.active_bindings
 
-        asyncio.run(exercise())
-
-    monkeypatch.setattr(App, "run", run)
-    assert run_markdownview(str(path)) == 0
+    _run_viewer(monkeypatch, exercise)
+    assert view.run_view(str(path)) == 0
 
 
 def test_markdown_link_keeps_long_running_viewer_alive(monkeypatch):
-    import subprocess
-
     processes = []
     popen = subprocess.Popen
+    command = shlex.join([sys.executable, "-c", "import time; time.sleep(30)"])
 
     def start(*args, **kwargs):
         process = popen(*args, **kwargs)
@@ -386,45 +408,378 @@ def test_markdown_link_keeps_long_running_viewer_alive(monkeypatch):
         return process
 
     monkeypatch.setattr(launcher.subprocess, "Popen", start)
-    app = markdownview._MarkdownApp(
-        "# Document", shlex.join([sys.executable, "-c", "import time; time.sleep(30)"]), False
-    )
-    notices = []
-    monkeypatch.setattr(app, "notify", lambda message, **kwargs: notices.append(message))
+    app = view._MarkdownApp(view.Document("# Document", "file:///document.md"), command, False)
+    statuses = []
+
+    async def follow(pilot):
+        app.follow("https://example.com")
+        statuses.append(_viewer_status(app))
+
     try:
-        app.open_url("https://example.com")
+        _drive_viewer(monkeypatch, app, follow)
         assert processes[0].poll() is None
-        assert notices == [f"Opened https://example.com with {app._open_command}"]
+        assert statuses == [f"Opened https://example.com with {command}"]
     finally:
         if processes and processes[0].poll() is None:
             processes[0].terminate()
             processes[0].wait(timeout=5)
 
 
-def test_markdown_link_opens_configured_pane(monkeypatch):
+def test_external_link_honours_the_configured_pane_viewer(monkeypatch):
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "session")
     opened = MagicMock()
     monkeypatch.setattr(launcher.zellij, "open_viewer", opened)
-    app = markdownview._MarkdownApp("# Document", "viewer", True)
-    notices = []
-    monkeypatch.setattr(app, "notify", lambda message, **kwargs: notices.append(message))
+    app = view._MarkdownApp(view.Document("# Document", "file:///document.md"), "viewer", True)
+    statuses = []
 
-    app.open_url("https://example.com")
+    async def follow(pilot):
+        app.follow("https://example.com")
+        statuses.append(_viewer_status(app))
+
+    _drive_viewer(monkeypatch, app, follow)
 
     opened.assert_called_once_with("session", ["viewer", "https://example.com"])
-    assert notices == ["Opened https://example.com with viewer"]
+    assert statuses == ["Opened https://example.com with viewer"]
 
 
 def test_markdown_link_reports_immediate_command_failure(monkeypatch):
     process = MagicMock()
     process.wait.return_value = 7
     monkeypatch.setattr(launcher.subprocess, "Popen", MagicMock(return_value=process))
-    app = markdownview._MarkdownApp("# Document", "viewer", False)
-    notices = []
-    monkeypatch.setattr(app, "notify", lambda message, **kwargs: notices.append(message))
+    app = view._MarkdownApp(view.Document("# Document", "file:///document.md"), "viewer", False)
+    statuses = []
 
-    app.open_url("https://example.com")
+    async def follow(pilot):
+        app.follow("https://example.com")
+        statuses.append(_viewer_status(app))
 
-    assert notices == [
+    _drive_viewer(monkeypatch, app, follow)
+
+    assert statuses == [
         "Failed to open https://example.com: Failed to open URL via viewer: exit code 7"
     ]
+
+
+def test_markdown_viewer_resolves_relative_links_against_the_document_url(monkeypatch):
+    app = view._MarkdownApp(
+        view.Document("# Remote\n\n[Next](other.md)", "https://docs.example/guide/start.md"),
+        "xdg-open",
+        False,
+    )
+    loaded = []
+
+    def load_document(target):
+        loaded.append(target)
+        return view.Document("# Next", target)
+
+    monkeypatch.setattr(view, "load_document", load_document)
+    sources = []
+
+    async def follow(pilot):
+        app.follow("other.md")
+        await _settle(pilot, lambda: _viewer_source(app) == "# Next")
+        sources.append(_viewer_source(app))
+
+    _drive_viewer(monkeypatch, app, follow)
+
+    assert loaded == ["https://docs.example/guide/other.md"]
+    assert sources == ["# Next"]
+
+
+def test_github_markdown_page_opens_with_the_configured_command(monkeypatch):
+    app = view._MarkdownApp(view.Document("# Document", "file:///document.md"), "xdg-open", False)
+    opened = []
+    monkeypatch.setattr(
+        launcher, "open_in_browser", lambda url, *args, **kwargs: opened.append(url) or "xdg-open"
+    )
+    statuses = []
+
+    async def follow(pilot):
+        app.follow("https://github.com/owner/repo/blob/main/README.md")
+        statuses.append(_viewer_status(app))
+
+    _drive_viewer(monkeypatch, app, follow)
+
+    assert opened == ["https://github.com/owner/repo/blob/main/README.md"]
+    assert statuses == ["Opened https://github.com/owner/repo/blob/main/README.md with xdg-open"]
+
+
+def test_view_uses_the_configured_open_command_for_external_links(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        view,
+        "load_config",
+        lambda: WorkdashConfig(open_command="term-view --quiet", open_needs_pane=True),
+    )
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-current")
+    opened = []
+    monkeypatch.setattr(
+        launcher,
+        "open_in_browser",
+        lambda url, command, **kwargs: opened.append((url, command, kwargs)) or command,
+    )
+    document = tmp_path / "notes.md"
+    document.write_text("# Notes\n\n[Web](https://example.com/source)\n", encoding="utf-8")
+    statuses = []
+
+    async def exercise(pilot, app):
+        await pilot.click(Markdown, offset=(2, 4))
+        await _settle(pilot, lambda: _viewer_status(app) != "")
+        statuses.append(_viewer_status(app))
+
+    _run_viewer(monkeypatch, exercise)
+    assert view.run_view(str(document)) == 0
+
+    assert opened == [
+        (
+            "https://example.com/source",
+            "term-view --quiet",
+            {
+                "needs_pane": True,
+                "zellij_session": "workdash-current",
+                "direct_nonblocking": True,
+            },
+        )
+    ]
+    assert statuses == ["Opened https://example.com/source with term-view --quiet"]
+
+
+def test_markdown_viewer_reports_a_malformed_link(tmp_path, monkeypatch):
+    path = tmp_path / "analysis.md"
+    path.write_text("# Analysis\n\n[Bad](http://[::1/docs/x.md)\n", encoding="utf-8")
+    observed = []
+
+    async def exercise(pilot, app):
+        await pilot.click(Markdown, offset=(2, 4))
+        await _settle(pilot, lambda: _viewer_status(app) != "")
+        observed.append(_viewer_status(app))
+        observed.append(_viewer_source(app))
+
+    _run_viewer(monkeypatch, exercise)
+    assert view.run_view(str(path)) == 0
+
+    assert observed[0].startswith("Failed to load "), observed[0]
+    assert observed[0].endswith(": Invalid IPv6 URL"), observed[0]
+    assert observed[1].startswith("# Analysis\n")
+
+
+def test_markdown_viewer_reports_a_link_it_cannot_decode(tmp_path, monkeypatch):
+    path = tmp_path / "analysis.md"
+    path.write_text("# Analysis\n\n[Bad](latin.md)\n", encoding="utf-8")
+    (tmp_path / "latin.md").write_bytes("# Caf\xe9".encode("latin-1"))
+    monkeypatch.chdir(tmp_path)
+    observed = []
+
+    async def exercise(pilot, app):
+        await pilot.click(Markdown, offset=(2, 4))
+        await _settle(pilot, lambda: _viewer_status(app) != "")
+        observed.append(_viewer_status(app))
+        observed.append(_viewer_source(app))
+
+    _run_viewer(monkeypatch, exercise)
+    assert view.run_view(str(path)) == 0
+
+    assert observed[0].startswith("Failed to read "), observed[0]
+    assert "latin.md" in observed[0] and "utf-8" in observed[0]
+    assert observed[1].startswith("# Analysis\n")
+
+
+def test_markdown_viewer_reports_a_remote_link_it_cannot_fetch(tmp_path, monkeypatch):
+    path = tmp_path / "analysis.md"
+    path.write_text("# Analysis\n\n[Missing](https://docs.example/missing.md)\n", encoding="utf-8")
+    monkeypatch.setattr(
+        urllib.request, "urlopen", MagicMock(side_effect=urllib.error.URLError("not found"))
+    )
+    observed = []
+
+    async def exercise(pilot, app):
+        await pilot.click(Markdown, offset=(2, 4))
+        await _settle(pilot, lambda: _viewer_status(app) != "")
+        observed.append(_viewer_status(app))
+        observed.append(_viewer_source(app))
+
+    _run_viewer(monkeypatch, exercise)
+    assert view.run_view(str(path)) == 0
+
+    assert observed[0] == (
+        "Failed to read https://docs.example/missing.md: <urlopen error not found>"
+    )
+    assert observed[1].startswith("# Analysis\n")
+
+
+def test_back_walks_the_whole_history(tmp_path, monkeypatch):
+    first = tmp_path / "analysis.md"
+    first.write_text("# First\n\n[Next](second.md)\n", encoding="utf-8")
+    (tmp_path / "second.md").write_text("# Second\n\n[Next](third.md)\n", encoding="utf-8")
+    (tmp_path / "third.md").write_text("# Third\n", encoding="utf-8")
+    shown = []
+
+    async def exercise(pilot, app):
+        await pilot.click(Markdown, offset=(2, 4))
+        await _settle(pilot, lambda: _viewer_source(app).startswith("# Second"))
+        await pilot.click(Markdown, offset=(2, 4))
+        await _settle(pilot, lambda: _viewer_source(app).startswith("# Third"))
+        shown.append((_viewer_source(app), "b" in app.screen.active_bindings))
+        for _ in range(2):
+            await pilot.press("b")
+            await pilot.pause()
+            shown.append((_viewer_source(app), "b" in app.screen.active_bindings))
+
+    _run_viewer(monkeypatch, exercise)
+    assert view.run_view(str(first)) == 0
+
+    assert shown == [
+        ("# Third\n", True),
+        ("# Second\n\n[Next](third.md)\n", True),
+        ("# First\n\n[Next](second.md)\n", False),
+    ]
+
+
+def test_back_during_loading_keeps_the_previous_document(tmp_path, monkeypatch):
+    first = tmp_path / "analysis.md"
+    first.write_text("# First\n\n[Next](second.md)\n", encoding="utf-8")
+    (tmp_path / "second.md").write_text("# Second\n\n[Next](third.md)\n", encoding="utf-8")
+    (tmp_path / "third.md").write_text("# Third\n", encoding="utf-8")
+    real_load_document = view.load_document
+    started = threading.Event()
+    finished = threading.Event()
+    release = threading.Event()
+
+    def slow_load_document(target):
+        started.set()
+        assert release.wait(timeout=10)
+        finished.set()
+        return real_load_document(target)
+
+    observed = {}
+
+    async def exercise(pilot, app):
+        app.follow("second.md")
+        await _settle(pilot, lambda: _viewer_source(app).startswith("# Second"))
+        monkeypatch.setattr(view, "load_document", slow_load_document)
+        app.follow("third.md")
+        while not started.is_set():
+            await pilot.pause()
+        assert _viewer_status(app).startswith("Loading ")
+        await app.action_back()
+        assert _viewer_source(app).startswith("# First\n")
+        release.set()
+        while not finished.is_set():
+            await pilot.pause()
+        await pilot.pause()
+        observed["source"] = _viewer_source(app)
+        observed["back"] = "b" in app.screen.active_bindings
+
+    _run_viewer(monkeypatch, exercise)
+    assert view.run_view(str(first)) == 0
+
+    assert observed["source"].startswith("# First\n")
+    assert observed["back"] is False
+
+
+@pytest.mark.parametrize("href", ["#", ""])
+def test_markdown_viewer_ignores_an_empty_anchor_link(tmp_path, monkeypatch, href):
+    path = tmp_path / "analysis.md"
+    path.write_text(f"# Analysis\n\n[Top]({href})\n", encoding="utf-8")
+    observed = {}
+
+    async def exercise(pilot, app):
+        await pilot.click(Markdown, offset=(2, 4))
+        await pilot.pause()
+        observed["running"] = app.is_running
+        observed["source"] = _viewer_source(app)
+        observed["back"] = "b" in app.screen.active_bindings
+
+    _run_viewer(monkeypatch, exercise)
+    assert view.run_view(str(path)) == 0
+
+    assert observed == {
+        "running": True,
+        "source": f"# Analysis\n\n[Top]({href})\n",
+        "back": False,
+    }
+
+
+def test_markdown_viewer_resolves_relative_links_against_the_redirected_url(monkeypatch):
+    response = io.BytesIO(b"# Guide\n\n[Next](other.md)")
+    response.geturl = lambda: "https://docs.example/new/guide.md"
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: response)
+
+    document = view.load_document("https://docs.example/old/start.md")
+    assert document.source == "https://docs.example/new/guide.md"
+
+    loaded = []
+
+    def load_document(target):
+        loaded.append(target)
+        return view.Document("# Next", target)
+
+    monkeypatch.setattr(view, "load_document", load_document)
+    app = view._MarkdownApp(document, "xdg-open", False)
+
+    async def follow(pilot):
+        app.follow("other.md")
+        await _settle(pilot, lambda: _viewer_source(app) == "# Next")
+
+    _drive_viewer(monkeypatch, app, follow)
+
+    assert loaded == ["https://docs.example/new/other.md"]
+
+
+def test_markdown_viewer_reports_a_github_link_that_cannot_be_fetched(monkeypatch):
+    from view_fake import ISSUE_URL, fake_gh_view_run
+
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run({}, fails=True))
+    app = view._MarkdownApp(
+        view.Document(f"# Analysis\n\n[Issue]({ISSUE_URL})\n", "file:///analysis.md"),
+        "xdg-open",
+        False,
+    )
+    observed = {}
+
+    async def follow(pilot):
+        app.follow(ISSUE_URL)
+        await _settle(pilot, lambda: _viewer_status(app) != "")
+        observed["status"] = _viewer_status(app)
+        observed["source"] = _viewer_source(app)
+
+    _drive_viewer(monkeypatch, app, follow)
+
+    assert observed["status"] == (
+        f"Failed to load {ISSUE_URL}: Failed to fetch GitHub data with gh: no such issue"
+    )
+    assert observed["source"].startswith("# Analysis\n")
+
+
+def test_back_during_a_failed_load_keeps_the_status_clear(tmp_path, monkeypatch):
+    first = tmp_path / "analysis.md"
+    first.write_text("# First\n\n[Next](second.md)\n", encoding="utf-8")
+    (tmp_path / "second.md").write_text("# Second\n\n[Broken](missing.md)\n", encoding="utf-8")
+    release = threading.Event()
+    finished = threading.Event()
+
+    def failing_load_document(target):
+        assert release.wait(timeout=10)
+        finished.set()
+        raise RuntimeError(f"Failed to read {target}: broken")
+
+    observed = {}
+
+    async def exercise(pilot, app):
+        app.follow("second.md")
+        await _settle(pilot, lambda: _viewer_source(app).startswith("# Second"))
+        monkeypatch.setattr(view, "load_document", failing_load_document)
+        app.follow("missing.md")
+        while not _viewer_status(app).startswith("Loading "):
+            await pilot.pause()
+        await app.action_back()
+        release.set()
+        while not finished.is_set():
+            await pilot.pause()
+        await pilot.pause()
+        observed["status"] = _viewer_status(app)
+        observed["source"] = _viewer_source(app)
+
+    _run_viewer(monkeypatch, exercise)
+    assert view.run_view(str(first)) == 0
+
+    assert observed == {"status": "", "source": "# First\n\n[Next](second.md)\n"}

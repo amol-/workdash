@@ -68,7 +68,7 @@ def _config_has_no_agent(scenario_state: dict[str, Any]) -> None:
         github_username="testuser",
         open_command="xdg-open",
         analysis_viewer={
-            "command": "workdash mdview",
+            "command": "workdash view",
             "format": "markdown",
             "needs_pane": True,
         },
@@ -84,7 +84,7 @@ def _config_has_malformed_agent_command(scenario_state: dict[str, Any]) -> None:
         github_username="testuser",
         open_command="xdg-open",
         analysis_viewer={
-            "command": "workdash mdview",
+            "command": "workdash view",
             "format": "markdown",
             "needs_pane": True,
         },
@@ -143,7 +143,7 @@ def _run_system(
                 github_username="testuser",
                 open_command="xdg-open",
                 analysis_viewer={
-                    "command": "workdash mdview",
+                    "command": "workdash view",
                     "format": "markdown",
                     "needs_pane": True,
                 },
@@ -173,7 +173,7 @@ def _run_system(
                 github_username="testuser",
                 open_command="xdg-open",
                 analysis_viewer={
-                    "command": "workdash mdview",
+                    "command": "workdash view",
                     "format": "markdown",
                     "needs_pane": True,
                 },
@@ -248,7 +248,7 @@ def _install_direct_start_fakes(
             github_username="testuser",
             open_command="xdg-open",
             analysis_viewer={
-                "command": "workdash mdview",
+                "command": "workdash view",
                 "format": "markdown",
                 "needs_pane": True,
             },
@@ -433,7 +433,7 @@ def _user_starts_list_command(
             github_username="testuser",
             open_command="xdg-open",
             analysis_viewer={
-                "command": "workdash mdview",
+                "command": "workdash view",
                 "format": "markdown",
                 "needs_pane": True,
             },

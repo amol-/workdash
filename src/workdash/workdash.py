@@ -69,10 +69,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "terminal",
     }:
         return _run_server_backed_command(commands, options)
-    if options.command == "mdview":
-        from .markdownview import run_markdownview
-
-        return run_markdownview(options.target)
     if options.command == "view":
         from .view import run_view
 
@@ -963,16 +959,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         default=argparse.SUPPRESS,
         help="Emit machine-readable JSON.",
     )
-    mdview_parser = subparsers.add_parser("mdview", help="View a Markdown document.")
-    mdview_parser.add_argument("target", metavar="PATH")
     view_parser = subparsers.add_parser(
         "view",
-        help="View a GitHub issue or pull request as a document.",
+        help="View a document: a GitHub issue or pull request, a local path, or a URL.",
     )
     view_parser.add_argument(
         "target",
         metavar="TARGET",
-        help="GitHub issue or pull request URL, owner/repo#NUMBER, or a number.",
+        help="GitHub issue or pull request URL, owner/repo#NUMBER, a number, a local path, "
+        "a file URL, or an HTTP(S) URL.",
     )
     branchdiff_parser = subparsers.add_parser(
         "branchdiff",

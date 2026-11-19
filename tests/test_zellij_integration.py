@@ -89,7 +89,7 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
         "control.prepare_launch_agent_prompt = lambda *_args, **_kwargs: 'test prompt'\n"
         "cli.GitHubClient.check_authentication = lambda self: None\n"
         "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
-        "analysis_viewer={'command': 'workdash mdview', 'format': 'markdown', 'needs_pane': True}, "
+        "analysis_viewer={'command': 'workdash view', 'format': 'markdown', 'needs_pane': True}, "
         f"agents={{'agent': AgentConfig(launch={shlex.quote(str(agent))!r})}}, repositories=('owner/repo',), "
         f"workdir={str(tmp_path)!r}, todo_repository='test/todos')\n"
         "cli.WorkdashBackend.load_items = lambda self, progress_callback=None: ([item], {})\n"
@@ -315,7 +315,7 @@ def test_persistent_dashboard_quit_and_restart_in_real_zellij(tmp_path, repeat):
         "from workdash.config import WorkdashConfig, AgentConfig\n"
         'cli.GitHubClient.check_authentication = lambda self: ("expired" if os.getenv("TEST_EXPIRED") else None)\n'
         "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
-        "analysis_viewer={'command': 'workdash mdview', 'format': 'markdown', 'needs_pane': True}, "
+        "analysis_viewer={'command': 'workdash view', 'format': 'markdown', 'needs_pane': True}, "
         "agents={'agent': AgentConfig(launch='sh')}, repositories=('owner/repo',), "
         "workdir='/tmp', todo_repository='test/todos')\n"
         "cli.WorkdashBackend.load_items = lambda self, progress_callback=None: ([], {})\n"
@@ -598,7 +598,7 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
         initial_ids = {p["id"] for p in initial if not p["is_plugin"]}
         launcher.open_markdown(
             str(document),
-            "workdash mdview",
+            "workdash view",
             format="markdown",
             needs_pane=True,
             zellij_session=name,
@@ -897,7 +897,7 @@ def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected
         + (f"control.SERVER_PORT = {port}\n" if selected == "unset" else "")
         + "cli.GitHubClient.check_authentication = lambda self: None\n"
         "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
-        "analysis_viewer={'command': 'workdash mdview', 'format': 'markdown', 'needs_pane': True}, "
+        "analysis_viewer={'command': 'workdash view', 'format': 'markdown', 'needs_pane': True}, "
         "agents={'agent': AgentConfig(launch='sh')}, repositories=('owner/repo',), "
         f"workdir={str(tmp_path)!r}, todo_repository='test/todos')\n"
         "cli.WorkdashBackend.load_items = lambda self, progress_callback=None: ([], {})\n"
@@ -982,7 +982,7 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
         "from workdash.config import WorkdashConfig, AgentConfig\n"
         "cli.GitHubClient.check_authentication = lambda self: None\n"
         "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
-        "analysis_viewer={'command': 'workdash mdview', 'format': 'markdown', 'needs_pane': True}, "
+        "analysis_viewer={'command': 'workdash view', 'format': 'markdown', 'needs_pane': True}, "
         "agents={'agent': AgentConfig(launch='sh')}, repositories=('owner/repo',), "
         f"workdir={str(tmp_path)!r}, todo_repository='test/todos')\n"
         "cli.WorkdashBackend.load_items = lambda self, progress_callback=None: ([], {})\n"
@@ -1230,7 +1230,7 @@ def test_dashboard_analysis_focuses_viewer_in_real_zellij(tmp_path, choice, repe
         "url='https://example.com/1', analyzed_at=now)\n"
         "cli.GitHubClient.check_authentication = lambda self: None\n"
         "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
-        f"analysis_viewer={{'command': '{sys.executable} -m workdash mdview', "
+        f"analysis_viewer={{'command': '{sys.executable} -m workdash view', "
         "'format': 'markdown', 'needs_pane': True}, "
         "agents={'agent': AgentConfig(analyze='unused')}, repositories=('owner/repo',), "
         f"workdir={str(tmp_path)!r}, todo_repository='test/todos')\n"
