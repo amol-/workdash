@@ -1,10 +1,14 @@
 """Persistent dashboard startup behavior at the Zellij boundary."""
 
+import os
 import subprocess
+import sys
 
 import pytest
 
 from workdash import launcher
+from workdash.control import WorkdashControlError
+from workdash.dashboard_record import DashboardRecord, DashboardRecords
 
 
 def test_exited_session_recovery_failure_does_not_create_a_new_session(monkeypatch):
@@ -62,28 +66,25 @@ def test_existing_session_restarts_dashboard_in_its_tab(monkeypatch):
     monkeypatch.setattr(launcher.os, "execvp", lambda *args: (_ for _ in ()).throw(SystemExit()))
     with pytest.raises(SystemExit):
         launcher.zellij.exec_zellij_wrapped_workdash(["--refresh"])
-    assert any("rename-pane" in command and "terminal_4" in command for command in calls)
+    assert not any("rename-pane" in command for command in calls)
     launch = next(command for command in calls if "new-pane" in command)
     assert "--refresh" in launch and "--tab-id" in launch and "3" in launch
 
 
-@pytest.mark.parametrize(
-    "pane_command",
-    [
-        "/usr/bin/python3 /opt/bin/workdash --direct",
-        "/usr/bin/python3 -m workdash --direct",
-        "/usr/bin/python3 /opt/bin/renamed-dashboard --persistent-pane",
-    ],
-)
-def test_existing_running_dashboard_attaches_without_starting_another(
-    monkeypatch, capsys, pane_command
-):
+def test_recorded_dashboard_for_the_session_attaches_without_starting_another(monkeypatch, capsys):
     calls = []
+    DashboardRecords().save(
+        DashboardRecord(session="custom", pid=os.getpid(), address="127.0.0.1:9999")
+    )
     monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/zellij")
     monkeypatch.setattr(
         launcher.Zellij,
         "load_zellij_panes",
-        lambda session: [{"id": 2, "title": "workdash tui", "pane_command": pane_command}],
+        lambda session: [{"id": 2, "title": "workdash tui", "pane_command": "/bin/sh"}],
+    )
+    monkeypatch.setattr(
+        "workdash.control.probe_dashboard_session",
+        lambda address: {"127.0.0.1:9999": "custom"}[address],
     )
     monkeypatch.setattr(
         launcher.subprocess,
@@ -100,6 +101,146 @@ def test_existing_running_dashboard_attaches_without_starting_another(
         launcher.zellij.exec_zellij_wrapped_workdash(["--session", "custom", "--refresh"])
     assert calls == [("sleep", 1), ("/zellij", ["/zellij", "attach", "custom"])]
     assert "options are ignored" in capsys.readouterr().out
+    assert DashboardRecords().load("custom") is not None
+
+
+def test_dashboard_serving_the_session_at_the_start_address_is_attached(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/zellij")
+    monkeypatch.setattr(launcher.Zellij, "load_zellij_panes", lambda session: [])
+    monkeypatch.setattr(
+        launcher.subprocess,
+        "run",
+        lambda command, **kw: subprocess.CompletedProcess(command, 0, "custom [Created now]\n", ""),
+    )
+    monkeypatch.setattr(launcher.time, "sleep", lambda seconds: calls.append(("sleep", seconds)))
+    monkeypatch.setattr(
+        launcher.os,
+        "execvp",
+        lambda file, command: calls.append((file, command)) or (_ for _ in ()).throw(SystemExit()),
+    )
+    monkeypatch.setattr("workdash.control.probe_dashboard_session", lambda address: "custom")
+    with pytest.raises(SystemExit):
+        launcher.zellij.exec_zellij_wrapped_workdash(["--session", "custom"])
+    assert calls == [("sleep", 1), ("/zellij", ["/zellij", "attach", "custom"])]
+    assert "options are ignored" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "pid_kind, recorded_session",
+    [("dead", "custom"), ("alive", "previous")],
+)
+def test_a_record_that_no_longer_matches_reality_is_discarded(
+    monkeypatch, pid_kind, recorded_session
+):
+    calls = []
+    pid = os.getpid() if pid_kind == "alive" else _finished_process_pid()
+    DashboardRecords().save(DashboardRecord(session="custom", pid=pid, address="127.0.0.1:9999"))
+    monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/zellij")
+    monkeypatch.setattr(launcher.Zellij, "load_zellij_panes", lambda session: [])
+
+    def probe(address):
+        return recorded_session if address == "127.0.0.1:9999" else None
+
+    monkeypatch.setattr("workdash.control.probe_dashboard_session", probe)
+
+    def run(command, **kwargs):
+        calls.append(command)
+        output = "custom [Created now]\n" if "list-sessions" in command else "17\n"
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(launcher.subprocess, "run", run)
+    monkeypatch.setattr(launcher.os, "execvp", lambda *args: (_ for _ in ()).throw(SystemExit()))
+    with pytest.raises(SystemExit):
+        launcher.zellij.exec_zellij_wrapped_workdash(["--session", "custom", "--refresh"])
+    assert any("new-pane" in command and "--refresh" in command for command in calls)
+    assert DashboardRecords().load("custom") is None
+
+
+@pytest.mark.parametrize("session_exists", [True, False])
+def test_dashboard_serving_another_session_is_reported(monkeypatch, session_exists):
+    calls = []
+    sessions = "custom [Created now]\n" if session_exists else ""
+    monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/zellij")
+    monkeypatch.setattr(launcher.Zellij, "load_zellij_panes", lambda session: [])
+    monkeypatch.setattr(
+        launcher.subprocess,
+        "run",
+        lambda command, **kw: subprocess.CompletedProcess(command, 0, sessions, ""),
+    )
+    monkeypatch.setattr("workdash.control.probe_dashboard_session", lambda address: "other")
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:9999")
+    with pytest.raises(RuntimeError) as error:
+        launcher.zellij.exec_zellij_wrapped_workdash(["--session", "custom"])
+    assert "127.0.0.1:9999" in str(error.value)
+    assert "'other'" in str(error.value)
+    assert not any("new-pane" in command for command in calls)
+
+
+def test_an_address_that_does_not_answer_starts_nothing_and_keeps_the_record(monkeypatch):
+    calls = []
+    DashboardRecords().save(
+        DashboardRecord(session="custom", pid=os.getpid(), address="127.0.0.1:9999")
+    )
+    monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/zellij")
+    monkeypatch.setattr(launcher.Zellij, "load_zellij_panes", lambda session: [])
+    monkeypatch.setattr(
+        launcher.subprocess,
+        "run",
+        lambda command, **kw: (
+            calls.append(command)
+            or subprocess.CompletedProcess(command, 0, "custom [Created now]\n", "")
+        ),
+    )
+
+    def probe(address):
+        raise WorkdashControlError(
+            "server_unresponsive", f"The server at {address} did not answer."
+        )
+
+    monkeypatch.setattr("workdash.control.probe_dashboard_session", probe)
+    with pytest.raises(RuntimeError, match="Cannot tell whether a Workdash dashboard is running"):
+        launcher.zellij.exec_zellij_wrapped_workdash(["--session", "custom"])
+
+    assert not any("new-pane" in command for command in calls)
+    assert DashboardRecords().load("custom") is not None
+
+
+def _finished_process_pid() -> int:
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait()
+    return process.pid
+
+
+def test_a_pane_named_like_a_dashboard_does_not_count_as_a_running_one(monkeypatch):
+    calls = []
+    monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/zellij")
+    monkeypatch.setattr(
+        launcher.Zellij,
+        "load_zellij_panes",
+        lambda session: [
+            {
+                "id": 2,
+                "title": "workdash tui",
+                "tab_name": "dashboard",
+                "tab_id": 3,
+                "pane_command": "/usr/bin/python3 -m workdash --persistent-pane",
+            }
+        ],
+    )
+
+    def run(command, **kwargs):
+        calls.append(command)
+        output = "custom [Created now]\n" if "list-sessions" in command else "3\n"
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(launcher.subprocess, "run", run)
+    monkeypatch.setattr(launcher.os, "execvp", lambda *args: (_ for _ in ()).throw(SystemExit()))
+    with pytest.raises(SystemExit):
+        launcher.zellij.exec_zellij_wrapped_workdash(["--session", "custom", "--refresh"])
+
+    launch = next(command for command in calls if "new-pane" in command)
+    assert "--refresh" in launch
 
 
 def test_missing_dashboard_tab_is_created_with_new_options(monkeypatch):
@@ -144,39 +285,9 @@ def test_existing_plugin_only_dashboard_tab_is_reused(monkeypatch):
     assert launch[launch.index("--tab-id") + 1] == "3"
 
 
-def test_inside_start_renames_stale_panes_without_interrupting_commands(monkeypatch):
+def test_inside_start_names_only_the_dashboard_own_pane(monkeypatch):
     calls = []
     monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/zellij")
-    monkeypatch.setattr(
-        launcher.zellij,
-        "load_zellij_panes",
-        lambda session: [
-            {"id": 2, "title": "workdash tui", "pane_command": "vim notes"},
-            {"id": 3, "title": "workdash tui", "pane_command": "/usr/bin/workdash"},
-            {"id": 4, "title": "workdash tui", "is_plugin": True},
-        ],
-    )
     monkeypatch.setattr(launcher.subprocess, "run", lambda command, **kwargs: calls.append(command))
     launcher.zellij.name_dashboard_pane("project", "3")
-    assert [command[-3:] for command in calls] == [
-        ["-p", "terminal_2", "workdash old"],
-        ["-p", "terminal_3", "workdash tui"],
-    ]
-
-
-def test_inside_start_preserves_running_dashboard(monkeypatch):
-    calls = []
-    monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/zellij")
-    monkeypatch.setattr(
-        launcher.zellij,
-        "load_zellij_panes",
-        lambda session: [
-            {"id": 1, "title": "workdash tui", "pane_command": "/bin/sh"},
-            {"id": 2, "title": "workdash tui", "pane_command": "/usr/bin/workdash --direct"},
-            {"id": 3, "title": "shell", "pane_command": "/bin/sh"},
-        ],
-    )
-    monkeypatch.setattr(launcher.subprocess, "run", lambda command, **kwargs: calls.append(command))
-    with pytest.raises(RuntimeError, match="already running"):
-        launcher.zellij.name_dashboard_pane("project", "3")
-    assert calls == []
+    assert [command[-3:] for command in calls] == [["-p", "terminal_3", "workdash tui"]]

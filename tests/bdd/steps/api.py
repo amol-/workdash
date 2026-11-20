@@ -185,6 +185,15 @@ def _current_dashboard_items_do_not_include(
     assert all(format_work_item_id(item) != item_id for item in work_items)
 
 
+@given(parsers.parse("a server-backed Workdash session is running in Zellij session `{session}`"))
+def _server_session_running_in_zellij_session(
+    session: str, scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    scenario_state["zellij_session"] = session
+    seed_dashboard_item(work_items, scenario_state)
+    ensure_api_session(scenario_state, work_items, tmp_path)
+
+
 @given(parsers.parse("`workdash info` reports pane ID `{pane_id}`"))
 def _workdash_info_reports_pane_id(pane_id: str, scenario_state: dict[str, Any]) -> None:
     scenario_state["pane_id"] = pane_id
@@ -292,6 +301,13 @@ def _client_requests_info_api(
         lambda _workdir, _item, **kwargs: scenario_state.get("known_worktree_path"),
     )
     _call_api(scenario_state, work_items, tmp_path, "info")
+
+
+@when("a client requests the identity API")
+def _client_requests_identity_api(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    _call_api(scenario_state, work_items, tmp_path, "identity")
 
 
 @when("a client requests the show-config API")
@@ -723,6 +739,12 @@ def _api_returns_pane_records(scenario_state: dict[str, Any]) -> None:
     scenario_state["pane_records"] = result["panes"]
     assert result["session"] == "workdash-main"
     assert result["panes"]
+
+
+@then(parsers.parse("the API reports the Zellij session `{session}` in its `session` field"))
+def _api_reports_the_zellij_session(session: str, scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["api_status"] == 200
+    assert scenario_state["api_payload"]["result"]["session"] == session
 
 
 @then("the API returns the configured analysis agents")

@@ -24,6 +24,7 @@ from .control import (
     server_address,
     show_config_payload,
 )
+from .dashboard_record import DashboardRecord, DashboardRecords
 from .github_client import GitHubClient, parse_github_item_url
 from .launcher import (
     inject_workdash_local_bin_into_path,
@@ -109,6 +110,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         pane = os.getenv("ZELLIJ_PANE_ID")
         if session and pane:
             try:
+                if launcher.dashboard_is_running(session):
+                    print("Workdash is already running; new options are ignored.", flush=True)
+                    return 0
                 launcher.zellij.name_dashboard_pane(session, pane)
             except RuntimeError as error:
                 print(f"Error: {error}", file=sys.stderr, flush=True)
@@ -557,10 +561,23 @@ class WorkdashCommands:
         except RuntimeError as error:
             print(f"Error: {error}", file=sys.stderr, flush=True)
             return 1
+        records = DashboardRecords()
         try:
+            if zellij_session:
+                host, port = server_address()
+                records.save(
+                    DashboardRecord(
+                        session=zellij_session,
+                        pid=os.getpid(),
+                        address=f"{host}:{port}",
+                    )
+                )
             # Keyboard-only dashboard: preserve native terminal mouse behavior.
             app.run(mouse=False)
         finally:
+            record = records.load(zellij_session) if zellij_session else None
+            if record is not None and record.pid == os.getpid():
+                records.remove(zellij_session)
             control_server.stop()
         return 0
 

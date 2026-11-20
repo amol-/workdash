@@ -19,6 +19,13 @@ import uuid
 import pytest
 
 
+def _temporary_home(tmp_path) -> str:
+    """Return a home that keeps dashboard records and Zellij's first run out of the real one."""
+
+    (tmp_path / "home" / ".config" / "zellij").mkdir(parents=True)
+    return str(tmp_path / "home")
+
+
 def _cleanup_sessions(zellij, env, sessions):
     for name, pid, fd in sessions:
         for command in (["delete-session", "--force", name], ["kill-session", name]):
@@ -105,7 +112,12 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
     zellij_env = os.environ.copy()
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
         zellij_env.pop(key, None)
-    zellij_env.update(TERM="xterm-256color", ZELLIJ_CONFIG_FILE=str(config), SHELL=str(shell))
+    zellij_env.update(
+        TERM="xterm-256color",
+        HOME=_temporary_home(tmp_path),
+        ZELLIJ_CONFIG_FILE=str(config),
+        SHELL=str(shell),
+    )
     try:
         for prefix in ("workdash-test", "demo-test"):
             with socket.socket() as probe:
@@ -333,6 +345,7 @@ def test_persistent_dashboard_quit_and_restart_in_real_zellij(tmp_path, repeat):
         env.pop(key, None)
     env.update(
         TERM="xterm-256color",
+        HOME=_temporary_home(tmp_path),
         SHELL="/bin/sh",
         ZELLIJ_SOCKET_DIR=str(tmp_path / "sockets"),
         XDG_CACHE_HOME=str(tmp_path / "cache"),
@@ -459,11 +472,13 @@ def test_persistent_dashboard_quit_and_restart_in_real_zellij(tmp_path, repeat):
             )
         )
         old = next(p for p in panes if p.get("id") == dashboard["id"] and not p["is_plugin"])
-        assert old["title"] == "workdash old" and old["pane_command"] == "/bin/sh -i"
-        assert next(p for p in panes if p.get("title") == "workdash tui")["tab_name"] == "dashboard"
+        assert old["title"] == "workdash tui" and old["pane_command"] == "/bin/sh -i"
+        restarted = next(
+            p for p in panes if "--debug" in str(p.get("pane_command")) and not p["is_plugin"]
+        )
+        assert restarted["tab_name"] == "dashboard"
         assert action("new-tab", "--name", "keep").returncode == 0
-        tab_id = next(p for p in panes if p.get("title") == "workdash tui")["tab_id"]
-        assert action("close-tab", "--tab-id", str(tab_id)).returncode == 0
+        assert action("close-tab", "--tab-id", str(restarted["tab_id"])).returncode == 0
         start("--refresh")
         panes = wait_for(
             lambda panes: any(
@@ -471,9 +486,9 @@ def test_persistent_dashboard_quit_and_restart_in_real_zellij(tmp_path, repeat):
                 for p in panes
             )
         )
-        assert next(p for p in panes if p.get("title") == "workdash tui")["tab_name"] == "dashboard"
+        recovered = next(p for p in panes if "--refresh" in str(p.get("pane_command")))
+        assert recovered["tab_name"] == "dashboard"
         assert any(p.get("tab_name") == "keep" for p in panes)
-        recovered = next(p for p in panes if p.get("title") == "workdash tui")
         time.sleep(2)
         assert (
             action("write-chars", "--pane-id", f"terminal_{recovered['id']}", "q").returncode == 0
@@ -497,6 +512,7 @@ def test_persistent_dashboard_quit_and_restart_in_real_zellij(tmp_path, repeat):
             p for p in panes if p.get("title") == "workdash tui" and p.get("tab_name") == "keep"
         )
         assert inside["id"] == keep["id"]
+        panes_before = json.loads(action("list-panes", "--json", "--all").stdout)
         start("--debug", expired=True)
         output = b""
         deadline = time.monotonic() + 10
@@ -505,9 +521,9 @@ def test_persistent_dashboard_quit_and_restart_in_real_zellij(tmp_path, repeat):
                 output += os.read(clients[-1][1], 65536)
         assert b"options are ignored" in output
         panes = json.loads(action("list-panes", "--json", "--all").stdout)
-        assert sum(p.get("title") == "workdash tui" for p in panes) == 1
+        assert {p["id"] for p in panes} == {p["id"] for p in panes_before}
         old = next(p for p in panes if p.get("id") == recovered["id"] and not p["is_plugin"])
-        assert old["title"] == "workdash old" and old["pane_command"] == "/bin/sh -i"
+        assert old["title"] == "workdash tui" and old["pane_command"] == "/bin/sh -i"
         assert action("write-chars", "--pane-id", f"terminal_{inside['id']}", "q").returncode == 0
         time.sleep(1)
         assert "Ctrl+Q" in action("dump-screen", "--pane-id", f"terminal_{inside['id']}").stdout
@@ -906,10 +922,13 @@ def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected
     wrapper = tmp_path / "wrapper.py"
     wrapper.write_text(
         "import sys\n"
+        "import workdash.control as control\n"
         "from workdash import launcher\n"
         f"launcher._build_direct_workdash_command = lambda args: [{sys.executable!r}, {str(dashboard)!r}]\n"
         "launcher.os.execvp = lambda *args: sys.exit(0)\n"
-        f"launcher.zellij.exec_zellij_wrapped_workdash(['--session', {name!r}, '--debug'])\n"
+        # The dashboard under test uses this default address too.
+        + (f"control.SERVER_PORT = {port}\n" if selected == "unset" else "")
+        + f"launcher.zellij.exec_zellij_wrapped_workdash(['--session', {name!r}, '--debug'])\n"
     )
     env = os.environ.copy()
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
@@ -918,6 +937,7 @@ def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected
     config.write_text("")
     env.update(
         TERM="xterm-256color",
+        HOME=_temporary_home(tmp_path),
         SHELL="/bin/sh",
         WORKDASH_HOST=f"127.0.0.1:{old_port}",
         ZELLIJ_CONFIG_FILE=str(config),
@@ -1006,6 +1026,7 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
             env.pop(key, None)
         env.update(
             TERM="xterm-256color",
+            HOME=_temporary_home(tmp_path),
             SHELL="/bin/sh",
             WORKDASH_HOST=f"127.0.0.1:{port}",
             ZELLIJ_SOCKET_DIR=sockets,
@@ -1161,7 +1182,9 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
                     panes = json.loads(
                         run("--session", name, "action", "list-panes", "--json", "--all").stdout
                     )
-                    if any(p["tab_name"] == "later-work" for p in panes):
+                    if any(p["tab_name"] == "later-work" for p in panes) and any(
+                        p["title"] == "workdash tui" and not p["is_held"] for p in panes
+                    ):
                         break
                 except (WorkdashControlError, json.JSONDecodeError):
                     pass

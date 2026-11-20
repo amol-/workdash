@@ -31,7 +31,12 @@ from gh_work_state_fake import (
 )
 from workdash.backend import IncludeResult, WorkdashBackend
 from workdash.config import AgentConfig, WorkdashConfig
-from workdash.control import WorkdashControlError, WorkdashSession, format_work_item_id
+from workdash.control import (
+    WorkdashControlError,
+    WorkdashSession,
+    format_work_item_id,
+    probe_dashboard_session,
+)
 from workdash.github_client import GitHubClient
 from workdash.models import WorkItem, WorkItemKind, WorkItemType, accepted_worktree_numbers
 from workdash.work_instruction import render_work_instruction
@@ -1895,13 +1900,85 @@ def test_client_preserves_api_errors_and_names_selected_host(monkeypatch) -> Non
 
 
 def test_client_names_selected_host_when_unreachable(monkeypatch) -> None:
-    failure = OSError("connection refused")
+    failure = ConnectionRefusedError("connection refused")
     monkeypatch.setattr(control_module.urllib.request, "urlopen", MagicMock(side_effect=failure))
     with pytest.raises(control_module.WorkdashControlError, match="dashboard.lan:8765") as error:
         control_module.WorkdashControlClient("dashboard.lan").request("list")
     assert error.value.status == 503
     assert error.value.code == "server_unreachable"
     assert error.value.__cause__ is failure
+
+
+@pytest.mark.parametrize("served_session", ["workdash-main", "project"])
+def test_identity_reports_the_session_the_dashboard_serves(served_session) -> None:
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=served_session,
+    )
+    request = Request.blank(
+        "/api/v0/identity",
+        method="POST",
+        content_type="application/json",
+        body=b"{}",
+    )
+
+    response = request.get_response(control_module._make_turbogears_app(session))
+
+    assert response.status_int == 200
+    assert json.loads(response.text)["result"]["session"] == served_session
+
+
+def test_probe_answers_without_waiting_for_the_session_lock(monkeypatch) -> None:
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setattr(control_module, "SERVER_PORT", port)
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda session: [])
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="project",
+    )
+    server = control_module.WorkdashControlServer(session)
+    server.start()
+    try:
+        with session._lock:
+            assert probe_dashboard_session(f"127.0.0.1:{port}") == "project"
+    finally:
+        server.stop()
+
+
+def test_probe_refuses_a_server_that_is_not_a_dashboard(monkeypatch) -> None:
+    import socket
+    import threading
+    from wsgiref.simple_server import make_server
+
+    monkeypatch.setattr(control_module.time, "sleep", lambda seconds: None)
+
+    def not_workdash(environ, start_response):
+        start_response("200 OK", [("Content-Type", "application/json")])
+        return [b'{"ok": true, "result": {"panes": []}}']
+
+    with socket.socket() as free:
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+    httpd = make_server("127.0.0.1", port, not_workdash)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(WorkdashControlError):
+            probe_dashboard_session(f"127.0.0.1:{port}")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join()
 
 
 def test_environment_selects_real_server_and_cli(monkeypatch, capsys):
@@ -1990,7 +2067,7 @@ def test_explicit_host_only_client_uses_default_port(monkeypatch, capsys):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     requested = []
 
-    def redirect(request):
+    def redirect(request, timeout=None):
         requested.append(request.full_url)
         return opener.open(
             urllib.request.Request(

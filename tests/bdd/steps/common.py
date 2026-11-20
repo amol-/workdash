@@ -337,9 +337,9 @@ def _no_server_backed_workdash_session(
 
     scenario_state.pop("api_session", None)
 
-    def fail_urlopen(request):
+    def fail_urlopen(request, timeout=None):
         scenario_state.setdefault("urlopen_requests", []).append(request)
-        raise OSError("connection refused")
+        raise ConnectionRefusedError("connection refused")
 
     monkeypatch.setattr(control_module.urllib.request, "urlopen", fail_urlopen)
 

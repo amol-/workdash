@@ -84,6 +84,11 @@ _LAUNCH_VISIBILITY_INTERVAL_SECONDS = 0.5
 # An unconfirmed launch may still have started an agent, so the worktree refuses
 # new launches for this long unless its pane shows up first.
 _UNCONFIRMED_LAUNCH_TTL_SECONDS = 60.0
+# A dashboard answers its identity request quickly, and a probe runs before every
+# dashboard start, so it retries once and never waits long.
+_DASHBOARD_PROBE_ATTEMPTS = 2
+_DASHBOARD_PROBE_RETRY_SECONDS = 0.5
+_DASHBOARD_PROBE_TIMEOUT_SECONDS = 2.0
 
 
 def server_address(value: str | None = None) -> tuple[str, int]:
@@ -1826,51 +1831,102 @@ class WorkdashControlClient:
         self._address = f"{selected_host}:{port}"
 
     def request(self, endpoint: str, payload: dict[str, object] | None = None) -> dict[str, object]:
-        body = json.dumps(payload or {}).encode("utf-8")
-        request = urllib.request.Request(
-            f"http://{self._address}/api/v0/{endpoint}",
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "X-Workdash": "1",
-            },
-            method="POST",
-        )
+        return _dashboard_api_result(self._address, endpoint, payload)
+
+
+def probe_dashboard_session(address: str) -> str | None:
+    """Ask the server at ``address`` which Zellij session its dashboard serves.
+
+    ``None`` means nothing listens at that address. An answer that is not a Workdash
+    dashboard, or no answer at all, raises ``WorkdashControlError`` so callers never
+    mistake an inconclusive probe for a missing dashboard.
+
+    :param str address: ``HOST:PORT`` to ask.
+    """
+
+    for attempt in range(1, _DASHBOARD_PROBE_ATTEMPTS + 1):
         try:
-            with urllib.request.urlopen(request) as response:
-                raw = response.read().decode("utf-8")
-        except urllib.error.HTTPError as error:
-            api_error = _client_error_from_body(error)
-            raise WorkdashControlError(
-                api_error.code,
-                f"Workdash server at {self._address}: {api_error}",
-                status=api_error.status,
-            ) from error
-        except OSError as error:
+            result = _dashboard_api_result(
+                address, "identity", timeout=_DASHBOARD_PROBE_TIMEOUT_SECONDS
+            )
+            break
+        except WorkdashControlError as error:
+            if error.code == "server_unreachable":
+                return None
+            if attempt == _DASHBOARD_PROBE_ATTEMPTS:
+                raise
+            time.sleep(_DASHBOARD_PROBE_RETRY_SECONDS)
+    session = result.get("session")
+    if not isinstance(session, str) or not session:
+        raise WorkdashControlError(
+            "invalid_response",
+            f"Workdash server at {address} did not report a Zellij session.",
+        )
+    return session
+
+
+def _dashboard_api_result(
+    address: str,
+    endpoint: str,
+    payload: dict[str, object] | None = None,
+    *,
+    timeout: float | None = None,
+) -> dict[str, object]:
+    """POST to a dashboard endpoint and return its envelope result.
+
+    Transport, HTTP, and envelope failures become ``WorkdashControlError``, so no
+    caller mistakes another server for a dashboard.
+    """
+
+    request = urllib.request.Request(
+        f"http://{address}/api/v0/{endpoint}",
+        data=json.dumps(payload or {}).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Workdash": "1",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as error:
+        api_error = _client_error_from_body(error)
+        raise WorkdashControlError(
+            api_error.code,
+            f"Workdash server at {address}: {api_error}",
+            status=api_error.status,
+        ) from error
+    except OSError as error:
+        if isinstance(getattr(error, "reason", error), ConnectionRefusedError):
             raise WorkdashControlError(
                 "server_unreachable",
-                f"No Workdash server is reachable at {self._address}. Start one with `workdash`.",
+                f"No Workdash server is reachable at {address}. Start one with `workdash`.",
                 status=HTTPStatus.SERVICE_UNAVAILABLE,
             ) from error
-        try:
-            envelope = json.loads(raw)
-        except json.JSONDecodeError as error:
-            raise WorkdashControlError(
-                "invalid_response",
-                f"Workdash server at {self._address} returned invalid JSON: {error.msg}",
-            ) from error
-        if not isinstance(envelope, dict) or envelope.get("ok") is not True:
-            raise WorkdashControlError(
-                "invalid_response",
-                f"Workdash server at {self._address} returned an invalid response.",
-            )
-        result = envelope.get("result")
-        if not isinstance(result, dict):
-            raise WorkdashControlError(
-                "invalid_response", f"Workdash server at {self._address} result was not an object."
-            )
-        return result
+        # Anything short of a refusal may still be a dashboard that is slow to answer.
+        raise WorkdashControlError(
+            "server_unresponsive",
+            f"The server at {address} did not answer.",
+            status=HTTPStatus.SERVICE_UNAVAILABLE,
+        ) from error
+    try:
+        envelope = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise WorkdashControlError(
+            "invalid_response", f"Workdash server at {address} returned invalid JSON: {error.msg}"
+        ) from error
+    if not isinstance(envelope, dict) or envelope.get("ok") is not True:
+        raise WorkdashControlError(
+            "invalid_response", f"Workdash server at {address} returned an invalid response."
+        )
+    result = envelope.get("result")
+    if not isinstance(result, dict):
+        raise WorkdashControlError(
+            "invalid_response", f"Workdash server at {address} result was not an object."
+        )
+    return result
 
 
 def format_work_item_id(item: WorkItem) -> str:
@@ -2064,6 +2120,16 @@ def _make_turbogears_app(session: WorkdashSession):
                 lambda payload: self._session.info(
                     include_all_panes=bool(payload.get("include_all_panes", False))
                 ),
+            )
+
+        @expose("json")
+        def identity(self):
+            # Answers from the session captured at startup so it never waits on the
+            # session lock or a Zellij pane listing.
+            return _handle_json_request(
+                request,
+                response,
+                lambda payload: {"session": self._session.zellij_session},
             )
 
         @expose("json")

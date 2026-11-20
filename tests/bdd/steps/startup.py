@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
 import subprocess
@@ -17,6 +18,8 @@ import workdash.github_client as github_client_module
 import workdash.launcher as launcher_module
 import workdash.workdash as workdash_module
 from workdash.config import AgentConfig, WorkdashConfig, load_config, save_config
+from workdash.control import probe_dashboard_session
+from workdash.dashboard_record import DashboardRecord, DashboardRecords
 
 
 @given("the GitHub CLI is not installed on PATH")
@@ -318,11 +321,6 @@ def _start_interactive_dashboard(
 
     monkeypatch.setattr(launcher_module.subprocess, "run", run)
     if scenario_state.get("named_dashboard"):
-        command = (
-            "/usr/bin/python -m workdash --persistent-pane"
-            if scenario_state["named_dashboard"] == "running"
-            else "/bin/sh"
-        )
 
         def load_panes(session):
             if scenario_state["named_dashboard"] == "exited":
@@ -331,13 +329,7 @@ def _start_interactive_dashboard(
                     for action in scenario_state["zellij_actions"]
                 )
             return [
-                {
-                    "id": 2,
-                    "title": "workdash tui",
-                    "tab_name": "dashboard",
-                    "tab_id": 3,
-                    "pane_command": command,
-                },
+                {"id": 2, "title": "workdash tui", "tab_name": "dashboard", "tab_id": 3},
                 {"id": 5, "title": "work", "tab_name": "project", "tab_id": 4},
             ]
 
@@ -345,6 +337,8 @@ def _start_interactive_dashboard(
         monkeypatch.setattr(launcher_module.time, "sleep", lambda seconds: None)
     monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
     monkeypatch.delenv("ZELLIJ_PANE_ID", raising=False)
+    if scenario_state.get("inside_dashboard_pane"):
+        monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
     if scenario_state.get("outside_zellij"):
         monkeypatch.delenv("ZELLIJ", raising=False)
     else:
@@ -561,7 +555,12 @@ def _reports_malformed_config_with_wizard_guidance(scenario_state: dict[str, Any
 
 @given("the named session `project` already has a running dashboard")
 def _named_session_running(scenario_state):
-    scenario_state.update(outside_zellij=True, _zellij_installed=True, named_dashboard="running")
+    scenario_state.update(
+        outside_zellij=True,
+        _zellij_installed=True,
+        named_dashboard="running",
+        dashboard_at_address="project",
+    )
 
 
 @given("the named session `project` has a stopped dashboard")
@@ -588,13 +587,14 @@ def _recovered_session(scenario_state):
 
 
 @when("the user starts the dashboard in the named session with configured listeners")
-def _start_named_session(scenario_state, monkeypatch, capsys, tmp_path):
+def _start_named_session(scenario_state, monkeypatch, capsys, tmp_path, request):
     scenario_state["configured_listeners"] = ("127.0.0.2@127.0.0.4",)
     scenario_state["config_path"] = tmp_path / "config.json"
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         scenario_state["port"] = probe.getsockname()[1]
     monkeypatch.setenv("WORKDASH_HOST", f"127.0.0.1:{scenario_state['port']}")
+    _serve_dashboard_answers(scenario_state, monkeypatch, request)
     monkeypatch.setattr(launcher_module.sys, "argv", ["workdash"])
     _start_interactive_dashboard(
         scenario_state,
@@ -602,6 +602,48 @@ def _start_named_session(scenario_state, monkeypatch, capsys, tmp_path):
         capsys,
         argv=["--session", "project"],
     )
+
+
+def _serve_dashboard_answers(scenario_state, monkeypatch, request):
+    """Answer dashboard identity probes from the servers and records the scenario describes."""
+
+    if scenario_state.get("unidentifiable_dashboard"):
+        _serve_unidentified_address(scenario_state["port"], monkeypatch, request)
+        return
+
+    answers = {}
+    if scenario_state.get("recorded_dashboard"):
+        address = f"127.0.0.2:{scenario_state['port']}"
+        DashboardRecords().save(
+            DashboardRecord(session="project", pid=os.getpid(), address=address)
+        )
+        answers[address] = "project"
+    if "dashboard_at_address" in scenario_state:
+        answers[f"127.0.0.1:{scenario_state['port']}"] = scenario_state["dashboard_at_address"]
+    if not answers:
+        return
+
+    monkeypatch.setattr(
+        control_module, "probe_dashboard_session", lambda address: answers.get(address)
+    )
+
+
+def _serve_unidentified_address(port, monkeypatch, request):
+    """Answer the start address with a server that does not prove which session it serves."""
+
+    import threading
+    from wsgiref.simple_server import make_server
+
+    def unproven_identity(environ, start_response):
+        start_response("404 Not Found", [("Content-Type", "application/json")])
+        return [b'{"ok": false, "error": {"code": "not_found", "message": "No such endpoint."}}']
+
+    httpd = make_server("127.0.0.1", port, unproven_identity)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    request.addfinalizer(lambda: (httpd.shutdown(), httpd.server_close(), thread.join()))
+    # The suite stubs the probe; this scenario needs the real classification.
+    monkeypatch.setattr(control_module, "probe_dashboard_session", probe_dashboard_session)
 
 
 @then("the system attaches to the named session")
@@ -612,6 +654,36 @@ def _attaches_named_session(scenario_state):
 @then("the system reports that the new options are ignored")
 def _reports_options_ignored(scenario_state):
     assert "options are ignored" in scenario_state["output"]
+
+
+@then("the system exits successfully")
+def _exits_successfully(scenario_state):
+    assert scenario_state["exit_code"] == 0
+    assert scenario_state.get("dashboard_started") is not True
+
+
+@then("the new pane is named `workdash tui` and the replaced pane is not renamed")
+def _new_pane_is_named_workdash_tui(scenario_state):
+    actions = scenario_state["zellij_actions"]
+    launch = next(command for command in actions if "new-pane" in command)
+    assert launch[launch.index("--name") + 1] == "workdash tui"
+    assert not any("rename-pane" in command for command in actions)
+
+
+@given("the system is running inside a Zellij session whose dashboard is already running")
+def _inside_zellij_with_running_dashboard(scenario_state, monkeypatch):
+    scenario_state["inside_dashboard_pane"] = True
+
+    def dashboard_is_running(session):
+        assert session == "workdash-test"
+        return True
+
+    monkeypatch.setattr(launcher_module, "dashboard_is_running", dashboard_is_running)
+    monkeypatch.setattr(
+        launcher_module.zellij,
+        "name_dashboard_pane",
+        lambda session, pane: pytest.fail("a running dashboard keeps its pane name"),
+    )
 
 
 @then("the system starts a dashboard in that session")
@@ -667,11 +739,47 @@ def _restarted_dashboard_accepts_configured_clients(scenario_state, monkeypatch,
     assert exit_info.value.code == 0
 
 
-@then("the previous dashboard pane is preserved")
-def _preserves_previous_pane(scenario_state):
-    actions = scenario_state["zellij_actions"]
-    assert any("rename-pane" in c and "terminal_2" in c for c in actions)
-    assert not any("close-pane" in c for c in actions)
+@given("the named session `project` already has a running dashboard on another address")
+def _named_session_running_elsewhere(scenario_state):
+    scenario_state.update(
+        outside_zellij=True,
+        _zellij_installed=True,
+        named_dashboard="running",
+        recorded_dashboard=True,
+    )
+
+
+@given("its address answers without proving which session it serves")
+def _address_answers_unidentifiably(scenario_state):
+    scenario_state["unidentifiable_dashboard"] = True
+
+
+@then("the system reports that it cannot tell whether a dashboard is running")
+def _reports_unknown_dashboard(scenario_state):
+    assert "Cannot tell whether a Workdash dashboard is running" in scenario_state["output"]
+
+
+@given("the named session `project` has no dashboard")
+def _named_session_without_dashboard(scenario_state):
+    scenario_state.update(outside_zellij=True, _zellij_installed=True, named_dashboard="stopped")
+
+
+@given("its address serves session `other`")
+def _address_serves_other(scenario_state):
+    scenario_state["dashboard_at_address"] = "other"
+
+
+@then("the system reports the other session and the address it serves")
+def _reports_the_other_session(scenario_state):
+    output = scenario_state["output"]
+    assert "'other'" in output
+    assert f"127.0.0.1:{scenario_state['port']}" in output
+
+
+@then("the system does not start a dashboard")
+def _does_not_start_a_dashboard(scenario_state):
+    assert not any("new-pane" in command for command in scenario_state["zellij_actions"])
+    assert not any("--layout" in command for _file, command in scenario_state["exec_calls"])
 
 
 @then("the Zellij session detaches when the terminal closes")
