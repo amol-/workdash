@@ -139,9 +139,7 @@ def _run_workdash(
                     {"endpoint": endpoint, "payload": dict(payload)}
                 )
                 if endpoint == "info":
-                    return scenario_state["api_session"].info(
-                        include_all_panes=bool(payload.get("include_all_panes", False))
-                    )
+                    return scenario_state["api_session"].info(panes=payload.get("panes", "work"))
                 if endpoint == "analyze":
                     result = scenario_state["api_session"].analyze(
                         target=payload["target"],
@@ -880,7 +878,7 @@ def _run_orchestration_command(
 @then("the command requests pane information from the local Workdash server")
 def _requests_pane_information(scenario_state: dict[str, Any]) -> None:
     assert scenario_state.get("control_requests") == [
-        {"endpoint": "info", "payload": {"include_all_panes": False}}
+        {"endpoint": "info", "payload": {"panes": "work"}}
     ]
 
 
@@ -1179,7 +1177,7 @@ def _client_process_cannot_find_github_or_zellij(scenario_state: dict[str, Any])
 )
 def _requests_pane_information_with_ordinary_panes(scenario_state: dict[str, Any]) -> None:
     assert scenario_state.get("control_requests") == [
-        {"endpoint": "info", "payload": {"include_all_panes": True}}
+        {"endpoint": "info", "payload": {"panes": "all"}}
     ]
 
 

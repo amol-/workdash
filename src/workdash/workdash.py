@@ -183,7 +183,7 @@ class WorkdashCommands:
         """Report live panes through the local Workdash server."""
 
         try:
-            result = self._client.request("info", {"include_all_panes": include_all_panes})
+            result = self._client.request("info", {"panes": "all" if include_all_panes else "work"})
         except WorkdashControlError as error:
             _print_control_error(error)
             return 1

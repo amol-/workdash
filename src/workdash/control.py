@@ -21,6 +21,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager, suppress
 from datetime import UTC, datetime
 from http import HTTPStatus
+from importlib.metadata import version
 from ipaddress import IPv4Address, ip_address, ip_network
 from pathlib import Path
 from socketserver import BaseServer
@@ -84,7 +85,7 @@ _LAUNCH_VISIBILITY_INTERVAL_SECONDS = 0.5
 # An unconfirmed launch may still have started an agent, so the worktree refuses
 # new launches for this long unless its pane shows up first.
 _UNCONFIRMED_LAUNCH_TTL_SECONDS = 60.0
-# A dashboard answers its identity request quickly, and a probe runs before every
+# A dashboard answers its info request quickly, and a probe runs before every
 # dashboard start, so it retries once and never waits long.
 _DASHBOARD_PROBE_ATTEMPTS = 2
 _DASHBOARD_PROBE_RETRY_SECONDS = 0.5
@@ -139,6 +140,9 @@ class WorkdashSession:
         self.work_items = list(work_items)
         self.suggestion_markers = dict(suggestion_markers)
         self.zellij_session = zellij_session
+        self.version = version("workdash")
+        host, port = server_address()
+        self.addresses = [f"{host}:{port}"]
         self.items_changed_callback = items_changed_callback
         self._lock = threading.RLock()
         self._todo_lock = threading.Lock()
@@ -193,22 +197,30 @@ class WorkdashSession:
             self._notify_items_changed()
         return payload
 
-    def info(self, *, include_all_panes: bool = False) -> dict[str, object]:
+    def info(self, *, panes: str = "work") -> dict[str, object]:
         """Return live pane state for the server-backed Workdash session."""
 
+        if panes not in ("work", "all", "none"):
+            raise WorkdashControlError("bad_request", "Invalid panes value.", status=400)
         if not self.zellij_session:
             raise WorkdashControlError(
                 "zellij_session_required",
                 "The Workdash server is not attached to a known Workdash Zellij session.",
                 status=HTTPStatus.CONFLICT,
             )
+        if panes == "none":
+            return {
+                "session": self.zellij_session,
+                "addresses": self.addresses,
+                "version": self.version,
+            }
         with self._lock:
             result = _pane_info_payload(
                 self.zellij_session,
                 self.config.workdir,
                 self.work_items,
                 git=self.git,
-                include_all_panes=include_all_panes,
+                include_all_panes=panes == "all",
             )
         result["autodispatch_sessions"] = self.autodispatch_sessions()
         return result
@@ -1741,6 +1753,11 @@ class WorkdashControlServer:
     ) -> None:
         self._session = session
         self._listeners = listeners
+        host, port = server_address()
+        self._session.addresses = [
+            f"{address}:{port}"
+            for address in dict.fromkeys([host, *(address for address, _ in listeners)])
+        ]
         self._httpds: list[BaseServer] = []
         self._threads: list[threading.Thread] = []
         self._log_handler: logging.Handler | None = None
@@ -1758,7 +1775,9 @@ class WorkdashControlServer:
         host = primary_host
         try:
             app = _source_and_header_guarded_wsgi_app(
-                _make_turbogears_app(self._session), accepted_ips
+                _make_turbogears_app(self._session),
+                accepted_ips,
+                server_version=self._session.version,
             )
             for host in [
                 primary_host,
@@ -1847,12 +1866,14 @@ def probe_dashboard_session(address: str) -> str | None:
     for attempt in range(1, _DASHBOARD_PROBE_ATTEMPTS + 1):
         try:
             result = _dashboard_api_result(
-                address, "identity", timeout=_DASHBOARD_PROBE_TIMEOUT_SECONDS
+                address, "info", {"panes": "none"}, timeout=_DASHBOARD_PROBE_TIMEOUT_SECONDS
             )
             break
         except WorkdashControlError as error:
             if error.code == "server_unreachable":
                 return None
+            if error.code == "version_mismatch":
+                raise
             if attempt == _DASHBOARD_PROBE_ATTEMPTS:
                 raise
             time.sleep(_DASHBOARD_PROBE_RETRY_SECONDS)
@@ -1884,7 +1905,7 @@ def _dashboard_api_result(
         headers={
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "X-Workdash": "1",
+            "X-Workdash": version("workdash"),
         },
         method="POST",
     )
@@ -2117,19 +2138,7 @@ def _make_turbogears_app(session: WorkdashSession):
             return _handle_json_request(
                 request,
                 response,
-                lambda payload: self._session.info(
-                    include_all_panes=bool(payload.get("include_all_panes", False))
-                ),
-            )
-
-        @expose("json")
-        def identity(self):
-            # Answers from the session captured at startup so it never waits on the
-            # session lock or a Zellij pane listing.
-            return _handle_json_request(
-                request,
-                response,
-                lambda payload: {"session": self._session.zellij_session},
+                lambda payload: self._session.info(panes=payload.get("panes", "work")),
             )
 
         @expose("json")
@@ -2476,13 +2485,17 @@ def _handle_json_request(request, response, action) -> dict[str, object]:
         raise
 
 
-def _source_and_header_guarded_wsgi_app(app, accepted_ips: Collection[str] = ()):
+def _source_and_header_guarded_wsgi_app(
+    app, accepted_ips: Collection[str] = (), *, server_version: str | None = None
+):
     """Wrap ``app`` so only accepted source IPs and X-Workdash requests reach it.
 
     Read-only documents and artifacts skip the header check for browser viewing.
     The header is not authentication: non-browser clients can send it.
     """
 
+    if server_version is None:
+        server_version = version("workdash")
     allowed: set[ip_network] = {ip_network("127.0.0.1"), ip_network("::1")}
     for entry in accepted_ips:
         with suppress(ValueError):
@@ -2512,10 +2525,21 @@ def _source_and_header_guarded_wsgi_app(app, accepted_ips: Collection[str] = ())
             and path[1:3] == ["api", "items"]
             and (path[5:] in (["analysis"], ["analysis", "html"]) or path[5:6] == ["files"])
         )
-        if environ.get("REQUEST_METHOD") == "OPTIONS" or (
-            not browser_read and environ.get("HTTP_X_WORKDASH") != "1"
-        ):
-            return reject("X-Workdash: 1 is required.")
+        if environ.get("REQUEST_METHOD") == "OPTIONS":
+            return reject("Cross-origin preflights are denied.")
+        client_version = environ.get("HTTP_X_WORKDASH")
+        if not browser_read and client_version != server_version:
+            body = json.dumps(
+                _error_envelope(
+                    "version_mismatch",
+                    f"Workdash client version {client_version!r} does not match dashboard version {server_version!r}; restart the dashboard.",
+                )
+            ).encode("utf-8")
+            start_response(
+                "403 Forbidden",
+                [("Content-Type", "application/json"), ("Content-Length", str(len(body)))],
+            )
+            return [body]
         return app(environ, start_response)
 
     return guarded

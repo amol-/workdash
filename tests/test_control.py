@@ -8,6 +8,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
 from http import HTTPStatus
+from importlib.metadata import version
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
@@ -1660,7 +1661,7 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
                         "POST",
                         "/api/v0/list",
                         "{}",
-                        {"Content-Type": "application/json", "X-Workdash": "1"},
+                        {"Content-Type": "application/json", "X-Workdash": version("workdash")},
                     )
                     response = connection.getresponse()
                     assert response.status == 200
@@ -1873,7 +1874,7 @@ def test_client_names_selected_host_for_invalid_responses(monkeypatch, body) -> 
         control_module.WorkdashControlClient("dashboard.lan").request("list", {"refresh": True})
     assert error.value.code == "invalid_response"
     request = urlopen.call_args.args[0]
-    assert request.get_header("X-workdash") == "1"
+    assert request.get_header("X-workdash") == version("workdash")
     assert request.full_url == "http://dashboard.lan:8765/api/v0/list"
     assert json.loads(request.data) == {"refresh": True}
 
@@ -1909,28 +1910,6 @@ def test_client_names_selected_host_when_unreachable(monkeypatch) -> None:
     assert error.value.__cause__ is failure
 
 
-@pytest.mark.parametrize("served_session", ["workdash-main", "project"])
-def test_identity_reports_the_session_the_dashboard_serves(served_session) -> None:
-    session = WorkdashSession(
-        config=WorkdashConfig(),
-        backend=MagicMock(),
-        work_items=[],
-        suggestion_markers={},
-        zellij_session=served_session,
-    )
-    request = Request.blank(
-        "/api/v0/identity",
-        method="POST",
-        content_type="application/json",
-        body=b"{}",
-    )
-
-    response = request.get_response(control_module._make_turbogears_app(session))
-
-    assert response.status_int == 200
-    assert json.loads(response.text)["result"]["session"] == served_session
-
-
 def test_probe_answers_without_waiting_for_the_session_lock(monkeypatch) -> None:
     import socket
 
@@ -1947,10 +1926,16 @@ def test_probe_answers_without_waiting_for_the_session_lock(monkeypatch) -> None
         zellij_session="project",
     )
     server = control_module.WorkdashControlServer(session)
+    urlopen = MagicMock(wraps=control_module.urllib.request.urlopen)
+    monkeypatch.setattr(control_module.urllib.request, "urlopen", urlopen)
     server.start()
     try:
         with session._lock:
             assert probe_dashboard_session(f"127.0.0.1:{port}") == "project"
+        request = urlopen.call_args.args[0]
+        assert request.get_method() == "POST"
+        assert request.full_url == f"http://127.0.0.1:{port}/api/v0/info"
+        assert json.loads(request.data) == {"panes": "none"}
     finally:
         server.stop()
 
@@ -2325,7 +2310,7 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
     )
 
     def get(path, method="GET", peer="127.0.0.1"):
-        request = Request.blank(path, method=method, headers={"X-Workdash": "1"})
+        request = Request.blank(path, method=method, headers={"X-Workdash": version("workdash")})
         request.environ["REMOTE_ADDR"] = peer
         return request.get_response(app)
 
@@ -2469,7 +2454,8 @@ def test_item_files_reject_symlink_substitution(tmp_path, monkeypatch, component
         "alias-target": ".workdash/alias",
     }.get(component, ".workdash/nested/review.md")
     request = Request.blank(
-        f"/api/items/owner/repo%23ISSUE-1/files/{suffix}", headers={"X-Workdash": "1"}
+        f"/api/items/owner/repo%23ISSUE-1/files/{suffix}",
+        headers={"X-Workdash": version("workdash")},
     )
     request.environ["REMOTE_ADDR"] = "127.0.0.1"
     response = request.get_response(app)
@@ -2514,7 +2500,8 @@ def test_item_files_reject_worktree_symlink_substitution(tmp_path, monkeypatch, 
         control_module._make_turbogears_app(session)
     )
     request = Request.blank(
-        f"/api/items/owner/repo%23ISSUE-1/files/{suffix}", headers={"X-Workdash": "1"}
+        f"/api/items/owner/repo%23ISSUE-1/files/{suffix}",
+        headers={"X-Workdash": version("workdash")},
     )
     request.environ["REMOTE_ADDR"] = "127.0.0.1"
     response = request.get_response(app)
@@ -2557,7 +2544,9 @@ def test_item_files_listing_validates_pinned_entries_after_replacement(tmp_path,
     app = control_module._source_and_header_guarded_wsgi_app(
         control_module._make_turbogears_app(session)
     )
-    request = Request.blank("/api/items/owner/repo%23ISSUE-1/files/", headers={"X-Workdash": "1"})
+    request = Request.blank(
+        "/api/items/owner/repo%23ISSUE-1/files/", headers={"X-Workdash": version("workdash")}
+    )
     request.environ["REMOTE_ADDR"] = "127.0.0.1"
     response = request.get_response(app)
     assert response.status_int == 404 or response.json["result"]["entries"] == ["safe"]
@@ -2600,7 +2589,9 @@ def test_item_files_listing_rejects_directory_substitution(tmp_path, monkeypatch
     app = control_module._source_and_header_guarded_wsgi_app(
         control_module._make_turbogears_app(session)
     )
-    request = Request.blank("/api/items/owner/repo%23ISSUE-1/files/", headers={"X-Workdash": "1"})
+    request = Request.blank(
+        "/api/items/owner/repo%23ISSUE-1/files/", headers={"X-Workdash": version("workdash")}
+    )
     request.environ["REMOTE_ADDR"] = "127.0.0.1"
     response = request.get_response(app)
     assert replaced
@@ -2659,7 +2650,8 @@ def test_item_files_resolve_shared_pr_and_targeted_todo_worktrees(
     )
     for item_id, expected in (("owner/repo%23PR-2", "shared"), ("owner/repo%23ISSUE-WT3", "todo")):
         request = Request.blank(
-            f"/api/items/{item_id}/files/.workdash/artifact.txt", headers={"X-Workdash": "1"}
+            f"/api/items/{item_id}/files/.workdash/artifact.txt",
+            headers={"X-Workdash": version("workdash")},
         )
         request.environ["REMOTE_ADDR"] = "127.0.0.1"
         response = request.get_response(app)
@@ -2716,7 +2708,8 @@ def test_item_files_reject_worktree_replacement_after_resolution(tmp_path, monke
         control_module._make_turbogears_app(session)
     )
     request = Request.blank(
-        f"/api/items/owner/repo%23ISSUE-1/files/{suffix}", headers={"X-Workdash": "1"}
+        f"/api/items/owner/repo%23ISSUE-1/files/{suffix}",
+        headers={"X-Workdash": version("workdash")},
     )
     request.environ["REMOTE_ADDR"] = "127.0.0.1"
     response = request.get_response(app)
@@ -2771,7 +2764,8 @@ def test_item_files_pins_worktree_before_git_validation(tmp_path, monkeypatch):
         control_module._make_turbogears_app(session)
     )
     request = Request.blank(
-        "/api/items/owner/repo%23ISSUE-1/files/.workdash/artifact.txt", headers={"X-Workdash": "1"}
+        "/api/items/owner/repo%23ISSUE-1/files/.workdash/artifact.txt",
+        headers={"X-Workdash": version("workdash")},
     )
     request.environ["REMOTE_ADDR"] = "127.0.0.1"
     response = request.get_response(app)
@@ -4614,7 +4608,7 @@ def test_control_boundary_requires_header_except_analysis_documents():
     assert form.status_int == 403
     assert "Access-Control-Allow-Origin" not in form.headers
     session.show_config.assert_not_called()
-    assert call(control, "POST", {"X-Workdash": "1"}).status_int == 200
+    assert call(control, "POST", {"X-Workdash": version("workdash")}).status_int == 200
     for path in (analysis, analysis + "/html"):
         assert call(path).status_int == 200
         assert call(path, peer="192.0.2.1").status_int == 403
@@ -5327,3 +5321,153 @@ def test_dispatch_api_does_not_expose_blocked_scope_metadata(monkeypatch, tmp_pa
         "status": "no_ready_task",
         "scope": "owner/repo#1",
     }
+
+
+def test_info_api_filters_unrelated_panes_unless_all_requested(monkeypatch, tmp_path):
+    panes = [
+        {"id": 1, "title": "code_owner_repo_1", "pane_cwd": str(tmp_path)},
+        {"id": 2, "title": "shell", "pane_cwd": str(tmp_path), "pane_command": "bash"},
+    ]
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: panes)
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args, **kwargs: tmp_path)
+    session = WorkdashSession(
+        config=WorkdashConfig(workdir=str(tmp_path)),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="Work")],
+        suggestion_markers={},
+        zellij_session="project",
+    )
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    for payload in ({}, {"panes": "work"}, {"panes": "all"}):
+        request = Request.blank(
+            "/api/v0/info",
+            method="POST",
+            content_type="application/json",
+            headers={"X-Workdash": version("workdash")},
+            body=json.dumps(payload).encode(),
+        )
+        request.environ["REMOTE_ADDR"] = "127.0.0.1"
+        response = request.get_response(app)
+        assert response.status_int == 200
+        result = response.json["result"]["panes"]
+        assert [pane["pane_id"] for pane in result] == (
+            ["terminal_1", "terminal_2"] if payload.get("panes") == "all" else ["terminal_1"]
+        )
+        assert result[0]["kind"] == "agent"
+        assert result[0]["item"] == "owner/repo#ISSUE-1"
+        if payload.get("panes") == "all":
+            assert result[1]["kind"] == "unknown"
+            assert result[1]["item"] == "unknown"
+            assert result[1]["command"] == "bash"
+
+
+def test_info_without_panes_identifies_dashboard_without_listing(monkeypatch):
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.2:9876")
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="project",
+    )
+    control_module.WorkdashControlServer(session, listeners=(("127.0.0.3", ("127.0.0.1",)),))
+    monkeypatch.setattr(control_module, "_pane_info_payload", MagicMock(side_effect=AssertionError))
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    request = Request.blank(
+        "/api/v0/info",
+        method="POST",
+        content_type="application/json",
+        headers={"X-Workdash": version("workdash")},
+        body=b'{"panes":"none"}',
+    )
+    request.environ["REMOTE_ADDR"] = "127.0.0.1"
+    response = request.get_response(app)
+    assert response.status_int == 200
+    assert response.json["result"] == {
+        "session": "project",
+        "version": version("workdash"),
+        "addresses": ["127.0.0.2:9876", "127.0.0.3:9876"],
+    }
+
+
+def test_running_server_refuses_cli_after_installed_version_changes(monkeypatch, capsys):
+    import socket
+
+    import workdash.workdash as workdash_module
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setenv("WORKDASH_HOST", f"127.0.0.1:{port}")
+    installed = ["1.0.0"]
+    monkeypatch.setattr(control_module, "version", lambda _name: installed[0])
+    backend = MagicMock()
+    backend.load_items.return_value = ([], {})
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=backend,
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="project",
+    )
+    server = control_module.WorkdashControlServer(session)
+    server.start()
+    try:
+        assert (
+            control_module.WorkdashControlClient().request("info", {"panes": "none"})["version"]
+            == "1.0.0"
+        )
+        assert workdash_module.main(["list", "--refresh"]) == 0
+        backend.load_items.assert_called_once()
+        backend.load_items.reset_mock()
+        capsys.readouterr()
+
+        installed[0] = "2.0.0"
+        assert workdash_module.main(["list", "--refresh"]) == 1
+        output = capsys.readouterr()
+        assert "1.0.0" in output.err
+        assert "2.0.0" in output.err
+        assert "restart the dashboard" in output.err
+        backend.load_items.assert_not_called()
+    finally:
+        server.stop()
+
+
+@pytest.mark.parametrize("header", [None, "different"])
+def test_version_mismatch_reports_both_versions_and_restart(header):
+    session = MagicMock()
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    headers = {"X-Workdash": header} if header is not None else {}
+    request = Request.blank("/api/v0/info", method="POST", headers=headers, body=b"{}")
+    request.environ["REMOTE_ADDR"] = "127.0.0.1"
+    response = request.get_response(app)
+    assert response.status_int == 403
+    error = response.json["error"]
+    assert error["code"] == "version_mismatch"
+    assert repr(header) in error["message"]
+    assert version("workdash") in error["message"]
+    assert "restart the dashboard" in error["message"]
+    session.info.assert_not_called()
+
+
+def test_info_rejects_invalid_panes():
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="project",
+    )
+    app = control_module._make_turbogears_app(session)
+    request = Request.blank(
+        "/api/v0/info", method="POST", content_type="application/json", body=b'{"panes":"invalid"}'
+    )
+    response = request.get_response(app)
+    assert response.status_int == 400
+    assert response.json["error"]["code"] == "bad_request"

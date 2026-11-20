@@ -784,7 +784,7 @@ def test_main_exits_with_config_guidance_when_startup_config_command_is_malforme
     [
         (["list"], "list", {"refresh": False}),
         (["list", "--refresh"], "list", {"refresh": True}),
-        (["info"], "info", {"include_all_panes": False}),
+        (["info"], "info", {"panes": "work"}),
         (["ready", "any"], "ready", {"scope": "any"}),
         (["ready", "owner/repo#42", "--json"], "ready", {"scope": "owner/repo#42"}),
         (["terminal", "owner/repo#ISSUE-1"], "terminal", {"target": "owner/repo#ISSUE-1"}),
@@ -807,7 +807,7 @@ def test_main_exits_with_config_guidance_when_startup_config_command_is_malforme
             {"text": "Fix it", "target": "owner/repo", "body": "  Details\n\nMore context\n"},
         ),
         (["close", "terminal_23"], "pane/close", {"pane_id": "terminal_23"}),
-        (["info", "--all"], "info", {"include_all_panes": True}),
+        (["info", "--all"], "info", {"panes": "all"}),
         (
             ["analyze", "owner/repo#ISSUE-1", "--agent", "codex"],
             "analyze",
@@ -1489,7 +1489,7 @@ def test_main_info_human_output_formats_server_response(
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "info"
-            assert payload == {"include_all_panes": False}
+            assert payload == {"panes": "work"}
             return {
                 "session": "workdash",
                 "panes": [
@@ -1528,7 +1528,7 @@ def test_main_info_json_outputs_server_response(
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "info"
-            assert payload == {"include_all_panes": False}
+            assert payload == {"panes": "work"}
             return response
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)

@@ -7,6 +7,7 @@ import json
 import threading
 import urllib.error
 import urllib.request
+from importlib.metadata import version
 from unittest.mock import MagicMock
 
 import pytest
@@ -88,7 +89,7 @@ def _request(state, path, payload) -> dict:
     request = urllib.request.Request(
         f"{state['url']}/{path}",
         data=json.dumps(payload).encode(),
-        headers={"X-Workdash": "1", "Content-Type": "application/json"},
+        headers={"X-Workdash": version("workdash"), "Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:

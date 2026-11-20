@@ -11,7 +11,7 @@ Zellij, GitHub, config files, or worktrees directly.
 ## Required server
 
 Depends on an existing `workdash` session.
-Server-backed commands fail clearly if it is not running.
+Server-backed commands fail clearly if it is not running. Client and dashboard versions must match; restart the dashboard after upgrading Workdash.
 You MUST NEVER start a server yourself, if no server is running just tell so.
 To know the configuration of the server, you can use `show-config` subcommand
 

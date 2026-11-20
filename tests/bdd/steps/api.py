@@ -11,6 +11,7 @@ import socket
 import subprocess
 import threading
 from contextlib import nullcontext
+from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -61,7 +62,7 @@ def _call_api(
         content_type="application/json",
         body=json.dumps(payload or {}).encode("utf-8"),
     )
-    request.headers["X-Workdash"] = "1"
+    request.headers["X-Workdash"] = version("workdash")
     request.environ["REMOTE_ADDR"] = scenario_state.get("remote_addr", "127.0.0.1")
     request.headers.update(scenario_state.get("forwarding_headers", {}))
     response = request.get_response(app)
@@ -303,11 +304,24 @@ def _client_requests_info_api(
     _call_api(scenario_state, work_items, tmp_path, "info")
 
 
-@when("a client requests the identity API")
-def _client_requests_identity_api(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    _call_api(scenario_state, work_items, tmp_path, "identity")
+@when("a client requests info without panes")
+def _client_requests_info_without_panes(scenario_state, work_items, tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:9876")
+    control_module.WorkdashControlServer(
+        scenario_state["api_session"], listeners=(("127.0.0.2", ("127.0.0.1",)),)
+    )
+    _call_api(scenario_state, work_items, tmp_path, "info", {"panes": "none"})
+
+
+@then("the API reports the dashboard session, addresses, and version")
+def _info_identifies_dashboard(scenario_state):
+    assert scenario_state["api_status"] == 200
+    result = scenario_state["api_payload"]["result"]
+    assert result == {
+        "session": "project",
+        "addresses": ["127.0.0.1:9876", "127.0.0.2:9876"],
+        "version": version("workdash"),
+    }
 
 
 @when("a client requests the show-config API")
@@ -1038,7 +1052,7 @@ def _source_can_access_custom_server(scenario_state):
                 "POST",
                 "/api/v0/list",
                 "{}",
-                {"Content-Type": "application/json", "X-Workdash": "1"},
+                {"Content-Type": "application/json", "X-Workdash": version("workdash")},
             )
             response = connection.getresponse()
             assert response.status == status
@@ -1161,7 +1175,10 @@ def _primary_requests_list(scenario_state):
     connection = HTTPConnection(host, port, source_address=(host, 0), timeout=3)
     try:
         connection.request(
-            "POST", "/api/v0/list", "{}", {"Content-Type": "application/json", "X-Workdash": "1"}
+            "POST",
+            "/api/v0/list",
+            "{}",
+            {"Content-Type": "application/json", "X-Workdash": version("workdash")},
         )
         response = connection.getresponse()
         scenario_state["api_status"] = response.status
@@ -1178,7 +1195,10 @@ def _unlisted_source_cannot_access_primary(scenario_state):
     connection = HTTPConnection(host, port, source_address=("127.0.0.3", 0), timeout=3)
     try:
         connection.request(
-            "POST", "/api/v0/list", "{}", {"Content-Type": "application/json", "X-Workdash": "1"}
+            "POST",
+            "/api/v0/list",
+            "{}",
+            {"Content-Type": "application/json", "X-Workdash": version("workdash")},
         )
         response = connection.getresponse()
         assert response.status == 403
@@ -1509,7 +1529,8 @@ def _get_artifacts(scenario_state, work_items, tmp_path):
         ".workdash/data.unknownworkdash",
     ):
         req = Request.blank(
-            f"/api/items/owner/repo%23ISSUE-1/files/{suffix}", headers={"X-Workdash": "1"}
+            f"/api/items/owner/repo%23ISSUE-1/files/{suffix}",
+            headers={"X-Workdash": version("workdash")},
         )
         req.environ["REMOTE_ADDR"] = "127.0.0.1"
         response = req.get_response(app)
@@ -1552,7 +1573,7 @@ def _request_control_with_and_without_header(scenario_state, work_items, tmp_pat
         ("POST", "/api/v0/list"),
         ("GET", "/api/items/owner/repo%23ISSUE-1/files/.workdash/PR_REVIEW.md"),
     ):
-        for header in (None, "wrong", "1"):
+        for header in (None, "wrong", version("workdash")):
             request = Request.blank(path, method=method)
             request.environ["REMOTE_ADDR"] = "127.0.0.1"
             if header is not None:
@@ -1573,16 +1594,16 @@ def _request_control_with_and_without_header(scenario_state, work_items, tmp_pat
     scenario_state["header_responses"] = responses
 
 
-@then("control requests require `X-Workdash: 1` but artifact GETs do not")
+@then("control requests require the current Workdash version but artifact GETs do not")
 def _check_control_header(scenario_state):
     responses = scenario_state["header_responses"]
     assert responses["POST", None].status_int == 403
     assert responses["POST", "wrong"].status_int == 403
-    assert responses["POST", "1"].status_int == 200
-    for header in (None, "wrong", "1"):
+    assert responses["POST", version("workdash")].status_int == 200
+    for header in (None, "wrong", version("workdash")):
         assert responses["GET", header].status_int == 200
-    assert responses["POST", "1"].json["ok"] is True
-    assert responses["GET", "1"].text == "Review contents"
+    assert responses["POST", version("workdash")].json["ok"] is True
+    assert responses["GET", version("workdash")].text == "Review contents"
 
 
 @then("a cross-origin preflight is denied")
@@ -1642,7 +1663,7 @@ def _request_analysis_through_host(scenario_state, work_items, tmp_path, monkeyp
         "/api/v0/analyze",
         method="POST",
         host="dashboard.test:9876",
-        headers={"X-Workdash": "1"},
+        headers={"X-Workdash": version("workdash")},
         content_type="application/json",
         body=b'{"target":"owner/repo#ISSUE-1"}',
     )

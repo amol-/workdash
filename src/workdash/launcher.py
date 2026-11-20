@@ -345,6 +345,8 @@ def _dashboard_session_at(address: str) -> str | None:
     try:
         return probe_dashboard_session(address)
     except WorkdashControlError as error:
+        if error.code == "version_mismatch":
+            raise RuntimeError(str(error)) from error
         raise RuntimeError(
             f"Cannot tell whether a Workdash dashboard is running at {address}: {error}"
         ) from error
