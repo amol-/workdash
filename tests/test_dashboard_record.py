@@ -15,7 +15,7 @@ def test_a_saved_record_answers_for_its_session_only() -> None:
         session="work/dash", pid=42, address="a:1"
     )
     assert records.load("work_dash") is None
-    assert (dashboard_record.SESSIONS_DIR / "work_dash.json").exists()
+    assert (dashboard_record.SESSIONS_DIR / "work%2Fdash.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -56,3 +56,16 @@ def test_removing_a_record_leaves_no_record_and_forgives_a_missing_one() -> None
     records.remove("project")
 
     assert records.load("project") is None
+
+
+def test_session_names_that_differ_only_in_separators_keep_their_own_records() -> None:
+    records = dashboard_record.DashboardRecords()
+    records.save(dashboard_record.DashboardRecord(session="foo", pid=1, address="a:1"))
+    records.save(dashboard_record.DashboardRecord(session="foo-", pid=2, address="a:2"))
+
+    assert records.load("foo") == dashboard_record.DashboardRecord(
+        session="foo", pid=1, address="a:1"
+    )
+    assert records.load("foo-") == dashboard_record.DashboardRecord(
+        session="foo-", pid=2, address="a:2"
+    )

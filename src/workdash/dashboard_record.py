@@ -8,8 +8,8 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
-from .analysis_cache import sanitize_cache_filename_component
 from .config import CONFIG_PATH
 
 SESSIONS_DIR = CONFIG_PATH.parent / "sessions"
@@ -86,4 +86,4 @@ class DashboardRecords:
             self._path(session).unlink()
 
     def _path(self, session: str) -> Path:
-        return SESSIONS_DIR / f"{sanitize_cache_filename_component(session)}.json"
+        return SESSIONS_DIR / f"{quote(session, safe='')}.json"
