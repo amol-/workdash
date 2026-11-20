@@ -1279,6 +1279,7 @@ def test_dashboard_analysis_focuses_viewer_in_real_zellij(tmp_path, choice, repe
         SHELL=str(shell),
         WORKDASH_HOST=f"127.0.0.1:{port}",
         ZELLIJ_SOCKET_DIR=sockets.name,
+        HOME=_temporary_home(tmp_path),
         ZELLIJ_CONFIG_FILE=str(config),
         XDG_CACHE_HOME=str(tmp_path / "cache"),
     )
