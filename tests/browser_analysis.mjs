@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 
-const [browser, profile, url, control, attacker, ...artifacts] = process.argv.slice(2);
+const [browser, profile, url, control, attacker, version, ...artifacts] = process.argv.slice(2);
 const chrome = spawn(browser, [
   '--headless', '--no-sandbox', '--disable-gpu', '--no-first-run',
   '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
@@ -54,7 +54,7 @@ try {
   });
   await navigate(attacker);
   const attack = await send('Runtime.evaluate', {
-    expression: `fetch(${JSON.stringify(control)}, {method:'POST', headers:{'X-Workdash':'1', 'Content-Type':'application/json'}, body:'{}'}).then(() => 'allowed', () => 'blocked')`,
+    expression: `fetch(${JSON.stringify(control)}, {method:'POST', headers:{'X-Workdash':${JSON.stringify(version)}, 'Content-Type':'application/json'}, body:'{}'}).then(() => 'allowed', () => 'blocked')`,
     awaitPromise: true, returnByValue: true,
   });
   const active = [];

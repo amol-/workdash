@@ -8,6 +8,7 @@ import re
 import socket
 import subprocess
 from http.client import HTTPConnection
+from importlib.metadata import version
 from typing import Any
 
 import pytest
@@ -607,6 +608,19 @@ def _start_named_session(scenario_state, monkeypatch, capsys, tmp_path, request)
 def _serve_dashboard_answers(scenario_state, monkeypatch, request):
     """Answer dashboard identity probes from the servers and records the scenario describes."""
 
+    if scenario_state.get("version_mismatch"):
+        import threading
+        from wsgiref.simple_server import make_server
+
+        app = control_module._source_and_header_guarded_wsgi_app(
+            lambda environ, start_response: [], server_version="different-version"
+        )
+        httpd = make_server("127.0.0.1", scenario_state["port"], app)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        request.addfinalizer(lambda: (httpd.shutdown(), httpd.server_close(), thread.join()))
+        monkeypatch.setattr(control_module, "probe_dashboard_session", probe_dashboard_session)
+        return
     if scenario_state.get("unidentifiable_dashboard"):
         _serve_unidentified_address(scenario_state["port"], monkeypatch, request)
         return
@@ -721,7 +735,7 @@ def _restarted_dashboard_accepts_configured_clients(scenario_state, monkeypatch,
                         "POST",
                         "/api/v0/list",
                         "{}",
-                        {"Content-Type": "application/json", "X-Workdash": "1"},
+                        {"Content-Type": "application/json", "X-Workdash": version("workdash")},
                     )
                     response = connection.getresponse()
                     assert response.status == expected
@@ -795,3 +809,16 @@ def _dashboard_above_shell(scenario_state):
         layout,
         re.DOTALL,
     )
+
+
+@given("its address serves a dashboard with a different Workdash version")
+def _address_version_mismatch(scenario_state):
+    scenario_state["version_mismatch"] = True
+
+
+@then("the system reports the version mismatch and restart guidance")
+def _reports_version_mismatch(scenario_state):
+    output = scenario_state["output"]
+    assert "version" in output and "restart the dashboard" in output
+    assert "Cannot tell" not in output
+    assert f"127.0.0.1:{scenario_state['port']}" in output

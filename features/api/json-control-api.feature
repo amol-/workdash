@@ -16,14 +16,14 @@ Feature: Local JSON control API
     - All listeners share the union of accepted source IPs and CIDR subnets, automatically including localhost and the primary server IP. An entry matching the primary IP adds its source IPs without binding a second listener.
     - Actual peer source IPs determine access, never forwarding headers; unlisted peers receive a forbidden JSON error without executing actions.
     - If any listener cannot bind, including a repeated non-primary listener address, startup fails without leaving other listeners active; exiting the TUI stops every listener.
-    - Control requests require `X-Workdash: 1`; the CLI supplies it. GET requests for artifacts and analysis Markdown and HTML documents are exempt for direct browser viewing. Cross-origin preflights are denied. Artifact responses prevent active content from running scripts or invoking control actions. Gzip-compressed SVGs can be viewed in browsers; other compressed SVGs are served as compressed files.
+    - Control requests require `X-Workdash` with the installed Workdash version; the CLI supplies it. A missing or mismatched version is refused with both versions and restart guidance. GET requests for artifacts and analysis Markdown and HTML documents are exempt for direct browser viewing. Cross-origin preflights are denied. Artifact responses prevent active content from running scripts or invoking control actions. Gzip-compressed SVGs can be viewed in browsers; other compressed SVGs are served as compressed files.
     - The API is intentionally unauthenticated plain HTTP for trusted LAN use only; the header is not authentication.
     - V0 exposes JSON APIs only, not an HTML browser UI.
     - V0 API requests and responses use JSON objects; item file GET responses contain file bytes or a JSON directory listing.
     - `GET /api/items/{item_id}/files/` lists the item's `.workdash` directory as a JSON success envelope containing a sorted `entries` array of names; `GET /api/items/{item_id}/files/.workdash/{path}` serves a file within it with its original bytes, a Content-Type inferred from the requested filename, falling back to `application/octet-stream` when unknown. Compressed archives are downloaded compressed; compressed SVG remains viewable. Symlinked worktree paths and symlinks resolving inside `.workdash` are available; paths and symlinks escaping `.workdash` and missing worktrees are not served or listed. The same source IP access rules apply, and no writes are supported.
     - `GET /api/items/{item_id}/analysis` serves the item's cached analysis markdown as `text/markdown` under the same source IP access rules; an item without a valid cached analysis returns a 404 JSON error. No writes are supported.
-    - V0 capabilities are exposed as `POST /api/v0/list`, `POST /api/v0/info`, `POST /api/v0/identity`, `POST /api/v0/analyze`, `POST /api/v0/code`, `POST /api/v0/terminal`, `POST /api/v0/ready`, `POST /api/v0/todo`, `POST /api/v0/show-config`, `POST /api/v0/pane/content`, `POST /api/v0/pane/send`, and `POST /api/v0/pane/close`.
-    - `POST /api/v0/identity` reports the Zellij session the dashboard serves.
+    - V0 capabilities are exposed as `POST /api/v0/list`, `POST /api/v0/info`, `POST /api/v0/analyze`, `POST /api/v0/code`, `POST /api/v0/terminal`, `POST /api/v0/ready`, `POST /api/v0/todo`, `POST /api/v0/show-config`, `POST /api/v0/pane/content`, `POST /api/v0/pane/send`, and `POST /api/v0/pane/close`.
+    - `POST /api/v0/info` accepts `panes` as `work` (default), `all`, or `none`; `none` reports only the session, served addresses, and version. Other values are rejected.
     - `POST /api/v0/todo` accepts an optional target as a GitHub `owner/repo` name or a git URL on any hosting service.
     - `POST /api/v0/todo` accepts optional body text as long details separate from the title, appended unchanged after the metadata block.
     - Successful API responses use `{ "ok": true, "result": ... }`.
@@ -49,8 +49,14 @@ Feature: Local JSON control API
   Scenario: Control requests require the Workdash header
     Given a server-backed Workdash session has an item with a worktree artifact and an alias inside .workdash
     When a client requests the list API and the item's artifact with and without the Workdash header
-    Then control requests require `X-Workdash: 1` but artifact GETs do not
+    Then control requests require the current Workdash version but artifact GETs do not
     And a cross-origin preflight is denied
+
+  @id:F-API-JSON-CONTROL-S042
+  Scenario: Identify the dashboard without requesting panes
+    Given a server-backed Workdash session is running in Zellij session `project`
+    When a client requests info without panes
+    Then the API reports the dashboard session, addresses, and version
 
   @id:F-API-JSON-CONTROL-S039
   Scenario: Analysis documents can be viewed without the Workdash header
@@ -333,12 +339,6 @@ Feature: Local JSON control API
     When a client requests code with autostart `"false"` for `owner/repo#ISSUE-1` with agent `pi`
     Then the API returns error `bad_request` with HTTP status 400
     And no coding agent is launched
-
-  @id:F-API-JSON-CONTROL-S041
-  Scenario: Identity API reports the Zellij session the dashboard serves
-    Given a server-backed Workdash session is running in Zellij session `project`
-    When a client requests the identity API
-    Then the API reports the Zellij session `project` in its `session` field
 
   @id:F-API-JSON-CONTROL-S031
   Scenario: A custom server address is shared by clients and overlapping listeners

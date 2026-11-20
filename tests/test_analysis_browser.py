@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.metadata import version
 from pathlib import Path
 from unittest.mock import MagicMock
 from urllib.request import Request, urlopen
@@ -89,7 +90,7 @@ def test_analysis_images_and_control_security_in_browser(tmp_path, monkeypatch):
         action = f"{base}/api/v0/show-config"
         payload = (
             "window.pwned = true; "
-            f"fetch('{action}', {{method: 'POST', headers: {{'X-Workdash': '1'}}}}); "
+            f"fetch('{action}', {{method: 'POST', headers: {{'X-Workdash': '{version('workdash')}'}}}}); "
             "document.forms[0].submit()"
         )
         (artifacts / "active.html").write_text(
@@ -121,6 +122,7 @@ def test_analysis_images_and_control_security_in_browser(tmp_path, monkeypatch):
                     url,
                     action,
                     f"http://127.0.0.1:{images.server_port}/attacker",
+                    version("workdash"),
                     f"{artifact}/active.html",
                     f"{artifact}/active.svg",
                 ],
@@ -141,7 +143,9 @@ def test_analysis_images_and_control_security_in_browser(tmp_path, monkeypatch):
         ] * 2
         session.show_config.assert_not_called()
         request = Request(
-            action, data=b"{}", headers={"X-Workdash": "1", "Content-Type": "application/json"}
+            action,
+            data=b"{}",
+            headers={"X-Workdash": version("workdash"), "Content-Type": "application/json"},
         )
         with urlopen(request) as response:
             assert response.status == 200

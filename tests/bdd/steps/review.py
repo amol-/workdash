@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 from datetime import UTC, datetime
+from importlib.metadata import version
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -399,7 +400,7 @@ def list_during_review(review_state):
     request = Request(
         f"http://{control.server_address()[0]}:{control.server_address()[1]}/api/v0/list",
         data=b"{}",
-        headers={"Content-Type": "application/json", "X-Workdash": "1"},
+        headers={"Content-Type": "application/json", "X-Workdash": version("workdash")},
     )
     with urlopen(request, timeout=2) as response:
         review_state["list"] = json.load(response)["result"]

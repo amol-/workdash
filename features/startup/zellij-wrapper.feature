@@ -8,6 +8,7 @@ Feature: Persistent dashboard Zellij session
     - A dashboard that exited without cleanup is not reported as running, so the next start replaces it.
     - If the dashboard is not running, workdash starts it with the new options and current `WORKDASH_HOST` setting in the `dashboard` tab, creating that tab if needed. An unset `WORKDASH_HOST` selects the default address.
     - If the address this start would use already serves a dashboard for another session, workdash reports that session and the address instead of starting a dashboard that cannot serve.
+    - If the dashboard at the address refuses the client version, workdash reports the version mismatch and starts nothing.
     - If the address this start would use answers without proving which session it serves, workdash reports that it cannot tell whether a dashboard is running and starts nothing.
     - Quitting the dashboard leaves the session running and tells the user that Ctrl+Q quits the whole session and all its panes. A dashboard restarted in that tab leaves the pane it replaced as a shell, so both panes are named `workdash tui`.
     - Inside Zellij, the dashboard starts in the current pane and uses the current session regardless of `--session`; when that session already has a dashboard, workdash reports that the new options are ignored and starts nothing.
@@ -87,6 +88,15 @@ Feature: Persistent dashboard Zellij session
     And its address answers without proving which session it serves
     When the user starts the dashboard in the named session with configured listeners
     Then the system reports that it cannot tell whether a dashboard is running
+    And the system does not start a dashboard
+    And the system exits with a non-zero status
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S018
+  Scenario: Refuse to start against a dashboard with a different version
+    Given the named session `project` has no dashboard
+    And its address serves a dashboard with a different Workdash version
+    When the user starts the dashboard in the named session with configured listeners
+    Then the system reports the version mismatch and restart guidance
     And the system does not start a dashboard
     And the system exits with a non-zero status
 

@@ -340,7 +340,7 @@ when downloaded; compressed SVG images are decoded by the browser. Only files in
 worktree's `.workdash/` directory are available. These endpoints are read-only
 and use the same peer access checks as the control API.
 
-Control API requests require `X-Workdash: 1`; the CLI sends it automatically.
+Control API requests require `X-Workdash` set to the installed Workdash version; the CLI sends it automatically. A mismatched or missing version is rejected with restart guidance. `POST /api/v0/info` accepts `panes` as `work` (the default), `all`, or `none`; `none` returns only the session, served addresses and version.
 Artifact GETs and GETs of analysis Markdown and HTML documents are exempt for
 browser viewing, but still require an allowed source IP. Cross-origin preflight
 requests are denied. The header prevents browser images and cross-origin JavaScript
