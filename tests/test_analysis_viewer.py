@@ -361,6 +361,36 @@ def test_markdown_viewer_opens_relative_link_in_place(tmp_path, monkeypatch):
     assert "Analysis" in shown[1] and "Replacement" not in shown[1]
 
 
+def test_analysis_viewer_navigates_to_issue_and_back_with_copy_available(tmp_path, monkeypatch):
+    from html import unescape
+
+    from view_fake import ISSUE_URL, fake_gh_view_run, issue_routes
+
+    path = tmp_path / "analysis.md"
+    path.write_text(f"# Analysis\n\n[Issue]({ISSUE_URL})\n", encoding="utf-8")
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes()))
+    copied = []
+
+    async def exercise(pilot, app):
+        monkeypatch.setattr(app, "copy_to_clipboard", copied.append)
+        footer = unescape(app.export_screenshot()).replace("\N{NO-BREAK SPACE}", " ")
+        assert "Copy selected text" in footer
+        assert "Quit" in footer
+        await pilot.click(Markdown, offset=(2, 4))
+        await _settle(pilot, lambda: "Crash on startup" in _viewer_source(app))
+        assert "Sub issue 13" in _viewer_source(app)
+        await pilot.triple_click(Markdown, offset=(3, 1))
+        await pilot.press("ctrl+c")
+        assert copied and "Crash on startup" in copied[-1]
+        await pilot.press("b")
+        await pilot.pause()
+        assert _viewer_source(app) == path.read_text(encoding="utf-8")
+        assert "b" not in app.screen.active_bindings
+
+    _run_viewer(monkeypatch, exercise)
+    assert view.run_view(str(path)) == 0
+
+
 def test_markdown_viewer_reports_a_link_it_cannot_load(tmp_path, monkeypatch):
     path = tmp_path / "analysis.md"
     path.write_text("# Analysis\n\n[Source](missing-file.md)\n", encoding="utf-8")
