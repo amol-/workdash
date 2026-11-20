@@ -58,6 +58,7 @@ from .steps import (
 from .steps import (
     show_config as _show_config,
 )
+from .steps import site as _site
 from .steps import (
     startup as _startup,
 )
@@ -98,6 +99,7 @@ for _step_module in (
     _branchinfo,
     _ready,
     _review,
+    _site,
     _dispatch,
     _view,
 ):
