@@ -22,6 +22,7 @@ import nh3
 
 from .agent_context import render_github_context
 from .config import LOCAL_BIN_PATH
+from .dashboard_record import DashboardRecords
 from .github_client import GitHubClient
 from .models import REVIEW_KINDS, WorkItem, WorkItemKind, WorkItemType, display_repo
 
@@ -303,19 +304,63 @@ def is_live_zellij_pane(pane: dict[str, object]) -> bool:
     )
 
 
-def _is_dashboard_pane(pane: dict[str, object]) -> bool:
-    if is_live_zellij_pane(pane) and not pane.get("pane_command"):
-        raise RuntimeError("Cannot determine whether the Workdash dashboard is running.")
-    command_text = str(pane.get("pane_command") or "")
+def dashboard_is_running(session: str) -> bool:
+    """Whether a dashboard already serves ``session``.
+
+    A recorded dashboard counts only while its process lives and its address still
+    reports the same session. With no usable record, the address this start would
+    bind decides, which also covers dashboards started before records existed. A
+    dashboard serving another session cannot be replaced, and an address that will
+    not answer proves nothing, so both are reported instead of starting a dashboard
+    that could not bind or that would duplicate a live one.
+    """
+
+    # The control API speaks to this module, so the address and probe arrive late.
+    from .control import server_address
+
+    records = DashboardRecords()
+    record = records.load(session)
+    if record is not None:
+        if _process_alive(record.pid) and _dashboard_session_at(record.address) == session:
+            return True
+        records.remove(session)
+
+    host, port = server_address()
+    address = f"{host}:{port}"
+    reported = _dashboard_session_at(address)
+    if reported == session:
+        return True
+    if reported is not None:
+        raise RuntimeError(
+            f"Zellij session {reported!r} already has a Workdash dashboard at {address}. "
+            "Stop it or set WORKDASH_HOST to a different address."
+        )
+    return False
+
+
+def _dashboard_session_at(address: str) -> str | None:
+    """Return the Zellij session of the dashboard serving ``address``, if any."""
+
+    from .control import WorkdashControlError, probe_dashboard_session
+
     try:
-        tokens = shlex.split(command_text)
-    except ValueError:
-        tokens = command_text.split()
-    return is_live_zellij_pane(pane) and (
-        "--persistent-pane" in tokens
-        or any(Path(token).name == "workdash" for token in tokens[:2])
-        or any(tokens[i : i + 2] == ["-m", "workdash"] for i in range(len(tokens) - 1))
-    )
+        return probe_dashboard_session(address)
+    except WorkdashControlError as error:
+        raise RuntimeError(
+            f"Cannot tell whether a Workdash dashboard is running at {address}: {error}"
+        ) from error
+
+
+def _process_alive(pid: int) -> bool:
+    """Whether the recorded dashboard process still exists."""
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
 
 
 def _pane_input_error(
@@ -715,7 +760,11 @@ class Zellij:
                     f"Failed to list Zellij sessions: {details or error.returncode}"
                 ) from error
             sessions = {}
-        if session_name in sessions:
+        if dashboard_is_running(session_name):
+            print("Workdash is already running; new options are ignored. Attaching...", flush=True)
+            time.sleep(1)
+            command = [zellij, "attach", session_name]
+        elif session_name in sessions:
             if sessions[session_name]:
                 try:
                     # Attach's boolean options can toggle twice; layout options override config.
@@ -739,79 +788,50 @@ class Zellij:
                     raise RuntimeError(
                         f"Failed to recover Zellij session: {details or error.returncode}"
                     ) from error
+            if not preflight():
+                return
             panes = Zellij.load_zellij_panes(session_name)
-            dashboard_panes = [
-                pane
-                for pane in _terminal_zellij_panes(panes)
-                if pane.get("title") == "workdash tui"
-            ]
-            running = any([_is_dashboard_pane(pane) for pane in dashboard_panes])
-            if running:
-                print(
-                    "Workdash is already running; new options are ignored. Attaching...", flush=True
+            prefix = [zellij, "--session", session_name, "action"]
+            try:
+                tab = next(
+                    (pane.get("tab_id") for pane in panes if pane.get("tab_name") == "dashboard"),
+                    None,
                 )
-                time.sleep(1)
-            else:
-                if not preflight():
-                    return
-                prefix = [zellij, "--session", session_name, "action"]
-                try:
-                    for pane in dashboard_panes:
-                        subprocess.run(
-                            [
-                                *prefix,
-                                "rename-pane",
-                                "-p",
-                                f"terminal_{pane['id']}",
-                                "workdash old",
-                            ],
-                            check=True,
-                            capture_output=True,
-                            text=True,
-                        )
-                    tab = next(
-                        (
-                            pane.get("tab_id")
-                            for pane in panes
-                            if pane.get("tab_name") == "dashboard"
-                        ),
-                        None,
-                    )
-                    if tab is None:
-                        tab = subprocess.run(
-                            [*prefix, "new-tab", "--name", "dashboard"],
-                            check=True,
-                            capture_output=True,
-                            text=True,
-                        ).stdout.strip()
-                    subprocess.run(
-                        [
-                            *prefix,
-                            "new-pane",
-                            "--tab-id",
-                            str(tab),
-                            "--name",
-                            "workdash tui",
-                            "--",
-                            "env",
-                            *(
-                                [f"WORKDASH_HOST={os.environ['WORKDASH_HOST']}"]
-                                if "WORKDASH_HOST" in os.environ
-                                else ["-u", "WORKDASH_HOST"]
-                            ),
-                            *workdash_command,
-                        ],
+                if tab is None:
+                    tab = subprocess.run(
+                        [*prefix, "new-tab", "--name", "dashboard"],
                         check=True,
                         capture_output=True,
                         text=True,
-                    )
-                except OSError as error:
-                    raise RuntimeError(f"Failed to start dashboard in Zellij: {error}") from error
-                except subprocess.CalledProcessError as error:
-                    details = (error.stderr or "").strip() or (error.stdout or "").strip()
-                    raise RuntimeError(
-                        f"Failed to start dashboard in Zellij: {details or error.returncode}"
-                    ) from error
+                    ).stdout.strip()
+                subprocess.run(
+                    [
+                        *prefix,
+                        "new-pane",
+                        "--tab-id",
+                        str(tab),
+                        "--name",
+                        "workdash tui",
+                        "--",
+                        "env",
+                        *(
+                            [f"WORKDASH_HOST={os.environ['WORKDASH_HOST']}"]
+                            if "WORKDASH_HOST" in os.environ
+                            else ["-u", "WORKDASH_HOST"]
+                        ),
+                        *workdash_command,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except OSError as error:
+                raise RuntimeError(f"Failed to start dashboard in Zellij: {error}") from error
+            except subprocess.CalledProcessError as error:
+                details = (error.stderr or "").strip() or (error.stdout or "").strip()
+                raise RuntimeError(
+                    f"Failed to start dashboard in Zellij: {details or error.returncode}"
+                ) from error
             command = [zellij, "attach", session_name]
         else:
             if not preflight():
@@ -825,28 +845,8 @@ class Zellij:
         raise AssertionError("os.execvp returned unexpectedly")
 
     def name_dashboard_pane(self, session: str, pane_id: str) -> None:
-        stale = [
-            pane
-            for pane in self.list_workdash_panes(session)
-            if pane.get("title") == "workdash tui"
-            and _format_zellij_pane_id(pane.get("id")) != _format_zellij_pane_id(pane_id)
-        ]
-        if any([_is_dashboard_pane(pane) for pane in stale]):
-            raise RuntimeError("A Workdash dashboard is already running in this session.")
-        for pane in stale:
-            _run_launch_command(
-                [
-                    _resolve_zellij_binary(),
-                    "--session",
-                    session,
-                    "action",
-                    "rename-pane",
-                    "-p",
-                    f"terminal_{pane['id']}",
-                    "workdash old",
-                ],
-                context="Failed to rename stale dashboard pane",
-            )
+        """Name the dashboard's own pane so the session shows what it runs."""
+
         _run_launch_command(
             [
                 _resolve_zellij_binary(),

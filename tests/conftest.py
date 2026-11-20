@@ -18,3 +18,17 @@ def _not_inside_zellij(monkeypatch):
 
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
         monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _dashboard_records_in_tmp_path(tmp_path, monkeypatch):
+    """Keep dashboard session records away from the developer's own config directory."""
+
+    monkeypatch.setattr("workdash.dashboard_record.SESSIONS_DIR", tmp_path / "sessions")
+
+
+@pytest.fixture(autouse=True)
+def _no_answering_dashboard(monkeypatch):
+    """Keep dashboard startup from probing a dashboard that may run on this machine."""
+
+    monkeypatch.setattr("workdash.control.probe_dashboard_session", lambda address, **_kwargs: None)

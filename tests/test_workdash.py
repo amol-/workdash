@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -16,6 +17,7 @@ import workdash.control as control_module
 import workdash.github_client as github_client_module
 import workdash.workdash as workdash_module
 from workdash.config import AgentConfig, WorkdashConfig, load_config, save_config
+from workdash.control import probe_dashboard_session
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.workdash import _print_work_items, _print_work_items_result
 
@@ -2165,6 +2167,210 @@ def test_interactive_diff_prepares_worktree_with_session_git(monkeypatch, tmp_pa
     git.create_worktree.assert_called_once_with(
         tmp_path / "owner_repo", worktree, "issue-1", "origin/HEAD"
     )
+
+
+@pytest.mark.parametrize("failing", [False, True])
+def test_interactive_records_the_serving_dashboard_for_its_session(monkeypatch, failing) -> None:
+    import socket
+    from unittest.mock import MagicMock
+
+    from workdash.dashboard_record import DashboardRecord, DashboardRecords
+
+    with socket.socket() as free:
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+    monkeypatch.setattr(control_module, "SERVER_PORT", port)
+    monkeypatch.setattr(
+        workdash_module, "WorkdashControlServer", control_module.WorkdashControlServer
+    )
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda session: [])
+    monkeypatch.setenv("ZELLIJ", "1")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "project")
+    backend = MagicMock()
+    backend.load_items.return_value = ([], {})
+    monkeypatch.setattr(
+        workdash_module.WorkdashCommands,
+        "_load_config_and_backend",
+        lambda self: (_VALID_CONFIG, backend),
+    )
+    recorded = []
+
+    class FakeApp:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def run(self, *, mouse) -> None:
+            recorded.append(DashboardRecords().load("project"))
+            assert control_module.WorkdashControlClient().request("info")["session"] == "project"
+            if failing:
+                raise RuntimeError("dashboard crashed")
+
+    monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
+    if failing:
+        with pytest.raises(RuntimeError, match="dashboard crashed"):
+            workdash_module.WorkdashCommands().interactive()
+    else:
+        assert workdash_module.WorkdashCommands().interactive() == 0
+
+    assert recorded == [
+        DashboardRecord(session="project", pid=os.getpid(), address=f"127.0.0.1:{port}")
+    ]
+    assert DashboardRecords().load("project") is None
+
+
+def test_a_failed_record_write_stops_the_dashboard_server(monkeypatch, tmp_path) -> None:
+    import socket
+    from unittest.mock import MagicMock
+
+    with socket.socket() as free:
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+    monkeypatch.setattr(control_module, "SERVER_PORT", port)
+    monkeypatch.setattr(
+        workdash_module, "WorkdashControlServer", control_module.WorkdashControlServer
+    )
+    unwritable = tmp_path / "record-file"
+    unwritable.write_text("")
+    monkeypatch.setattr("workdash.dashboard_record.SESSIONS_DIR", unwritable / "sessions")
+    monkeypatch.setenv("ZELLIJ", "1")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "project")
+    backend = MagicMock()
+    backend.load_items.return_value = ([], {})
+    monkeypatch.setattr(
+        workdash_module.WorkdashCommands,
+        "_load_config_and_backend",
+        lambda self: (_VALID_CONFIG, backend),
+    )
+    monkeypatch.setattr(workdash_module, "WorkdashApp", MagicMock())
+
+    with pytest.raises(OSError):
+        workdash_module.WorkdashCommands().interactive()
+
+    with socket.socket() as replacement:
+        replacement.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        replacement.bind(("127.0.0.1", port))
+
+
+def test_interactive_leaves_another_process_dashboard_record_alone(monkeypatch) -> None:
+    from unittest.mock import MagicMock
+
+    from workdash.dashboard_record import DashboardRecord, DashboardRecords
+
+    other = DashboardRecord(session="project", pid=os.getppid(), address="127.0.0.1:9999")
+    backend = MagicMock()
+    backend.load_items.return_value = ([], {})
+    monkeypatch.setattr(
+        workdash_module.WorkdashCommands,
+        "_load_config_and_backend",
+        lambda self: (_VALID_CONFIG, backend),
+    )
+    monkeypatch.setenv("ZELLIJ", "1")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "project")
+
+    class FakeApp:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def run(self, *, mouse) -> None:
+            DashboardRecords().save(other)
+
+    monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
+
+    assert workdash_module.WorkdashCommands().interactive() == 0
+
+    assert DashboardRecords().load("project") == other
+
+
+def test_the_dashboard_record_makes_the_next_start_attach(monkeypatch, capsys) -> None:
+    import socket
+    from unittest.mock import MagicMock
+
+    from workdash.dashboard_record import DashboardRecords
+
+    with socket.socket() as free:
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+    with socket.socket() as idle:
+        idle.bind(("127.0.0.1", 0))
+        other_port = idle.getsockname()[1]
+    monkeypatch.setattr(control_module, "SERVER_PORT", port)
+    # The suite stubs the probe; this test asks the dashboard it started.
+    monkeypatch.setattr(control_module, "probe_dashboard_session", probe_dashboard_session)
+    monkeypatch.setattr(
+        workdash_module, "WorkdashControlServer", control_module.WorkdashControlServer
+    )
+    launched = workdash_module.launcher
+    monkeypatch.setattr(launched.zellij, "load_zellij_panes", lambda session: [])
+    monkeypatch.setattr(launched, "_resolve_zellij_binary", lambda: "/usr/bin/zellij")
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "project [Created now]\n", "")
+
+    monkeypatch.setattr(launched.subprocess, "run", run)
+    execs = []
+    monkeypatch.setattr(
+        launched.os,
+        "execvp",
+        lambda file, command: execs.append((file, command)) or (_ for _ in ()).throw(SystemExit(0)),
+    )
+    pauses = []
+    monkeypatch.setattr(launched.time, "sleep", lambda seconds: pauses.append(seconds))
+    monkeypatch.setenv("ZELLIJ", "1")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "project")
+    backend = MagicMock()
+    backend.load_items.return_value = ([], {})
+    monkeypatch.setattr(
+        workdash_module.WorkdashCommands,
+        "_load_config_and_backend",
+        lambda self: (_VALID_CONFIG, backend),
+    )
+
+    class FakeApp:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def run(self, *, mouse) -> None:
+            # The next start prefers another address than the recorded dashboard serves.
+            monkeypatch.setenv("WORKDASH_HOST", f"127.0.0.1:{other_port}")
+            launched.zellij.exec_zellij_wrapped_workdash(["--session", "project"])
+
+    monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
+    with pytest.raises(SystemExit):
+        workdash_module.WorkdashCommands().interactive()
+
+    assert "options are ignored" in capsys.readouterr().out
+    assert pauses == [1]
+    assert execs == [("/usr/bin/zellij", ["/usr/bin/zellij", "attach", "project"])]
+    assert not any("new-pane" in command for command in calls)
+    assert DashboardRecords().load("project") is None
+
+
+def test_main_inside_zellij_leaves_a_running_dashboard_alone(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "project")
+    monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
+
+    def dashboard_is_running(session):
+        assert session == "project"
+        return True
+
+    monkeypatch.setattr(workdash_module.launcher, "dashboard_is_running", dashboard_is_running)
+    monkeypatch.setattr(
+        workdash_module.launcher.zellij,
+        "name_dashboard_pane",
+        lambda session, pane: pytest.fail("a running dashboard keeps its pane name"),
+    )
+    monkeypatch.setattr(
+        workdash_module, "WorkdashApp", lambda **kwargs: pytest.fail("the dashboard must not start")
+    )
+
+    assert workdash_module.main([]) == 0
+    assert "options are ignored" in capsys.readouterr().out
 
 
 def test_todo_close_json_uses_server(monkeypatch, capsys):
