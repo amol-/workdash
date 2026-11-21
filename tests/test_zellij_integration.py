@@ -1342,7 +1342,7 @@ def test_dashboard_analysis_focuses_viewer_in_real_zellij(tmp_path, choice, repe
 
 
 def _attach_running_dashboard_focus_harness(
-    tmp_path, has_pane, duplicate_tab=False, new_last_input=False
+    tmp_path, has_pane, duplicate_tab=False, new_last_input=False, last_detach=False
 ):
     import socket
 
@@ -1390,7 +1390,7 @@ def _attach_running_dashboard_focus_harness(
         wrapper = wrapper_dir / "zellij"
         wrapper.write_text(
             "#!/bin/sh\n"
-            'if [ "$3" = action ] && [ "$4" = focus-pane-id ]; then\n'
+            'if [ "$3" = action ] && [ "$4" = go-to-tab-by-id ]; then\n'
             f"  touch {shlex.quote(str(tmp_path / 'focus-pending'))}\n"
             f"  while [ ! -e {shlex.quote(str(tmp_path / 'focus-release'))} ]; do sleep 0.01; done\n"
             "fi\n"
@@ -1466,6 +1466,9 @@ def _attach_running_dashboard_focus_harness(
         action("rename-tab", "renamed")
         action("new-pane")
         wait_for(lambda ps: sum(not p["is_plugin"] for p in ps) == (3 if duplicate_tab else 2))
+        if last_detach:
+            action("new-pane")
+            wait_for(lambda ps: sum(not p["is_plugin"] for p in ps) == 3)
         if duplicate_tab:
             action("go-to-tab", "1")
             other = next(p for p in panes if not p["is_plugin"] and p["id"] == 0)
@@ -1481,6 +1484,12 @@ def _attach_running_dashboard_focus_harness(
         client_id = action("list-clients").stdout.splitlines()[1].split()[0]
         time.sleep(0.5)
         yield
+        if last_detach:
+            action("detach")
+            deadline = time.monotonic() + 5
+            while action("list-clients").stdout.splitlines()[1:]:
+                assert time.monotonic() < deadline, "last client did not detach"
+                time.sleep(0.01)
         output.clear()
         stop_draining.set()
         drain_thread.join()
@@ -1497,13 +1506,17 @@ def _attach_running_dashboard_focus_harness(
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             clients = action("list-clients").stdout.splitlines()[1:]
-            new_clients = [line.split() for line in clients if line.split()[0] != client_id]
-            if len(new_clients) == 1 and new_clients[0][1] == f"terminal_{other['id']}":
+            new_clients = [
+                line.split() for line in clients if last_detach or line.split()[0] != client_id
+            ]
+            if len(new_clients) == 1 and (
+                last_detach or new_clients[0][1] == f"terminal_{other['id']}"
+            ):
                 break
             time.sleep(0.01)
-        assert len(new_clients) == 1 and new_clients[0][1] == f"terminal_{other['id']}", (
-            f"new client did not attach to the other pane: {clients}"
-        )
+        assert len(new_clients) == 1 and (
+            last_detach or new_clients[0][1] == f"terminal_{other['id']}"
+        ), f"new client did not attach to the other pane: {clients}"
         new_client_id = new_clients[0][0]
         if new_last_input:
             deadline = time.monotonic() + 5
@@ -1524,7 +1537,7 @@ def _attach_running_dashboard_focus_harness(
             (tmp_path / "focus-release").touch()
         yield
         focused = pane if has_pane else other
-        focus_client = new_client_id if new_last_input else client_id
+        focus_client = new_client_id if new_last_input or last_detach else client_id
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             clients = action("list-clients").stdout.splitlines()[1:]
@@ -1535,7 +1548,7 @@ def _attach_running_dashboard_focus_harness(
             time.sleep(0.1)
         else:
             pytest.fail(f"client {focus_client} did not focus pane {focused['id']}: {clients}")
-        input_fd = child_fd if new_last_input or not has_pane else fd
+        input_fd = child_fd if new_last_input or last_detach or not has_pane else fd
         if has_pane:
             os.write(input_fd, b"/")
             deadline = time.monotonic() + 10
@@ -1545,7 +1558,7 @@ def _attach_running_dashboard_focus_harness(
                     break
                 time.sleep(0.1)
             assert "Filter items by type" in screen
-            if new_last_input:
+            if new_last_input or last_detach:
                 return
             os.write(input_fd, b"FOCUSED_INPUT_PROOF")
         else:
@@ -1586,6 +1599,19 @@ def _attach_running_dashboard_focus_harness(
             os.close(child_fd)
         _cleanup_sessions(zellij, env, sessions)
         sockets.cleanup()
+
+
+@pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
+@pytest.mark.parametrize("attempt", range(2))
+def test_attach_after_last_client_detaches_from_other_tab(tmp_path, attempt):
+    harness = _attach_running_dashboard_focus_harness(tmp_path, True, last_detach=True)
+    try:
+        next(harness)
+        next(harness)
+        with pytest.raises(StopIteration):
+            next(harness)
+    finally:
+        harness.close()
 
 
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")

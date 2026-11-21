@@ -1267,6 +1267,19 @@ class Zellij:
                                     "--session",
                                     session_name,
                                     "action",
+                                    "go-to-tab-by-id",
+                                    str(pane["tab_id"]),
+                                ],
+                                check=True,
+                                capture_output=True,
+                                timeout=2,
+                            )
+                            subprocess.run(
+                                [
+                                    zellij,
+                                    "--session",
+                                    session_name,
+                                    "action",
                                     "focus-pane-id",
                                     f"terminal_{record.pane_id}",
                                 ],
@@ -1274,6 +1287,50 @@ class Zellij:
                                 capture_output=True,
                                 timeout=2,
                             )
+                            # Zellij may ignore pane-ID focus until a reattached client sends input.
+                            if not existing_clients:
+                                tab_panes = {
+                                    f"{'plugin' if p.get('is_plugin') else 'terminal'}_{p['id']}"
+                                    for p in panes
+                                    if p.get("tab_id") == pane["tab_id"] and p.get("id") is not None
+                                }
+                                for _ in range(len(tab_panes)):
+                                    clients = subprocess.run(
+                                        [
+                                            zellij,
+                                            "--session",
+                                            session_name,
+                                            "action",
+                                            "list-clients",
+                                        ],
+                                        check=True,
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=2,
+                                    )
+                                    lines = [
+                                        line.split() for line in clients.stdout.splitlines()[1:]
+                                    ]
+                                    if len(lines) != 1 or len(lines[0]) < 2:
+                                        break
+                                    focused = lines[0][1]
+                                    if (
+                                        focused == f"terminal_{record.pane_id}"
+                                        or focused not in tab_panes
+                                    ):
+                                        break
+                                    subprocess.run(
+                                        [
+                                            zellij,
+                                            "--session",
+                                            session_name,
+                                            "action",
+                                            "focus-next-pane",
+                                        ],
+                                        check=True,
+                                        capture_output=True,
+                                        timeout=2,
+                                    )
                     raise SystemExit(client.wait())
                 finally:
                     for sig, handler in previous.items():

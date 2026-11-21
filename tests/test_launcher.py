@@ -1845,7 +1845,8 @@ def test_running_dashboard_attach_focuses_when_possible(monkeypatch, case):
         assert not actions
     else:
         assert actions == [
-            ["zellij", "--session", "project", "action", "focus-pane-id", "terminal_3"]
+            ["zellij", "--session", "project", "action", "go-to-tab-by-id", "0"],
+            ["zellij", "--session", "project", "action", "focus-pane-id", "terminal_3"],
         ]
 
 
@@ -1878,7 +1879,44 @@ def test_attach_waits_for_delayed_client_before_focusing(monkeypatch, attaches):
         launcher_module.Zellij._attach_and_focus_dashboard(
             "zellij", "project", ["zellij", "attach", "project"]
         )
-    assert focused == ([9] if attaches else [])
+    assert focused == ([9, 9] if attaches else [])
     if not attaches:
         assert lookups == 21
+    client.wait.assert_called_once()
+
+
+def test_attach_does_not_cycle_panes_when_another_client_joins(monkeypatch):
+    from workdash.dashboard_record import DashboardRecord, DashboardRecords
+
+    DashboardRecords().save(DashboardRecord("project", 42, "a:1", "3"))
+    monkeypatch.setattr(
+        launcher_module,
+        "_read_zellij_panes",
+        lambda _: [{"id": 3, "tab_id": 0}, {"id": 4, "tab_id": 0}],
+    )
+    client = MagicMock()
+    client.wait.return_value = 0
+    monkeypatch.setattr(launcher_module.subprocess, "Popen", lambda _: client)
+    commands = []
+    lookups = 0
+
+    def run(command, **kwargs):
+        nonlocal lookups
+        commands.append(command)
+        output = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n"
+        if "list-clients" in command:
+            lookups += 1
+            if lookups >= 2:
+                output += "1 terminal_4 sh\n"
+            if lookups >= 3:
+                output += "2 terminal_4 sh\n"
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(launcher_module.subprocess, "run", run)
+    with pytest.raises(SystemExit):
+        launcher_module.Zellij._attach_and_focus_dashboard(
+            "zellij", "project", ["zellij", "attach", "project"]
+        )
+    assert any("focus-pane-id" in command for command in commands)
+    assert not any("focus-next-pane" in command for command in commands)
     client.wait.assert_called_once()
