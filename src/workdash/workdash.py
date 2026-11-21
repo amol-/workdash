@@ -570,6 +570,7 @@ class WorkdashCommands:
                         session=zellij_session,
                         pid=os.getpid(),
                         address=f"{host}:{port}",
+                        pane_id=os.environ.get("ZELLIJ_PANE_ID"),
                     )
                 )
             # Keyboard-only dashboard: preserve native terminal mouse behavior.

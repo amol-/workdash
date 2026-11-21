@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 from http.client import HTTPConnection
@@ -822,3 +823,31 @@ def _reports_version_mismatch(scenario_state):
     assert "version" in output and "restart the dashboard" in output
     assert "Cannot tell" not in output
     assert f"127.0.0.1:{scenario_state['port']}" in output
+
+
+@given(
+    "a running dashboard is in another tab of the named session",
+    target_fixture="real_dashboard_focus",
+)
+def _dashboard_in_other_tab(tmp_path):
+    from test_zellij_integration import _attach_running_dashboard_focus_harness
+
+    if not shutil.which("zellij"):
+        pytest.skip("Zellij is not installed")
+    harness = _attach_running_dashboard_focus_harness(tmp_path, True, new_last_input=True)
+    try:
+        next(harness)
+        yield harness
+    finally:
+        harness.close()
+
+
+@when("the user returns to that session with Workdash and sends the most recent input")
+def _return_to_dashboard_session(real_dashboard_focus):
+    next(real_dashboard_focus)
+
+
+@then("the returning client's input reaches the dashboard pane")
+def _dashboard_receives_input(real_dashboard_focus):
+    with pytest.raises(StopIteration):
+        next(real_dashboard_focus)

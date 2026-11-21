@@ -69,3 +69,16 @@ def test_session_names_that_differ_only_in_separators_keep_their_own_records() -
     assert records.load("foo-") == dashboard_record.DashboardRecord(
         session="foo-", pid=2, address="a:2"
     )
+
+
+def test_pane_id_round_trips_and_old_records_remain_usable():
+    records = dashboard_record.DashboardRecords()
+    records.save(
+        dashboard_record.DashboardRecord(session="project", pid=42, address="a:1", pane_id="3")
+    )
+    assert records.load("project").pane_id == "3"
+    path = dashboard_record.SESSIONS_DIR / "project.json"
+    raw = json.loads(path.read_text())
+    del raw["dashboard"]["pane_id"]
+    path.write_text(json.dumps(raw))
+    assert records.load("project").pane_id is None

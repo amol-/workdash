@@ -2187,6 +2187,7 @@ def test_interactive_records_the_serving_dashboard_for_its_session(monkeypatch, 
     monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda session: [])
     monkeypatch.setenv("ZELLIJ", "1")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "project")
+    monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
     backend = MagicMock()
     backend.load_items.return_value = ([], {})
     monkeypatch.setattr(
@@ -2214,7 +2215,9 @@ def test_interactive_records_the_serving_dashboard_for_its_session(monkeypatch, 
         assert workdash_module.WorkdashCommands().interactive() == 0
 
     assert recorded == [
-        DashboardRecord(session="project", pid=os.getpid(), address=f"127.0.0.1:{port}")
+        DashboardRecord(
+            session="project", pid=os.getpid(), address=f"127.0.0.1:{port}", pane_id="3"
+        )
     ]
     assert DashboardRecords().load("project") is None
 

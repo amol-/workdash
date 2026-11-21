@@ -1759,3 +1759,164 @@ def test_workdash_pane_listing_and_lookup_ignore_plugins(monkeypatch):
     assert launcher_module.find_zellij_pane(raw_panes, "terminal_3") == panes[0]
     assert launcher_module.find_zellij_pane(raw_panes, 4) == panes[1]
     assert launcher_module.find_zellij_pane(raw_panes[:1], 3) is None
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "present",
+        "renamed",
+        "missing",
+        "old",
+        "no_record",
+        "lookup_failure",
+        "failure",
+        "ambiguous_failure",
+    ],
+)
+def test_running_dashboard_attach_focuses_when_possible(monkeypatch, case):
+    from workdash.dashboard_record import DashboardRecord, DashboardRecords
+
+    records = DashboardRecords()
+    if case != "no_record":
+        records.save(DashboardRecord("project", 42, "a:1", None if case == "old" else "3"))
+    monkeypatch.setattr(launcher_module, "_resolve_zellij_binary", lambda: "zellij")
+    monkeypatch.setattr(launcher_module, "dashboard_is_running", lambda session: True)
+    monkeypatch.setattr(launcher_module.time, "sleep", lambda _: None)
+    client = MagicMock()
+    client.wait.return_value = 0
+    popen = MagicMock(return_value=client)
+    monkeypatch.setattr(launcher_module.subprocess, "Popen", popen)
+
+    def read_panes(session):
+        popen.assert_called_once_with(["zellij", "attach", "project"])
+        if case == "lookup_failure":
+            raise RuntimeError("lookup failed")
+        return (
+            []
+            if case == "missing"
+            else [
+                {
+                    "id": 3,
+                    "is_plugin": False,
+                    "tab_name": "renamed" if case == "renamed" else "dashboard",
+                    "tab_id": 0,
+                },
+                {"id": 4, "is_plugin": False, "is_focused": True, "tab_name": "other", "tab_id": 1},
+            ]
+        )
+
+    monkeypatch.setattr(launcher_module, "_read_zellij_panes", read_panes)
+    commands = []
+    client_lookups = 0
+
+    def run(command, **kwargs):
+        nonlocal client_lookups
+        commands.append(command)
+        if "list-clients" in command:
+            client_lookups += 1
+        if case in ("failure", "ambiguous_failure") and "focus-pane-id" in command:
+            raise subprocess.CalledProcessError(1, command)
+        output = (
+            "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n1 terminal_4 sh\n"
+            + ("2 terminal_3 sh\n" if client_lookups > 1 else "")
+            if "list-clients" in command
+            else "project [Created now]\n"
+        )
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(launcher_module.subprocess, "run", run)
+    execvp = MagicMock(side_effect=SystemExit)
+    monkeypatch.setattr(launcher_module.os, "execvp", execvp)
+    with pytest.raises(SystemExit):
+        launcher_module.zellij.exec_zellij_wrapped_workdash(
+            ["--session", "project"], preflight=lambda: pytest.fail("preflight")
+        )
+    actions = [
+        command for command in commands if "action" in command and "list-clients" not in command
+    ]
+    if case in ("old", "no_record"):
+        popen.assert_not_called()
+        execvp.assert_called_once_with("zellij", ["zellij", "attach", "project"])
+    else:
+        popen.assert_called_once_with(["zellij", "attach", "project"])
+        execvp.assert_not_called()
+    if case in ("missing", "old", "no_record", "lookup_failure"):
+        assert not actions
+    else:
+        assert actions == [
+            ["zellij", "--session", "project", "action", "go-to-tab-by-id", "0"],
+            ["zellij", "--session", "project", "action", "focus-pane-id", "terminal_3"],
+        ]
+
+
+@pytest.mark.parametrize("attaches", [True, False])
+def test_attach_waits_for_delayed_client_before_focusing(monkeypatch, attaches):
+    from workdash.dashboard_record import DashboardRecord, DashboardRecords
+
+    DashboardRecords().save(DashboardRecord("project", 42, "a:1", "3"))
+    monkeypatch.setattr(launcher_module, "_read_zellij_panes", lambda _: [{"id": 3, "tab_id": 0}])
+    monkeypatch.setattr(launcher_module.time, "sleep", lambda _: None)
+    client = MagicMock()
+    client.wait.return_value = 0
+    monkeypatch.setattr(launcher_module.subprocess, "Popen", lambda _: client)
+    lookups = 0
+    focused = []
+
+    def run(command, **kwargs):
+        nonlocal lookups
+        if "list-clients" in command:
+            lookups += 1
+            output = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n1 terminal_4 sh\n"
+            if attaches and lookups >= 9:
+                output += "2 terminal_4 sh\n"
+            return subprocess.CompletedProcess(command, 0, output, "")
+        focused.append(lookups)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(launcher_module.subprocess, "run", run)
+    with pytest.raises(SystemExit):
+        launcher_module.Zellij._attach_and_focus_dashboard(
+            "zellij", "project", ["zellij", "attach", "project"]
+        )
+    assert focused == ([9, 9] if attaches else [])
+    if not attaches:
+        assert lookups == 21
+    client.wait.assert_called_once()
+
+
+def test_attach_does_not_cycle_panes_when_another_client_joins(monkeypatch):
+    from workdash.dashboard_record import DashboardRecord, DashboardRecords
+
+    DashboardRecords().save(DashboardRecord("project", 42, "a:1", "3"))
+    monkeypatch.setattr(
+        launcher_module,
+        "_read_zellij_panes",
+        lambda _: [{"id": 3, "tab_id": 0}, {"id": 4, "tab_id": 0}],
+    )
+    client = MagicMock()
+    client.wait.return_value = 0
+    monkeypatch.setattr(launcher_module.subprocess, "Popen", lambda _: client)
+    commands = []
+    lookups = 0
+
+    def run(command, **kwargs):
+        nonlocal lookups
+        commands.append(command)
+        output = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n"
+        if "list-clients" in command:
+            lookups += 1
+            if lookups >= 2:
+                output += "1 terminal_4 sh\n"
+            if lookups >= 3:
+                output += "2 terminal_4 sh\n"
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(launcher_module.subprocess, "run", run)
+    with pytest.raises(SystemExit):
+        launcher_module.Zellij._attach_and_focus_dashboard(
+            "zellij", "project", ["zellij", "attach", "project"]
+        )
+    assert any("focus-pane-id" in command for command in commands)
+    assert not any("focus-next-pane" in command for command in commands)
+    client.wait.assert_called_once()

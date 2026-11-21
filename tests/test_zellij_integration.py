@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import termios
+import threading
 import time
 import uuid
 
@@ -1338,3 +1339,297 @@ def test_dashboard_analysis_focuses_viewer_in_real_zellij(tmp_path, choice, repe
     finally:
         _cleanup_sessions(zellij, env, [(name, pid, fd)])
         sockets.cleanup()
+
+
+def _attach_running_dashboard_focus_harness(
+    tmp_path, has_pane, duplicate_tab=False, new_last_input=False, last_detach=False
+):
+    import socket
+
+    zellij = shutil.which("zellij")
+    name = f"workdash-focus-{uuid.uuid4().hex}"
+    env = os.environ.copy()
+    for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "XDG_CONFIG_HOME"):
+        env.pop(key, None)
+    shell = tmp_path / "shell"
+    dashboard = tmp_path / "dashboard.py"
+    dashboard.write_text(
+        "import workdash.workdash as cli\n"
+        "from workdash.config import WorkdashConfig, AgentConfig\n"
+        "cli.GitHubClient.check_authentication = lambda self: None\n"
+        "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
+        "analysis_viewer={'command': 'workdash view', 'format': 'markdown', 'needs_pane': True}, "
+        "agents={'agent': AgentConfig(launch='sh')}, repositories=('owner/repo',), "
+        "workdir='/tmp', todo_repository='test/todos')\n"
+        "cli.WorkdashBackend.load_items = lambda self, progress_callback=None: ([], {})\n"
+        "raise SystemExit(cli.main())\n"
+    )
+    shell.write_text(
+        f'#!/bin/sh\nif [ "$ZELLIJ_PANE_ID" = {1 if duplicate_tab else 0} ]; then exec {shlex.quote(sys.executable)} '
+        f"{shlex.quote(str(dashboard))}; fi\necho DASHBOARD_PANE_$ZELLIJ_PANE_ID\nexec /bin/sh\n"
+    )
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    shell.chmod(0o755)
+    sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
+    config = tmp_path / "config.kdl"
+    config.write_text("show_release_notes false\nshow_startup_tips false\n")
+    env.update(
+        TERM="xterm-256color",
+        HOME=_temporary_home(tmp_path),
+        SHELL=str(shell),
+        WORKDASH_HOST=f"127.0.0.1:{port}",
+        ZELLIJ_SOCKET_DIR=sockets.name,
+        ZELLIJ_CONFIG_FILE=str(config),
+        XDG_CACHE_HOME=str(tmp_path / "cache"),
+    )
+    if new_last_input:
+        wrapper_dir = tmp_path / "bin"
+        wrapper_dir.mkdir()
+        wrapper = wrapper_dir / "zellij"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            'if [ "$3" = action ] && [ "$4" = go-to-tab-by-id ]; then\n'
+            f"  touch {shlex.quote(str(tmp_path / 'focus-pending'))}\n"
+            f"  while [ ! -e {shlex.quote(str(tmp_path / 'focus-release'))} ]; do sleep 0.01; done\n"
+            "fi\n"
+            f'exec {shlex.quote(zellij)} "$@"\n'
+        )
+        wrapper.chmod(0o755)
+        env["PATH"] = f"{wrapper_dir}:{env['PATH']}"
+    sessions = []
+    children = []
+    output = bytearray()
+    stop_draining = threading.Event()
+
+    def drain(fd, capture=False):
+        while not stop_draining.is_set():
+            try:
+                if select.select([fd], [], [], 0.1)[0]:
+                    data = os.read(fd, 65536)
+                    if capture:
+                        output.extend(data)
+            except OSError:
+                return
+
+    def action(*args):
+        return subprocess.run(
+            [zellij, "--session", name, "action", *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+
+    def wait_for(predicate):
+        deadline = time.monotonic() + 15
+        result = None
+        while time.monotonic() < deadline:
+            try:
+                result = action("list-panes", "--json", "--all", "--tab")
+                panes = json.loads(result.stdout)
+                if predicate(panes):
+                    return panes
+            except (subprocess.SubprocessError, ValueError):
+                pass
+            time.sleep(0.1)
+        process = subprocess.run(
+            ["ps", "-o", "pid,ppid,state,wchan,args", "-p", str(sessions[0][1])],
+            capture_output=True,
+            text=True,
+        ).stdout
+        pytest.fail(f"Zellij state not reached: {result}; PTY: {output[-3000:]!r}; {process}")
+
+    try:
+        pid, fd = pty.fork()
+        if pid == 0:
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+            os.execve(zellij, [zellij, "--session", name], env)
+        sessions.append((name, pid, fd))
+        drain_thread = threading.Thread(target=drain, args=(fd, True), daemon=True)
+        drain_thread.start()
+        panes = wait_for(lambda ps: any(not p["is_plugin"] for p in ps))
+        if duplicate_tab:
+            action("rename-tab", "renamed")
+            action("new-tab", "--name", "dashboard")
+            panes = wait_for(lambda ps: any(not p["is_plugin"] and p["id"] == 1 for p in ps))
+        pane = next(
+            p for p in panes if not p["is_plugin"] and p["id"] == (1 if duplicate_tab else 0)
+        )
+        record = tmp_path / "home" / ".config" / "workdash" / "sessions" / f"{name}.json"
+        deadline = time.monotonic() + 20
+        while not record.exists():
+            assert time.monotonic() < deadline, f"dashboard did not start: {output[-4000:]!r}"
+            time.sleep(0.1)
+        action("rename-tab", "renamed")
+        action("new-pane")
+        wait_for(lambda ps: sum(not p["is_plugin"] for p in ps) == (3 if duplicate_tab else 2))
+        if last_detach:
+            action("new-pane")
+            wait_for(lambda ps: sum(not p["is_plugin"] for p in ps) == 3)
+        if duplicate_tab:
+            action("go-to-tab", "1")
+            other = next(p for p in panes if not p["is_plugin"] and p["id"] == 0)
+        else:
+            action("new-tab", "--name", "other")
+            panes = wait_for(lambda ps: any(p.get("tab_name") == "other" for p in ps))
+            other = next(p for p in panes if p.get("tab_name") == "other" and not p["is_plugin"])
+        if not has_pane:
+            data = json.loads(record.read_text())
+            data["dashboard"]["pane_id"] = None
+            record.write_text(json.dumps(data))
+        os.write(fd, b"\n")
+        client_id = action("list-clients").stdout.splitlines()[1].split()[0]
+        time.sleep(0.5)
+        yield
+        if last_detach:
+            action("detach")
+            deadline = time.monotonic() + 5
+            while action("list-clients").stdout.splitlines()[1:]:
+                assert time.monotonic() < deadline, "last client did not detach"
+                time.sleep(0.01)
+        output.clear()
+        stop_draining.set()
+        drain_thread.join()
+        stop_draining.clear()
+        child, child_fd = pty.fork()
+        if child == 0:
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+            os.execve(sys.executable, [sys.executable, "-m", "workdash", "--session", name], env)
+        children.append((child, child_fd))
+        drain_thread = threading.Thread(target=drain, args=(fd, True), daemon=True)
+        child_drain_thread = threading.Thread(target=drain, args=(child_fd,), daemon=True)
+        drain_thread.start()
+        child_drain_thread.start()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            clients = action("list-clients").stdout.splitlines()[1:]
+            new_clients = [
+                line.split() for line in clients if last_detach or line.split()[0] != client_id
+            ]
+            if len(new_clients) == 1 and (
+                last_detach or new_clients[0][1] == f"terminal_{other['id']}"
+            ):
+                break
+            time.sleep(0.01)
+        assert len(new_clients) == 1 and (
+            last_detach or new_clients[0][1] == f"terminal_{other['id']}"
+        ), f"new client did not attach to the other pane: {clients}"
+        new_client_id = new_clients[0][0]
+        if new_last_input:
+            deadline = time.monotonic() + 5
+            while not (tmp_path / "focus-pending").exists():
+                assert time.monotonic() < deadline, "focus action was not issued"
+                time.sleep(0.01)
+            assert any(
+                line.split()[:2] == [client_id, f"terminal_{other['id']}"] for line in clients
+            )
+            os.write(child_fd, b"printf 'NEW_CLIENT_%s\\n' INPUT_PROOF\n")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                screen = action("dump-screen", "--pane-id", f"terminal_{other['id']}").stdout
+                if "NEW_CLIENT_INPUT_PROOF" in screen:
+                    break
+                time.sleep(0.01)
+            assert "NEW_CLIENT_INPUT_PROOF" in screen
+            (tmp_path / "focus-release").touch()
+        yield
+        focused = pane if has_pane else other
+        focus_client = new_client_id if new_last_input or last_detach else client_id
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            clients = action("list-clients").stdout.splitlines()[1:]
+            if any(
+                line.split()[:2] == [focus_client, f"terminal_{focused['id']}"] for line in clients
+            ):
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail(f"client {focus_client} did not focus pane {focused['id']}: {clients}")
+        input_fd = child_fd if new_last_input or last_detach or not has_pane else fd
+        if has_pane:
+            os.write(input_fd, b"/")
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                screen = action("dump-screen", "--pane-id", f"terminal_{focused['id']}").stdout
+                if "Filter items by type" in screen:
+                    break
+                time.sleep(0.1)
+            assert "Filter items by type" in screen
+            if new_last_input or last_detach:
+                return
+            os.write(input_fd, b"FOCUSED_INPUT_PROOF")
+        else:
+            os.write(input_fd, b"printf 'FOCUSED_%s\\n' INPUT_PROOF\n")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            screen = action("dump-screen", "--pane-id", f"terminal_{focused['id']}").stdout
+            if "FOCUSED_INPUT_PROOF" in screen:
+                break
+            time.sleep(0.1)
+        assert "FOCUSED_INPUT_PROOF" in screen, (screen, action("list-clients").stdout)
+        if has_pane and not new_last_input:
+            clients = action("list-clients").stdout.splitlines()[1:]
+            new_pane = next(line.split()[1] for line in clients if line.split()[0] == new_client_id)
+            assert new_pane == f"terminal_{other['id']}"
+            os.write(child_fd, b"printf 'NEW_CLIENT_%s\\n' INPUT_PROOF\n")
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                screen = action("dump-screen", "--pane-id", new_pane).stdout
+                if "NEW_CLIENT_INPUT_PROOF" in screen:
+                    break
+                time.sleep(0.1)
+            assert "NEW_CLIENT_INPUT_PROOF" in screen
+    finally:
+        if new_last_input:
+            (tmp_path / "focus-release").touch()
+        stop_draining.set()
+        if sessions:
+            drain_thread.join()
+        if children:
+            child_drain_thread.join()
+        for child, child_fd in children:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(child, 0)
+            os.close(child_fd)
+        _cleanup_sessions(zellij, env, sessions)
+        sockets.cleanup()
+
+
+@pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
+@pytest.mark.parametrize("attempt", range(2))
+def test_attach_after_last_client_detaches_from_other_tab(tmp_path, attempt):
+    harness = _attach_running_dashboard_focus_harness(tmp_path, True, last_detach=True)
+    try:
+        next(harness)
+        next(harness)
+        with pytest.raises(StopIteration):
+            next(harness)
+    finally:
+        harness.close()
+
+
+@pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
+@pytest.mark.parametrize("attempt", range(2))
+@pytest.mark.parametrize(
+    "has_pane,duplicate_tab,new_last_input",
+    [(False, False, False), (True, False, False), (True, True, False), (True, False, True)],
+)
+def test_attach_running_dashboard_focuses_its_pane(
+    tmp_path, attempt, has_pane, duplicate_tab, new_last_input
+):
+    harness = _attach_running_dashboard_focus_harness(
+        tmp_path, has_pane, duplicate_tab, new_last_input
+    )
+    try:
+        next(harness)
+        next(harness)
+        with pytest.raises(StopIteration):
+            next(harness)
+    finally:
+        harness.close()
