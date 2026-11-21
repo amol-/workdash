@@ -31,13 +31,13 @@
   </head>
   <body>
     <header>
-      <div class="container">
-        <div class="brand"><span class="mark">&#9889;</span> <a href="index.html">workdash</a></div>
+      <div class="container site-nav">
+        <a class="brand" href="index.html"><span class="mark" aria-hidden="true">&#9889;</span> workdash</a>
         <nav aria-label="Main navigation">
-          <a href="work.html">Work</a> &middot;
-          <a href="review.html">Review</a> &middot;
-          <a href="agentic.html">Agentic loop</a> &middot;
-          <a href="control.html">Automation</a> &middot;
+          <a href="work.html">Work</a>
+          <a href="review.html">Review</a>
+          <a href="agentic.html">Agentic loop</a>
+          <a href="control.html" aria-current="page">Automation</a>
           <a href="index.html#install">Install</a>
         </nav>
       </div>
@@ -45,7 +45,7 @@
 
     <section id="why">
       <div class="container">
-        <h2>Keep the same work visible</h2>
+        <h1>Keep the same work visible</h1>
         <p class="lead">Let an agent or script inspect and act on the same work you see.</p>
         <p>
           You keep visibility into the panes where your agents work.
@@ -94,7 +94,7 @@
         <h2>The CLI is the interface</h2>
         <p class="lead">Use the same commands yourself or let an agent or script call them for you.</p>
         <p>Add <code>--json</code> when your caller needs machine-readable output.</p>
-        <table>
+        <table class="command-table">
           <thead>
             <tr><th scope="col">Command</th><th scope="col">Purpose</th><th scope="col"><code>--json</code></th></tr>
           </thead>

@@ -13,8 +13,10 @@ if [ -n "$document" ]; then
 fi
 
 number=$(printf '%s' "$prompt" | sed -n 's|.*/issues/\([0-9][0-9]*\).*|\1|p' | head -1)
+printf 'Claude Code  |  demo session — staged transcript\n'
 printf 'Reading the issue and the checkout...\n'
 sleep 3
+printf 'Inspecting the shared workspace and its handoff notes...\n'
 printf 'Updating the shared workspace...\n'
 printf 'Shared workspace notes.\n' > NOTES.md
 git add NOTES.md

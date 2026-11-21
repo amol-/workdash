@@ -26,7 +26,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("shot", nargs="?", choices=SHOTS)
     parser.add_argument("--check", action="store_true", help="check the pages")
-    parser.add_argument("--setup", action="store_true", help="download the renderer")
+    parser.add_argument("--setup", action="store_true", help="download the renderer and its font")
     parser.add_argument("--list", action="store_true", help="list available captures")
     parser.add_argument(
         "--work",
@@ -38,19 +38,29 @@ def main():
     args = parser.parse_args()
     site = Path(__file__).resolve().parent
     renderer = args.work / "agg-1.5.0"
+    font = args.work / "fonts/NotoEmoji.ttf"
     if args.setup:
-        args.work.mkdir(parents=True, exist_ok=True)
-        data = urllib.request.urlopen(
-            "https://github.com/asciinema/agg/releases/download/v1.5.0/agg-x86_64-unknown-linux-gnu"
-        ).read()
-        if (
-            hashlib.sha256(data).hexdigest()
-            != "59673469d625df6f55c72159c84ffbb7af1348ac379d0e79db43f4b80fb986a3"
+        for path, url, sha256 in (
+            (
+                renderer,
+                "https://github.com/asciinema/agg/releases/download/v1.5.0/agg-x86_64-unknown-linux-gnu",
+                "59673469d625df6f55c72159c84ffbb7af1348ac379d0e79db43f4b80fb986a3",
+            ),
+            (
+                font,
+                "https://raw.githubusercontent.com/google/fonts/"
+                "b979dba422e445492b0eb9951ac52ee0b4d648c3/ofl/notoemoji/NotoEmoji%5Bwght%5D.ttf",
+                "de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551",
+            ),
         ):
-            raise RuntimeError("agg checksum mismatch")
-        renderer.write_bytes(data)
+            with urllib.request.urlopen(url) as download:
+                data = download.read()
+            if hashlib.sha256(data).hexdigest() != sha256:
+                raise RuntimeError(f"{path.name} checksum mismatch")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            print(f"Installed {path}")
         renderer.chmod(0o755)
-        print(f"Installed {renderer}")
         return 0
     if args.list:
         for name, (page, size, _, _) in SHOTS.items():
@@ -58,8 +68,8 @@ def main():
         return 0
     if args.check:
         return report(site)
-    if not renderer.is_file():
-        parser.error("run --setup first")
+    if not renderer.is_file() or not font.is_file():
+        parser.error("run --setup first to install the renderer and its font")
     work = Path(tempfile.mkdtemp(dir=args.work))
     real_config = config_snapshot()
     try:
@@ -115,13 +125,25 @@ def validate_capture(name, cast):
             "✓✓PR 51",
         ),
         "dashboard-progress": ("demo/project#42", "developing (implement)"),
-        "analyze-dialog": ("(a) Open analysis", "(1) Analyze with demo"),
+        "analyze-dialog": (
+            "(a) Open analysis",
+            "(1) Analyze with claude",
+            "(2) Analyze with codex",
+        ),
+        "analysis-viewer": ("Shared workspace analysis", "Improve the handoff notes"),
         "viewer": ("Make it easier to pick up work together.", "Comments (0)"),
-        "agent-session": ("code_demo_project_42", "Ready to work together."),
+        "agent-session": (
+            "code_demo_project_42",
+            "Claude Code",
+            "staged transcript",
+            "Ready to work together.",
+        ),
         "branchdiff": ("README.md (+2, -0)", "Coordinate work and share progress."),
-        "code-menu": ("Code menu:", "(1) demo", "(d) branchdiff", "(r) auto review"),
+        "code-menu": ("Code menu:", "(1) claude", "(2) codex", "(d) branchdiff", "(r) auto review"),
         "loop": ("[automerge]", "developing (implement)", "reviewing", "(closed)"),
     }
+    if any("\ue000" <= char <= "\uf8ff" or char == "\ufffd" for char in text):
+        raise RuntimeError(f"{name}: capture contains unsupported terminal glyphs")
     missing = [marker for marker in markers[name] if marker not in text]
     if name == "dashboard" and "\x1b[38;5;80m\x1b[1mCoordinate workspace rollout" not in raw:
         missing.append("native sub-issue title highlight")

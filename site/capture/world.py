@@ -28,12 +28,17 @@ def build(root: Path, work: Path):
         "todo_repository": "demo/todos",
         "open": "xdg-open",
         "analysis_viewer": {"command": "workdash view", "format": "markdown", "needs_pane": True},
-        "agents": {"demo": {"analyze": "agent", "launch": "agent"}},
+        "agents": {
+            "claude": {"analyze": "agent", "launch": "agent"},
+            "codex": {"analyze": "agent", "launch": "agent"},
+        },
         "listens": [],
     }
     (config_dir / "config.json").write_text(json.dumps(config))
     zellij_config = work / "config.kdl"
-    zellij_config.write_text("show_startup_tips false\nshow_release_notes false\n")
+    zellij_config.write_text(
+        "show_startup_tips false\nshow_release_notes false\nsimplified_ui true\n"
+    )
     snapshot = work / "snapshot"
     snapshot.mkdir()
     for name in ("pyproject.toml", "README.md", "LICENSE"):

@@ -181,6 +181,8 @@ def test_capture_preserves_failure_when_configuration_changes(tmp_path, monkeypa
     monkeypatch.syspath_prepend(str(source))
     generate = importlib.import_module("generate")
     (tmp_path / "agg-1.5.0").touch()
+    (tmp_path / "fonts").mkdir()
+    (tmp_path / "fonts/NotoEmoji.ttf").touch()
     monkeypatch.setattr(sys, "argv", ["generate.py", "dashboard", "--work", str(tmp_path)])
     monkeypatch.setattr(
         generate, "config_snapshot", MagicMock(side_effect=[{}, {"changed": "hash"}])
@@ -277,6 +279,19 @@ def check_navigation(published_site):
     return pages
 
 
+@then("the homepage shows installation, setup, and launch commands before the feature tour")
+def check_quickstart(published_site):
+    homepage = (published_site / "index.html").read_text()
+    quickstart = homepage[homepage.index('id="install"') : homepage.index('id="what"')]
+    assert "uv tool install workdash\nworkdash --configure\nworkdash" in quickstart
+
+
+@then("the homepage explains that setup provides missing GitHub CLI and Zellij binaries")
+def check_setup_downloads(published_site):
+    homepage = (published_site / "index.html").read_text()
+    assert re.search(r"setup wizard installs missing .*GitHub CLI.*Zellij", homepage)
+
+
 @then("local links and images on the pages resolve")
 def check_local_links(published_pages):
     for page, parsed in published_pages.items():
@@ -342,8 +357,13 @@ def test_capture_world_dashboard_legend(tmp_path, monkeypatch):
             "✓✓PR 51 RV 52 TD 7 IS 44 IS 42 Coordinate workspace rollout",
             "native sub-issue title highlight",
         ),
-        ("analyze-dialog", "(1) Analyze with demo", "(a) Open analysis"),
+        ("analyze-dialog", "(1) Analyze with claude", "(a) Open analysis"),
         ("viewer", "Loaded 6 item(s).", "Make it easier to pick up work together."),
+        (
+            "analyze-dialog",
+            "(1) Analyze with claude (a) Open analysis \ue0b0",
+            "unsupported terminal glyphs",
+        ),
     ],
 )
 def test_capture_rejects_missing_claimed_content(tmp_path, monkeypatch, shot, text, missing):
@@ -351,6 +371,8 @@ def test_capture_rejects_missing_claimed_content(tmp_path, monkeypatch, shot, te
     monkeypatch.syspath_prepend(str(source))
     generate = importlib.import_module("generate")
     (tmp_path / "agg-1.5.0").touch()
+    (tmp_path / "fonts").mkdir()
+    (tmp_path / "fonts/NotoEmoji.ttf").touch()
     monkeypatch.setattr(sys, "argv", ["generate.py", shot, "--work", str(tmp_path)])
     monkeypatch.setattr(generate, "build", MagicMock(return_value={}))
 

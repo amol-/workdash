@@ -1,5 +1,6 @@
 """Record a real Zellij client connected to the isolated dashboard."""
 
+import codecs
 import contextlib
 import fcntl
 import json
@@ -27,13 +28,16 @@ def capture(env, size, steps, output):
         os.execvpe("zellij", ["zellij", "--session", name], env)
     start = time.monotonic()
     events = []
+    decoder = codecs.getincrementaldecoder("utf-8")()
     try:
         for action, value in steps:
             if action == "keys":
                 os.write(fd, value.encode())
                 continue
-            deadline = time.monotonic() + value
+            marker, duration = value if action == "until" else (None, value)
+            deadline = time.monotonic() + duration
             last = time.monotonic()
+            tail = ""
             # A hold watches a running interaction, so it never ends early.
             while time.monotonic() < deadline:
                 ready, _, _ = select.select(
@@ -48,20 +52,22 @@ def capture(env, size, steps, output):
                         raise RuntimeError(
                             f"Zellij exited before the capture finished: {events[-1][2]!r}"
                         )
-                    events.append(
-                        [
-                            round(time.monotonic() - start, 3),
-                            "o",
-                            data.decode("utf-8", errors="replace"),
-                        ]
-                    )
                     last = time.monotonic()
+                    if text := decoder.decode(data):
+                        events.append([round(last - start, 3), "o", text])
+                        if marker:
+                            tail += text
+                            if marker in tail:
+                                break
+                            tail = tail[-len(marker) :]
                 elif (
                     action == "wait"
                     and time.monotonic() - last >= QUIET_PERIOD
                     and _dashboard_ready(env)
                 ):
                     break
+            if marker and marker not in tail:
+                raise RuntimeError(f"Timed out waiting for {marker!r} in Zellij")
         output.write_text(
             json.dumps({"version": 2, "width": size[0], "height": size[1], "timestamp": 0})
             + "\n"
