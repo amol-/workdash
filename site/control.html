@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Automation through the CLI — workdash</title>
+    <meta
+      name="description"
+      content="Use the workdash CLI to let agents and scripts inspect your work, read live panes, and send input while you keep visibility."
+    />
+    <meta property="og:title" content="Automation through the CLI — workdash" />
+    <meta
+      property="og:description"
+      content="Use the workdash CLI to let agents and scripts inspect your work, read live panes, and send input while you keep visibility."
+    />
+    <meta property="og:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
+    <meta property="og:image:width" content="967" />
+    <meta property="og:image:height" content="520" />
+    <meta property="og:image:alt" content="workdash dashboard showing GitHub issues and pull requests" />
+    <meta property="og:url" content="https://alessandro.molina.fyi/workdash/control.html" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Automation through the CLI — workdash" />
+    <meta
+      name="twitter:description"
+      content="Use the workdash CLI to let agents and scripts inspect your work, read live panes, and send input while you keep visibility."
+    />
+    <meta name="twitter:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="container site-nav">
+        <a class="brand" href="index.html"><span class="mark" aria-hidden="true">&#9889;</span> workdash</a>
+        <nav aria-label="Main navigation">
+          <a href="work.html">Work</a>
+          <a href="review.html">Review</a>
+          <a href="agentic.html">Agentic loop</a>
+          <a href="control.html" aria-current="page">Automation</a>
+          <a href="index.html#install">Install</a>
+        </nav>
+      </div>
+    </header>
+
+    <section id="why">
+      <div class="container">
+        <h1>Keep the same work visible</h1>
+        <p class="lead">Let an agent or script inspect and act on the same work you see.</p>
+        <p>
+          You keep visibility into the panes where your agents work.
+          You can step into the same pane whenever you need to participate.
+        </p>
+        <ol class="workflow-list">
+          <li>
+            <strong>Pick a work item.</strong>
+            Use <code>workdash list</code> to choose an issue.
+          </li>
+          <li>
+            <strong>Start your chosen agent.</strong>
+            Run <code>workdash code ITEM --agent NAME</code> to launch it in the work item's worktree.
+          </li>
+          <li>
+            <strong>Stay in the conversation.</strong>
+            Read the agent's pane and send input, or continue directly in the pane yourself.
+          </li>
+          <li>
+            <strong>Review the result.</strong>
+            Inspect the changes before you decide what to merge.
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="text">
+      <div class="container">
+        <h2>Text as the connection</h2>
+        <p class="lead">Coordinate through text while you keep your agents, editors, and terminal tools independent.</p>
+        <p>
+          Unix pipes inspire this approach: independent tools share text instead of belonging to one application.
+          Zellij carries text into and out of panes, rather than turning panes into literal Unix pipes.
+          You and workdash see the same terminal output.
+        </p>
+        <p>
+          You configure compatible command-line agents for analysis and coding.
+          Text-driven tools need no Workdash-specific plugin, extension, or dedicated harness for pane interaction.
+          Your tools still determine how they interpret input and display output.
+        </p>
+      </div>
+    </section>
+
+    <section id="cli">
+      <div class="container">
+        <h2>The CLI is the interface</h2>
+        <p class="lead">Use the same commands yourself or let an agent or script call them for you.</p>
+        <p>Add <code>--json</code> when your caller needs machine-readable output.</p>
+        <table class="command-table">
+          <thead>
+            <tr><th scope="col">Command</th><th scope="col">Purpose</th><th scope="col"><code>--json</code></th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>workdash list</code></td><td>List the dashboard's current work items.</td><td>Yes</td></tr>
+            <tr><td><code>workdash ready SCOPE</code></td><td>Find issues ready to pick up next.</td><td>Yes</td></tr>
+            <tr><td><code>workdash info</code></td><td>Inspect live Workdash panes and dispatch sessions.</td><td>Yes</td></tr>
+            <tr><td><code>workdash dispatch SCOPE</code></td><td>Launch one ready issue.</td><td>Yes</td></tr>
+            <tr><td><code>workdash autodispatch SCOPE</code></td><td>Start a dispatch loop for your chosen scope.</td><td>Yes</td></tr>
+            <tr><td><code>workdash autodispatch-stop SESSION_ID</code></td><td>Stop a dispatch session.</td><td>Yes</td></tr>
+            <tr><td><code>workdash analyze ITEM</code></td><td>Get a cached or fresh analysis of a work item.</td><td>Yes</td></tr>
+            <tr><td><code>workdash review ITEM</code></td><td>Start an agent review of an open PR.</td><td>Yes</td></tr>
+            <tr><td><code>workdash code ITEM</code></td><td>Launch a coding agent or report the running one.</td><td>Yes</td></tr>
+            <tr><td><code>workdash terminal ITEM</code></td><td>Open a terminal in a work item's worktree.</td><td>Yes</td></tr>
+            <tr><td><code>workdash todo TEXT</code></td><td>Capture a todo, or close one with <code>workdash todo --close ITEM</code>.</td><td>Yes</td></tr>
+            <tr><td><code>workdash read PANE_ID</code></td><td>Read text from a live pane.</td><td>Yes</td></tr>
+            <tr><td><code>workdash write PANE_ID TEXT</code></td><td>Send input to a live pane.</td><td>Yes</td></tr>
+            <tr><td><code>workdash show-config</code></td><td>Show configured agents and the selected server address.</td><td>Yes</td></tr>
+          </tbody>
+        </table>
+        <p>
+          Start <code>workdash</code> before you use server-backed commands.
+          Only <code>workdash show-config</code> in this table works without a running server.
+        </p>
+      </div>
+    </section>
+
+    <section id="panes">
+      <div class="container">
+        <h2>Talking to a live pane</h2>
+        <p class="lead">Read what your agent prints and send input without leaving the shared work.</p>
+        <p>
+          Use <code>workdash info</code> to find the pane ID you want.
+          <code>workdash read PANE_ID</code> reads its visible text.
+          <code>workdash write PANE_ID TEXT</code> sends your text followed by <span class="kbd">Enter</span>.
+        </p>
+        <p>If your agent's pane ID is <code>terminal_23</code>, you can use:</p>
+        <pre><code>workdash read terminal_23
+workdash write terminal_23 "Explain the changes before you continue."
+workdash read terminal_23</code></pre>
+        <p>
+          Add <code>--full</code> to <code>workdash read</code> when you need the pane's scrollback.
+          You can also open the same pane in Zellij and interact directly.
+        </p>
+      </div>
+    </section>
+
+    <section id="skill">
+      <div class="container">
+        <h2>Optional instructions for your agent</h2>
+        <p class="lead">Give your agent CLI guidance when it needs help choosing commands and following work.</p>
+        <p>
+          The supplied <code>workdash-control</code> skill explains how your agent uses the CLI.
+          You do not need the skill as an integration or a dedicated harness.
+          Your agent can use the commands directly.
+        </p>
+        <div class="remote-access">
+          <figure class="tour-shot" data-full="img/chat-session.png">
+            <img
+              src="img/chat-session.png"
+              alt="An assistant chat about work coordinated through the workdash CLI"
+            />
+          </figure>
+          <div class="tour-text">
+            <p>You see an assistant chat here, not a remote dashboard connection.</p>
+            <p>You ask your assistant about the work that remains visible in your terminal.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="network">
+      <div class="container">
+        <h2>Connect beyond localhost</h2>
+        <p class="lead">Connect CLI clients to your running server from another machine on a trusted network.</p>
+        <p>
+          Add <code>listens</code> entries in <code>~/.config/workdash/config.json</code> to accept network connections.
+          Each entry names a listening address followed by accepted source IPs or CIDR subnets.
+        </p>
+        <pre><code>"listens": ["192.168.1.5@192.168.1.10,192.168.2.0/24"]</code></pre>
+        <p>
+          Here your server listens on <code>192.168.1.5</code> using its selected port.
+          Your accepted sources include <code>192.168.1.10</code> and the <code>192.168.2.0/24</code> subnet.
+          Accepted sources apply across your listeners.
+        </p>
+        <p>
+          Use <code>--host HOST[:PORT]</code> per server-backed command to select your running server.
+          You can omit the port to use <code>8765</code>.
+        </p>
+        <pre><code>workdash list --json --host dashboard.lan
+workdash info --host dashboard.lan:8765</code></pre>
+        <p>
+          Your CLI clients connect without local GitHub credentials, configuration, or Zellij state.
+          Keep your dashboard state, worktrees, credentials, Zellij session, and agent tooling together on the server host.
+          <code>workdash show-config</code> reports your local configuration and does not accept <code>--host</code>.
+        </p>
+      </div>
+    </section>
+
+    <section id="trust">
+      <div class="container">
+        <h2>Trusted network only</h2>
+        <p class="lead">Keep the control server off untrusted networks.</p>
+        <p>
+          Your connection uses plain HTTP with no authentication.
+          The IP allowlist is not a security boundary or a substitute for authentication and encryption.
+          An accepted client can execute dashboard actions.
+          Do not expose the server to untrusted networks.
+        </p>
+      </div>
+    </section>
+
+    <section id="remote">
+      <div class="container">
+        <h2>Resume your remote session</h2>
+        <p class="lead">Reach the terminal on your development machine when you want to use the dashboard directly.</p>
+        <div class="remote-access">
+          <figure class="tour-shot" data-full="img/remote.jpg">
+            <img
+              src="img/remote.jpg"
+              alt="The workdash dashboard in a remote terminal session on a phone"
+            />
+          </figure>
+          <div class="tour-text">
+            <ul class="benefit-list">
+              <li>
+                <strong>Attach to your session.</strong>
+                Connect over <code>ssh</code> and attach to your existing Zellij session.
+              </li>
+              <li>
+                <strong>Keep your workspace together.</strong>
+                Your worktrees and tools remain on your development machine while you interact from another device.
+              </li>
+              <li>
+                <strong>Distinguish chat from remote access.</strong>
+                The <a href="img/chat-session.png">assistant chat screenshot</a> shows conversation, not a remote terminal connection.
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="lightbox" id="lightbox" aria-hidden="true">
+      <button class="lightbox-close" aria-label="Close">&times;</button>
+      <img alt="" />
+    </div>
+
+    <footer>
+      <div class="container">
+        <p>
+          <a href="https://github.com/amol-/workdash">Source</a>
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/features/"
+            >Product spec (BDD)</a
+          >
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/LICENSE">GPL-3.0</a>
+        </p>
+        <p>&copy; Alessandro Molina</p>
+      </div>
+    </footer>
+
+    <script>
+      (function () {
+        var lightbox = document.getElementById("lightbox");
+        var lightboxImg = lightbox.querySelector("img");
+        var closeBtn = lightbox.querySelector(".lightbox-close");
+
+        function open(src, alt) {
+          lightboxImg.src = src;
+          lightboxImg.alt = alt || "";
+          lightbox.classList.add("open");
+          lightbox.setAttribute("aria-hidden", "false");
+          document.body.style.overflow = "hidden";
+        }
+
+        function close() {
+          lightbox.classList.remove("open");
+          lightbox.setAttribute("aria-hidden", "true");
+          lightboxImg.src = "";
+          document.body.style.overflow = "";
+        }
+
+        document.querySelectorAll(".tour-shot").forEach(function (el) {
+          el.addEventListener("click", function () {
+            var full = el.getAttribute("data-full");
+            var img = el.querySelector("img");
+            open(full, img ? img.alt : "");
+          });
+        });
+
+        lightbox.addEventListener("click", function (e) {
+          if (e.target === lightbox || e.target === closeBtn) close();
+        });
+
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape" && lightbox.classList.contains("open")) close();
+        });
+      })();
+    </script>
+  </body>
+</html>

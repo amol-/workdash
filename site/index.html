@@ -3,1139 +3,133 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>workdash — text-based GitHub work triage dashboard</title>
-    <meta
-      name="description"
-      content="workdash pulls together the GitHub issues and pull requests that matter to you, suggests what to pick up next, and launches reviews, AI analyses, or full coding sessions from a terminal TUI."
-    />
-    <meta property="og:title" content="workdash" />
-    <meta
-      property="og:description"
-      content="Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
-    />
-    <meta property="og:image" content="https://alessandro.molina.fyi/workdash/workdash.png" />
+    <title>workdash — your work and your agents, together</title>
+    <meta name="description" content="Coordinate your work and your agents' work in a development environment you own. Share tasks, context, and terminal panes. Keep your choice of tools." />
+    <meta property="og:title" content="workdash — your work and your agents, together" />
+    <meta property="og:description" content="Coordinate your work and your agents' work in a development environment you own. Share tasks, context, and terminal panes. Keep your choice of tools." />
+    <meta property="og:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
     <meta property="og:image:width" content="967" />
     <meta property="og:image:height" content="520" />
     <meta property="og:image:alt" content="workdash dashboard showing GitHub issues and pull requests" />
     <meta property="og:url" content="https://alessandro.molina.fyi/workdash/" />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="workdash" />
-    <meta
-      name="twitter:description"
-      content="Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
-    />
-    <meta name="twitter:image" content="https://alessandro.molina.fyi/workdash/workdash.png" />
+    <meta name="twitter:title" content="workdash — your work and your agents, together" />
+    <meta name="twitter:description" content="Coordinate your work and your agents' work in a development environment you own. Share tasks, context, and terminal panes. Keep your choice of tools." />
+    <meta name="twitter:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
-    <style>
-      :root {
-        --bg: #0d1117;
-        --bg-elev: #161b22;
-        --border: #30363d;
-        --text: #e6edf3;
-        --muted: #8b949e;
-        --accent: #7ee787;
-        --accent-soft: rgba(126, 231, 135, 0.12);
-        --link: #58a6ff;
-        --code-bg: #1b2129;
-      }
-
-      @media (prefers-color-scheme: light) {
-        :root {
-          --bg: #ffffff;
-          --bg-elev: #f6f8fa;
-          --border: #d0d7de;
-          --text: #1f2328;
-          --muted: #59636e;
-          --accent: #1a7f37;
-          --accent-soft: rgba(26, 127, 55, 0.1);
-          --link: #0969da;
-          --code-bg: #f6f8fa;
-        }
-      }
-
-      * {
-        box-sizing: border-box;
-      }
-
-      html {
-        scroll-behavior: smooth;
-      }
-
-      body {
-        margin: 0;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
-          Helvetica, Arial, sans-serif;
-        background: var(--bg);
-        color: var(--text);
-        line-height: 1.6;
-        -webkit-font-smoothing: antialiased;
-      }
-
-      a {
-        color: var(--link);
-        text-decoration: none;
-      }
-
-      a:hover {
-        text-decoration: underline;
-      }
-
-      code,
-      pre {
-        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
-          "Liberation Mono", monospace;
-        font-size: 0.92em;
-      }
-
-      code {
-        background: var(--code-bg);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        padding: 0.1em 0.4em;
-      }
-
-      pre {
-        background: var(--code-bg);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 1rem 1.2rem;
-        overflow-x: auto;
-        line-height: 1.5;
-      }
-
-      pre code {
-        background: none;
-        border: 0;
-        padding: 0;
-      }
-
-      .container {
-        max-width: 960px;
-        margin: 0 auto;
-        padding: 0 1.5rem;
-      }
-
-      header {
-        padding: 3rem 0 1rem;
-        text-align: center;
-      }
-
-      .brand {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-        font-size: 2.5rem;
-        font-weight: 700;
-        letter-spacing: -0.02em;
-      }
-
-      .brand .mark {
-        color: var(--accent);
-      }
-
-      .tagline {
-        color: var(--muted);
-        font-size: 1.15rem;
-        margin: 0.5rem auto 1.5rem;
-        max-width: 36rem;
-      }
-
-      .cta {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.6rem 1.1rem;
-        margin: 0.25rem;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        font-weight: 600;
-        background: var(--bg-elev);
-        color: var(--text);
-      }
-
-      .cta.primary {
-        background: var(--accent-soft);
-        border-color: var(--accent);
-        color: var(--text);
-      }
-
-      .cta:hover {
-        text-decoration: none;
-        border-color: var(--accent);
-      }
-
-      .hero-shot {
-        margin: 2rem auto 0;
-        max-width: 100%;
-        border-radius: 12px;
-        border: 1px solid var(--border);
-        display: block;
-        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
-      }
-
-      section {
-        padding: 3rem 0;
-        border-top: 1px solid var(--border);
-      }
-
-      section h2 {
-        font-size: 1.6rem;
-        margin: 0 0 1rem;
-        letter-spacing: -0.01em;
-      }
-
-      section p.lead {
-        color: var(--muted);
-        max-width: 42rem;
-        margin-top: 0;
-      }
-
-      .features {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-        gap: 1rem;
-        margin-top: 1.5rem;
-      }
-
-      .control-plane-features {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-
-      .feature {
-        background: var(--bg-elev);
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 1.1rem 1.2rem;
-      }
-
-      .feature h3 {
-        font-size: 1rem;
-        margin: 0 0 0.4rem;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-      }
-
-      .feature h3 .kbd {
-        display: inline-block;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 0.75rem;
-        padding: 0.1rem 0.5rem;
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        background: var(--bg);
-        color: var(--accent);
-      }
-
-      .feature p {
-        margin: 0;
-        color: var(--muted);
-        font-size: 0.95rem;
-      }
-
-      .tour {
-        display: flex;
-        flex-direction: column;
-        gap: 2.5rem;
-        margin-top: 2rem;
-      }
-
-      .workflow {
-        border-top: 1px solid var(--border);
-        padding-top: 2rem;
-      }
-
-      .workflow:first-child {
-        border-top: 0;
-        padding-top: 0;
-      }
-
-      .workflow-header {
-        display: flex;
-        align-items: baseline;
-        gap: 0.8rem;
-        margin-bottom: 1.5rem;
-        flex-wrap: wrap;
-      }
-
-      .workflow-header h3 {
-        font-size: 1.35rem;
-        margin: 0;
-        letter-spacing: -0.01em;
-      }
-
-      .workflow-header .workflow-lead {
-        color: var(--muted);
-        font-size: 0.95rem;
-        margin: 0;
-      }
-
-      .workflow-steps {
-        display: flex;
-        flex-direction: column;
-        gap: 2rem;
-      }
-
-      .tour-step {
-        display: grid;
-        grid-template-columns: 3fr 2fr;
-        gap: 2rem;
-        align-items: center;
-      }
-
-      .tour-step:nth-child(even) {
-        grid-template-columns: 2fr 3fr;
-      }
-
-      .tour-step:nth-child(even) .tour-shot {
-        order: 2;
-      }
-
-      .tour-step.image-left {
-        grid-template-columns: 3fr 2fr;
-      }
-
-      .tour-step.image-left .tour-shot {
-        order: 0;
-      }
-
-      .tour-shot {
-        margin: 0;
-        background: #0b0f14;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        overflow: hidden;
-        aspect-ratio: 16 / 10;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        cursor: zoom-in;
-        position: relative;
-        transition: border-color 0.15s ease, transform 0.15s ease;
-      }
-
-      .tour-shot:hover {
-        border-color: var(--accent);
-      }
-
-      .tour-shot img {
-        width: 100%;
-        height: 100%;
-        object-fit: contain;
-        display: block;
-      }
-
-      .tour-shot.fit-top img {
-        object-fit: cover;
-        object-position: top center;
-      }
-
-      .tour-shots {
-        display: flex;
-        flex-direction: column;
-        gap: 1rem;
-      }
-
-      .tour-shots .tour-shot {
-        aspect-ratio: 16 / 8;
-      }
-
-      .tour-shot::after {
-        content: "⤢";
-        position: absolute;
-        top: 0.5rem;
-        right: 0.6rem;
-        width: 1.8rem;
-        height: 1.8rem;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        border-radius: 6px;
-        background: rgba(0, 0, 0, 0.55);
-        color: #fff;
-        font-size: 0.95rem;
-        opacity: 0;
-        transition: opacity 0.15s ease;
-      }
-
-      .tour-shot:hover::after {
-        opacity: 1;
-      }
-
-      .tour-text h4 {
-        font-size: 1.05rem;
-        margin: 0 0 0.75rem;
-        letter-spacing: -0.01em;
-        color: var(--muted);
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        font-size: 0.8rem;
-      }
-
-      .workflow-list {
-        list-style: none;
-        counter-reset: step;
-        margin: 0;
-        padding: 0;
-      }
-
-      .workflow-list li {
-        counter-increment: step;
-        position: relative;
-        padding: 0 0 1rem 2.4rem;
-        color: var(--muted);
-      }
-
-      .workflow-list li:last-child {
-        padding-bottom: 0;
-      }
-
-      .workflow-list li::before {
-        content: counter(step);
-        position: absolute;
-        left: 0;
-        top: 0;
-        width: 1.7rem;
-        height: 1.7rem;
-        border-radius: 50%;
-        background: var(--accent-soft);
-        color: var(--accent);
-        border: 1px solid var(--accent);
-        font-weight: 700;
-        font-size: 0.85rem;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      }
-
-      .workflow-list li strong {
-        color: var(--text);
-        display: block;
-        margin-bottom: 0.15rem;
-        font-weight: 600;
-      }
-
-      .workflow-list li::after {
-        content: "";
-        position: absolute;
-        left: 0.85rem;
-        top: 1.9rem;
-        bottom: 0.2rem;
-        width: 1px;
-        background: var(--border);
-      }
-
-      .workflow-list li:last-child::after {
-        display: none;
-      }
-
-      .benefit-list {
-        list-style: none;
-        margin: 0;
-        padding: 0;
-      }
-
-      .benefit-list li {
-        position: relative;
-        padding: 0 0 0.9rem 1.6rem;
-        color: var(--muted);
-      }
-
-      .benefit-list li:last-child {
-        padding-bottom: 0;
-      }
-
-      .benefit-list li::before {
-        content: "";
-        position: absolute;
-        left: 0;
-        top: 0.55rem;
-        width: 0.5rem;
-        height: 0.5rem;
-        border-radius: 50%;
-        background: var(--accent);
-        opacity: 0.9;
-      }
-
-      .benefit-list li strong {
-        color: var(--text);
-        display: block;
-        margin-bottom: 0.15rem;
-        font-weight: 600;
-      }
-
-      .what-layout {
-        display: grid;
-        grid-template-columns: 3fr 2fr;
-        gap: 2rem;
-        align-items: start;
-        margin-top: 1rem;
-      }
-
-      .what-layout .what-text p.lead:first-child {
-        margin-top: 0;
-      }
-
-      .what-shot {
-        aspect-ratio: 4 / 5;
-        position: sticky;
-        top: 1.5rem;
-      }
-
-      .remote-access {
-        display: grid;
-        grid-template-columns: 2fr 3fr;
-        gap: 2rem;
-        align-items: center;
-        margin-top: 2rem;
-      }
-
-      .remote-access .tour-shot {
-        aspect-ratio: 11 / 12;
-      }
-
-      .lightbox {
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.88);
-        display: none;
-        align-items: center;
-        justify-content: center;
-        padding: 2rem;
-        z-index: 1000;
-        cursor: zoom-out;
-        opacity: 0;
-        transition: opacity 0.15s ease;
-      }
-
-      .lightbox.open {
-        display: flex;
-        opacity: 1;
-      }
-
-      .lightbox img {
-        max-width: 100%;
-        max-height: 100%;
-        border-radius: 8px;
-        box-shadow: 0 20px 80px rgba(0, 0, 0, 0.6);
-      }
-
-      .lightbox-close {
-        position: absolute;
-        top: 1rem;
-        right: 1.25rem;
-        background: none;
-        border: none;
-        color: #fff;
-        font-size: 2rem;
-        line-height: 1;
-        cursor: pointer;
-        padding: 0.25rem 0.5rem;
-        opacity: 0.8;
-      }
-
-      .lightbox-close:hover {
-        opacity: 1;
-      }
-
-      @media (max-width: 720px) {
-        .tour-step,
-        .tour-step:nth-child(even),
-        .remote-access,
-        .what-layout {
-          grid-template-columns: 1fr;
-          gap: 1rem;
-        }
-
-        .what-shot {
-          position: static;
-        }
-
-        .tour-step:nth-child(even) .tour-shot {
-          order: 0;
-        }
-
-        .control-plane-features {
-          grid-template-columns: 1fr;
-        }
-      }
-
-      .requirements ul {
-        margin: 0;
-        padding-left: 1.2rem;
-        color: var(--muted);
-      }
-
-      .requirements li {
-        margin-bottom: 0.3rem;
-      }
-
-      .requirements li strong {
-        color: var(--text);
-      }
-
-      footer {
-        padding: 2.5rem 0 3rem;
-        border-top: 1px solid var(--border);
-        color: var(--muted);
-        font-size: 0.9rem;
-        text-align: center;
-      }
-
-      @media (max-width: 600px) {
-        header {
-          padding-top: 2rem;
-        }
-
-        .brand {
-          font-size: 2rem;
-        }
-
-        section {
-          padding: 2.25rem 0;
-        }
-      }
-    </style>
+    <link rel="stylesheet" href="style.css" />
   </head>
   <body>
     <header>
-      <div class="container">
-        <div class="brand">
-          <span class="mark">&#9889;</span>
-          <span>workdash</span>
-        </div>
-        <p class="tagline">
-          Text-based GitHub work triage dashboard. Pick what to work on next,
-          then jump straight into a review, an AI analysis, or a full coding
-          session in a dedicated worktree.
-        </p>
-        <div>
-          <a
-            class="cta primary"
-            href="https://github.com/amol-/workdash"
-            >View on GitHub &rarr;</a
-          >
-          <a class="cta" href="#install">Install</a>
-        </div>
-        <img
-          class="hero-shot"
-          src="workdash.png"
-          alt="workdash TUI showing issues and pull requests pulled from GitHub, with one entry highlighted as the suggested next work item"
-        />
+      <div class="container site-nav">
+        <a class="brand" href="index.html" aria-current="page"><span class="mark" aria-hidden="true">&#9889;</span> workdash</a>
+        <nav aria-label="Main navigation">
+          <a href="work.html">Work</a>
+          <a href="review.html">Review</a>
+          <a href="agentic.html">Agentic loop</a>
+          <a href="control.html">Automation</a>
+          <a href="index.html#install">Install</a>
+        </nav>
       </div>
     </header>
 
-    <section id="what">
-      <div class="container">
-        <h2>Your GitHub work, with less friction</h2>
-        <div class="what-layout">
-          <div class="what-text">
-            <p class="lead">
-              GitHub tells you what is waiting. Getting from there to an open
-              editor with the right branch, the right context, and a summary of
-              the thing you are about to touch is the part that eats the morning.
-              <code>workdash</code> compresses that into a single keystroke.
-            </p>
-            <p class="lead">
-              It pulls
-              <a href="#authored-prs">your authored PRs</a>,
-              <a href="#review">review requests</a>, assignments, and
-              tracked issues into one list, suggests what to pick up next, and
-              lets you
-              <a href="#tackle">launch an AI analysis or a full coding session</a>
-              in a dedicated git worktree — each keyed to the GitHub item so
-              context never gets lost between sessions.
-            </p>
-            <p class="lead">
-              It also doubles as a
-              <a href="#cli">local control plane for agent swarms</a>, so your
-              <strong>assistant agent can act as a control agent</strong> —
-              reading the queue, requesting analyses, and launching coding
-              sessions against your dashboard.
-            </p>
-            <p class="lead">
-              <strong>And it works on mobile too</strong> —
-              <a href="#remote">access everywhere</a> from a laptop, tablet, or
-              phone.
-            </p>
-            <p class="lead">
-              <a class="cta primary" href="#install">Try it now &rarr;</a>
-            </p>
+    <main>
+      <section class="home-hero" aria-labelledby="mission">
+        <div class="container">
+          <div class="hero-layout">
+            <div>
+              <p class="eyebrow">Your shared terminal workspace</p>
+              <h1 id="mission">Your work and your agents, <em>together</em></h1>
+              <p class="tagline">Pick up a GitHub issue yourself or hand it to an agent you already use. Follow its progress and step into the same workspace whenever you want.</p>
+              <div class="hero-actions">
+                <a class="cta primary" href="#install">Get started <span aria-hidden="true">&darr;</span></a>
+                <a class="cta" href="#what">Explore the workflow <span aria-hidden="true">&rarr;</span></a>
+              </div>
+            </div>
+            <div class="quickstart" id="install" aria-labelledby="quickstart-title">
+              <p class="eyebrow">Linux &amp; macOS</p>
+              <h2 id="quickstart-title">Start with your own workspace</h2>
+              <pre><code>uv tool install workdash
+workdash --configure
+workdash</code></pre>
+              <p>The setup wizard installs missing <code>gh</code> (GitHub CLI) and Zellij binaries. Sign in to GitHub and choose your agent to get started.</p>
+            </div>
           </div>
-          <figure class="tour-shot what-shot" data-full="chat_session.png">
-            <img
-              src="chat_session.png"
-              alt="workdash driven by an assistant agent in a chat session, reading the work queue and launching actions on the dashboard"
-            />
+
+          <figure class="hero-preview">
+            <a href="img/dashboard.gif" aria-label="Open the full-size workdash dashboard screenshot">
+              <img src="img/dashboard.gif" alt="The workdash terminal dashboard with issues, pull requests, and todos across repositories" />
+            </a>
+            <figcaption>Your GitHub work, across repositories, in one terminal. <a href="img/dashboard.gif">View full size &nearr;</a></figcaption>
           </figure>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <section id="features">
-      <div class="container">
-        <h2>One key, one action</h2>
-        <div class="features">
-          <div class="feature">
-            <h3><span class="kbd">o</span>Open in browser</h3>
-            <p>Jump straight to the issue or pull request on GitHub.</p>
+      <section id="tools">
+        <div class="container tools-layout">
+          <div>
+            <p class="eyebrow">Make it yours</p>
+            <h2>Bring your own agent</h2>
+            <p class="lead">Use Claude Code, Codex, pi, or another terminal agent. Pick one to brief you on an issue, and another to write the code.</p>
+            <p>Your agent opens in the issue’s Git worktree with the task in hand. Open a terminal in that same worktree to inspect the changes or take over.</p>
+            <a class="text-link" href="work.html#code">See how you start a coding session &rarr;</a>
           </div>
-          <div class="feature">
-            <h3><span class="kbd">r</span>Refresh</h3>
-            <p>Re-pull authored PRs, review requests, assignments, and tracked items.</p>
-          </div>
-          <div class="feature">
-            <h3><span class="kbd">a</span>Analyze</h3>
-            <p>
-              Run Claude or Codex against the item, render the result as HTML,
-              and cache it — keyed by the GitHub <code>updated_at</code> so
-              stale entries invalidate themselves.
-            </p>
-          </div>
-          <div class="feature">
-            <h3><span class="kbd">c</span>Code</h3>
-            <p>
-              Prepare a dedicated git worktree and launch Claude, Codex, or
-              VSCode Copilot inside it, preloaded with the item's context. The
-              same menu opens a terminal in that worktree or the branch diff.
-            </p>
-          </div>
-          <div class="feature">
-            <h3><span class="kbd">d</span>Dispatch</h3>
-            <p>
-              Start an autodispatch session that works through the selected
-              issue's ready tasks and reviews the pull requests it opens.
-            </p>
-          </div>
-          <div class="feature">
-            <h3><span class="kbd">list</span>List command</h3>
-            <p>
-              Same triage, emitted as plain text for scripts, pipes, and agents
-              that want the dashboard without the TUI.
-            </p>
+          <div class="tools-card">
+            <h3>Bring your own tools</h3>
+            <p>Unix pipes let one tool use another’s output because both speak text. workdash takes the same idea into Zellij, the terminal workspace you share with your agents.</p>
+            <p>workdash sends tasks as text and reads what your tools print. You can swap in a compatible agent, viewer, or script without waiting for a plugin.</p>
+            <p>Keep the editor you already use. Open the same checkout in it whenever you want to make a change yourself.</p>
+            <a class="text-link" href="control.html#panes">See text in and text out &rarr;</a>
           </div>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <section id="tour">
-      <div class="container">
-        <h2>From inbox to code, in three keystrokes</h2>
-        <p class="lead">
-          <code>workdash</code> collapses the gap between
-          <em>knowing what to work on</em> and <em>actually working on it</em>.
-          Here is what that looks like for the common things you spend most of
-          your GitHub day on. Click any screenshot to zoom in.
-        </p>
-
-        <div class="workflow" id="review">
-          <div class="workflow-header">
-            <h3>Review a pull request</h3>
-            <p class="workflow-lead">
-              Skip the "what is this PR even doing?" step and dive into a
-              grounded review.
-            </p>
-          </div>
-          <div class="tour-step">
-            <div class="tour-shots">
-              <figure class="tour-shot" data-full="analyze_item.png">
-                <img
-                  src="analyze_item.png"
-                  alt="analyze dialog offering to open a cached analysis or run a fresh one with Claude or Codex against the selected pull request"
-                />
-              </figure>
-              <figure class="tour-shot fit-top" data-full="analysis_result.png">
-                <img
-                  src="analysis_result.png"
-                  alt="rendered HTML analysis of a pull request opened in a browser"
-                />
-              </figure>
-            </div>
-            <div class="tour-text">
-              <h4>Workflow</h4>
-              <ol class="workflow-list">
-                <li>
-                  <strong>Spot the review requests.</strong>
-                  PRs waiting on your review are surfaced in the same list
-                  as everything else, so they do not get lost in a GitHub
-                  notifications tab.
-                </li>
-                <li>
-                  <strong>Pick an analysis — <code>a</code>.</strong>
-                  The analyze dialog offers the cached result or a fresh
-                  run with Claude or Codex.
-                </li>
-                <li>
-                  <strong>Read the briefing.</strong>
-                  The analysis is rendered as HTML summarising the change,
-                  the intent, and the risky parts. Cached until the PR is
-                  updated, so re-opening is free.
-                </li>
-                <li>
-                  <strong>Open it in context — <code>o</code> or <code>c</code>.</strong>
-                  Jump to GitHub to leave comments, or drop into a worktree
-                  with the PR checked out to actually run the code.
-                </li>
-              </ol>
-            </div>
+      <section id="what">
+        <div class="container">
+          <p class="eyebrow">One workspace, four ways to work</p>
+          <h2>Pick where you want to start</h2>
+          <div class="features topic-grid">
+            <a class="feature topic" href="work.html">
+              <span class="eyebrow">01 / Work</span>
+              <h3>Pick up your next issue</h3>
+              <p>Read the discussion, get a briefing, and start working in a dedicated Git checkout.</p>
+              <span class="text-link">Explore your work &rarr;</span>
+            </a>
+            <a class="feature topic" href="review.html">
+              <span class="eyebrow">02 / Review</span>
+              <h3>See what’s ready to review</h3>
+              <p>Find pull requests that need your attention, inspect changes, and ask an agent for a second look.</p>
+              <span class="text-link">Explore pull request review &rarr;</span>
+            </a>
+            <a class="feature topic" href="agentic.html">
+              <span class="eyebrow">03 / Agentic loop</span>
+              <h3>Delegate a round of work</h3>
+              <p>Let your agent implement and review ready issues while you follow the loop from the dashboard.</p>
+              <span class="text-link">Watch the dispatch loop &rarr;</span>
+            </a>
+            <a class="feature topic" href="control.html">
+              <span class="eyebrow">04 / Automation</span>
+              <h3>Connect the tools you use</h3>
+              <p>Give scripts and assistants access to the same work and terminal panes through the command line.</p>
+              <span class="text-link">Explore the CLI &rarr;</span>
+            </a>
           </div>
         </div>
-
-        <div class="workflow" id="tackle">
-          <div class="workflow-header">
-            <h3>Tackle an issue</h3>
-            <p class="workflow-lead">
-              From a fresh bug report to an agent writing the fix — without
-              leaving the terminal.
-            </p>
-          </div>
-          <div class="tour-step">
-            <figure class="tour-shot" data-full="coding_session.png">
-              <img
-                src="coding_session.png"
-                alt="coding agent running inside the per-item git worktree, preloaded with the issue's context"
-              />
-            </figure>
-            <div class="tour-text">
-              <h4>Workflow</h4>
-              <ol class="workflow-list">
-                <li>
-                  <strong>See what's waiting.</strong>
-                  Authored PRs, review requests, assignments and tracked
-                  issues are merged into one list, sorted by last update,
-                  with a suggested next item highlighted.
-                </li>
-                <li>
-                  <strong>Get a read on it — <code>a</code>.</strong>
-                  Run Claude or Codex against the issue. The analysis is
-                  rendered as HTML and cached so you can revisit it
-                  instantly later.
-                </li>
-                <li>
-                  <strong>Start coding — <code>c</code>.</strong>
-                  A git worktree is prepared for the issue and your agent
-                  launches inside it, already primed with the cached
-                  analysis as context.
-                </li>
-              </ol>
-            </div>
-          </div>
-        </div>
-
-        <div class="workflow" id="changes">
-          <div class="workflow-header">
-            <h3>See what changed in a pull request</h3>
-            <p class="workflow-lead">
-              Review the actual diff before you decide whether a PR needs your
-              next reply, another commit, or a deeper review.
-            </p>
-          </div>
-          <div class="tour-step image-left">
-            <figure class="tour-shot" data-full="workdash_diff.png">
-              <img
-                src="workdash_diff.png"
-                alt="workdash showing the current diff for a pull request in the terminal"
-              />
-            </figure>
-            <div class="tour-text">
-              <h4>Why it helps</h4>
-              <ul class="benefit-list">
-                <li>
-                  <strong>Check authored PRs without context switching.</strong>
-                  See your current branch changes from the same dashboard you
-                  use to track review feedback.
-                </li>
-                <li>
-                  <strong>Review incoming PRs with the diff nearby.</strong>
-                  Move from the queue to the code changes without hunting
-                  through GitHub tabs.
-                </li>
-                <li>
-                  <strong>Decide the next action faster.</strong>
-                  When the diff is visible, it is easier to choose between
-                  replying, requesting changes, or opening a worktree.
-                </li>
-              </ul>
-            </div>
-          </div>
-        </div>
-
-        <div class="workflow" id="authored-prs">
-          <div class="workflow-header">
-            <h3>Keep up with feedback on your own PRs</h3>
-            <p class="workflow-lead">
-              Notice which of your open PRs actually need attention today,
-              without scrolling through a GitHub notifications list.
-            </p>
-          </div>
-          <div class="tour-step">
-            <figure class="tour-shot" data-full="workdash.png">
-              <img
-                src="workdash.png"
-                alt="workdash TUI showing authored pull requests alongside other work items, with recently-updated entries in bold and the suggested next item marked with an asterisk"
-              />
-            </figure>
-            <div class="tour-text">
-              <h4>Why it helps</h4>
-              <ul class="benefit-list">
-                <li>
-                  <strong>Suggested next item.</strong>
-                  One entry is marked with a <code>*</code>, so you don't
-                  re-decide every time.
-                </li>
-                <li>
-                  <strong>Recent activity in bold.</strong>
-                  Anything touched in the last 24 hours stands out — fresh
-                  review feedback is impossible to miss.
-                </li>
-                <li>
-                  <strong>Sorted by last update.</strong>
-                  PRs with new activity float up; quiet ones drop down.
-                </li>
-                <li>
-                  <strong>Authored, review-requested, assigned — one list.</strong>
-                  No switching between GitHub filters to see the whole
-                  picture.
-                </li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section id="cli">
-      <div class="container">
-        <h2>A local control plane for agent swarms</h2>
-        <p class="lead">
-          Workdash is not just a human dashboard. On the same host, agents can
-          read the queue, inspect live Zellij panes, request analysis, and launch
-          coding sessions through commands whose <code>--json</code> output is
-          safe to parse.
-        </p>
-        <div class="features control-plane-features">
-          <div class="feature">
-            <h3><span class="kbd">1</span>List work items</h3>
-            <p>
-              Start here. The list command returns copy/paste item IDs that the
-              other commands accept.
-            </p>
-            <pre><code>workdash list --json
-{
-  "items": [
-    {
-      "id": "owner/repo#ISSUE-42",
-      "type": "ISSUE",
-      "title": "Fix failing deploy",
-      "suggested": true
-    }
-  ]
-}</code></pre>
-          </div>
-          <div class="feature">
-            <h3><span class="kbd">2</span>Inspect panes</h3>
-            <p>See which Workdash-owned Zellij panes already exist.</p>
-            <pre><code>workdash info --json
-{
-  "session": "workdash-a1b2c3d4",
-  "panes": [
-    {
-      "pane_id": "terminal_7",
-      "kind": "agent",
-      "item": "owner/repo#ISSUE-42"
-    }
-  ]
-}</code></pre>
-          </div>
-          <div class="feature">
-            <h3><span class="kbd">3</span>Analyze an item</h3>
-            <p>Ask a configured analysis agent for a cached or fresh briefing.</p>
-            <pre><code>workdash analyze owner/repo#ISSUE-42 --json
-{
-  "item_id": "owner/repo#ISSUE-42",
-  "status": "generated",
-  "path": "/home/me/wrk/.../analysis.md"
-}</code></pre>
-          </div>
-          <div class="feature">
-            <h3><span class="kbd">4</span>Launch coding</h3>
-            <p>Start a coding agent and get back the Zellij pane it created.</p>
-            <pre><code>workdash code owner/repo#ISSUE-42 --agent codex --json
-{
-  "item_id": "owner/repo#ISSUE-42",
-  "session": "workdash-a1b2c3d4",
-  "pane_id": "terminal_9",
-  "cwd": "/home/me/wrk/owner_repo_issue_42"
-}</code></pre>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section id="remote">
-      <div class="container">
-        <h2>Access everywhere</h2>
-        <p class="lead">
-          <code>workdash</code> runs where your development machine runs. Attach
-          through <code>zellij</code> remote or plain <code>ssh</code>, then keep
-          the same dashboard, worktrees, cached analyses, and agent launch
-          commands available from a laptop, tablet, or phone.
-        </p>
-        <div class="remote-access">
-          <figure class="tour-shot" data-full="workdash_remote.jpg">
-            <img
-              src="workdash_remote.jpg"
-              alt="workdash running in a zellij terminal session from a mobile device over a remote connection"
-            />
-          </figure>
-          <div class="tour-text">
-            <h4>Remote workflow</h4>
-            <ul class="benefit-list">
-              <li>
-                <strong>Resume the same terminal session.</strong>
-                Use <code>zellij</code> remote to reconnect to the dashboard
-                without recreating tabs, panes, or in-progress coding sessions.
-              </li>
-              <li>
-                <strong>Fallback to ordinary SSH.</strong>
-                When all you have is a shell, start <code>workdash</code> over
-                <code>ssh</code> and keep the full triage loop close at hand.
-              </li>
-              <li>
-                <strong>Keep state on the workstation.</strong>
-                Worktrees, GitHub credentials, caches, and agent tooling stay
-                on the machine that already has your development environment.
-              </li>
-            </ul>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <div class="lightbox" id="lightbox" aria-hidden="true">
-      <button class="lightbox-close" aria-label="Close">&times;</button>
-      <img alt="" />
-    </div>
-
-    <section id="install">
-      <div class="container">
-        <h2>Install</h2>
-        <p class="lead">
-          With <a href="https://docs.astral.sh/uv/">uv</a> — one isolated
-          install, <code>workdash</code> on your <code>PATH</code>:
-        </p>
-        <pre><code>uv tool install workdash</code></pre>
-        <p class="lead">Then generate the configuration interactively:</p>
-        <pre><code>workdash --configure</code></pre>
-        <p class="lead">Launch the TUI:</p>
-        <pre><code>workdash</code></pre>
-
-        <h3 style="margin-top: 2.5rem">Give another agent access</h3>
-        <p class="lead">
-          To let an assistant agent drive your dashboard, start workdash with
-          the localhost JSON control API:
-        </p>
-        <pre><code>workdash</code></pre>
-        <p class="lead">
-          Then copy the
-          <a href="https://github.com/amol-/workdash/tree/main/skills">workdash
-          skills</a> into your control agent so it knows how to talk to the
-          dashboard.
-        </p>
-        <p class="lead">
-          The control agent must have the <code>workdash</code> command
-          available and run on the <strong>same host</strong> as the workdash
-          server.
-        </p>
-      </div>
-    </section>
-
-    <section id="requirements" class="requirements">
-      <div class="container">
-        <h2>Requirements</h2>
-        <ul>
-          <li><strong>Python 3.12+</strong></li>
-          <li>
-            <strong><a href="https://cli.github.com/">gh</a></strong> installed
-            and authenticated (<code>gh auth status</code> must succeed)
-            (auto installed if missing).
-          </li>
-          <li>
-            <strong>zellij</strong> for terminal and agent sessions (auto
-            installed if missing).
-          </li>
-          <li>
-            A supported terminal emulator: <code>ptyxis</code>,
-            <code>konsole</code>, or
-            <a href="https://ghostty.org/">Ghostty</a>.
-          </li>
-          <li><code>xdg-open</code> or <code>open</code> for links and rendered analyses.</li>
-          <li>
-            Optional, per action: <code>claude</code>, <code>codex</code>,
-            <code>code</code>, <a href="https://pi.dev"><code>pi</code></a>.
-          </li>
-        </ul>
-        <p class="lead" style="margin-top: 1rem">
-          Linux and macOS. Not tested on Windows.
-        </p>
-      </div>
-    </section>
+      </section>
+    </main>
 
     <footer>
       <div class="container">
         <p>
           <a href="https://github.com/amol-/workdash">Source</a>
           &middot;
-          <a href="https://github.com/amol-/workdash/blob/main/features/"
-            >Product spec (BDD)</a
-          >
+          <a href="https://github.com/amol-/workdash/blob/main/features/">Product spec (BDD)</a>
           &middot;
           <a href="https://github.com/amol-/workdash/blob/main/LICENSE">GPL-3.0</a>
         </p>
         <p>&copy; Alessandro Molina</p>
       </div>
     </footer>
-
-    <script>
-      (function () {
-        var lightbox = document.getElementById("lightbox");
-        var lightboxImg = lightbox.querySelector("img");
-        var closeBtn = lightbox.querySelector(".lightbox-close");
-
-        function open(src, alt) {
-          lightboxImg.src = src;
-          lightboxImg.alt = alt || "";
-          lightbox.classList.add("open");
-          lightbox.setAttribute("aria-hidden", "false");
-          document.body.style.overflow = "hidden";
-        }
-
-        function close() {
-          lightbox.classList.remove("open");
-          lightbox.setAttribute("aria-hidden", "true");
-          lightboxImg.src = "";
-          document.body.style.overflow = "";
-        }
-
-        document.querySelectorAll(".tour-shot").forEach(function (el) {
-          el.addEventListener("click", function () {
-            var full = el.getAttribute("data-full");
-            var img = el.querySelector("img");
-            open(full, img ? img.alt : "");
-          });
-        });
-
-        lightbox.addEventListener("click", function (e) {
-          if (e.target === lightbox || e.target === closeBtn) close();
-        });
-
-        document.addEventListener("keydown", function (e) {
-          if (e.key === "Escape" && lightbox.classList.contains("open")) close();
-        });
-      })();
-    </script>
   </body>
 </html>

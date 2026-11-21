@@ -1,0 +1,433 @@
+#!/usr/bin/env python3
+"""GitHub responses for the isolated website capture world."""
+
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+home = Path(os.environ["HOME"])
+args = sys.argv[1:]
+fixtures = json.loads(Path(__file__).resolve().with_name("fixtures.json").read_text())
+repo = "demo/project"
+issue = fixtures["tracked_issues"][0]
+issue_number = issue["number"]
+state_path = home / "gh-state.json"
+state = (
+    json.loads(state_path.read_text())
+    if state_path.exists()
+    else {"pull_requests": {}, "next_number": 53, "timestamp": datetime.now(UTC).isoformat()}
+)
+if not state_path.exists():
+    state_path.write_text(json.dumps(state))
+run_time = datetime.fromisoformat(state["timestamp"])
+(home / "gh-calls.log").open("a").write(shlex.join(args) + "\n")
+
+
+def respond():
+    """Answer one gh invocation, refusing anything this world does not provide."""
+    if args == ["auth", "status"]:
+        sys.exit(0)
+    search_suffix = [
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "id,number,title,url,createdAt,updatedAt,isDraft,repository",
+    ]
+    pull = next(iter(state["pull_requests"].values()), None)
+    if args == ["search", "prs", "--author", "demo", *search_suffix]:
+        print(json.dumps([search_pull(node) for node in fixtures["authored_prs"]]))
+    elif args == ["search", "prs", "user-review-requested:demo", *search_suffix]:
+        print(json.dumps([search_pull(node) for node in fixtures["review_requested_prs"]]))
+    elif args == ["search", "prs", "--reviewed-by", "demo", *search_suffix]:
+        print("[]")
+    elif args[:2] == ["issue", "view"] and args[2] == str(issue_number):
+        print(json.dumps(issue_view()))
+    elif args[:2] == ["pr", "view"] and args[2] in state["pull_requests"]:
+        fields = args[args.index("--json") + 1]
+        print(json.dumps(pull_request_json(state["pull_requests"][args[2]], fields)))
+    elif args[:2] == ["pr", "create"]:
+        create_pull_request()
+    elif args[:3] == ["api", "graphql", "-f"]:
+        print(json.dumps({"data": graphql(args[3])}))
+    elif args == ["api", f"repos/{repo}"]:
+        print(
+            json.dumps(
+                {
+                    "allow_squash_merge": True,
+                    "allow_merge_commit": False,
+                    "allow_rebase_merge": False,
+                }
+            )
+        )
+    elif args == ["api", f"repos/{repo}/rules/branches/main?per_page=100"]:
+        print("[]")
+    elif args == ["api", f"repos/{repo}/branches/main"]:
+        print(json.dumps({"protected": False}))
+    elif (
+        args[:3] == ["api", "--method", "PUT"]
+        and pull
+        and f"repos/{repo}/pulls/{pull['number']}/merge" in args
+    ):
+        now = datetime.now(UTC).isoformat()
+        pull["state"], pull["merged_at"], pull["updated_at"] = "MERGED", now, now
+        save()
+        print(json.dumps({"merged": True, "message": "Pull Request successfully merged"}))
+    elif args == ["api", f"repos/{repo}/issues/{issue_number}"]:
+        print(json.dumps(issue_api_payload()))
+    elif args in (
+        ["api", f"repos/{repo}/issues/{issue_number}/sub_issues?per_page=100", "--paginate"],
+        ["api", f"repos/{repo}/issues/{issue_number}/comments?per_page=100", "--paginate"],
+    ):
+        print("[]")
+    else:
+        unknown()
+
+
+def save():
+    state_path.write_text(json.dumps(state))
+
+
+def unknown():
+    (home / "gh-errors.log").open("a").write(shlex.join(args) + "\n")
+    sys.exit(f"unexpected gh arguments: {shlex.join(args)}")
+
+
+def git(*command):
+    return subprocess.run(
+        ["git", *command], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def closing_issues(pull):
+    return [int(fixed) for fixed in re.findall(r"(?:Fixes|Closes) #(\d+)", pull["body"])]
+
+
+def issue_state():
+    """A merged pull request closes the issue it fixes."""
+    merged = any(
+        issue_number in closing_issues(pull) and pull["state"] == "MERGED"
+        for pull in state["pull_requests"].values()
+    )
+    return "CLOSED" if merged else "OPEN"
+
+
+def issue_node(node=issue, repository=repo):
+    return {
+        "__typename": "Issue",
+        "id": f"I_{repository}_{node['number']}",
+        "number": node["number"],
+        "title": node["title"],
+        "body": node["body"],
+        "url": f"https://github.com/{repository}/issues/{node['number']}",
+        "createdAt": (run_time - timedelta(days=node["created_days_ago"])).isoformat(),
+        "updatedAt": (run_time - timedelta(hours=node["updated_hours_ago"])).isoformat(),
+        "state": issue_state() if node == issue else "OPEN",
+        "repository": {"nameWithOwner": repository},
+        "subIssuesSummary": {"total": len(node["sub_issues"])},
+        "issueDependenciesSummary": {"blockedBy": 0},
+        "closedByPullRequestsReferences": {
+            "nodes": [
+                {
+                    "number": pull["number"],
+                    "state": pull["state"],
+                    "repository": {"nameWithOwner": repo},
+                }
+                for pull in state["pull_requests"].values()
+                if node["number"] in closing_issues(pull)
+            ]
+        },
+        "subIssues": {"nodes": []},
+    }
+
+
+def issue_view():
+    node = issue_node()
+    return {
+        "number": node["number"],
+        "title": node["title"],
+        "body": node["body"],
+        "author": {"login": "demo"},
+        "assignees": [],
+        "labels": [],
+        "url": node["url"],
+        "state": node["state"],
+        "createdAt": node["createdAt"],
+        "updatedAt": node["updatedAt"],
+        "comments": [],
+    }
+
+
+def issue_api_payload():
+    node = issue_node()
+    return {
+        "title": node["title"],
+        "body": node["body"],
+        "state": node["state"].lower(),
+        "html_url": node["url"],
+        "updated_at": node["updatedAt"],
+        "user": {"login": "demo"},
+    }
+
+
+def pull_request_node(pull):
+    """One pull request as the app's ReadyPullRequest fragment expects it."""
+    return {
+        "number": pull["number"],
+        "title": pull["title"],
+        "url": pull["url"],
+        "createdAt": pull["created_at"],
+        "updatedAt": pull["updated_at"],
+        "state": pull["state"],
+        "author": {"__typename": "User", "login": "demo"},
+        "repository": {"nameWithOwner": repo},
+        "headRefOid": pull["sha"],
+        "mergedAt": pull["merged_at"],
+        "maintainerCanModify": True,
+        "headRef": {"refUpdateRule": {"viewerCanPush": True}},
+        "headRepository": {"viewerPermission": "WRITE"},
+        "baseRepository": {"viewerPermission": "WRITE"},
+        "baseRefName": pull["base"],
+        "baseRef": {"target": {"oid": pull["base_sha"]}},
+        "mergeable": "MERGEABLE",
+        "reviewDecision": None,
+        "closingIssuesReferences": {"nodes": [issue_node()]},
+        "commits": {
+            "nodes": [
+                {
+                    "commit": {
+                        "oid": pull["sha"],
+                        "statusCheckRollup": {
+                            "contexts": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [],
+                            }
+                        },
+                    }
+                }
+            ]
+        },
+        "reviewRequests": {"nodes": []},
+        "latestOpinionatedReviews": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        "reviews": {"nodes": []},
+        "reviewThreads": {"pageInfo": {"hasPreviousPage": False}, "nodes": []},
+        "comments": {"nodes": []},
+    }
+
+
+def pull_request_json(pull, fields):
+    """One pull request with only the `--json` fields the caller asked for."""
+    available = {
+        "number": pull["number"],
+        "title": pull["title"],
+        "body": pull["body"],
+        "author": {"login": "demo"},
+        "assignees": [],
+        "labels": [],
+        "url": pull["url"],
+        "state": pull["state"],
+        "createdAt": pull["created_at"],
+        "updatedAt": pull["updated_at"],
+        "isDraft": False,
+        "reviewDecision": "",
+        "additions": 1,
+        "deletions": 0,
+        "changedFiles": 1,
+        "headRefName": pull["head"],
+        "baseRefName": pull["base"],
+        "comments": [],
+        "reviews": [],
+        "headRepository": {"name": "project"},
+        "headRepositoryOwner": {"login": "demo"},
+    }
+    return {name: available[name] for name in fields.split(",")}
+
+
+def create_pull_request():
+    number = state["next_number"]
+    state["next_number"] = number + 1
+    now = datetime.now(UTC).isoformat()
+    state["pull_requests"][str(number)] = {
+        "number": number,
+        "title": args[args.index("--title") + 1],
+        "body": args[args.index("--body") + 1],
+        "url": f"https://github.com/{repo}/pull/{number}",
+        "state": "OPEN",
+        "head": git("rev-parse", "--abbrev-ref", "HEAD"),
+        "sha": git("rev-parse", "HEAD"),
+        "base": "main",
+        "base_sha": git("rev-parse", "origin/main"),
+        "created_at": now,
+        "updated_at": now,
+        "merged_at": None,
+    }
+    save()
+    print(state["pull_requests"][str(number)]["url"])
+
+
+def fetched_item(item_number):
+    """One `issueOrPullRequest` node, as the item lookup asks for it."""
+    pull = state["pull_requests"].get(str(item_number))
+    if pull is not None:
+        return {
+            "repository": {
+                "nameWithOwner": repo,
+                "issueOrPullRequest": {
+                    "__typename": "PullRequest",
+                    **pull_request_node(pull),
+                    "reviewRequests": {"totalCount": 0},
+                    "reviewThreads": {"nodes": []},
+                    "closingIssuesReferences": {
+                        "nodes": [{"number": issue_number, "repository": {"nameWithOwner": repo}}]
+                    },
+                    "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]},
+                },
+            }
+        }
+    return {
+        "repository": {
+            "nameWithOwner": repo,
+            "issueOrPullRequest": {
+                "__typename": "Issue",
+                **issue_node(),
+                "id": f"I_demo_{issue_number}",
+            },
+        }
+    }
+
+
+def graphql(query):
+    """Answer the work-state queries the capture flows reach."""
+    repositories = re.findall(r'repository\(owner: "([^"]+)", name: "([^"]+)"\)', query)
+    if any(f"{owner}/{name}" not in (repo, "demo/todos") for owner, name in repositories):
+        unknown()
+    requested = re.search(r"issueOrPullRequest\(number: (\d+)\)", query)
+    if requested:
+        number = int(requested.group(1))
+        if number != issue_number and str(number) not in state["pull_requests"]:
+            unknown()
+        return fetched_item(number)
+    aliases = re.findall(
+        r'(p\d+): repository\(owner: "demo", name: "project"\) \{ pullRequest\(number: (\d+)\)',
+        query,
+    )
+    if (
+        aliases
+        and "fragment ReadyPullRequest" not in query
+        and "query PullRequestStates" not in query
+    ):
+        data = {}
+        for alias, number in aliases:
+            node = next(
+                (
+                    node
+                    for node in fixtures["authored_prs"] + fixtures["review_requested_prs"]
+                    if node["number"] == int(number)
+                ),
+                None,
+            )
+            if node is not None:
+                data[alias] = {
+                    "pullRequest": {
+                        "commits": {
+                            "nodes": [
+                                {"commit": {"statusCheckRollup": {"state": node.get("ci_state")}}}
+                            ]
+                        },
+                        "reviewDecision": node.get("review_decision"),
+                        "reviewRequests": {"totalCount": 0},
+                        "reviewThreads": {"nodes": []},
+                        "closingIssuesReferences": {"nodes": []},
+                    }
+                }
+            elif number in state["pull_requests"]:
+                data[alias] = {"pullRequest": pull_request_node(state["pull_requests"][number])}
+            else:
+                unknown()
+        return data
+    if "query ReadyRepositoryIssues" in query:
+        node = issue_node()
+        return {
+            "repository": {
+                "issues": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [node] if node["state"] == "OPEN" else [],
+                }
+            }
+        }
+    if "query ReadyIssueTree" in query:
+        return {"repository": {"issue": issue_node()}}
+    if "fragment ReadyPullRequest" in query:
+        return {
+            f"p{index}": {"pullRequest": pull_request_node(pull)}
+            for index, pull in enumerate(state["pull_requests"].values())
+        }
+    if "query PullRequestStates" in query:
+        return {
+            f"p{index}": {"pullRequest": {"state": pull["state"], "mergedAt": pull["merged_at"]}}
+            for index, pull in enumerate(state["pull_requests"].values())
+        }
+    if "closedByPullRequestsReferences(first: 100" in query:
+        return {
+            "repository": {
+                "issue": {
+                    "closedByPullRequestsReferences": {
+                        "nodes": issue_node()["closedByPullRequestsReferences"]["nodes"],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        }
+    if "reviewThreads(first: 100) { nodes { isResolved path line" in query:
+        return {
+            "repository": {
+                "pullRequest": {
+                    "closingIssuesReferences": {"nodes": []},
+                    "reviewThreads": {"nodes": []},
+                }
+            }
+        }
+    if "query IssueBlockers" in query:
+        return {
+            "repository": {
+                "issue": {
+                    "blockedBy": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [],
+                    }
+                }
+            }
+        }
+    if "assigned: search" in query and "assignee:demo" in query:
+        return {"assigned": {"nodes": [issue_node(node) for node in fixtures["assigned_issues"]]}}
+    if "tracked: search" in query and "repo:demo/project" in query:
+        return {"tracked": {"nodes": [issue_node(node) for node in fixtures["tracked_issues"]]}}
+    if 'name: "todos"' in query and 'labels: ["workdash-todo"]' in query:
+        return {
+            "repository": {
+                "issues": {"nodes": [issue_node(node, "demo/todos") for node in fixtures["todos"]]}
+            }
+        }
+    unknown()
+
+
+def search_pull(node):
+    return {
+        "id": f"PR_demo_{node['number']}",
+        "number": node["number"],
+        "title": node["title"],
+        "url": f"https://github.com/{repo}/pull/{node['number']}",
+        "createdAt": (run_time - timedelta(days=node["created_days_ago"])).isoformat(),
+        "updatedAt": (run_time - timedelta(hours=node["updated_hours_ago"])).isoformat(),
+        "isDraft": False,
+        "repository": {"nameWithOwner": repo},
+    }
+
+
+respond()

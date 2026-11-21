@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Review pull requests together — workdash</title>
+    <meta
+      name="description"
+      content="Find your review requests, understand the change, and inspect an agent's findings before you decide."
+    />
+    <meta property="og:title" content="Review pull requests together — workdash" />
+    <meta
+      property="og:description"
+      content="Find your review requests, understand the change, and inspect an agent's findings before you decide."
+    />
+    <meta property="og:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
+    <meta property="og:image:width" content="967" />
+    <meta property="og:image:height" content="520" />
+    <meta property="og:image:alt" content="workdash dashboard showing GitHub issues and pull requests" />
+    <meta property="og:url" content="https://alessandro.molina.fyi/workdash/review.html" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Review pull requests together — workdash" />
+    <meta
+      name="twitter:description"
+      content="Find your review requests, understand the change, and inspect an agent's findings before you decide."
+    />
+    <meta name="twitter:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="container site-nav">
+        <a class="brand" href="index.html"><span class="mark" aria-hidden="true">&#9889;</span> workdash</a>
+        <nav aria-label="Main navigation">
+          <a href="work.html">Work</a>
+          <a href="review.html" aria-current="page">Review</a>
+          <a href="agentic.html">Agentic loop</a>
+          <a href="control.html">Automation</a>
+          <a href="index.html#install">Install</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+    <section id="review">
+      <div class="container loop-intro">
+        <div>
+          <p class="eyebrow">Review together</p>
+          <h1>Give every change a second look.</h1>
+          <p class="lead">Review the code yourself and ask an agent what you might have missed. You still decide what’s ready to ship.</p>
+          <a class="cta primary" href="#changes">See how you review a change &darr;</a>
+        </div>
+        <div class="intro-map" aria-label="Two perspectives on one change">
+          <h2 class="eyebrow">Two perspectives, one pull request</h2>
+          <p><strong>You know the intent.</strong> Does the change solve the right problem and fit the codebase?</p>
+          <p><strong>Your agent looks for what you missed.</strong> Ask it to inspect the diff for bugs and edge cases before you decide.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="analyze">
+      <div class="container">
+        <h2>Know what the change is meant to do</h2>
+        <p class="lead">Review requests show up as <code>RV</code> next to the rest of your work. Get the intent before you get into the diff.</p>
+        <div class="features">
+          <article class="feature">
+            <h3><span class="kbd">v</span> Read the pull request</h3>
+            <p>Press <span class="kbd">v</span> twice to read the description and review discussion in the terminal.</p>
+          </article>
+          <article class="feature">
+            <h3><span class="kbd">a</span> Ask for a briefing</h3>
+            <p>Have your chosen agent read the description, comments, and reviews. Return to the cached briefing until the PR updates.</p>
+          </article>
+        </div>
+        <p><a class="text-link" href="work.html#analyze">See the terminal and HTML analysis views &rarr;</a></p>
+      </div>
+    </section>
+
+    <section id="changes">
+      <div class="container">
+        <h2>Read the diff in your terminal</h2>
+        <p class="lead">Press <span class="kbd">c</span>, then <span class="kbd">d</span> to open the branch diff. Pick a file and compare the old and new code side by side.</p>
+        <figure class="detail-shot">
+          <a href="img/branch-diff.png"><img src="img/branch-diff.png" alt="Full-width branch diff showing a changed-file list and code before and after the change" loading="lazy" /></a>
+          <figcaption>The file list stays visible as you move through the diff. <a href="img/branch-diff.png">View full size &nearr;</a></figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section id="agent-review">
+      <div class="container">
+        <h2>Get a second set of eyes</h2>
+        <p class="lead">Use your agent’s findings to guide a closer look. Keep your judgment at the center of the review.</p>
+        <ol class="workflow-list">
+          <li><strong>Pick your reviewer.</strong> Press <span class="kbd">c</span>, then <span class="kbd">r</span>, or run <code>workdash review ITEM</code> from your terminal.</li>
+          <li><strong>Read the findings where the change lives.</strong> The agent posts new major findings as inline comments on GitHub.</li>
+          <li><strong>Make the call yourself.</strong> Check those findings against the code and what the change is meant to do.</li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="re-review">
+      <div class="container">
+        <h2>Close the feedback loop</h2>
+        <p>Address the feedback, resolve the relevant threads, and ask the reviewer for another look. For work you delegate, the <a href="agentic.html">dispatch loop</a> can pick up actionable feedback on a linked PR.</p>
+        <p id="branchinfo">Already in a checkout? <a href="work.html#branchinfo">Find its pull request and linked issues from the terminal.</a></p>
+      </div>
+    </section>
+
+    </main>
+
+    <footer>
+      <div class="container">
+        <p>
+          <a href="https://github.com/amol-/workdash">Source</a>
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/features/"
+            >Product spec (BDD)</a
+          >
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/LICENSE">GPL-3.0</a>
+        </p>
+        <p>&copy; Alessandro Molina</p>
+      </div>
+    </footer>
+
+  </body>
+</html>

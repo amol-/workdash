@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Your work — workdash</title>
+    <meta
+      name="description"
+      content="See what is waiting, read documents, analyze work items, and code alongside your chosen agent in the same worktree."
+    />
+    <meta property="og:title" content="Your work — workdash" />
+    <meta
+      property="og:description"
+      content="See what is waiting, read documents, analyze work items, and code alongside your chosen agent in the same worktree."
+    />
+    <meta property="og:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
+    <meta property="og:image:width" content="967" />
+    <meta property="og:image:height" content="520" />
+    <meta property="og:image:alt" content="workdash dashboard showing GitHub issues and pull requests" />
+    <meta property="og:url" content="https://alessandro.molina.fyi/workdash/work.html" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Your work — workdash" />
+    <meta
+      name="twitter:description"
+      content="See what is waiting, read documents, analyze work items, and code alongside your chosen agent in the same worktree."
+    />
+    <meta name="twitter:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="container site-nav">
+        <a class="brand" href="index.html"><span class="mark" aria-hidden="true">&#9889;</span> workdash</a>
+        <nav aria-label="Main navigation">
+          <a href="work.html" aria-current="page">Work</a>
+          <a href="review.html">Review</a>
+          <a href="agentic.html">Agentic loop</a>
+          <a href="control.html">Automation</a>
+          <a href="index.html#install">Install</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+    <section id="work">
+      <div class="container loop-intro">
+        <div>
+          <p class="eyebrow">Work your way</p>
+          <h1>Work with your agent. Stay in control.</h1>
+          <p class="lead">Pick a task, decide what it needs, and work on it yourself or alongside an agent. You share the same Git checkout and can take over whenever you want.</p>
+          <a class="cta primary" href="#waiting">Start with your work &darr;</a>
+        </div>
+        <ol class="workflow-list intro-map" aria-label="On this page">
+          <li><strong><a href="#waiting">Pick your next task</a></strong> Find the issue or PR that needs your attention.</li>
+          <li><strong><a href="#view">Study the task</a></strong> Read the discussion or <a href="#analyze">ask for an agent’s briefing</a>.</li>
+          <li><strong><a href="#code">Work in the same checkout</a></strong> Open a shell, start an agent, or edit the files yourself.</li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="waiting">
+      <div class="container">
+        <h2>What’s waiting for you?</h2>
+        <p class="lead">See your issues, pull requests, review requests, and todos across repositories. Recently updated work rises to the top, and <code>*</code> marks a suggested next task.</p>
+        <figure class="detail-shot">
+          <a href="img/dashboard.gif"><img src="img/dashboard.gif" alt="Dashboard with the suggested issue, review requests, and check and review indicators beside an authored pull request" /></a>
+        </figure>
+        <dl class="legend-strip" id="legend" aria-label="Dashboard row labels">
+          <div><dt>IS</dt><dd>Issue</dd></div>
+          <div><dt>TD</dt><dd>Todo</dd></div>
+          <div><dt>PR</dt><dd>Your pull request</dd></div>
+          <div><dt>RV</dt><dd>Requested or completed review</dd></div>
+          <div><dt>VR</dt><dd>Other pull request</dd></div>
+        </dl>
+	<p>On your PRs, the first symbol reports CI and the second reports review.<br/>For example, <code><span style="color:green">✓✓</span> PR</code> means checks pass and the PR is approved. A bold cyan title marks an issue with sub-issues.</p>
+        <div class="features" id="search">
+          <div class="feature">
+            <h3><span class="kbd">/</span> Find a task</h3>
+            <p>Filter by type, number, repository, or title. Press <span class="kbd">/</span> again to clear the filter.</p>
+          </div>
+          <div class="feature">
+            <h3><span class="kbd">i</span> Bring in another task</h3>
+            <p>Paste a GitHub issue or PR URL to add it to your dashboard.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view">
+      <div class="container">
+        <h2>Study the task before you edit</h2>
+        <div class="tour-step">
+          <figure class="tour-shot" data-full="img/viewer.gif">
+            <img src="img/viewer.gif" alt="The built-in terminal viewer showing the issue description and its discussion" />
+          </figure>
+          <div class="tour-text">
+            <p class="lead">Read the issue, follow the discussion, and see what needs to change without leaving the terminal.</p>
+            <p>Press <span class="kbd">v</span> twice to open the task in the built-in viewer. Follow a linked issue or document and press <span class="kbd">b</span> to return. To open the task on GitHub, press <span class="kbd">v</span>, then <span class="kbd">o</span>.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="analyze">
+      <div class="container">
+        <h2>Get a briefing from your agent</h2>
+        <p class="lead">Ask for another reading of the issue before you touch the code. Press <span class="kbd">a</span> to choose an agent or reopen a saved analysis.</p>
+        <div class="features analysis-gallery">
+          <figure class="feature">
+            <h3>Choose an agent</h3>
+            <a href="img/analyze-dialog.gif"><img src="img/analyze-dialog.gif" alt="The analysis picker offers Claude, Codex, and a cached result" loading="lazy" /></a>
+            <figcaption>Pick a tool for a fresh look, or open your last analysis.</figcaption>
+          </figure>
+          <figure class="feature">
+            <h3>Read it in the terminal</h3>
+            <a href="img/analysis-viewer.gif"><img src="img/analysis-viewer.gif" alt="A cached analysis open in the built-in terminal viewer" loading="lazy" /></a>
+            <figcaption>Read the briefing without leaving your workspace.</figcaption>
+          </figure>
+          <figure class="feature">
+            <h3>Or read it in HTML</h3>
+            <a href="img/analysis-html.png"><img src="img/analysis-html.png" alt="A rendered workdash analysis with headings and a summary in a browser" loading="lazy" /></a>
+            <figcaption>Choose an HTML analysis viewer in setup to read the same result in your browser.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section id="code">
+      <div class="container">
+        <h2>Build in the same checkout</h2>
+        <p class="lead">Start your agent with the task already in hand. While it works, inspect the changes, run a test, or edit the same files yourself.</p>
+        <figure class="detail-shot">
+          <a href="img/coding-session.png"><img src="img/coding-session.png" alt="A workdash dashboard beside a coding agent in the same terminal workspace" loading="lazy" /></a>
+          <figcaption>The dashboard and a coding session side by side. <a href="img/coding-session.png">View full size &nearr;</a></figcaption>
+        </figure>
+        <div class="tour-step">
+          <figure class="tour-shot" data-full="img/code-menu.gif">
+            <img src="img/code-menu.gif" alt="Workdash code menu with Claude, Codex, editor, diff, and terminal choices" loading="lazy" />
+          </figure>
+          <div class="tour-text">
+            <p>Press <span class="kbd">c</span> and choose an agent to open a dedicated Git worktree for the task. Choose the agent again to return to its running pane, not start another one.</p>
+            <p>Rather work solo? Open the task’s terminal. If you use VS Code with Copilot, press <span class="kbd">e</span> to open the checkout there instead.</p>
+            <p><a class="text-link" href="img/agent-session.gif">See a simulated Claude session &nearr;</a></p>
+            <a class="text-link" href="review.html">Review the result together &rarr;</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="workspace">
+      <div class="container">
+        <p class="eyebrow">Keep your place</p>
+        <h2>Stay with the work, even when you switch tasks</h2>
+        <div class="features">
+          <article class="feature" id="terminals">
+            <h3>Run commands in the right checkout</h3>
+            <p>Press <span class="kbd">c</span>, then <span class="kbd">t</span> to open the task’s shell without launching an agent. The same keys return to that shell so you can pick up the test or command you left there.</p>
+          </article>
+          <article class="feature" id="todos">
+            <h3>Park a thought without losing it</h3>
+            <p>Press <span class="kbd">w</span> to capture a todo while you’re focused on something else. It returns to your dashboard as a GitHub issue. Add detail with <code>workdash todo TEXT --body "…"</code>.</p>
+          </article>
+          <article class="feature" id="session">
+            <h3>Resume from another terminal</h3>
+            <p>Leave the dashboard running when you detach and your agent can keep working. Run <code>workdash</code> in another terminal to reattach to the same Zellij session.</p>
+          </article>
+        </div>
+        <div class="branch-example" id="branchinfo">
+          <h3>Find the task behind this pane</h3>
+          <p>Forgot what you opened a shell for? Run <code>workdash branchinfo</code> from the checkout to see the branch’s pull request and linked issues. Here’s an example with passing checks and an approved PR:</p>
+          <pre><code>PR: Describe the shared workspace https://github.com/demo/project/pull/53 ✓✓
+ISSUE: Improve the shared workspace https://github.com/demo/project/issues/42</code></pre>
+        </div>
+      </div>
+    </section>
+
+    </main>
+
+    <div class="lightbox" id="lightbox" aria-hidden="true">
+      <button class="lightbox-close" aria-label="Close">&times;</button>
+      <img alt="" />
+    </div>
+
+    <footer>
+      <div class="container">
+        <p>
+          <a href="https://github.com/amol-/workdash">Source</a>
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/features/"
+            >Product spec (BDD)</a
+          >
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/LICENSE">GPL-3.0</a>
+        </p>
+        <p>&copy; Alessandro Molina</p>
+      </div>
+    </footer>
+
+    <script>
+      (function () {
+        var lightbox = document.getElementById("lightbox");
+        var lightboxImg = lightbox.querySelector("img");
+        var closeBtn = lightbox.querySelector(".lightbox-close");
+
+        function open(src, alt) {
+          lightboxImg.src = src;
+          lightboxImg.alt = alt || "";
+          lightbox.classList.add("open");
+          lightbox.setAttribute("aria-hidden", "false");
+          document.body.style.overflow = "hidden";
+        }
+
+        function close() {
+          lightbox.classList.remove("open");
+          lightbox.setAttribute("aria-hidden", "true");
+          lightboxImg.src = "";
+          document.body.style.overflow = "";
+        }
+
+        document.querySelectorAll(".tour-shot").forEach(function (el) {
+          el.addEventListener("click", function () {
+            var full = el.getAttribute("data-full");
+            var img = el.querySelector("img");
+            open(full, img ? img.alt : "");
+          });
+        });
+
+        lightbox.addEventListener("click", function (e) {
+          if (e.target === lightbox || e.target === closeBtn) close();
+        });
+
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape" && lightbox.classList.contains("open")) close();
+        });
+      })();
+    </script>
+  </body>
+</html>

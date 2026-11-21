@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Supervise your dispatch loop — workdash</title>
+    <meta
+      name="description"
+      content="Delegate ready issues to your agent in a worktree. Supervise implementation, review and optional merging from the dashboard, and join the pane when you need."
+    />
+    <meta property="og:title" content="Supervise your dispatch loop — workdash" />
+    <meta
+      property="og:description"
+      content="Delegate ready issues to your agent in a worktree. Supervise implementation, review and optional merging from the dashboard, and join the pane when you need."
+    />
+    <meta property="og:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
+    <meta property="og:image:width" content="967" />
+    <meta property="og:image:height" content="520" />
+    <meta property="og:image:alt" content="workdash dashboard showing GitHub issues and pull requests" />
+    <meta property="og:url" content="https://alessandro.molina.fyi/workdash/agentic.html" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Supervise your dispatch loop — workdash" />
+    <meta
+      name="twitter:description"
+      content="Delegate ready issues to your agent in a worktree. Supervise implementation, review and optional merging from the dashboard, and join the pane when you need."
+    />
+    <meta name="twitter:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="container site-nav">
+        <a class="brand" href="index.html"><span class="mark" aria-hidden="true">&#9889;</span> workdash</a>
+        <nav aria-label="Main navigation">
+          <a href="work.html">Work</a>
+          <a href="review.html">Review</a>
+          <a href="agentic.html" aria-current="page">Agentic loop</a>
+          <a href="control.html">Automation</a>
+          <a href="index.html#install">Install</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+    <section id="loop">
+      <div class="container">
+        <div class="loop-intro">
+          <div>
+            <p class="eyebrow">The agentic loop</p>
+            <h1>Delegate the work. Stay in the loop.</h1>
+            <p class="lead">Give your agent a set of issues to work through. Follow implementation and review from the same dashboard, and join the agent’s pane when you want to help.</p>
+            <a class="cta primary" href="#demo">Watch a run &darr;</a>
+          </div>
+          <svg class="loop-diagram" viewBox="0 0 468 204" role="img" aria-labelledby="loop-title loop-description">
+            <title id="loop-title">The workdash dispatch loop</title>
+            <desc id="loop-description">Ready work goes to implementation, then review. Rework returns to implementation. When work needs no further action, the loop looks for the next ready issue.</desc>
+            <defs>
+              <marker id="loop-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto">
+                <path d="M0 0l8 4-8 4z" fill="currentColor" />
+              </marker>
+            </defs>
+            <g class="loop-node">
+              <rect x="12" y="12" width="156" height="52" rx="10" />
+              <rect x="256" y="12" width="156" height="52" rx="10" />
+              <rect x="256" y="140" width="156" height="52" rx="10" />
+              <rect x="12" y="140" width="156" height="52" rx="10" />
+            </g>
+            <g class="loop-arrow" marker-end="url(#loop-arrow)">
+              <path d="M174 38h76" />
+              <path d="M313 70v64" />
+              <path d="M250 166h-76" />
+              <path d="M90 134V70" />
+              <path d="M418 166h20V38h-20" stroke-dasharray="4 4" />
+            </g>
+            <g class="loop-label">
+              <text x="90" y="45">Ready work</text>
+              <text x="334" y="45">Implement</text>
+              <text x="334" y="173">Review</text>
+              <text x="90" y="173">Next issue</text>
+              <text x="378" y="106" class="loop-rework">Rework</text>
+            </g>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <section id="demo">
+      <div class="container">
+        <p class="eyebrow">A run from start to finish</p>
+        <h2>From issue to merged pull request</h2>
+        <p class="lead">Follow the numbered captions. In the dashboard shots, the line above the work list shows what the agent is doing. This demo uses a simulated agent, with merging turned on.</p>
+        <figure class="loop-demo">
+          <picture>
+            <source media="(prefers-reduced-motion: no-preference)" srcset="img/loop.gif" />
+            <img src="img/dashboard-progress.gif" alt="Workdash tracks the selected issue above the work list as the agent implements it, opens a pull request, and moves to review before merging." />
+          </picture>
+          <figcaption><a class="text-link" href="img/loop.gif">Open full-size GIF &nearr;</a></figcaption>
+        </figure>
+        <p>Try it on your own issue: press <span class="kbd">d</span> and choose an agent that can code and review. Starting directly on an issue can restart work already under way on it.</p>
+      </div>
+    </section>
+
+    <section id="watching">
+      <div class="container">
+        <h2>Watching it work</h2>
+        <p class="lead">
+          Follow progress from the dashboard, then enter the pane when you want to participate.
+        </p>
+        <p>
+          The progress panel follows each issue from coding to review while you keep working.
+          Leave pull requests open for your review, or turn on merging for that session.
+        </p>
+        <div class="features">
+          <div class="feature">
+            <h3><span class="kbd">Shift+Tab</span>Focus progress</h3>
+            <p>Select a session with <span class="kbd">Up</span> or <span class="kbd">Down</span>. Use <span class="kbd">Tab</span> to return to your work table.</p>
+          </div>
+          <div class="feature">
+            <h3><span class="kbd">f</span>Join the pane</h3>
+            <p>Focus your selected session's coding or review pane while it is available.</p>
+          </div>
+          <div class="feature">
+            <h3><span class="kbd">m</span>Toggle merging</h3>
+            <p>Enable or disable automerge for your selected running session.</p>
+          </div>
+          <div class="feature">
+            <h3><span class="kbd">s</span>Stop the session</h3>
+            <p>Stop your selected session and remove it from the progress panel.</p>
+          </div>
+        </div>
+        <div class="tour-shots">
+          <figure class="tour-shot fit-top" data-full="img/dashboard-progress.gif">
+            <img
+              src="img/dashboard-progress.gif"
+              alt="Dashboard progress panel showing the current issue and session progress above the work table"
+            />
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section id="scope">
+      <div class="container">
+        <h2>Start with an issue or a whole repository</h2>
+        <p class="lead">Use the dashboard for the issue in front of you. From the CLI, start a loop for a repository or pass an issue to include its sub-issues.</p>
+        <pre><code>workdash autodispatch owner/repo</code></pre>
+        <a class="text-link" href="control.html#cli">Explore the command line &rarr;</a>
+      </div>
+    </section>
+
+    </main>
+
+    <div class="lightbox" id="lightbox" aria-hidden="true">
+      <button class="lightbox-close" aria-label="Close">&times;</button>
+      <img alt="" />
+    </div>
+
+    <footer>
+      <div class="container">
+        <p>
+          <a href="https://github.com/amol-/workdash">Source</a>
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/features/"
+            >Product spec (BDD)</a
+          >
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/LICENSE">GPL-3.0</a>
+        </p>
+        <p>&copy; Alessandro Molina</p>
+      </div>
+    </footer>
+
+    <script>
+      (function () {
+        var lightbox = document.getElementById("lightbox");
+        var lightboxImg = lightbox.querySelector("img");
+        var closeBtn = lightbox.querySelector(".lightbox-close");
+
+        function open(src, alt) {
+          lightboxImg.src = src;
+          lightboxImg.alt = alt || "";
+          lightbox.classList.add("open");
+          lightbox.setAttribute("aria-hidden", "false");
+          document.body.style.overflow = "hidden";
+        }
+
+        function close() {
+          lightbox.classList.remove("open");
+          lightbox.setAttribute("aria-hidden", "true");
+          lightboxImg.src = "";
+          document.body.style.overflow = "";
+        }
+
+        document.querySelectorAll(".tour-shot").forEach(function (el) {
+          el.addEventListener("click", function () {
+            var full = el.getAttribute("data-full");
+            var img = el.querySelector("img");
+            open(full, img ? img.alt : "");
+          });
+        });
+
+        lightbox.addEventListener("click", function (e) {
+          if (e.target === lightbox || e.target === closeBtn) close();
+        });
+
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape" && lightbox.classList.contains("open")) close();
+        });
+      })();
+    </script>
+  </body>
+</html>
