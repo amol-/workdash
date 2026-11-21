@@ -23,6 +23,7 @@ class DashboardRecord:
     session: str
     pid: int
     address: str
+    pane_id: str | None = None
 
 
 class DashboardRecords:
@@ -53,7 +54,10 @@ class DashboardRecords:
             return None
         if not isinstance(address, str) or not address:
             return None
-        return DashboardRecord(session=session, pid=pid, address=address)
+        pane_id = dashboard.get("pane_id")
+        if not isinstance(pane_id, str) or not pane_id.isascii() or not pane_id.isdecimal():
+            pane_id = None
+        return DashboardRecord(session=session, pid=pid, address=address, pane_id=pane_id)
 
     def save(self, record: DashboardRecord) -> None:
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -69,7 +73,11 @@ class DashboardRecords:
                     {
                         "schema_version": _SCHEMA_VERSION,
                         "session": record.session,
-                        "dashboard": {"pid": record.pid, "address": record.address},
+                        "dashboard": {
+                            "pid": record.pid,
+                            "address": record.address,
+                            "pane_id": record.pane_id,
+                        },
                     },
                     handle,
                     ensure_ascii=True,

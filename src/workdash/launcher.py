@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -766,6 +767,7 @@ class Zellij:
             print("Workdash is already running; new options are ignored. Attaching...", flush=True)
             time.sleep(1)
             command = [zellij, "attach", session_name]
+            Zellij._attach_and_focus_dashboard(zellij, session_name, command)
         elif session_name in sessions:
             if sessions[session_name]:
                 try:
@@ -1202,6 +1204,52 @@ class Zellij:
             raise RuntimeError(
                 f"Failed to close Zellij pane {pane_id} in {session}: {details or error.returncode}"
             ) from error
+
+    @staticmethod
+    def _attach_and_focus_dashboard(zellij: str, session_name: str, command: list[str]) -> None:
+        record = DashboardRecords().load(session_name)
+        if record and record.pane_id:
+            try:
+                client = subprocess.Popen(command)
+            except OSError:
+                pass
+            else:
+                previous = {
+                    sig: signal.signal(sig, signal.SIG_IGN)
+                    for sig in (signal.SIGINT, signal.SIGQUIT)
+                }
+                try:
+                    with suppress(OSError, RuntimeError, subprocess.SubprocessError):
+                        panes = _read_zellij_panes(session_name)
+                        pane = next(
+                            (
+                                pane
+                                for pane in panes
+                                if str(pane.get("id")) == record.pane_id
+                                and is_live_zellij_pane(pane)
+                                and pane.get("tab_id") is not None
+                            ),
+                            None,
+                        )
+                        if pane:
+                            time.sleep(0.5)
+                            subprocess.run(
+                                [
+                                    zellij,
+                                    "--session",
+                                    session_name,
+                                    "action",
+                                    "focus-pane-id",
+                                    f"terminal_{record.pane_id}",
+                                ],
+                                check=True,
+                                capture_output=True,
+                                timeout=2,
+                            )
+                    raise SystemExit(client.wait())
+                finally:
+                    for sig, handler in previous.items():
+                        signal.signal(sig, handler)
 
     def _group_tab_id(
         self, zellij: str, session: str, group: str | None, *, context: str
