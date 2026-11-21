@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Review — workdash — text-based GitHub work triage dashboard</title>
+    <meta
+      name="description"
+      content="workdash pulls together the GitHub issues and pull requests that matter to you, suggests what to pick up next, and launches reviews, AI analyses, or full coding sessions from a terminal TUI."
+    />
+    <meta property="og:title" content="Review — workdash" />
+    <meta
+      property="og:description"
+      content="Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
+    />
+    <meta property="og:image" content="https://alessandro.molina.fyi/workdash/img/workdash.png" />
+    <meta property="og:image:width" content="967" />
+    <meta property="og:image:height" content="520" />
+    <meta property="og:image:alt" content="workdash dashboard showing GitHub issues and pull requests" />
+    <meta property="og:url" content="https://alessandro.molina.fyi/workdash/review.html" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Review — workdash" />
+    <meta
+      name="twitter:description"
+      content="Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
+    />
+    <meta name="twitter:image" content="https://alessandro.molina.fyi/workdash/img/workdash.png" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="container">
+        <div class="brand"><span class="mark">&#9889;</span> <a href="index.html">workdash</a></div>
+        <nav aria-label="Main navigation">
+          <a href="work.html">Work</a> &middot;
+          <a href="review.html">Review</a> &middot;
+          <a href="agentic.html">Agentic loop</a> &middot;
+          <a href="control.html">Automation</a> &middot;
+          <a href="index.html#install">Install</a>
+        </nav>
+      </div>
+    </header>
+
+    <section id="tour">
+      <div class="container">
+        <h2>From inbox to code, in three keystrokes</h2>
+        <p class="lead">
+          <code>workdash</code> collapses the gap between
+          <em>knowing what to work on</em> and <em>actually working on it</em>.
+          Here is what that looks like for the common things you spend most of
+          your GitHub day on. Click any screenshot to zoom in.
+        </p>
+
+        <div class="workflow" id="review">
+          <div class="workflow-header">
+            <h3>Review a pull request</h3>
+            <p class="workflow-lead">
+              Skip the "what is this PR even doing?" step and dive into a
+              grounded review.
+            </p>
+          </div>
+          <div class="tour-step">
+            <div class="tour-shots">
+              <figure class="tour-shot" data-full="img/analyze_item.png">
+                <img
+                  src="img/analyze_item.png"
+                  alt="analyze dialog offering to open a cached analysis or run a fresh one with Claude or Codex against the selected pull request"
+                />
+              </figure>
+              <figure class="tour-shot fit-top" data-full="img/analysis_result.png">
+                <img
+                  src="img/analysis_result.png"
+                  alt="rendered HTML analysis of a pull request opened in a browser"
+                />
+              </figure>
+            </div>
+            <div class="tour-text">
+              <h4>Workflow</h4>
+              <ol class="workflow-list">
+                <li>
+                  <strong>Spot the review requests.</strong>
+                  PRs waiting on your review are surfaced in the same list
+                  as everything else, so they do not get lost in a GitHub
+                  notifications tab.
+                </li>
+                <li>
+                  <strong>Pick an analysis — <code>a</code>.</strong>
+                  The analyze dialog offers the cached result or a fresh
+                  run with Claude or Codex.
+                </li>
+                <li>
+                  <strong>Read the briefing.</strong>
+                  The analysis is rendered as HTML summarising the change,
+                  the intent, and the risky parts. Cached until the PR is
+                  updated, so re-opening is free.
+                </li>
+                <li>
+                  <strong>Open it in context — <code>o</code> or <code>c</code>.</strong>
+                  Jump to GitHub to leave comments, or drop into a worktree
+                  with the PR checked out to actually run the code.
+                </li>
+              </ol>
+            </div>
+          </div>
+        </div>
+
+        <div class="workflow" id="changes">
+          <div class="workflow-header">
+            <h3>See what changed in a pull request</h3>
+            <p class="workflow-lead">
+              Review the actual diff before you decide whether a PR needs your
+              next reply, another commit, or a deeper review.
+            </p>
+          </div>
+          <div class="tour-step image-left">
+            <figure class="tour-shot" data-full="img/workdash_diff.png">
+              <img
+                src="img/workdash_diff.png"
+                alt="workdash showing the current diff for a pull request in the terminal"
+              />
+            </figure>
+            <div class="tour-text">
+              <h4>Why it helps</h4>
+              <ul class="benefit-list">
+                <li>
+                  <strong>Check authored PRs without context switching.</strong>
+                  See your current branch changes from the same dashboard you
+                  use to track review feedback.
+                </li>
+                <li>
+                  <strong>Review incoming PRs with the diff nearby.</strong>
+                  Move from the queue to the code changes without hunting
+                  through GitHub tabs.
+                </li>
+                <li>
+                  <strong>Decide the next action faster.</strong>
+                  When the diff is visible, it is easier to choose between
+                  replying, requesting changes, or opening a worktree.
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <div class="lightbox" id="lightbox" aria-hidden="true">
+      <button class="lightbox-close" aria-label="Close">&times;</button>
+      <img alt="" />
+    </div>
+
+    <footer>
+      <div class="container">
+        <p>
+          <a href="https://github.com/amol-/workdash">Source</a>
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/features/"
+            >Product spec (BDD)</a
+          >
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/LICENSE">GPL-3.0</a>
+        </p>
+        <p>&copy; Alessandro Molina</p>
+      </div>
+    </footer>
+
+    <script>
+      (function () {
+        var lightbox = document.getElementById("lightbox");
+        var lightboxImg = lightbox.querySelector("img");
+        var closeBtn = lightbox.querySelector(".lightbox-close");
+
+        function open(src, alt) {
+          lightboxImg.src = src;
+          lightboxImg.alt = alt || "";
+          lightbox.classList.add("open");
+          lightbox.setAttribute("aria-hidden", "false");
+          document.body.style.overflow = "hidden";
+        }
+
+        function close() {
+          lightbox.classList.remove("open");
+          lightbox.setAttribute("aria-hidden", "true");
+          lightboxImg.src = "";
+          document.body.style.overflow = "";
+        }
+
+        document.querySelectorAll(".tour-shot").forEach(function (el) {
+          el.addEventListener("click", function () {
+            var full = el.getAttribute("data-full");
+            var img = el.querySelector("img");
+            open(full, img ? img.alt : "");
+          });
+        });
+
+        lightbox.addEventListener("click", function (e) {
+          if (e.target === lightbox || e.target === closeBtn) close();
+        });
+
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape" && lightbox.classList.contains("open")) close();
+        });
+      })();
+    </script>
+  </body>
+</html>

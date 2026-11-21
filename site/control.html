@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Automation — workdash — text-based GitHub work triage dashboard</title>
+    <meta
+      name="description"
+      content="workdash pulls together the GitHub issues and pull requests that matter to you, suggests what to pick up next, and launches reviews, AI analyses, or full coding sessions from a terminal TUI."
+    />
+    <meta property="og:title" content="Automation — workdash" />
+    <meta
+      property="og:description"
+      content="Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
+    />
+    <meta property="og:image" content="https://alessandro.molina.fyi/workdash/img/workdash.png" />
+    <meta property="og:image:width" content="967" />
+    <meta property="og:image:height" content="520" />
+    <meta property="og:image:alt" content="workdash dashboard showing GitHub issues and pull requests" />
+    <meta property="og:url" content="https://alessandro.molina.fyi/workdash/control.html" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Automation — workdash" />
+    <meta
+      name="twitter:description"
+      content="Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
+    />
+    <meta name="twitter:image" content="https://alessandro.molina.fyi/workdash/img/workdash.png" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="container">
+        <div class="brand"><span class="mark">&#9889;</span> <a href="index.html">workdash</a></div>
+        <nav aria-label="Main navigation">
+          <a href="work.html">Work</a> &middot;
+          <a href="review.html">Review</a> &middot;
+          <a href="agentic.html">Agentic loop</a> &middot;
+          <a href="control.html">Automation</a> &middot;
+          <a href="index.html#install">Install</a>
+        </nav>
+      </div>
+    </header>
+
+    <section id="cli">
+      <div class="container">
+        <h2>A local control plane for agent swarms</h2>
+        <p class="lead">
+          Workdash is not just a human dashboard. On the same host, agents can
+          read the queue, inspect live Zellij panes, request analysis, and launch
+          coding sessions through commands whose <code>--json</code> output is
+          safe to parse.
+        </p>
+        <div class="features control-plane-features">
+          <div class="feature">
+            <h3><span class="kbd">1</span>List work items</h3>
+            <p>
+              Start here. The list command returns copy/paste item IDs that the
+              other commands accept.
+            </p>
+            <pre><code>workdash list --json
+{
+  "items": [
+    {
+      "id": "owner/repo#ISSUE-42",
+      "type": "ISSUE",
+      "title": "Fix failing deploy",
+      "suggested": true
+    }
+  ]
+}</code></pre>
+          </div>
+          <div class="feature">
+            <h3><span class="kbd">2</span>Inspect panes</h3>
+            <p>See which Workdash-owned Zellij panes already exist.</p>
+            <pre><code>workdash info --json
+{
+  "session": "workdash-a1b2c3d4",
+  "panes": [
+    {
+      "pane_id": "terminal_7",
+      "kind": "agent",
+      "item": "owner/repo#ISSUE-42"
+    }
+  ]
+}</code></pre>
+          </div>
+          <div class="feature">
+            <h3><span class="kbd">3</span>Analyze an item</h3>
+            <p>Ask a configured analysis agent for a cached or fresh briefing.</p>
+            <pre><code>workdash analyze owner/repo#ISSUE-42 --json
+{
+  "item_id": "owner/repo#ISSUE-42",
+  "status": "generated",
+  "path": "/home/me/wrk/.../analysis.md"
+}</code></pre>
+          </div>
+          <div class="feature">
+            <h3><span class="kbd">4</span>Launch coding</h3>
+            <p>Start a coding agent and get back the Zellij pane it created.</p>
+            <pre><code>workdash code owner/repo#ISSUE-42 --agent codex --json
+{
+  "item_id": "owner/repo#ISSUE-42",
+  "session": "workdash-a1b2c3d4",
+  "pane_id": "terminal_9",
+  "cwd": "/home/me/wrk/owner_repo_issue_42"
+}</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="remote">
+      <div class="container">
+        <h2>Access everywhere</h2>
+        <p class="lead">
+          <code>workdash</code> runs where your development machine runs. Attach
+          through <code>zellij</code> remote or plain <code>ssh</code>, then keep
+          the same dashboard, worktrees, cached analyses, and agent launch
+          commands available from a laptop, tablet, or phone.
+        </p>
+        <div class="remote-access">
+          <figure class="tour-shot" data-full="img/workdash_remote.jpg">
+            <img
+              src="img/workdash_remote.jpg"
+              alt="workdash running in a zellij terminal session from a mobile device over a remote connection"
+            />
+          </figure>
+          <div class="tour-text">
+            <h4>Remote workflow</h4>
+            <ul class="benefit-list">
+              <li>
+                <strong>Resume the same terminal session.</strong>
+                Use <code>zellij</code> remote to reconnect to the dashboard
+                without recreating tabs, panes, or in-progress coding sessions.
+              </li>
+              <li>
+                <strong>Fallback to ordinary SSH.</strong>
+                When all you have is a shell, start <code>workdash</code> over
+                <code>ssh</code> and keep the full triage loop close at hand.
+              </li>
+              <li>
+                <strong>Keep state on the workstation.</strong>
+                Worktrees, GitHub credentials, caches, and agent tooling stay
+                on the machine that already has your development environment.
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="lightbox" id="lightbox" aria-hidden="true">
+      <button class="lightbox-close" aria-label="Close">&times;</button>
+      <img alt="" />
+    </div>
+
+    <footer>
+      <div class="container">
+        <p>
+          <a href="https://github.com/amol-/workdash">Source</a>
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/features/"
+            >Product spec (BDD)</a
+          >
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/LICENSE">GPL-3.0</a>
+        </p>
+        <p>&copy; Alessandro Molina</p>
+      </div>
+    </footer>
+
+    <script>
+      (function () {
+        var lightbox = document.getElementById("lightbox");
+        var lightboxImg = lightbox.querySelector("img");
+        var closeBtn = lightbox.querySelector(".lightbox-close");
+
+        function open(src, alt) {
+          lightboxImg.src = src;
+          lightboxImg.alt = alt || "";
+          lightbox.classList.add("open");
+          lightbox.setAttribute("aria-hidden", "false");
+          document.body.style.overflow = "hidden";
+        }
+
+        function close() {
+          lightbox.classList.remove("open");
+          lightbox.setAttribute("aria-hidden", "true");
+          lightboxImg.src = "";
+          document.body.style.overflow = "";
+        }
+
+        document.querySelectorAll(".tour-shot").forEach(function (el) {
+          el.addEventListener("click", function () {
+            var full = el.getAttribute("data-full");
+            var img = el.querySelector("img");
+            open(full, img ? img.alt : "");
+          });
+        });
+
+        lightbox.addEventListener("click", function (e) {
+          if (e.target === lightbox || e.target === closeBtn) close();
+        });
+
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape" && lightbox.classList.contains("open")) close();
+        });
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agentic loop — workdash — text-based GitHub work triage dashboard</title>
+    <meta
+      name="description"
+      content="workdash pulls together the GitHub issues and pull requests that matter to you, suggests what to pick up next, and launches reviews, AI analyses, or full coding sessions from a terminal TUI."
+    />
+    <meta property="og:title" content="Agentic loop — workdash" />
+    <meta
+      property="og:description"
+      content="Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
+    />
+    <meta property="og:image" content="https://alessandro.molina.fyi/workdash/img/workdash.png" />
+    <meta property="og:image:width" content="967" />
+    <meta property="og:image:height" content="520" />
+    <meta property="og:image:alt" content="workdash dashboard showing GitHub issues and pull requests" />
+    <meta property="og:url" content="https://alessandro.molina.fyi/workdash/agentic.html" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Agentic loop — workdash" />
+    <meta
+      name="twitter:description"
+      content="Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
+    />
+    <meta name="twitter:image" content="https://alessandro.molina.fyi/workdash/img/workdash.png" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="container">
+        <div class="brand"><span class="mark">&#9889;</span> <a href="index.html">workdash</a></div>
+        <nav aria-label="Main navigation">
+          <a href="work.html">Work</a> &middot;
+          <a href="review.html">Review</a> &middot;
+          <a href="agentic.html">Agentic loop</a> &middot;
+          <a href="control.html">Automation</a> &middot;
+          <a href="index.html#install">Install</a>
+        </nav>
+      </div>
+    </header>
+
+    <section id="features">
+      <div class="container">
+        <h2>One key, one action</h2>
+        <div class="features">
+          <div class="feature">
+            <h3><span class="kbd">d</span>Dispatch</h3>
+            <p>
+              Start an autodispatch session that works through the selected
+              issue's ready tasks and reviews the pull requests it opens.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="lightbox" id="lightbox" aria-hidden="true">
+      <button class="lightbox-close" aria-label="Close">&times;</button>
+      <img alt="" />
+    </div>
+
+    <footer>
+      <div class="container">
+        <p>
+          <a href="https://github.com/amol-/workdash">Source</a>
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/features/"
+            >Product spec (BDD)</a
+          >
+          &middot;
+          <a href="https://github.com/amol-/workdash/blob/main/LICENSE">GPL-3.0</a>
+        </p>
+        <p>&copy; Alessandro Molina</p>
+      </div>
+    </footer>
+
+    <script>
+      (function () {
+        var lightbox = document.getElementById("lightbox");
+        var lightboxImg = lightbox.querySelector("img");
+        var closeBtn = lightbox.querySelector(".lightbox-close");
+
+        function open(src, alt) {
+          lightboxImg.src = src;
+          lightboxImg.alt = alt || "";
+          lightbox.classList.add("open");
+          lightbox.setAttribute("aria-hidden", "false");
+          document.body.style.overflow = "hidden";
+        }
+
+        function close() {
+          lightbox.classList.remove("open");
+          lightbox.setAttribute("aria-hidden", "true");
+          lightboxImg.src = "";
+          document.body.style.overflow = "";
+        }
+
+        document.querySelectorAll(".tour-shot").forEach(function (el) {
+          el.addEventListener("click", function () {
+            var full = el.getAttribute("data-full");
+            var img = el.querySelector("img");
+            open(full, img ? img.alt : "");
+          });
+        });
+
+        lightbox.addEventListener("click", function (e) {
+          if (e.target === lightbox || e.target === closeBtn) close();
+        });
+
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape" && lightbox.classList.contains("open")) close();
+        });
+      })();
+    </script>
+  </body>
+</html>
