@@ -43,7 +43,7 @@ def check_social_preview(site_metadata):
     image = base + "img/og-card.png"
     title = {
         "index": "workdash — your work and your agents, together",
-        "work": "Work — workdash",
+        "work": "Your work — workdash",
         "review": "Review — workdash",
         "agentic": "Agentic loop — workdash",
         "control": "Automation — workdash",
@@ -51,6 +51,8 @@ def check_social_preview(site_metadata):
     description = (
         "Coordinate your work and your agents' work in a development environment you own. Share tasks, context, and terminal panes. Keep your choice of tools."
         if page == "index"
+        else "See what is waiting, read documents, analyze work items, and code alongside your chosen agent in the same worktree."
+        if page == "work"
         else "Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
     )
     assert (

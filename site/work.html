@@ -3,15 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Work — workdash — text-based GitHub work triage dashboard</title>
+    <title>Your work — workdash</title>
     <meta
       name="description"
-      content="workdash pulls together the GitHub issues and pull requests that matter to you, suggests what to pick up next, and launches reviews, AI analyses, or full coding sessions from a terminal TUI."
+      content="See what is waiting, read documents, analyze work items, and code alongside your chosen agent in the same worktree."
     />
-    <meta property="og:title" content="Work — workdash" />
+    <meta property="og:title" content="Your work — workdash" />
     <meta
       property="og:description"
-      content="Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
+      content="See what is waiting, read documents, analyze work items, and code alongside your chosen agent in the same worktree."
     />
     <meta property="og:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
     <meta property="og:image:width" content="967" />
@@ -20,10 +20,10 @@
     <meta property="og:url" content="https://alessandro.molina.fyi/workdash/work.html" />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Work — workdash" />
+    <meta name="twitter:title" content="Your work — workdash" />
     <meta
       name="twitter:description"
-      content="Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
+      content="See what is waiting, read documents, analyze work items, and code alongside your chosen agent in the same worktree."
     />
     <meta name="twitter:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
@@ -43,145 +43,267 @@
       </div>
     </header>
 
-    <section id="features">
+    <section id="waiting">
       <div class="container">
-        <h2>One key, one action</h2>
-        <div class="features">
-          <div class="feature">
-            <h3><span class="kbd">o</span>Open in browser</h3>
-            <p>Jump straight to the issue or pull request on GitHub.</p>
-          </div>
-          <div class="feature">
-            <h3><span class="kbd">r</span>Refresh</h3>
-            <p>Re-pull authored PRs, review requests, assignments, and tracked items.</p>
-          </div>
-          <div class="feature">
-            <h3><span class="kbd">a</span>Analyze</h3>
-            <p>
-              Run Claude or Codex against the item, render the result as HTML,
-              and cache it — keyed by the GitHub <code>updated_at</code> so
-              stale entries invalidate themselves.
-            </p>
-          </div>
-          <div class="feature">
-            <h3><span class="kbd">c</span>Code</h3>
-            <p>
-              Prepare a dedicated git worktree and launch Claude, Codex, or
-              VSCode Copilot inside it, preloaded with the item's context. The
-              same menu opens a terminal in that worktree or the branch diff.
-            </p>
-          </div>
-          <div class="feature">
-            <h3><span class="kbd">list</span>List command</h3>
-            <p>
-              Same triage, emitted as plain text for scripts, pipes, and agents
-              that want the dashboard without the TUI.
-            </p>
+        <h1>What is waiting</h1>
+        <p class="lead">See the work that needs your attention before you choose what to pick up.</p>
+        <div class="tour-step">
+          <figure class="tour-shot" data-full="img/dashboard.gif">
+            <img
+              src="img/dashboard.gif"
+              alt="Dashboard merging GitHub work items, with a suggested item and fresh rows in bold"
+            />
+          </figure>
+          <div class="tour-text">
+            <ul class="benefit-list">
+              <li>
+                <strong>One list for your work.</strong>
+                You see authored PRs, review requests, assignments, tracked items, and todos together.
+              </li>
+              <li>
+                <strong>Latest updates first.</strong>
+                You find recently updated work above older items in the merged list.
+              </li>
+              <li>
+                <strong>A suggested next item.</strong>
+                You see one work item marked with an asterisk to help you choose.
+              </li>
+            </ul>
           </div>
         </div>
       </div>
     </section>
 
-    <section id="tour">
+    <section id="legend">
       <div class="container">
-        <h2>From inbox to code, in three keystrokes</h2>
-        <p class="lead">
-          <code>workdash</code> collapses the gap between
-          <em>knowing what to work on</em> and <em>actually working on it</em>.
-          Here is what that looks like for the common things you spend most of
-          your GitHub day on. Click any screenshot to zoom in.
-        </p>
+        <h2>Read the list at a glance</h2>
+        <p class="lead">Read the row markers to spot activity, work types, and feedback without opening each item.</p>
+        <ul class="benefit-list">
+          <li>
+            <strong>Suggested and fresh.</strong>
+            You see <code>*</code> beside the suggested item and fresh rows in bold.
+          </li>
+          <li>
+            <strong>Sorted by update.</strong>
+            You read from the most recently updated item down when you load or refresh the list.
+          </li>
+          <li>
+            <strong>Type and number.</strong>
+            You distinguish your PRs (<code>PR</code>), reviews (<code>RV</code>), voluntary reviews (<code>VR</code>), issues (<code>IS</code>), and todos (<code>TD</code>).
+          </li>
+          <li>
+            <strong>CI comes first.</strong>
+            You see <code>✓</code> for passing, <code>✗</code> for failing, or <code>●</code> for running checks on your PRs.
+          </li>
+          <li>
+            <strong>Review follows CI.</strong>
+            You see a second <code>✓</code> for approval or <code>✗</code> for requested changes on your PRs.
+          </li>
+          <li>
+            <strong>Questions show review activity.</strong>
+            You see a yellow <code>?</code> for a pending reviewer or a blue <code>?</code> for unresolved comments.
+          </li>
+          <li>
+            <strong>Sub-issues stand out.</strong>
+            You recognize an issue with sub-issues by its bold cyan title.
+          </li>
+        </ul>
+        <p>When you pick up someone else's PR, follow the <a href="review.html">review workflow</a>.</p>
+      </div>
+    </section>
 
-        <div class="workflow" id="tackle">
-          <div class="workflow-header">
-            <h3>Tackle an issue</h3>
-            <p class="workflow-lead">
-              From a fresh bug report to an agent writing the fix — without
-              leaving the terminal.
-            </p>
+    <section id="search">
+      <div class="container">
+        <h2>Narrow it down</h2>
+        <p class="lead">Find a work item in the list or bring in one you encounter elsewhere.</p>
+        <div class="features">
+          <div class="feature">
+            <h3><span class="kbd">/</span> Search the list</h3>
+            <p>Filter by type, number, repository, or title. Use <span class="kbd">/</span> again to clear the filter.</p>
           </div>
-          <div class="tour-step">
-            <div class="tour-shots">
-              <figure class="tour-shot" data-full="img/code-menu.gif">
-                <img
-                  src="img/code-menu.gif"
-                  alt="code menu offering an agent, the editor, the branch diff, a terminal, and a review for the selected issue"
-                />
-              </figure>
-              <figure class="tour-shot fit-top" data-full="img/agent-session.gif">
-                <img
-                  src="img/agent-session.gif"
-                  alt="coding agent running inside the per-item git worktree, preloaded with the issue's context"
-                />
-              </figure>
-            </div>
-            <div class="tour-text">
-              <h4>Workflow</h4>
-              <ol class="workflow-list">
-                <li>
-                  <strong>See what's waiting.</strong>
-                  Authored PRs, review requests, assignments and tracked
-                  issues are merged into one list, sorted by last update,
-                  with a suggested next item highlighted.
-                </li>
-                <li>
-                  <strong>Get a read on it — <code>a</code>.</strong>
-                  Run Claude or Codex against the issue. The analysis is
-                  rendered as HTML and cached so you can revisit it
-                  instantly later.
-                </li>
-                <li>
-                  <strong>Start coding — <code>c</code>.</strong>
-                  A git worktree is prepared for the issue and your agent
-                  launches inside it, already primed with the cached
-                  analysis as context.
-                </li>
-              </ol>
-            </div>
+          <div class="feature">
+            <h3><span class="kbd">i</span> Include an item</h3>
+            <p>Paste a GitHub issue or PR URL to add it to your dashboard.</p>
           </div>
         </div>
+      </div>
+    </section>
 
-        <div class="workflow" id="authored-prs">
-          <div class="workflow-header">
-            <h3>Keep up with feedback on your own PRs</h3>
-            <p class="workflow-lead">
-              Notice which of your open PRs actually need attention today,
-              without scrolling through a GitHub notifications list.
-            </p>
+    <section id="view">
+      <div class="container">
+        <h2>Read the document</h2>
+        <p class="lead">Read the description and discussion before you decide what the work needs.</p>
+        <div class="tour-step">
+          <figure class="tour-shot" data-full="img/viewer.gif">
+            <img
+              src="img/viewer.gif"
+              alt="Built-in document viewer showing an issue in a full-size floating pane"
+            />
+          </figure>
+          <div class="tour-text">
+            <ul class="benefit-list">
+              <li>
+                <strong>View the selected item.</strong>
+                Use <span class="kbd">v</span>, then <span class="kbd">v</span> for (v) view in a full-size floating pane.
+              </li>
+              <li>
+                <strong>Read other documents.</strong>
+                Use <code>workdash view TARGET</code> for an issue, PR, local Markdown file, or URL, even without Zellij.
+              </li>
+              <li>
+                <strong>Follow the discussion.</strong>
+                Open document links and use <span class="kbd">b</span> for (b)ack to the previous document.
+              </li>
+              <li>
+                <strong>Keep the relevant passage.</strong>
+                Jump through heading links or select text and copy it with <span class="kbd">Ctrl+C</span>.
+              </li>
+            </ul>
           </div>
-          <div class="tour-step">
-            <figure class="tour-shot" data-full="img/dashboard.gif">
+        </div>
+      </div>
+    </section>
+
+    <section id="analyze">
+      <div class="container">
+        <h2>Analyze</h2>
+        <p class="lead">Get an agent's reading of the work before you open the code.</p>
+        <div class="tour-step">
+          <figure class="tour-shot" data-full="img/analyze-dialog.gif">
+            <img
+              src="img/analyze-dialog.gif"
+              alt="Analyze dialog offering cached analysis and a numbered configured analysis agent"
+            />
+          </figure>
+          <div class="tour-text">
+            <p>Use <span class="kbd">a</span> to open a cached analysis or request a fresh one.</p>
+            <p>Choose any agent you configure for analysis. You reuse the cached analysis until the work item updates.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="code">
+      <div class="container">
+        <h2>Start coding</h2>
+        <p class="lead">Start your chosen agent in the worktree you can inspect, edit, and take over.</p>
+        <div class="tour-step">
+          <div class="tour-shots">
+            <figure class="tour-shot" data-full="img/code-menu.gif">
               <img
-                src="img/dashboard.gif"
-                alt="workdash TUI showing authored pull requests alongside other work items, with recently-updated entries in bold and the suggested next item marked with an asterisk"
+                src="img/code-menu.gif"
+                alt="Code menu offering numbered agents, an editor, branch diff, terminal, and auto review"
               />
             </figure>
-            <div class="tour-text">
-              <h4>Why it helps</h4>
-              <ul class="benefit-list">
-                <li>
-                  <strong>Suggested next item.</strong>
-                  One entry is marked with a <code>*</code>, so you don't
-                  re-decide every time.
-                </li>
-                <li>
-                  <strong>Recent activity in bold.</strong>
-                  Anything touched in the last 24 hours stands out — fresh
-                  review feedback is impossible to miss.
-                </li>
-                <li>
-                  <strong>Sorted by last update.</strong>
-                  PRs with new activity float up; quiet ones drop down.
-                </li>
-                <li>
-                  <strong>Authored, review-requested, assigned — one list.</strong>
-                  No switching between GitHub filters to see the whole
-                  picture.
-                </li>
-              </ul>
-            </div>
+            <figure class="tour-shot" data-full="img/agent-session.gif">
+              <img
+                src="img/agent-session.gif"
+                alt="Agent working in the item's worktree alongside the dashboard in the same Zellij session"
+              />
+            </figure>
+          </div>
+          <div class="tour-text">
+            <ol class="workflow-list">
+              <li>
+                <strong>Pick an issue and a tool.</strong>
+                Open <span class="kbd">c</span> and choose a numbered agent to start in a per-item worktree with context preloaded.
+              </li>
+              <li>
+                <strong>Choose another way in.</strong>
+                Use <span class="kbd">e</span> for the VSCode Copilot editor, <span class="kbd">d</span> for branch diff, or <span class="kbd">t</span> for a terminal.
+              </li>
+              <li>
+                <strong>Continue together.</strong>
+                Choosing an agent again focuses its running pane instead of starting a duplicate.
+              </li>
+              <li>
+                <strong>Keep the same workspace.</strong>
+                Read the agent's output, send it input, or edit the same files yourself.
+              </li>
+              <li>
+                <strong>Review the result.</strong>
+                Choose <span class="kbd">r</span> for auto review in the code menu to ask an analysis agent to review the PR.
+              </li>
+            </ol>
           </div>
         </div>
+        <p>You keep your configured coding agents and terminal tools in the same session.</p>
+        <p>For delegated work across issues, use the <a href="agentic.html">dispatch loop</a>.</p>
+      </div>
+    </section>
+
+    <section id="terminals">
+      <div class="container">
+        <h2>Terminals</h2>
+        <p class="lead">Open a shell for the work item without starting a coding agent.</p>
+        <p>Choose <span class="kbd">t</span> in the <span class="kbd">c</span> menu to open the item's terminal.</p>
+        <p>You return to that terminal even after you use <code>cd</code> or run a program in it.</p>
+      </div>
+    </section>
+
+    <section id="todos">
+      <div class="container">
+        <h2>Todos</h2>
+        <p class="lead">Capture work as it comes up and return to it from the same list.</p>
+        <ul class="benefit-list">
+          <li>
+            <strong>Capture from the dashboard.</strong>
+            Use <span class="kbd">w</span> to enter a todo title and an optional target repository.
+          </li>
+          <li>
+            <strong>Add the details.</strong>
+            Use <code>workdash todo TEXT --body "..."</code> to save a title and a longer description.
+          </li>
+          <li>
+            <strong>Work on any git host.</strong>
+            Add <code>--target owner/repo</code> for GitHub or <code>--target GIT_URL</code> for another host.
+          </li>
+          <li>
+            <strong>Keep capture and code together.</strong>
+            Your todo lives as a GitHub issue while coding and terminal actions use the target repository's worktree.
+          </li>
+          <li>
+            <strong>Close finished work.</strong>
+            Use <code>workdash todo --close ITEM</code> to close a todo when you finish it.
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="branchinfo">
+      <div class="container">
+        <h2>What is this pane?</h2>
+        <p class="lead">Identify the work behind the checkout when you return to a pane.</p>
+        <p>Run <code>workdash branchinfo</code> to see its pull request, CI and review status, and linked issues.</p>
+        <p>Inside an agent with shell escapes, type <code>!workdash branchinfo</code> from the worktree.</p>
+        <p>When your branch has no linked pull request or issue, you see:</p>
+        <pre><code>PR: unknown
+ISSUE: unknown</code></pre>
+      </div>
+    </section>
+
+    <section id="session">
+      <div class="container">
+        <h2>The session</h2>
+        <p class="lead">Keep your dashboard, shell, and work panes together when you switch terminals.</p>
+        <ul class="benefit-list">
+          <li>
+            <strong>Start in a persistent session.</strong>
+            Run <code>workdash</code> outside Zellij to create or attach to your session, with the dashboard above a shell.
+          </li>
+          <li>
+            <strong>Leave the work open.</strong>
+            Use <span class="kbd">q</span> to exit the dashboard while keeping the session and its panes.
+          </li>
+          <li>
+            <strong>Quit the whole session.</strong>
+            Use <span class="kbd">Ctrl+Q</span> to quit Zellij and all its panes.
+          </li>
+          <li>
+            <strong>Return from another terminal.</strong>
+            Run <code>workdash</code> there to attach to the session and land on the dashboard.
+          </li>
+        </ul>
       </div>
     </section>
 
