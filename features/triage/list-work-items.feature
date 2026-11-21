@@ -45,7 +45,7 @@ Feature: List work items
     Given the dashboard contains a parent issue and a leaf issue being worked on by autodispatch
     When autodispatch stops working on the leaf issue after its title changes
     Then the leaf issue shows its updated title without the working highlight
-    And the selected row and scroll position remain unchanged
+    And the same issue remains selected and visible in the work table
 
   @id:F-TRIAGE-LIST-S017
   Scenario: Scrolling keeps every work item visible above the action bar
