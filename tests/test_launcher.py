@@ -1808,14 +1808,18 @@ def test_running_dashboard_attach_focuses_when_possible(monkeypatch, case):
 
     monkeypatch.setattr(launcher_module, "_read_zellij_panes", read_panes)
     commands = []
+    client_lookups = 0
 
     def run(command, **kwargs):
+        nonlocal client_lookups
         commands.append(command)
+        if "list-clients" in command:
+            client_lookups += 1
         if case in ("failure", "ambiguous_failure") and "focus-pane-id" in command:
             raise subprocess.CalledProcessError(1, command)
         output = (
             "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n1 terminal_4 sh\n"
-            + ("2 terminal_3 sh\n" if case == "ambiguous_failure" else "")
+            + ("2 terminal_3 sh\n" if client_lookups > 1 else "")
             if "list-clients" in command
             else "project [Created now]\n"
         )
@@ -1843,3 +1847,38 @@ def test_running_dashboard_attach_focuses_when_possible(monkeypatch, case):
         assert actions == [
             ["zellij", "--session", "project", "action", "focus-pane-id", "terminal_3"]
         ]
+
+
+@pytest.mark.parametrize("attaches", [True, False])
+def test_attach_waits_for_delayed_client_before_focusing(monkeypatch, attaches):
+    from workdash.dashboard_record import DashboardRecord, DashboardRecords
+
+    DashboardRecords().save(DashboardRecord("project", 42, "a:1", "3"))
+    monkeypatch.setattr(launcher_module, "_read_zellij_panes", lambda _: [{"id": 3, "tab_id": 0}])
+    monkeypatch.setattr(launcher_module.time, "sleep", lambda _: None)
+    client = MagicMock()
+    client.wait.return_value = 0
+    monkeypatch.setattr(launcher_module.subprocess, "Popen", lambda _: client)
+    lookups = 0
+    focused = []
+
+    def run(command, **kwargs):
+        nonlocal lookups
+        if "list-clients" in command:
+            lookups += 1
+            output = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n1 terminal_4 sh\n"
+            if attaches and lookups >= 9:
+                output += "2 terminal_4 sh\n"
+            return subprocess.CompletedProcess(command, 0, output, "")
+        focused.append(lookups)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(launcher_module.subprocess, "run", run)
+    with pytest.raises(SystemExit):
+        launcher_module.Zellij._attach_and_focus_dashboard(
+            "zellij", "project", ["zellij", "attach", "project"]
+        )
+    assert focused == ([9] if attaches else [])
+    if not attaches:
+        assert lookups == 21
+    client.wait.assert_called_once()

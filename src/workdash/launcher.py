@@ -1210,6 +1210,19 @@ class Zellij:
         record = DashboardRecords().load(session_name)
         if record and record.pane_id:
             try:
+                before = subprocess.run(
+                    [zellij, "--session", session_name, "action", "list-clients"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                existing_clients = {
+                    line.split()[0] for line in before.stdout.splitlines()[1:] if line.split()
+                }
+            except (OSError, subprocess.SubprocessError):
+                return
+            try:
                 client = subprocess.Popen(command)
             except OSError:
                 pass
@@ -1232,7 +1245,22 @@ class Zellij:
                             None,
                         )
                         if pane:
-                            time.sleep(0.5)
+                            for _ in range(20):
+                                clients = subprocess.run(
+                                    [zellij, "--session", session_name, "action", "list-clients"],
+                                    check=True,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=2,
+                                )
+                                if any(
+                                    line.split() and line.split()[0] not in existing_clients
+                                    for line in clients.stdout.splitlines()[1:]
+                                ):
+                                    break
+                                time.sleep(0.1)
+                            else:
+                                raise RuntimeError("Timed out waiting for Zellij client")
                             subprocess.run(
                                 [
                                     zellij,
