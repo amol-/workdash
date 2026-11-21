@@ -44,17 +44,17 @@ def check_social_preview(site_metadata):
     title = {
         "index": "workdash — your work and your agents, together",
         "work": "Your work — workdash",
-        "review": "Review — workdash",
-        "agentic": "Agentic loop — workdash",
-        "control": "Automation — workdash",
+        "review": "Review pull requests together — workdash",
+        "agentic": "Supervise your dispatch loop — workdash",
+        "control": "Automation through the CLI — workdash",
     }[page]
-    description = (
-        "Coordinate your work and your agents' work in a development environment you own. Share tasks, context, and terminal panes. Keep your choice of tools."
-        if page == "index"
-        else "See what is waiting, read documents, analyze work items, and code alongside your chosen agent in the same worktree."
-        if page == "work"
-        else "Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
-    )
+    description = {
+        "index": "Coordinate your work and your agents' work in a development environment you own. Share tasks, context, and terminal panes. Keep your choice of tools.",
+        "work": "See what is waiting, read documents, analyze work items, and code alongside your chosen agent in the same worktree.",
+        "review": "Find your review requests, understand the change, and inspect an agent's findings before you decide.",
+        "agentic": "Delegate ready issues to your agent in a worktree. Supervise implementation, review and optional merging from the dashboard, and join the pane when you need.",
+        "control": "Use the workdash CLI to let agents and scripts inspect your work, read live panes, and send input while you keep visibility.",
+    }[page]
     assert (
         metadata.items()
         >= {
