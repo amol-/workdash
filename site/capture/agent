@@ -1,0 +1,32 @@
+#!/bin/sh
+# Deterministic stand-in for a configured agent, following the prompt it is given.
+
+prompt=$1
+document=$(printf '%s' "$prompt" | sed -n 's|.*completion document at \(.*\) summarizing.*|\1|p')
+if [ -n "$document" ]; then
+    printf 'Reviewing the change to the shared workspace...\n'
+    sleep 3
+    mkdir -p "$(dirname "$document")"
+    printf 'Review outcome: success\n\nReviewed the shared workspace change. No findings to post.\n' > "$document"
+    printf 'No findings to post.\n'
+    exit 0
+fi
+
+number=$(printf '%s' "$prompt" | sed -n 's|.*/issues/\([0-9][0-9]*\).*|\1|p' | head -1)
+printf 'Reading the issue and the checkout...\n'
+sleep 3
+printf 'Updating the shared workspace...\n'
+printf 'Shared workspace notes.\n' > NOTES.md
+git add NOTES.md
+git commit -q -m 'Describe the shared workspace'
+git push -q -u origin HEAD
+gh pr create --title 'Describe the shared workspace' --body "Fixes #${number}"
+printf 'Published the pull request.\n'
+
+case "$prompt" in
+    *AUTOSTART*) ;;
+    *)
+        printf 'Ready to work together.\n'
+        exec /bin/sh
+        ;;
+esac

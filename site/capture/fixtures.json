@@ -1,0 +1,10 @@
+{
+  "tracked_issues": [
+    {
+      "number": 42,
+      "title": "Improve the shared workspace",
+      "body": "Make it easier to pick up work together.",
+      "sub_issues": 0
+    }
+  ]
+}

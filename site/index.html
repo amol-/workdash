@@ -3,29 +3,29 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>workdash — text-based GitHub work triage dashboard</title>
+    <title>workdash — your work and your agents, together</title>
     <meta
       name="description"
-      content="workdash pulls together the GitHub issues and pull requests that matter to you, suggests what to pick up next, and launches reviews, AI analyses, or full coding sessions from a terminal TUI."
+      content="Coordinate your work and your agents' work in a development environment you own. Share tasks, context, and terminal panes. Keep your choice of tools."
     />
-    <meta property="og:title" content="workdash" />
+    <meta property="og:title" content="workdash — your work and your agents, together" />
     <meta
       property="og:description"
-      content="Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
+      content="Coordinate your work and your agents' work in a development environment you own. Share tasks, context, and terminal panes. Keep your choice of tools."
     />
-    <meta property="og:image" content="https://alessandro.molina.fyi/workdash/img/workdash.png" />
+    <meta property="og:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
     <meta property="og:image:width" content="967" />
     <meta property="og:image:height" content="520" />
     <meta property="og:image:alt" content="workdash dashboard showing GitHub issues and pull requests" />
     <meta property="og:url" content="https://alessandro.molina.fyi/workdash/" />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="workdash" />
+    <meta name="twitter:title" content="workdash — your work and your agents, together" />
     <meta
       name="twitter:description"
-      content="Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
+      content="Coordinate your work and your agents' work in a development environment you own. Share tasks, context, and terminal panes. Keep your choice of tools."
     />
-    <meta name="twitter:image" content="https://alessandro.molina.fyi/workdash/img/workdash.png" />
+    <meta name="twitter:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
     <link rel="stylesheet" href="style.css" />
   </head>
@@ -43,134 +43,211 @@
           <a href="control.html">Automation</a> &middot;
           <a href="index.html#install">Install</a>
         </nav>
+        <h1>Your work and your agents, together</h1>
         <p class="tagline">
-          Text-based GitHub work triage dashboard. Pick what to work on next,
-          then jump straight into a review, an AI analysis, or a full coding
-          session in a dedicated worktree.
+          Coordinate with your agents in a development environment you own.
+          Share tasks, context, and terminal panes, without giving up your
+          editor or your tools.
         </p>
         <div>
-          <a
-            class="cta primary"
-            href="https://github.com/amol-/workdash"
-            >View on GitHub &rarr;</a
-          >
+          <a class="cta primary" href="#what">See how it works &rarr;</a>
           <a class="cta" href="#install">Install</a>
         </div>
         <img
           class="hero-shot"
-          src="img/workdash.png"
-          alt="workdash TUI showing issues and pull requests pulled from GitHub, with one entry highlighted as the suggested next work item"
+          src="img/dashboard.gif"
+          alt="Your GitHub issues and pull requests in workdash, with a suggested next work item"
         />
       </div>
     </header>
 
     <section id="what">
       <div class="container">
-        <h2>Your GitHub work, with less friction</h2>
+        <h2>Share the work, keep control</h2>
+        <p class="lead">
+          Your GitHub work stays in one list, whether you tackle it yourself
+          or involve an agent.
+        </p>
+        <div class="features control-plane-features">
+          <div class="feature">
+            <h3>Your work</h3>
+            <p>
+              See your issues, authored pull requests, and review requests
+              across repositories. Read a work item, ask for an analysis,
+              then start coding in its worktree.
+              <a href="work.html">Pick up your work &rarr;</a>
+            </p>
+          </div>
+          <div class="feature">
+            <h3>Your agents</h3>
+            <p>
+              Delegate a work item, watch your agent's pane, and send input
+              when you need to intervene. Review the result yourself, or use
+              the dispatch loop to implement and review ready work.
+              <a href="agentic.html">Follow the dispatch loop &rarr;</a>
+            </p>
+          </div>
+        </div>
+        <div class="features">
+          <div class="feature">
+            <h3>Automation</h3>
+            <p>
+              Let agents and scripts inspect and act on the same dashboard
+              through the CLI. The supplied <code>workdash-control</code>
+              skill offers optional instructions, not a required integration.
+              <a href="control.html">Use the CLI &rarr;</a>
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tools">
+      <div class="container">
+        <h2>Keep your tools connected</h2>
+        <p class="lead">
+          You and your agents use the same work items, worktrees, and panes
+          instead of separate workflows.
+        </p>
         <div class="what-layout">
           <div class="what-text">
             <p class="lead">
-              GitHub tells you what is waiting. Getting from there to an open
-              editor with the right branch, the right context, and a summary of
-              the thing you are about to touch is the part that eats the morning.
-              <code>workdash</code> compresses that into a single keystroke.
+              Text is the common language, inspired by Unix pipes.
+              Zellij is the coordination bus: workdash sends text into a pane
+              and reads text back. You can inspect and interact with that same
+              pane yourself.
             </p>
+            <ol class="workflow-list">
+              <li>
+                <strong>Pick an issue.</strong>
+                Read its discussion and choose an agent from the code menu.
+              </li>
+              <li>
+                <strong>Start in its worktree.</strong>
+                Your chosen agent opens in a pane with the work item's context.
+              </li>
+              <li>
+                <strong>Read and respond.</strong>
+                Watch the pane and send input, or stop the agent and continue
+                in its worktree yourself.
+              </li>
+              <li>
+                <strong>Review the result.</strong>
+                Inspect the changes before deciding what to do with the pull
+                request.
+              </li>
+            </ol>
             <p class="lead">
-              It pulls
-              <a href="work.html#authored-prs">your authored PRs</a>,
-              <a href="review.html#review">review requests</a>, assignments, and
-              tracked issues into one list, suggests what to pick up next, and
-              lets you
-              <a href="work.html#tackle">launch an AI analysis or a full coding session</a>
-              in a dedicated git worktree — each keyed to the GitHub item so
-              context never gets lost between sessions.
+              An assistant using the CLI can inspect and interact with the
+              same work. Use the pane ID from <code>workdash info</code> in
+              place of <code>PANE_ID</code>:
             </p>
+            <pre><code>workdash info
+workdash read PANE_ID
+workdash write PANE_ID "Run the tests before continuing."</code></pre>
             <p class="lead">
-              It also doubles as a
-              <a href="control.html#cli">local control plane for agent swarms</a>, so your
-              <strong>assistant agent can act as a control agent</strong> —
-              reading the queue, requesting analyses, and launching coding
-              sessions against your dashboard.
-            </p>
-            <p class="lead">
-              <strong>And it works on mobile too</strong> —
-              <a href="control.html#remote">access everywhere</a> from a laptop, tablet, or
-              phone.
-            </p>
-            <p class="lead">
-              <a class="cta primary" href="#install">Try it now &rarr;</a>
+              You read what the agent printed, then send it text as input.
+              How it responds depends on the tool running in that pane.
             </p>
           </div>
           <figure class="tour-shot what-shot" data-full="img/chat_session.png">
             <img
               src="img/chat_session.png"
-              alt="workdash driven by an assistant agent in a chat session, reading the work queue and launching actions on the dashboard"
+              alt="An assistant using workdash to read shared work and launch an agent from a chat session"
             />
           </figure>
         </div>
+        <ul class="benefit-list">
+          <li>
+            <strong>Bring your own tools.</strong>
+            Keep your editor, agents, terminal tools, and scripts in Zellij
+            panes alongside the dashboard.
+          </li>
+          <li>
+            <strong>Replace the defaults.</strong>
+            Start with detected agents and the built-in document viewer,
+            then configure your preferred commands.
+          </li>
+          <li>
+            <strong>Match the action.</strong>
+            Configure an analysis command, a coding command, or both for each
+            agent; each receives the task prompt as its last argument.
+          </li>
+          <li>
+            <strong>Skip special integrations.</strong>
+            Compatible text-driven tools need no workdash-specific plugin,
+            extension, skill, or dedicated agent harness.
+          </li>
+        </ul>
       </div>
     </section>
 
     <section id="install">
       <div class="container">
-        <h2>Install</h2>
+        <h2>Start with your own workspace</h2>
         <p class="lead">
-          With <a href="https://docs.astral.sh/uv/">uv</a> — one isolated
-          install, <code>workdash</code> on your <code>PATH</code>:
+          Install with <code>uv</code> to put <code>workdash</code> on your
+          <code>PATH</code> in an isolated environment.
         </p>
         <pre><code>uv tool install workdash</code></pre>
-        <p class="lead">Then generate the configuration interactively:</p>
+        <p class="lead">
+          Configure your GitHub account, repositories, agents, and working
+          directory through the setup wizard.
+        </p>
         <pre><code>workdash --configure</code></pre>
-        <p class="lead">Launch the TUI:</p>
-        <pre><code>workdash</code></pre>
-
-        <h3 style="margin-top: 2.5rem">Give another agent access</h3>
         <p class="lead">
-          To let an assistant agent drive your dashboard, start workdash with
-          the localhost JSON control API:
+          Start your dashboard in Zellij, then keep it running while you use
+          the CLI.
         </p>
         <pre><code>workdash</code></pre>
-        <p class="lead">
-          Then copy the
-          <a href="https://github.com/amol-/workdash/tree/main/skills">workdash
-          skills</a> into your control agent so it knows how to talk to the
-          dashboard.
-        </p>
-        <p class="lead">
-          The control agent must have the <code>workdash</code> command
-          available and run on the <strong>same host</strong> as the workdash
-          server.
-        </p>
       </div>
     </section>
 
     <section id="requirements" class="requirements">
       <div class="container">
-        <h2>Requirements</h2>
+        <h2>What you need installed</h2>
+        <p class="lead">
+          You can run workdash on Linux or macOS with the following tools.
+        </p>
         <ul>
-          <li><strong>Python 3.12+</strong></li>
           <li>
-            <strong><a href="https://cli.github.com/">gh</a></strong> installed
-            and authenticated (<code>gh auth status</code> must succeed)
-            (auto installed if missing).
+            <strong>Python 3.12+.</strong>
+            You need Python 3.12 or later to run workdash.
           </li>
           <li>
-            <strong>zellij</strong> for terminal and agent sessions (auto
-            installed if missing).
+            <strong>GitHub CLI.</strong>
+            Authenticate <code>gh</code> with <code>gh auth login</code> so
+            you can access your repositories.
           </li>
           <li>
-            A supported terminal emulator: <code>ptyxis</code>,
-            <code>konsole</code>, or
-            <a href="https://ghostty.org/">Ghostty</a>.
+            <strong>Zellij.</strong>
+            You use <code>zellij</code> for the dashboard, terminal panes,
+            and agent sessions.
           </li>
-          <li><code>xdg-open</code> or <code>open</code> for links and rendered analyses.</li>
           <li>
-            Optional, per action: <code>claude</code>, <code>codex</code>,
-            <code>code</code>, <a href="https://pi.dev"><code>pi</code></a>.
+            <strong>A terminal that runs Zellij.</strong>
+            You can use <code>ptyxis</code>, <code>konsole</code>, Ghostty,
+            or any terminal that runs Zellij well.
+          </li>
+          <li>
+            <strong>A link opener.</strong>
+            Use <code>xdg-open</code> on Linux or <code>open</code> on macOS
+            for GitHub links and external links from documents.
+          </li>
+          <li>
+            <strong>Your choice of agents.</strong>
+            Setup requires one configured agent; choose <code>claude</code>,
+            <code>codex</code>, <code>pi</code>, or another compatible command.
+          </li>
+          <li>
+            <strong>Optional tools, per action.</strong>
+            Use your agents for analysis or coding, and optionally install
+            <code>code</code> to launch VSCode Copilot from the code menu.
           </li>
         </ul>
-        <p class="lead" style="margin-top: 1rem">
-          Linux and macOS. Not tested on Windows.
+        <p class="lead">
+          The setup wizard can install local copies of <code>gh</code> and
+          <code>zellij</code> if you do not have them.
         </p>
       </div>
     </section>

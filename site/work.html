@@ -13,7 +13,7 @@
       property="og:description"
       content="Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
     />
-    <meta property="og:image" content="https://alessandro.molina.fyi/workdash/img/workdash.png" />
+    <meta property="og:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
     <meta property="og:image:width" content="967" />
     <meta property="og:image:height" content="520" />
     <meta property="og:image:alt" content="workdash dashboard showing GitHub issues and pull requests" />
@@ -25,7 +25,7 @@
       name="twitter:description"
       content="Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
     />
-    <meta name="twitter:image" content="https://alessandro.molina.fyi/workdash/img/workdash.png" />
+    <meta name="twitter:image" content="https://alessandro.molina.fyi/workdash/img/og-card.png" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
     <link rel="stylesheet" href="style.css" />
   </head>
@@ -101,12 +101,20 @@
             </p>
           </div>
           <div class="tour-step">
-            <figure class="tour-shot" data-full="img/coding_session.png">
-              <img
-                src="img/coding_session.png"
-                alt="coding agent running inside the per-item git worktree, preloaded with the issue's context"
-              />
-            </figure>
+            <div class="tour-shots">
+              <figure class="tour-shot" data-full="img/code-menu.gif">
+                <img
+                  src="img/code-menu.gif"
+                  alt="code menu offering an agent, the editor, the branch diff, a terminal, and a review for the selected issue"
+                />
+              </figure>
+              <figure class="tour-shot fit-top" data-full="img/agent-session.gif">
+                <img
+                  src="img/agent-session.gif"
+                  alt="coding agent running inside the per-item git worktree, preloaded with the issue's context"
+                />
+              </figure>
+            </div>
             <div class="tour-text">
               <h4>Workflow</h4>
               <ol class="workflow-list">
@@ -142,9 +150,9 @@
             </p>
           </div>
           <div class="tour-step">
-            <figure class="tour-shot" data-full="img/workdash.png">
+            <figure class="tour-shot" data-full="img/dashboard.gif">
               <img
-                src="img/workdash.png"
+                src="img/dashboard.gif"
                 alt="workdash TUI showing authored pull requests alongside other work items, with recently-updated entries in bold and the suggested next item marked with an asterisk"
               />
             </figure>

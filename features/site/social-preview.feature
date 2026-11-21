@@ -19,3 +19,8 @@ Feature: Share the workdash site
     When a visitor browses the workdash site
     Then every page offers navigation to the workdash topics and installation
     And local links and images on the pages resolve
+
+  @id:F-SITE-BROWSE-S002
+  Scenario: Check the site before publishing
+    When a maintainer checks the site
+    Then the site check succeeds without generating images

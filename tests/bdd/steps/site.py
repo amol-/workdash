@@ -1,12 +1,18 @@
+import importlib
+import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 from html.parser import HTMLParser
 from pathlib import Path
+from unittest.mock import MagicMock
 from urllib.parse import unquote, urlsplit
 
+import pytest
 from pytest_bdd import parsers, then, when
 
 
@@ -34,15 +40,19 @@ def read_site_metadata(page):
 def check_social_preview(site_metadata):
     page, metadata = site_metadata
     base = "https://alessandro.molina.fyi/workdash/"
-    image = base + "img/workdash.png"
+    image = base + "img/og-card.png"
     title = {
-        "index": "workdash",
+        "index": "workdash — your work and your agents, together",
         "work": "Work — workdash",
         "review": "Review — workdash",
         "agentic": "Agentic loop — workdash",
         "control": "Automation — workdash",
     }[page]
-    description = "Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
+    description = (
+        "Coordinate your work and your agents' work in a development environment you own. Share tasks, context, and terminal panes. Keep your choice of tools."
+        if page == "index"
+        else "Text-based GitHub work triage dashboard. Pick what to work on next, then jump straight into a review, analysis, or coding session."
+    )
     assert (
         metadata.items()
         >= {
@@ -100,6 +110,104 @@ def test_site_staging(tmp_path):
     assert not (published_site / "capture").exists()
     assert "uv tool install workdash" in (published_site / "index.html").read_text()
     assert "workdash list --json" in (published_site / "control.html").read_text()
+
+
+@when("a maintainer checks the site", target_fixture="site_check")
+def run_site_check():
+    root = Path(__file__).resolve().parents[3]
+    images = root / "site/img"
+    before = {p: p.read_bytes() for p in images.iterdir() if p.is_file()}
+    result = subprocess.run(
+        [sys.executable, "site/generate.py", "--check"], cwd=root, capture_output=True, text=True
+    )
+    after = {p: p.read_bytes() for p in images.iterdir() if p.is_file()}
+    return result, before, after
+
+
+@then("the site check succeeds without generating images")
+def check_site_check(site_check):
+    result, before, after = site_check
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert before == after
+
+
+def test_capture_github_stub_rejects_unknown_calls(tmp_path):
+    gh = Path(__file__).resolve().parents[3] / "site/capture/gh"
+    env = {**os.environ, "HOME": str(tmp_path)}
+    response = subprocess.run(
+        [sys.executable, str(gh), "api", "graphql", "-f", "query={ tracked: search }"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    items = json.loads(response.stdout)["data"]["tracked"]["nodes"]
+    assert items[0]["title"] == "Improve the shared workspace"
+    for args in (["api", "unsupported"], ["search", "prs", "--author", "someone-else"]):
+        unknown = subprocess.run(
+            [sys.executable, str(gh), *args], env=env, capture_output=True, text=True
+        )
+        assert unknown.returncode != 0
+        assert " ".join(args) in unknown.stderr
+
+
+@pytest.mark.parametrize("image", ["dashboard.gif", "og-card.png"])
+def test_site_check_reports_broken_images(tmp_path, image):
+    source = Path(__file__).resolve().parents[3] / "site"
+    shutil.copytree(source, tmp_path / "site")
+    (tmp_path / "site/img" / image).unlink()
+    result = subprocess.run(
+        [sys.executable, "site/generate.py", "--check"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert f"img/{image}" in result.stdout
+
+
+@pytest.mark.parametrize("capture_fails", [False, True])
+def test_capture_preserves_failure_when_configuration_changes(tmp_path, monkeypatch, capture_fails):
+    source = Path(__file__).resolve().parents[3] / "site"
+    monkeypatch.syspath_prepend(str(source))
+    generate = importlib.import_module("generate")
+    (tmp_path / "agg-1.5.0").touch()
+    monkeypatch.setattr(sys, "argv", ["generate.py", "dashboard", "--work", str(tmp_path)])
+    monkeypatch.setattr(
+        generate, "config_snapshot", MagicMock(side_effect=[{}, {"changed": "hash"}])
+    )
+    monkeypatch.setattr(generate, "build", MagicMock(return_value={}))
+    monkeypatch.setattr(
+        generate,
+        "capture",
+        MagicMock(side_effect=ValueError("capture failed") if capture_fails else None),
+    )
+    monkeypatch.setattr(generate, "render", MagicMock())
+    error = ValueError if capture_fails else RuntimeError
+    message = "capture failed" if capture_fails else "Real workdash configuration changed"
+    with pytest.raises(error, match=message):
+        generate.main()
+    assert not list(tmp_path.glob("tmp*"))
+
+
+def test_site_check_reports_missing_navigation_and_metadata(tmp_path):
+    source = Path(__file__).resolve().parents[3] / "site"
+    shutil.copytree(source, tmp_path / "site")
+    page = tmp_path / "site/index.html"
+    page.write_text(
+        page.read_text()
+        .replace('href="review.html"', 'href="work.html"')
+        .replace('property="og:type"', 'property="not-og-type"')
+    )
+    result = subprocess.run(
+        [sys.executable, "site/generate.py", "--check"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "missing navigation link review.html" in result.stdout
+    assert "missing og:type" in result.stdout
 
 
 @when("a visitor browses the workdash site", target_fixture="published_site")
