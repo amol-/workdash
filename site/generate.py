@@ -3,7 +3,9 @@
 
 import argparse
 import hashlib
+import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -73,6 +75,7 @@ def main():
             gh_errors = work / name / "home/gh-errors.log"
             if gh_errors.exists():
                 raise RuntimeError(f"Unsupported gh calls:\n{gh_errors.read_text()}")
+            validate_capture(name, cast)
             output = site / "img" / f"{name}.gif"
             card = site / "img/og-card.png" if name == "dashboard" else None
             render(work / name / "venv/bin/python", renderer, cast, output, animated, card)
@@ -87,6 +90,43 @@ def main():
         if sys.exception() is None and config_snapshot() != real_config:
             raise RuntimeError("Real workdash configuration changed during capture")
     return report(site)
+
+
+def validate_capture(name, cast):
+    """Refuse images whose terminal output does not demonstrate the site's claims."""
+    raw = "".join(
+        event[2]
+        for line in cast.read_text().splitlines()[1:]
+        if (event := json.loads(line))[1] == "o"
+    )
+    text = re.sub(
+        r"\x1b(?:\][^\x1b\x07]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\|\[[0-?]*[ -/]*[@-~]|[()][A-Z0-9]|[=>])",
+        "",
+        raw,
+    )
+    markers = {
+        "dashboard": (
+            "PR 51",
+            "RV 52",
+            "TD 7",
+            "IS 44",
+            "IS 42",
+            "Coordinate workspace rollout",
+            "✓✓PR 51",
+        ),
+        "dashboard-progress": ("demo/project#42", "developing (implement)"),
+        "analyze-dialog": ("(a) Open analysis", "(1) Analyze with demo"),
+        "viewer": ("Make it easier to pick up work together.", "Comments (0)"),
+        "agent-session": ("code_demo_project_42", "Ready to work together."),
+        "branchdiff": ("README.md (+2, -0)", "Coordinate work and share progress."),
+        "code-menu": ("Code menu:", "(1) demo", "(d) branchdiff", "(r) auto review"),
+        "loop": ("[automerge]", "developing (implement)", "reviewing", "(closed)"),
+    }
+    missing = [marker for marker in markers[name] if marker not in text]
+    if name == "dashboard" and "\x1b[38;5;80m\x1b[1mCoordinate workspace rollout" not in raw:
+        missing.append("native sub-issue title highlight")
+    if missing:
+        raise RuntimeError(f"{name}: capture missing expected content: {', '.join(missing)}")
 
 
 class Page(HTMLParser):

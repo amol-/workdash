@@ -2,6 +2,7 @@ import importlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -136,21 +137,27 @@ def check_site_check(site_check):
 def test_capture_github_stub_rejects_unknown_calls(tmp_path):
     gh = Path(__file__).resolve().parents[3] / "site/capture/gh"
     env = {**os.environ, "HOME": str(tmp_path)}
-    response = subprocess.run(
-        [sys.executable, str(gh), "api", "graphql", "-f", "query={ tracked: search }"],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    items = json.loads(response.stdout)["data"]["tracked"]["nodes"]
-    assert items[0]["title"] == "Improve the shared workspace"
-    for args in (["api", "unsupported"], ["search", "prs", "--author", "someone-else"]):
+    for args in (
+        ["api", "unsupported"],
+        ["search", "prs", "--author", "someone-else"],
+        [
+            "api",
+            "graphql",
+            "-f",
+            'query={ repository(owner: "other", name: "project") { issueOrPullRequest(number: 42) { title } } }',
+        ],
+        [
+            "api",
+            "graphql",
+            "-f",
+            'query={ p0: repository(owner: "demo", name: "project") { pullRequest(number: 999) { reviewDecision } } }',
+        ],
+    ):
         unknown = subprocess.run(
             [sys.executable, str(gh), *args], env=env, capture_output=True, text=True
         )
         assert unknown.returncode != 0
-        assert " ".join(args) in unknown.stderr
+        assert shlex.join(args) in unknown.stderr
 
 
 @pytest.mark.parametrize("image", ["dashboard.gif", "og-card.png"])
@@ -185,6 +192,7 @@ def test_capture_preserves_failure_when_configuration_changes(tmp_path, monkeypa
         MagicMock(side_effect=ValueError("capture failed") if capture_fails else None),
     )
     monkeypatch.setattr(generate, "render", MagicMock())
+    monkeypatch.setattr(generate, "validate_capture", MagicMock(), raising=False)
     error = ValueError if capture_fails else RuntimeError
     message = "capture failed" if capture_fails else "Real workdash configuration changed"
     with pytest.raises(error, match=message):
@@ -283,3 +291,75 @@ def check_local_links(published_pages):
                     target in published_pages
                     and unquote(url.fragment) in published_pages[target].ids
                 ), f"{page.name}: {link}"
+
+
+def test_capture_world_dashboard_legend(tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+
+    from workdash.backend import WorkdashBackend
+    from workdash.config import WorkdashConfig
+    from workdash.included_items import IncludedItemsStore
+    from workdash.models import WorkItemKind, ci_status_symbol
+
+    source = Path(__file__).resolve().parents[3] / "site/capture"
+    for name in ("gh", "fixtures.json"):
+        shutil.copy2(source / name, tmp_path / name)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+    backend = WorkdashBackend(
+        config=WorkdashConfig(
+            github_username="demo", repositories=("demo/project",), todo_repository="demo/todos"
+        ),
+        cache_root=tmp_path / "cache",
+        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+    )
+    items, _ = backend.load_items()
+    assert len(items) == 6
+    assert max(items, key=lambda item: item.updated_at).number == 42
+    authored = next(item for item in items if item.kind == WorkItemKind.AUTHORED_PR)
+    assert ci_status_symbol(authored.ci_state, authored.review_decision, False) == (
+        ("✓", "green"),
+        ("✓", "green"),
+    )
+    assert any(item.kind == WorkItemKind.REVIEW_REQUESTED_PR for item in items)
+    assert any(item.repo == "demo/todos" for item in items)
+    assert any(item.kind == WorkItemKind.ASSIGNED_ISSUE for item in items)
+    assert any(item.has_sub_issues and item.sub_issue_total == 2 for item in items)
+    assert all(
+        0 <= (datetime.now(UTC) - item.updated_at).total_seconds() < 7 * 86400 for item in items
+    )
+    again, _ = backend.load_items()
+    assert [item.updated_at for item in again] == [item.updated_at for item in items]
+    assert not (tmp_path / "gh-errors.log").exists()
+
+
+@pytest.mark.parametrize(
+    ("shot", "text", "missing"),
+    [
+        ("dashboard", "PR 51 ✓✓ RV 52 TD 7 IS 42", "Coordinate workspace rollout"),
+        (
+            "dashboard",
+            "✓✓PR 51 RV 52 TD 7 IS 44 IS 42 Coordinate workspace rollout",
+            "native sub-issue title highlight",
+        ),
+        ("analyze-dialog", "(1) Analyze with demo", "(a) Open analysis"),
+        ("viewer", "Loaded 6 item(s).", "Make it easier to pick up work together."),
+    ],
+)
+def test_capture_rejects_missing_claimed_content(tmp_path, monkeypatch, shot, text, missing):
+    source = Path(__file__).resolve().parents[3] / "site"
+    monkeypatch.syspath_prepend(str(source))
+    generate = importlib.import_module("generate")
+    (tmp_path / "agg-1.5.0").touch()
+    monkeypatch.setattr(sys, "argv", ["generate.py", shot, "--work", str(tmp_path)])
+    monkeypatch.setattr(generate, "build", MagicMock(return_value={}))
+
+    def capture(env, size, steps, output):
+        output.write_text(json.dumps({"version": 2}) + "\n" + json.dumps([0, "o", text]) + "\n")
+
+    monkeypatch.setattr(generate, "capture", capture)
+    renderer = MagicMock()
+    monkeypatch.setattr(generate, "render", renderer)
+    with pytest.raises(RuntimeError, match=f"{shot}.*{re.escape(missing)}"):
+        generate.main()
+    renderer.assert_not_called()

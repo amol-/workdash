@@ -7,7 +7,7 @@ import re
 import shlex
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 home = Path(os.environ["HOME"])
@@ -20,8 +20,11 @@ state_path = home / "gh-state.json"
 state = (
     json.loads(state_path.read_text())
     if state_path.exists()
-    else {"pull_requests": {}, "next_number": 43}
+    else {"pull_requests": {}, "next_number": 53, "timestamp": datetime.now(UTC).isoformat()}
 )
+if not state_path.exists():
+    state_path.write_text(json.dumps(state))
+run_time = datetime.fromisoformat(state["timestamp"])
 (home / "gh-calls.log").open("a").write(shlex.join(args) + "\n")
 
 
@@ -38,11 +41,11 @@ def respond():
         "id,number,title,url,createdAt,updatedAt,isDraft,repository",
     ]
     pull = next(iter(state["pull_requests"].values()), None)
-    if args in [
-        ["search", "prs", "--author", "demo", *search_suffix],
-        ["search", "prs", "--reviewed-by", "demo", *search_suffix],
-        ["search", "prs", "user-review-requested:demo", *search_suffix],
-    ]:
+    if args == ["search", "prs", "--author", "demo", *search_suffix]:
+        print(json.dumps([search_pull(node) for node in fixtures["authored_prs"]]))
+    elif args == ["search", "prs", "user-review-requested:demo", *search_suffix]:
+        print(json.dumps([search_pull(node) for node in fixtures["review_requested_prs"]]))
+    elif args == ["search", "prs", "--reviewed-by", "demo", *search_suffix]:
         print("[]")
     elif args[:2] == ["issue", "view"] and args[2] == str(issue_number):
         print(json.dumps(issue_view()))
@@ -115,18 +118,19 @@ def issue_state():
     return "CLOSED" if merged else "OPEN"
 
 
-def issue_node():
-    now = datetime.now(UTC).isoformat()
+def issue_node(node=issue, repository=repo):
     return {
-        "number": issue_number,
-        "title": issue["title"],
-        "body": issue["body"],
-        "url": f"https://github.com/{repo}/issues/{issue_number}",
-        "createdAt": now,
-        "updatedAt": now,
-        "state": issue_state(),
-        "repository": {"nameWithOwner": repo},
-        "subIssuesSummary": {"total": 0},
+        "__typename": "Issue",
+        "id": f"I_{repository}_{node['number']}",
+        "number": node["number"],
+        "title": node["title"],
+        "body": node["body"],
+        "url": f"https://github.com/{repository}/issues/{node['number']}",
+        "createdAt": (run_time - timedelta(days=node["created_days_ago"])).isoformat(),
+        "updatedAt": (run_time - timedelta(hours=node["updated_hours_ago"])).isoformat(),
+        "state": issue_state() if node == issue else "OPEN",
+        "repository": {"nameWithOwner": repository},
+        "subIssuesSummary": {"total": len(node["sub_issues"])},
         "issueDependenciesSummary": {"blockedBy": 0},
         "closedByPullRequestsReferences": {
             "nodes": [
@@ -136,7 +140,7 @@ def issue_node():
                     "repository": {"nameWithOwner": repo},
                 }
                 for pull in state["pull_requests"].values()
-                if issue_number in closing_issues(pull)
+                if node["number"] in closing_issues(pull)
             ]
         },
         "subIssues": {"nodes": []},
@@ -300,9 +304,53 @@ def fetched_item(item_number):
 
 def graphql(query):
     """Answer the work-state queries the capture flows reach."""
+    repositories = re.findall(r'repository\(owner: "([^"]+)", name: "([^"]+)"\)', query)
+    if any(f"{owner}/{name}" not in (repo, "demo/todos") for owner, name in repositories):
+        unknown()
     requested = re.search(r"issueOrPullRequest\(number: (\d+)\)", query)
     if requested:
-        return fetched_item(int(requested.group(1)))
+        number = int(requested.group(1))
+        if number != issue_number and str(number) not in state["pull_requests"]:
+            unknown()
+        return fetched_item(number)
+    aliases = re.findall(
+        r'(p\d+): repository\(owner: "demo", name: "project"\) \{ pullRequest\(number: (\d+)\)',
+        query,
+    )
+    if (
+        aliases
+        and "fragment ReadyPullRequest" not in query
+        and "query PullRequestStates" not in query
+    ):
+        data = {}
+        for alias, number in aliases:
+            node = next(
+                (
+                    node
+                    for node in fixtures["authored_prs"] + fixtures["review_requested_prs"]
+                    if node["number"] == int(number)
+                ),
+                None,
+            )
+            if node is not None:
+                data[alias] = {
+                    "pullRequest": {
+                        "commits": {
+                            "nodes": [
+                                {"commit": {"statusCheckRollup": {"state": node.get("ci_state")}}}
+                            ]
+                        },
+                        "reviewDecision": node.get("review_decision"),
+                        "reviewRequests": {"totalCount": 0},
+                        "reviewThreads": {"nodes": []},
+                        "closingIssuesReferences": {"nodes": []},
+                    }
+                }
+            elif number in state["pull_requests"]:
+                data[alias] = {"pullRequest": pull_request_node(state["pull_requests"][number])}
+            else:
+                unknown()
+        return data
     if "query ReadyRepositoryIssues" in query:
         node = issue_node()
         return {
@@ -356,31 +404,30 @@ def graphql(query):
                 }
             }
         }
-    if "assigned: search" in query:
-        return {"assigned": {"nodes": []}}
-    if "tracked: search" in query:
-        node = issue_node()
+    if "assigned: search" in query and "assignee:demo" in query:
+        return {"assigned": {"nodes": [issue_node(node) for node in fixtures["assigned_issues"]]}}
+    if "tracked: search" in query and "repo:demo/project" in query:
+        return {"tracked": {"nodes": [issue_node(node) for node in fixtures["tracked_issues"]]}}
+    if 'name: "todos"' in query and 'labels: ["workdash-todo"]' in query:
         return {
-            "tracked": {
-                "nodes": [
-                    {
-                        "__typename": "Issue",
-                        "id": f"I_demo_{issue_number}",
-                        "number": node["number"],
-                        "title": node["title"],
-                        "url": node["url"],
-                        "createdAt": node["createdAt"],
-                        "updatedAt": node["updatedAt"],
-                        "state": node["state"],
-                        "repository": node["repository"],
-                        "subIssuesSummary": node["subIssuesSummary"],
-                    }
-                ]
+            "repository": {
+                "issues": {"nodes": [issue_node(node, "demo/todos") for node in fixtures["todos"]]}
             }
         }
-    if 'name: "todos"' in query:
-        return {"repository": {"issues": {"nodes": []}}}
     unknown()
+
+
+def search_pull(node):
+    return {
+        "id": f"PR_demo_{node['number']}",
+        "number": node["number"],
+        "title": node["title"],
+        "url": f"https://github.com/{repo}/pull/{node['number']}",
+        "createdAt": (run_time - timedelta(days=node["created_days_ago"])).isoformat(),
+        "updatedAt": (run_time - timedelta(hours=node["updated_hours_ago"])).isoformat(),
+        "isDraft": False,
+        "repository": {"nameWithOwner": repo},
+    }
 
 
 respond()

@@ -99,6 +99,20 @@ def build(root: Path, work: Path):
         check=True,
     )
     env["PATH"] = f"{bin_dir}:{work / 'venv/bin'}:/usr/bin:/bin"
+    subprocess.run(
+        [
+            str(work / "venv/bin/python"),
+            "-c",
+            "from pathlib import Path\n"
+            "from workdash.analysis_cache import AnalysisCache\n"
+            "from workdash.github_client import GitHubClient\n"
+            "item = GitHubClient().fetch_item('demo/project', 42, github_username='demo', todo_repository='demo/todos')\n"
+            "AnalysisCache(Path.home() / '.config/workdash/cache').save(item, "
+            "'# Shared workspace analysis\\n\\nImprove the handoff notes and verify the contributor workflow.\\n')\n",
+        ],
+        env=env,
+        check=True,
+    )
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         env["WORKDASH_HOST"] = f"127.0.0.1:{sock.getsockname()[1]}"

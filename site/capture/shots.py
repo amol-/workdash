@@ -21,19 +21,19 @@ SHOTS = {
     "viewer": (
         "work.html",
         (110, 28),
-        [("wait", 15), ("keys", "v"), ("wait", 2), ("keys", "v"), ("wait", 5)],
+        [("wait", 15), ("keys", "v"), ("wait", 2), ("keys", "v"), ("hold", 5)],
         False,
     ),
     "agent-session": (
         "work.html",
         (110, 28),
-        [("wait", 15), ("keys", "c"), ("wait", 2), ("keys", "1"), ("wait", 8)],
+        [("wait", 15), ("keys", "c"), ("wait", 2), ("keys", "1"), ("hold", 8)],
         False,
     ),
     "branchdiff": (
         "review.html",
         (110, 28),
-        [("wait", 15), ("keys", "c"), ("wait", 2), ("keys", "d"), ("wait", 8)],
+        [("wait", 15), ("keys", "c"), ("wait", 2), ("keys", "d"), ("hold", 8)],
         False,
     ),
     "code-menu": ("work.html", (110, 28), [("wait", 15), ("keys", "c"), ("wait", 3)], False),

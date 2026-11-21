@@ -4,7 +4,55 @@
       "number": 42,
       "title": "Improve the shared workspace",
       "body": "Make it easier to pick up work together.",
-      "sub_issues": 0
+      "created_days_ago": 10,
+      "updated_hours_ago": 0,
+      "sub_issues": []
+    },
+    {
+      "number": 45,
+      "title": "Coordinate workspace rollout",
+      "body": "Track the workspace improvements as native sub-issues.",
+      "created_days_ago": 8,
+      "updated_hours_ago": 48,
+      "sub_issues": [46, 47]
+    }
+  ],
+  "assigned_issues": [
+    {
+      "number": 44,
+      "title": "Document the contributor setup",
+      "body": "Help new contributors get started.",
+      "created_days_ago": 3,
+      "updated_hours_ago": 8,
+      "sub_issues": []
+    }
+  ],
+  "todos": [
+    {
+      "number": 7,
+      "title": "Plan the next pairing session",
+      "body": "Choose a time to work together.",
+      "created_days_ago": 2,
+      "updated_hours_ago": 6,
+      "sub_issues": []
+    }
+  ],
+  "authored_prs": [
+    {
+      "number": 51,
+      "title": "Add workspace shortcuts",
+      "created_days_ago": 4,
+      "updated_hours_ago": 2,
+      "ci_state": "SUCCESS",
+      "review_decision": "APPROVED"
+    }
+  ],
+  "review_requested_prs": [
+    {
+      "number": 52,
+      "title": "Simplify project navigation",
+      "created_days_ago": 3,
+      "updated_hours_ago": 4
     }
   ]
 }
