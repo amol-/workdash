@@ -508,7 +508,6 @@ def _user_scrolls_diff_right(
             scroll_container = diff_view.query("DiffScrollContainer").first()
             scenario_state["diff_scroll_before_right"] = scroll_container.scroll_x
             await pilot.press("right")
-            await pilot.pause()
             scenario_state["diff_scroll_after_right"] = scroll_container.scroll_x
 
     asyncio.run(run_smoke())
@@ -535,10 +534,8 @@ def _user_scrolls_diff_left(
             diff_view = app.screen.query_one("#diff-view", branchdiff_module.DiffView)
             scroll_container = diff_view.query("DiffScrollContainer").first()
             await pilot.press("right")
-            await pilot.pause()
             scenario_state["diff_scroll_before_left"] = scroll_container.scroll_x
             await pilot.press("left")
-            await pilot.pause()
             scenario_state["diff_scroll_after_left"] = scroll_container.scroll_x
 
     asyncio.run(run_smoke())
@@ -653,7 +650,6 @@ def _file_list_keeps_horizontal_scroll_position(
             assert previous_scroll_x == expected_scroll_x
 
             await pilot.press("k")
-            await pilot.pause()
 
             assert table.cursor_row == scenario_state["next_file_index"]
             assert table.scroll_x == previous_scroll_x

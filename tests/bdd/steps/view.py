@@ -544,7 +544,6 @@ def _activate_link(
                 records["running"] = app.is_running
                 for key in press:
                     await pilot.press(key)
-                    await pilot.pause()
                 records["source_latest"] = _viewer_source(app)
                 records["offered_latest"] = _back_offered(app)
 
@@ -707,7 +706,6 @@ def _choose_view(
 
     async def interactions(app, pilot) -> None:
         await pilot.press("v")
-        await pilot.pause()
         await pilot.press("v")
         for _ in range(20):
             await pilot.pause()
@@ -730,9 +728,7 @@ def _cancel_menu(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> 
 
     async def interactions(app, pilot) -> None:
         await pilot.press("v")
-        await pilot.pause()
         await pilot.press("escape")
-        await pilot.pause()
         captured["modal_screen_names"] = modal_screen_names(app)
 
     run_app(

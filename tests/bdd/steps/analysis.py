@@ -300,9 +300,7 @@ def _user_cancels(scenario_state: dict[str, Any], work_items: list[WorkItem]) ->
 
     async def interactions(app, pilot) -> None:
         await pilot.press(dialog_key)
-        await pilot.pause()
         await pilot.press("escape")
-        await pilot.pause()
 
     from .common import run_app
 

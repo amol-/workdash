@@ -916,7 +916,6 @@ def dashboard_toggle_automerge(autodispatch_state):
     async def interact(app, pilot):
         autodispatch_state["command_off"] = app.query_one("#command-footer", Static).render().plain
         await pilot.press("m")
-        await pilot.pause()
         autodispatch_state["command_on"] = app.query_one("#command-footer", Static).render().plain
         autodispatch_state["enabled"] = session.autodispatch_sessions()[0]["automerge"]
         autodispatch_state["footer"] = app.query_one("#status-footer", Static).render().plain
@@ -924,7 +923,6 @@ def dashboard_toggle_automerge(autodispatch_state):
             app.query_one("#autodispatch-progress", Static).render().plain
         )
         await pilot.press("m")
-        await pilot.pause()
         autodispatch_state["disabled_footer"] = (
             app.query_one("#status-footer", Static).render().plain
         )
@@ -957,7 +955,6 @@ def toggle_progress_automerge(autodispatch_state):
         autodispatch_state["index"] = app._progress_index
         autodispatch_state["hint_before"] = app.query_one("#command-footer", Static).render().plain
         await pilot.press("m")
-        await pilot.pause()
         autodispatch_state["footer"] = app.query_one("#status-footer", Static).render().plain
         autodispatch_state["hint_after"] = app.query_one("#command-footer", Static).render().plain
         autodispatch_state["after_progress"] = {
@@ -1008,7 +1005,6 @@ def dashboard_toggle_for_merge(autodispatch_state, times):
     async def interact(app, pilot):
         for _ in range(1 if times == "once" else 2):
             await pilot.press("m")
-            await pilot.pause()
 
     run_app(
         work_items=[autodispatch_state["item"]],
@@ -1209,7 +1205,6 @@ def focus_progress_session(autodispatch_state):
 
     async def interact(app, pilot):
         await pilot.press("shift+tab", "down", "f")
-        await pilot.pause()
 
     run_app(
         work_items=[autodispatch_state["item"]],
@@ -1250,7 +1245,6 @@ def focus_review_session(autodispatch_state):
 
     async def interact(app, pilot):
         await pilot.press("shift+tab", "f")
-        await pilot.pause()
 
     run_app(
         work_items=[],

@@ -2,7 +2,20 @@
 
 from __future__ import annotations
 
+from wsgiref.simple_server import WSGIServer
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _fast_http_server_shutdown(monkeypatch):
+    """Avoid waiting up to half a second for idle test servers to stop."""
+    serve_forever = WSGIServer.serve_forever
+
+    def serve_with_short_poll(server, poll_interval=0.01):
+        return serve_forever(server, poll_interval=poll_interval)
+
+    monkeypatch.setattr(WSGIServer, "serve_forever", serve_with_short_poll)
 
 
 @pytest.fixture(autouse=True)
