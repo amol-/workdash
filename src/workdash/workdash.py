@@ -45,12 +45,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         logging.basicConfig(level=logging.DEBUG)
 
     if options.configure:
-        try:
-            configure(github_client=GitHubClient())
-        except WorkdashConfigValidationError as error:
-            _print_config_validation_error(error)
-            return 1
-        return 0
+        return _run_configure()
 
     commands = WorkdashCommands(host=options.host)
     if options.command in {
@@ -92,15 +87,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.command is None:
         try:
             first_run = load_config().config_file_missing
-            if first_run:
-                configure(github_client=GitHubClient())
-        except WorkdashConfigValidationError as error:
-            _print_config_validation_error(error)
-            return 1
         except RuntimeError as error:
             print(f"Error: {error}", file=sys.stderr, flush=True)
             return 1
         if first_run:
+            if _run_configure() != 0:
+                return 1
             print()
             print("Configuration complete.")
             print("Run 'workdash' again to start the dashboard.")
@@ -695,6 +687,20 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             json_output=options.json_output,
         )
     raise AssertionError(f"Unsupported server-backed command: {options.command}")
+
+
+def _run_configure() -> int:
+    """Run the setup wizard, reporting any failure as a one-line error."""
+
+    try:
+        configure(github_client=GitHubClient())
+    except WorkdashConfigValidationError as error:
+        _print_config_validation_error(error)
+        return 1
+    except (RuntimeError, OSError, EOFError) as error:
+        print(f"Error: {error}", file=sys.stderr, flush=True)
+        return 1
+    return 0
 
 
 def _print_config_validation_error(error: WorkdashConfigValidationError) -> None:

@@ -1355,12 +1355,7 @@ def _attach_running_dashboard_focus_harness(
     dashboard = tmp_path / "dashboard.py"
     dashboard.write_text(
         "import workdash.workdash as cli\n"
-        "from workdash.config import WorkdashConfig, AgentConfig\n"
         "cli.GitHubClient.check_authentication = lambda self: None\n"
-        "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
-        "analysis_viewer={'command': 'workdash view', 'format': 'markdown', 'needs_pane': True}, "
-        "agents={'agent': AgentConfig(launch='sh')}, repositories=('owner/repo',), "
-        "workdir='/tmp', todo_repository='test/todos')\n"
         "cli.WorkdashBackend.load_items = lambda self, progress_callback=None: ([], {})\n"
         "raise SystemExit(cli.main())\n"
     )

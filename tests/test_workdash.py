@@ -688,6 +688,32 @@ def test_main_exits_with_error_when_gh_is_not_installed(
     assert "gh CLI is not installed" in captured.err
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [EOFError("EOF when reading a line"), PermissionError("denied")],
+)
+def test_main_reports_a_failed_wizard_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    failure: Exception,
+) -> None:
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        lambda **kwargs: (_ for _ in ()).throw(failure),
+    )
+
+    exit_code = workdash_module.main([])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith(f"Error: {failure}")
+    assert "Run 'workdash' again" not in captured.out
+
+
 def test_main_runs_configuration_when_the_config_file_is_missing(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -1620,6 +1646,23 @@ def test_main_configure_reports_invalid_listeners(monkeypatch, tmp_path, capsys)
     error = capsys.readouterr().err
     assert "listens" in error and "list" in error and str(path) in error
     assert path.read_text() == original
+
+
+def test_main_configure_reports_an_unparsable_config_file_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    from workdash.config import configure
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{invalid json", encoding="utf-8")
+    monkeypatch.setattr(workdash_module, "configure", lambda **kwargs: configure(config_path))
+
+    exit_code = workdash_module.main(["--configure"])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("Error: Configuration at ")
+    assert "is not valid JSON" in captured.err
 
 
 def test_main_configure_runs_setup_and_exits(

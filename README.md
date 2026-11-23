@@ -48,11 +48,9 @@ pip install -e '.[test]'
 ## First-time setup
 
 On the first run you need a configuration file at
-`~/.config/workdash/config.json`. Generate it interactively with:
-
-```bash
-workdash --configure
-```
+`~/.config/workdash/config.json`. Running `workdash` without one starts the
+interactive wizard and asks you to run `workdash` again to start the dashboard.
+`workdash --configure` reruns the wizard at any time.
 
 The wizard fills in:
 
