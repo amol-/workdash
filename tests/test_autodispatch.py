@@ -2606,7 +2606,19 @@ def test_tui_scrolling_remains_visible_when_progress_changes(size):
             progress = app.query_one("#autodispatch-progress", Static)
             status = app.query_one("#status-footer", Static)
             footer = app.query_one("#command-footer", Static)
-            await pilot.press(*(["down"] * 39))
+
+            def row_y(row):
+                return table.region.y + table._get_row_region(row).y - int(table.scroll_y)
+
+            def assert_selected_row_visible(row):
+                assert table.cursor_row == row
+                y = row_y(row)
+                assert table.region.y + table.header_height <= y < table.region.bottom
+                rows = [strip.text for strip in app.screen._compositor.render_strips()]
+                assert f"IS {row + 1} " in rows[y]
+
+            last_row = len(items) - 1
+            table.move_cursor(row=last_row)
             for entries in (
                 [],
                 [{"id": "1", "status": "failed", "scope": "owner/repo", "error": "failed"}],
@@ -2615,30 +2627,33 @@ def test_tui_scrolling_remains_visible_when_progress_changes(size):
                 session.autodispatch_sessions.return_value = entries
                 app._update_autodispatch_progress()
                 await pilot.pause()
+                # Let the table handle the resize from the progress panel's relayout.
+                await pilot.pause()
                 assert not entries or progress.region.y == 0
                 assert table.region.bottom <= footer.region.y < status.region.y
-                await _choose_open(pilot, opened)
-                assert opened[-1].number == 40
-                row_y = (
-                    table.region.y + table._get_row_region(table.cursor_row).y - int(table.scroll_y)
-                )
-                assert table.region.y <= row_y < footer.region.y
                 rows = [strip.text for strip in app.screen._compositor.render_strips()]
                 assert any("Failed: failed (owner/repo)" in row for row in rows) == bool(entries)
-                assert "IS 40" in rows[row_y]
-                for key, numbers in (("up", range(39, 0, -1)), ("down", range(2, 41))):
-                    for number in numbers:
-                        await pilot.press(key)
-                        row_y = (
-                            table.region.y
-                            + table._get_row_region(table.cursor_row).y
-                            - int(table.scroll_y)
-                        )
-                        assert table.region.y <= row_y < footer.region.y
-                        rows = [strip.text for strip in app.screen._compositor.render_strips()]
-                        assert f"IS {number} " in rows[row_y]
-                    await _choose_open(pilot, opened)
-                assert [item.number for item in opened[-2:]] == [1, 40]
+                assert_selected_row_visible(last_row)
+
+                # Jump to each viewport edge so the real keypress must scroll the table.
+                top_row = int(table.scroll_y)  # Work items are one line each.
+                table.move_cursor(row=top_row)
+                await pilot.pause()
+                assert_selected_row_visible(top_row)
+                assert row_y(top_row - 1) < table.region.y + table.header_height
+                await pilot.press("up")
+                assert_selected_row_visible(top_row - 1)
+                await _choose_open(pilot, opened)
+                assert opened[-1].number == top_row
+
+                table.move_cursor(row=last_row - 1)
+                await pilot.pause()
+                assert_selected_row_visible(last_row - 1)
+                assert row_y(last_row) >= table.region.bottom
+                await pilot.press("down")
+                assert_selected_row_visible(last_row)
+                await _choose_open(pilot, opened)
+                assert opened[-1].number == len(items)
 
     asyncio.run(exercise())
 
