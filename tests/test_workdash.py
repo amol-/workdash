@@ -1676,6 +1676,7 @@ def test_main_exits_with_error_when_gh_is_not_authenticated(
 
     monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     monkeypatch.setattr(github_client_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
 
@@ -1698,6 +1699,7 @@ def test_main_outside_zellij_checks_gh_before_replacing_process(
 
     monkeypatch.delenv("ZELLIJ", raising=False)
     monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(
         workdash_module.launcher.zellij,
         "exec_zellij_wrapped_workdash",

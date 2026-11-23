@@ -35,6 +35,7 @@ def test_startup_and_backend_use_same_github_client(monkeypatch):
     client = MagicMock()
     client.check_authentication.return_value = None
     monkeypatch.setattr(app, "GitHubClient", lambda: client)
+    monkeypatch.setattr(app, "load_config", lambda: WorkdashConfig())
     monkeypatch.setattr(
         app.WorkdashCommands,
         "preload_config",
