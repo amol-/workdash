@@ -12,6 +12,8 @@ Feature: First-time configuration
 
   Rules:
     - The configuration lives at ~/.config/workdash/config.json.
+    - When the configuration file is missing, starting the system without any flag runs the wizard, then tells the user to run the system again instead of starting the dashboard.
+    - An existing configuration file is never reconfigured automatically, even when it has missing or invalid options; the system tells the user to run the wizard.
     - Required configuration fields are the GitHub username, open command, at least one repository selector, the work directory, the todo repository, and at least one agent.
     - Every required field must be present for the system to start; the wizard backfills missing required fields, using a default when one exists.
     - The analysis viewer is required; the wizard defaults to `workdash view` for Markdown in a terminal pane.
@@ -238,3 +240,19 @@ Feature: First-time configuration
     And the user chooses a custom HTML analysis viewer requiring a terminal pane
     When the user runs the system with "--configure"
     Then the saved analysis viewer uses that command and HTML in a terminal pane
+
+  @id:F-SETUP-CONFIGURE-S025
+  Scenario: Starting the system without a configuration file runs the wizard
+    Given the user has no configuration file
+    When the user starts the system
+    Then the system prompts the user for each missing globally required field
+    And the system writes the collected values to "~/.config/workdash/config.json"
+    And the system tells the user to run the system again
+    And the system stops without starting the dashboard
+
+  @id:F-SETUP-CONFIGURE-S026
+  Scenario: An existing configuration file is never reconfigured automatically
+    Given the user has a configuration file missing a required field
+    When the user starts the system
+    Then the system tells the user to run the configuration wizard
+    And the system does not run the configuration wizard

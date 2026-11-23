@@ -688,6 +688,60 @@ def test_main_exits_with_error_when_gh_is_not_installed(
     assert "gh CLI is not installed" in captured.err
 
 
+def test_main_runs_configuration_when_the_config_file_is_missing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        lambda github_client: save_config(_VALID_CONFIG, config_path),
+    )
+    monkeypatch.setattr(
+        workdash_module,
+        "WorkdashBackend",
+        lambda *args, **kwargs: pytest.fail("first run should not load work items"),
+    )
+    monkeypatch.setattr(
+        workdash_module.launcher.zellij,
+        "exec_zellij_wrapped_workdash",
+        lambda _argv, preflight: preflight(),
+    )
+    monkeypatch.delenv("ZELLIJ", raising=False)
+
+    exit_code = workdash_module.main([])
+
+    assert exit_code == 0
+    assert load_config(config_path) == _VALID_CONFIG
+    captured = capsys.readouterr()
+    assert "Run 'workdash' again to start the dashboard." in captured.out
+
+
+def test_main_does_not_configure_again_when_the_config_file_exists(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(WorkdashConfig(github_username="testuser"), config_path)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        lambda **kwargs: pytest.fail("an existing config must not be reconfigured"),
+    )
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
+
+    exit_code = workdash_module.main([])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "missing configuration fields" in captured.err
+    assert "workdash --configure" in captured.err
+
+
 def test_main_exits_with_error_when_config_incomplete(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

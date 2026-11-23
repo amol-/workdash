@@ -28,7 +28,7 @@ def test_load_config_returns_empty_when_file_missing(tmp_path):
 
     config = load_config(config_path)
 
-    assert config == WorkdashConfig()
+    assert config.config_file_missing is True
     assert config.github_username == ""
     assert config.agents == {}
     assert config.repositories == ()
@@ -72,6 +72,7 @@ def test_load_config_reads_existing_config(tmp_path):
     ]
     assert config.repositories == ("owner/repo",)
     assert config.workdir == ""
+    assert config.config_file_missing is False
 
 
 def test_load_config_returns_empty_for_missing_keys(tmp_path):

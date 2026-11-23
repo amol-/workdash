@@ -39,7 +39,7 @@ Feature: Share the workdash site
   @id:F-SITE-BROWSE-S003
   Scenario: Get started from the homepage
     When a visitor browses the workdash site
-    Then the homepage shows installation, setup, and launch commands before the feature tour
+    Then the homepage shows the install command and starting workdash before the feature tour
     And the homepage explains that setup provides missing GitHub CLI and Zellij binaries
 
   @id:F-SITE-BROWSE-S002

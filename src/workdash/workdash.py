@@ -86,7 +86,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.command == "show-config":
         return commands.show_config(json_output=options.json_output)
 
+    setup_completed = False
+
     def preflight() -> bool:
+        nonlocal setup_completed
+        # A completely missing configuration file means first-time use: configure
+        # it, then let the user start again so the dashboard opens on a saved config.
+        if options.command is None and load_config().config_file_missing:
+            configure(github_client=GitHubClient())
+            print()
+            print("Configuration complete.")
+            print("Run 'workdash' again to start the dashboard.")
+            print()
+            setup_completed = True
+            return False
         commands._github_client = GitHubClient()
         inject_workdash_local_bin_into_path()
         gh_error = commands._github_client.check_authentication()
@@ -98,12 +111,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if _should_wrap_interactive_start(options):
         try:
             launcher.zellij.exec_zellij_wrapped_workdash(argv, preflight)
-            return 1
         except RuntimeError as error:
             print(f"Error: {error}", file=sys.stderr, flush=True)
             return 1
+        return 0 if setup_completed else 1
     elif not preflight():
-        return 1
+        return 0 if setup_completed else 1
 
     if os.getenv("ZELLIJ") and not options.persistent_pane:
         session = os.getenv("ZELLIJ_SESSION_NAME")

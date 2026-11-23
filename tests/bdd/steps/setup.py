@@ -221,12 +221,12 @@ class _UserHasNotAnswered(Exception):
     """The wizard asked an agent question the scenario's user has not answered (yet)."""
 
 
-def _run_configure_with_fakes(
+def _install_wizard_fakes(
     scenario_state: dict[str, Any],
     config_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> WorkdashConfig:
+) -> list[str]:
+    """Wire main's configure() call to the wizard fed by the scenario's answers."""
     on_path_tools = scenario_state.get("on_path_tools", set())
     responses = iter(scenario_state.get("input_responses", []))
     # By default the user ends both agent sections without adding agents.
@@ -282,6 +282,16 @@ def _run_configure_with_fakes(
     monkeypatch.setenv("SHELL", "/bin/sh")
     monkeypatch.delenv("ENV", raising=False)  # an interactive shell would source it
     monkeypatch.setenv("PATH", str(shell_bin))
+    return prompts
+
+
+def _run_configure_with_fakes(
+    scenario_state: dict[str, Any],
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> WorkdashConfig:
+    prompts = _install_wizard_fakes(scenario_state, config_path, monkeypatch)
     try:
         scenario_state["exit_code"] = workdash_module.main(["--configure"])
     except _UserHasNotAnswered:
@@ -703,3 +713,52 @@ def _other_settings_preserved(scenario_state, config_path):
     saved = json.loads(config_path.read_text())
     for key, value in scenario_state["original_settings"].items():
         assert saved[key] == value
+
+
+@given("the user has a configuration file missing a required field")
+def _config_file_missing_required_field(scenario_state: dict[str, Any], config_path: Path) -> None:
+    config_path.write_text(json.dumps({"github_username": "octocat"}), encoding="utf-8")
+    scenario_state["config_path"] = config_path
+    scenario_state.setdefault(
+        "on_path_tools", {"zellij", "gh", config_module._default_open_command(), "claude"}
+    )
+
+
+@when("the user starts the system")
+def _starts_the_system(
+    scenario_state: dict[str, Any],
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    prompts = _install_wizard_fakes(scenario_state, config_path, monkeypatch)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
+    monkeypatch.setattr(
+        workdash_module,
+        "WorkdashBackend",
+        lambda *args, **kwargs: pytest.fail("startup loaded work items"),
+    )
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
+    scenario_state["exit_code"] = workdash_module.main([])
+    captured = capsys.readouterr()
+    scenario_state["output"] = captured.out + captured.err
+    scenario_state["prompts"] = prompts
+    scenario_state["written_config"] = load_config(config_path)
+
+
+@then("the system tells the user to run the system again")
+def _tells_to_run_again(scenario_state: dict[str, Any]) -> None:
+    assert "Run 'workdash' again to start the dashboard." in scenario_state["output"]
+
+
+@then("the system stops without starting the dashboard")
+def _stops_without_dashboard(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0
+    assert "Loading work items" not in scenario_state["output"]
+
+
+@then("the system does not run the configuration wizard")
+def _does_not_run_wizard(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["prompts"] == []

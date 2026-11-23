@@ -297,17 +297,18 @@ def check_repository_link(published_pages):
         assert parsed.navigation_svgs[index] == 1, page.name
 
 
-@then("the homepage shows installation, setup, and launch commands before the feature tour")
+@then("the homepage shows the install command and starting workdash before the feature tour")
 def check_quickstart(published_site):
     homepage = (published_site / "index.html").read_text()
     quickstart = homepage[homepage.index('id="install"') : homepage.index('id="what"')]
-    assert "uv tool install workdash\nworkdash --configure\nworkdash" in quickstart
+    assert "uv tool install workdash\nworkdash" in quickstart
+    assert "--configure" not in quickstart
 
 
 @then("the homepage explains that setup provides missing GitHub CLI and Zellij binaries")
 def check_setup_downloads(published_site):
     homepage = (published_site / "index.html").read_text()
-    assert re.search(r"setup wizard installs missing .*GitHub CLI.*Zellij", homepage)
+    assert re.search(r"setup wizard.*installs missing .*GitHub CLI.*Zellij", homepage)
 
 
 @then("local links and images on the pages resolve")
