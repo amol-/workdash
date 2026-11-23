@@ -30,6 +30,12 @@ Feature: Share the workdash site
     Then every page offers navigation to the workdash topics and installation
     And local links and images on the pages resolve
 
+  @id:F-SITE-BROWSE-S004
+  Scenario: Reach the workdash repository from the navigation
+    When a visitor browses the workdash site
+    Then every page offers navigation to the workdash topics and installation
+    And every page links to the workdash repository after the installation link
+
   @id:F-SITE-BROWSE-S003
   Scenario: Get started from the homepage
     When a visitor browses the workdash site

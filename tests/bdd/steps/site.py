@@ -238,6 +238,8 @@ def check_navigation(published_site):
             self.ids = set()
             self.links = []
             self.navigation = []
+            self.navigation_attributes = []
+            self.nav_svg = False
             self.in_nav = False
 
         def handle_starttag(self, tag, attrs):
@@ -246,11 +248,14 @@ def check_navigation(published_site):
                 self.ids.add(attrs["id"])
             if tag == "nav":
                 self.in_nav = True
+            if self.in_nav and tag == "svg":
+                self.nav_svg = True
             for attr in ("href", "src", "data-full"):
                 if attrs.get(attr):
                     self.links.append(attrs[attr])
             if self.in_nav and tag == "a":
                 self.navigation.append(attrs.get("href"))
+                self.navigation_attributes.append(attrs)
 
         def handle_endtag(self, tag):
             if tag == "nav":
@@ -277,6 +282,21 @@ def check_navigation(published_site):
             "index.html#install",
         }
     return pages
+
+
+@then("every page links to the workdash repository after the installation link")
+def check_repository_link(published_pages):
+    repository = "https://github.com/amol-/workdash"
+    for page, parsed in published_pages.items():
+        assert repository in parsed.navigation, page.name
+        assert parsed.navigation.index(repository) == (
+            parsed.navigation.index("index.html#install") + 1
+        ), page.name
+        assert (
+            parsed.navigation_attributes[parsed.navigation.index(repository)]["aria-label"]
+            == "workdash on GitHub"
+        ), page.name
+        assert parsed.nav_svg, page.name
 
 
 @then("the homepage shows installation, setup, and launch commands before the feature tour")
