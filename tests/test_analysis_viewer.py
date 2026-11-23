@@ -352,7 +352,6 @@ def test_markdown_viewer_opens_relative_link_in_place(tmp_path, monkeypatch):
         shown.append(_viewer_source(app))
         assert "b" in app.screen.active_bindings
         await pilot.press("b")
-        await pilot.pause()
         shown.append(_viewer_source(app))
 
     _run_viewer(monkeypatch, exercise)
@@ -383,7 +382,6 @@ def test_analysis_viewer_navigates_to_issue_and_back_with_copy_available(tmp_pat
         await pilot.press("ctrl+c")
         assert copied and "Crash on startup" in copied[-1]
         await pilot.press("b")
-        await pilot.pause()
         assert _viewer_source(app) == path.read_text(encoding="utf-8")
         assert "b" not in app.screen.active_bindings
 
@@ -651,7 +649,6 @@ def test_back_walks_the_whole_history(tmp_path, monkeypatch):
         shown.append((_viewer_source(app), "b" in app.screen.active_bindings))
         for _ in range(2):
             await pilot.press("b")
-            await pilot.pause()
             shown.append((_viewer_source(app), "b" in app.screen.active_bindings))
 
     _run_viewer(monkeypatch, exercise)

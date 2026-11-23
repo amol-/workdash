@@ -696,7 +696,6 @@ async def _choose_open(pilot, opened: list) -> None:
     """Pick the view menu's open choice and wait for the open callback to run."""
     count = len(opened)
     await pilot.press("v")
-    await pilot.pause()
     await pilot.press("o")
     for _ in range(20):
         await pilot.pause()
@@ -834,13 +833,11 @@ def test_tui_reports_the_failure_of_the_session_the_user_started():
         async with app.run_test() as pilot:
             footer = app.query_one("#status-footer", Static)
             await pilot.press("d", "1")
-            await pilot.pause()
             assert footer.render().plain == (
                 "Started autodispatch for owner/repo#ISSUE-42: session-1."
             )
             # Another action replaces the footer before the session fails.
             await pilot.press("r")
-            await pilot.pause()
             assert footer.render().plain == "Refresh skipped."
             session.autodispatch_sessions.return_value = [
                 {**running, "status": "failed", "error": "\x1b[31mGitHub\x1b[0m\nunavailable"}
@@ -956,7 +953,6 @@ def test_tui_does_not_reannounce_the_session_it_started():
         async with app.run_test() as pilot:
             footer = app.query_one("#status-footer", Static)
             await pilot.press("d", "1")
-            await pilot.pause()
             assert (
                 footer.render().plain == "Started autodispatch for owner/repo#ISSUE-42: session-1."
             )
@@ -1056,7 +1052,6 @@ def test_tui_short_dashboard_scrolls_progress_and_keeps_table_visible(width):
             assert "owner/f0" in app.export_screenshot()
             assert "owner/f2" not in app.export_screenshot()
             await pilot.press("shift+tab", "end")
-            await pilot.pause()
             assert "owner/f2" in app.export_screenshot()
             assert any("IS 42" in strip.text for strip in app.screen._compositor.render_strips())
 
@@ -2554,7 +2549,6 @@ def test_tui_short_pane_keeps_a_work_item_visible_with_progress():
             assert progress.region.height > 0
             assert table.region.height >= 2
             await pilot.press(*(["down"] * 9))
-            await pilot.pause()
             rows = [strip.text for strip in app.screen._compositor.render_strips()]
             assert any("IS 10" in row for row in rows[table.region.y : status.region.y])
             await _choose_open(pilot, opened)
@@ -2839,7 +2833,6 @@ def test_tui_dispatch_replaces_selected_running_session():
             session.start_autodispatch_for_item.assert_not_called()
             assert session.autodispatch_sessions()[0]["id"] == "old"
             await pilot.press("d", "1")
-            await pilot.pause()
             session.start_autodispatch_for_item.assert_called_once_with(item, agent="pi")
 
     asyncio.run(exercise())
@@ -2863,11 +2856,9 @@ def test_tui_toggles_automerge_for_the_session_it_just_dispatched():
     async def exercise():
         async with app.run_test() as pilot:
             await pilot.press("d", "1")
-            await pilot.pause()
             # The dashboard learns the new session from the polled snapshot.
             await app._poll_autodispatch_progress()
             await pilot.press("m")
-            await pilot.pause()
             session.toggle_automerge.assert_called_once_with("new")
 
     asyncio.run(exercise())
@@ -2913,7 +2904,6 @@ def test_tui_refuses_ambiguous_automerge_toggle():
     async def exercise():
         async with app.run_test() as pilot:
             await pilot.press("m")
-            await pilot.pause()
             session.toggle_automerge.assert_not_called()
             assert "multiple" in app.query_one("#status-footer", Static).render().plain.lower()
 
@@ -3726,7 +3716,6 @@ def test_tui_dispatch_chooser_pages_and_selects_tenth():
             lines = [widget.render().plain for widget in app.screen.query(".review-line")]
             assert "(9) agent-9" in lines
             await pilot.press("right", "1")
-            await pilot.pause()
             session.start_autodispatch_for_item.assert_called_once_with(item, agent="agent-10")
 
     asyncio.run(exercise())

@@ -136,12 +136,10 @@ def test_branchdiff_left_and_right_arrows_scroll_wide_diff(
             assert scroll_container.scroll_x == 0
 
             await pilot.press("right")
-            await pilot.pause()
 
             assert scroll_container.scroll_x > 0
 
             await pilot.press("left")
-            await pilot.pause()
 
             assert scroll_container.scroll_x == 0
 
@@ -213,10 +211,8 @@ def test_branchdiff_refresh_keeps_one_diff_view_when_selected_file_is_replaced(
         async with app.run_test(size=(80, 20)) as pilot:
             await pilot.pause()
             await pilot.press("k")
-            await pilot.pause()
 
             await pilot.press("r")
-            await pilot.pause()
 
             diff_views = list(app.screen.query("#diff-view"))
             assert len(diff_views) == 1
@@ -256,7 +252,6 @@ def test_branchdiff_file_list_keeps_horizontal_scroll_when_switching_files(
             assert previous_scroll_x > 0
 
             await pilot.press("k")
-            await pilot.pause()
 
             assert table.cursor_row == 1
             assert table.scroll_x == previous_scroll_x
@@ -302,19 +297,16 @@ def test_branchdiff_app_mounts_and_navigates_between_files(monkeypatch, tmp_path
             assert str(diff_view.line_styles["-"]) == "rgb(255,255,255) on rgb(104,0,0)"
 
             await pilot.press("down")
-            await pilot.pause()
 
             assert table.cursor_row == 0
             assert diff_view.scroll_y > 0
 
             await pilot.press("up")
-            await pilot.pause()
 
             assert table.cursor_row == 0
             assert diff_view.scroll_y == 0
 
             await pilot.press("k")
-            await pilot.pause()
 
             assert table.cursor_row == 1
             diff_view = app.screen.query_one("#diff-view", DiffView)
@@ -323,7 +315,6 @@ def test_branchdiff_app_mounts_and_navigates_between_files(monkeypatch, tmp_path
             assert "b.py" in str(title.content)
 
             await pilot.press("j")
-            await pilot.pause()
 
             assert table.cursor_row == 0
             diff_view = app.screen.query_one("#diff-view", DiffView)
@@ -332,21 +323,18 @@ def test_branchdiff_app_mounts_and_navigates_between_files(monkeypatch, tmp_path
             assert "a.py" in str(title.content)
 
             await pilot.press("space")
-            await pilot.pause()
 
             assert table.cursor_row == 0
             assert diff_view.scroll_y > 1
 
             contents["a.py"] = (long_old, "refreshed a\n")
             await pilot.press("r")
-            await pilot.pause()
 
             assert table.cursor_row == 0
             diff_view = app.screen.query_one("#diff-view", DiffView)
             assert diff_view.code_modified == "refreshed a\n"
 
             await pilot.press("k")
-            await pilot.pause()
 
             assert table.cursor_row == 1
             diff_view = app.screen.query_one("#diff-view", DiffView)
@@ -354,16 +342,13 @@ def test_branchdiff_app_mounts_and_navigates_between_files(monkeypatch, tmp_path
 
             changed_files.clear()
             await pilot.press("r")
-            await pilot.pause()
             await pilot.press("down")
             await pilot.press("space")
             await pilot.press("up")
-            await pilot.pause()
 
             assert app.is_running is True
 
             await pilot.press("q")
-            await pilot.pause()
 
             assert app.is_running is False
             assert app.return_code == 0
@@ -417,7 +402,6 @@ def test_branchdiff_uses_one_replaceable_git_for_initial_display_and_refresh(mon
                 await pilot.pause()
                 assert app.screen.query_one("#diff-view", DiffView).code_modified == "first\n"
                 await pilot.press("r")
-                await pilot.pause()
                 assert app.screen.query_one("#diff-view", DiffView).code_modified == "refreshed\n"
 
         asyncio.run(exercise())

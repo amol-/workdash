@@ -2908,7 +2908,6 @@ def _autodispatch_stops(work_items: list[WorkItem], scenario_state: dict[str, An
         assert table.get_row("issue:owner/repo#1")[2].style == "bold cyan"
         assert "magenta" in table.get_row("issue:owner/repo#2")[2].style
         await pilot.press("end")
-        await pilot.pause()
 
         def snapshot():
             selected = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
@@ -2974,7 +2973,6 @@ def _scroll_work_items(scenario_state: dict[str, Any], work_items: list[WorkItem
         assert "Failed: failed (owner/repo)" in progress.render().plain
         for index in range(table.row_count):
             await pilot.press("v")
-            await pilot.pause()
             await pilot.press("o")
             row_y = table.region.y + table._get_row_region(index).y - int(table.scroll_y)
             rows = [strip.text for strip in app.screen._compositor.render_strips()]
