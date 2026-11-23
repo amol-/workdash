@@ -1375,9 +1375,31 @@ def _attach_running_dashboard_focus_harness(
     sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
     config = tmp_path / "config.kdl"
     config.write_text("show_release_notes false\nshow_startup_tips false\n")
+    home = _temporary_home(tmp_path)
+    # A dashboard already runs in this home, so the machine is configured: the returning
+    # client must attach instead of being offered first-time configuration.
+    (tmp_path / "home" / ".config" / "workdash").mkdir(parents=True)
+    (tmp_path / "home" / ".config" / "workdash" / "config.json").write_text(
+        json.dumps(
+            {
+                "github_username": "test",
+                "open": "xdg-open",
+                "analysis_viewer": {
+                    "command": "workdash view",
+                    "format": "markdown",
+                    "needs_pane": True,
+                },
+                "agents": {"agent": {"analyze": "", "launch": "sh"}},
+                "repositories": ["owner/repo"],
+                "workdir": "/tmp",
+                "todo_repository": "test/todos",
+            }
+        ),
+        encoding="utf-8",
+    )
     env.update(
         TERM="xterm-256color",
-        HOME=_temporary_home(tmp_path),
+        HOME=home,
         SHELL=str(shell),
         WORKDASH_HOST=f"127.0.0.1:{port}",
         ZELLIJ_SOCKET_DIR=sockets.name,
