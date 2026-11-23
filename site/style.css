@@ -133,6 +133,7 @@ header {
 .site-nav nav a.github {
   display: inline-flex;
   align-items: center;
+  padding-inline: 0.5rem;
 }
 
 .site-nav nav a.github svg {
