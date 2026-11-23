@@ -124,10 +124,20 @@ header {
   padding: 0.35rem 0;
 }
 
-.site-nav nav a:last-child {
+.site-nav nav a.install {
   border: 1px solid var(--border);
   border-radius: 0.6rem;
   padding-inline: 0.75rem;
+}
+
+.site-nav nav a.github {
+  display: inline-flex;
+  align-items: center;
+  padding-inline: 0.5rem;
+}
+
+.site-nav nav a.github svg {
+  display: block;
 }
 
 .site-nav nav a:hover,
