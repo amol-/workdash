@@ -2956,7 +2956,9 @@ def _many_dashboard_items(work_items: list[WorkItem]) -> None:
 @when("the user scrolls through the work items")
 def _scroll_work_items(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
     visible = []
+    selected = []
     opened = []
+    expected_opened = []
     session = MagicMock()
     session.work_items = work_items
     session.suggestion_markers = {}
@@ -2971,9 +2973,17 @@ def _scroll_work_items(scenario_state: dict[str, Any], work_items: list[WorkItem
         progress = app.query_one("#autodispatch-progress", Static)
         assert progress.region.height > 0
         assert "Failed: failed (owner/repo)" in progress.render().plain
+        initial_scroll_y = int(table.scroll_y)
+        first_scrolled_row = None
         for index in range(table.row_count):
-            await pilot.press("v")
-            await pilot.press("o")
+            item = app._selected_item()
+            selected.append(item.number if item is not None else None)
+            if first_scrolled_row is None and int(table.scroll_y) > initial_scroll_y:
+                first_scrolled_row = index
+            if index in (0, first_scrolled_row, table.row_count - 1):
+                expected_opened.append(index + 1)
+                await pilot.press("v")
+                await pilot.press("o")
             row_y = table.region.y + table._get_row_region(index).y - int(table.scroll_y)
             rows = [strip.text for strip in app.screen._compositor.render_strips()]
             visible.append(
@@ -2990,10 +3000,14 @@ def _scroll_work_items(scenario_state: dict[str, Any], work_items: list[WorkItem
         session=session,
     )
     scenario_state["scroll_visible"] = visible
-    scenario_state["scroll_opened"] = opened
+    scenario_state["scroll_selected"] = selected
+    scenario_state["scroll_opened"] = [item.number for item in opened]
+    scenario_state["scroll_expected_opened"] = expected_opened
 
 
 @then("every work item can be seen and selected above the action bar")
 def _all_items_visible_and_selected(scenario_state: dict[str, Any]) -> None:
     assert all(scenario_state["scroll_visible"])
-    assert [item.number for item in scenario_state["scroll_opened"]] == list(range(1, 41))
+    assert scenario_state["scroll_selected"] == list(range(1, 41))
+    assert len(scenario_state["scroll_expected_opened"]) == 3
+    assert scenario_state["scroll_opened"] == scenario_state["scroll_expected_opened"]
