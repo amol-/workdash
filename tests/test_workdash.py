@@ -703,11 +703,9 @@ def test_main_runs_configuration_when_the_config_file_is_missing(
         "WorkdashBackend",
         lambda *args, **kwargs: pytest.fail("first run should not load work items"),
     )
-    monkeypatch.setattr(
-        workdash_module.launcher.zellij,
-        "exec_zellij_wrapped_workdash",
-        lambda _argv, preflight: preflight(),
-    )
+    # A machine without Zellij is the main first-time case: setup must run before
+    # anything needs the Zellij binary it installs.
+    monkeypatch.setattr(workdash_module.launcher.shutil, "which", lambda command: None)
     monkeypatch.delenv("ZELLIJ", raising=False)
 
     exit_code = workdash_module.main([])
@@ -716,6 +714,7 @@ def test_main_runs_configuration_when_the_config_file_is_missing(
     assert load_config(config_path) == _VALID_CONFIG
     captured = capsys.readouterr()
     assert "Run 'workdash' again to start the dashboard." in captured.out
+    assert "zellij is not installed" not in captured.err
 
 
 def test_main_does_not_configure_again_when_the_config_file_exists(

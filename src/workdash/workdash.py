@@ -86,20 +86,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.command == "show-config":
         return commands.show_config(json_output=options.json_output)
 
-    setup_completed = False
+    # A completely missing configuration file means first-time use: configure it, then
+    # let the user start again so the dashboard opens on a saved configuration. This
+    # runs before the Zellij wrapper, which needs the Zellij that setup installs.
+    if options.command is None and load_config().config_file_missing:
+        try:
+            configure(github_client=GitHubClient())
+        except WorkdashConfigValidationError as error:
+            _print_config_validation_error(error)
+            return 1
+        print()
+        print("Configuration complete.")
+        print("Run 'workdash' again to start the dashboard.")
+        print()
+        return 0
 
     def preflight() -> bool:
-        nonlocal setup_completed
-        # A completely missing configuration file means first-time use: configure
-        # it, then let the user start again so the dashboard opens on a saved config.
-        if options.command is None and load_config().config_file_missing:
-            configure(github_client=GitHubClient())
-            print()
-            print("Configuration complete.")
-            print("Run 'workdash' again to start the dashboard.")
-            print()
-            setup_completed = True
-            return False
         commands._github_client = GitHubClient()
         inject_workdash_local_bin_into_path()
         gh_error = commands._github_client.check_authentication()
@@ -114,9 +116,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         except RuntimeError as error:
             print(f"Error: {error}", file=sys.stderr, flush=True)
             return 1
-        return 0 if setup_completed else 1
+        return 1
     elif not preflight():
-        return 0 if setup_completed else 1
+        return 1
 
     if os.getenv("ZELLIJ") and not options.persistent_pane:
         session = os.getenv("ZELLIJ_SESSION_NAME")
