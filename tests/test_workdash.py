@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import workdash.config as config_module
 import workdash.control as control_module
 import workdash.github_client as github_client_module
 import workdash.workdash as workdash_module
@@ -748,6 +749,68 @@ def test_main_runs_configuration_when_the_config_file_is_missing(
     captured = capsys.readouterr()
     assert "Run 'workdash' again to start the dashboard." in captured.out
     assert "zellij is not installed" not in captured.err
+
+
+@pytest.mark.parametrize("path_is_set", [True, False], ids=["set-path", "unset-path"])
+def test_first_run_replaces_private_gh_without_a_system_install(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    path_is_set: bool,
+) -> None:
+    config_path = tmp_path / "missing.json"
+    private_bin = tmp_path / "bin"
+    private_bin.mkdir()
+    system_bin = tmp_path / "system-bin"
+    system_bin.mkdir()
+    gh = private_bin / "gh"
+    for binary in (private_bin / "zellij", gh, system_bin / "claude"):
+        binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        binary.chmod(0o755)
+    gh.write_text("not an executable format\n", encoding="utf-8")
+
+    original_path = str(system_bin) if path_is_set else None
+    if path_is_set:
+        monkeypatch.setenv("PATH", str(system_bin))
+    else:
+        monkeypatch.delenv("PATH", raising=False)
+        monkeypatch.setattr(os, "confstr", lambda name: str(system_bin))
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(workdash_module.launcher, "_WORKDASH_LOCAL_BIN", private_bin)
+    monkeypatch.setattr(workdash_module.launcher, "dashboard_is_running", lambda session: False)
+
+    from unittest.mock import MagicMock
+
+    list_sessions = MagicMock(return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    monkeypatch.setattr(workdash_module.launcher.subprocess, "run", list_sessions)
+
+    def install_gh():
+        gh.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        return str(gh)
+
+    answers = iter(["/bin/sh", "", "", "", "", "octocat", "", ""])
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        lambda **kwargs: config_module.configure(
+            config_path,
+            **kwargs,
+            input_fn=lambda prompt: next(answers),
+            install_zellij_fn=lambda: str(private_bin / "zellij"),
+            install_gh_fn=install_gh,
+        ),
+    )
+
+    assert workdash_module.main([]) == 0
+    output = capsys.readouterr().out
+    assert f"Installed GitHub CLI to: {gh}" in output
+    assert "Run 'workdash' again to start the dashboard." in output
+    assert gh.read_text(encoding="utf-8").startswith("#!/bin/sh")
+    assert os.environ.get("PATH") == original_path
+    assert [call.args[0] for call in list_sessions.call_args_list] == [
+        [str(private_bin / "zellij"), "list-sessions", "--no-formatting"]
+    ]
 
 
 def test_main_does_not_configure_again_when_the_config_file_exists(

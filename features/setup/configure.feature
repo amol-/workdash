@@ -51,6 +51,7 @@ Feature: First-time configuration
     - When GitHub CLI is detected on PATH, the wizard tells the user what was detected.
     - When GitHub CLI is not detected on PATH, the wizard tells the user it will install a local GitHub CLI binary from the latest release URL and that a global GitHub CLI install can be used instead when it is on PATH.
     - When GitHub CLI is not detected on PATH, the wizard downloads the latest release binary for the current operating system and architecture under the workdash configuration directory and tells the user where it was installed.
+    - When automatic setup finds no system installation of GitHub CLI or Zellij, it installs a fresh private copy of the missing dependency, replacing any leftover private copy.
     - Re-running the wizard always checks PATH for GitHub CLI first; if no PATH binary is available, it downloads a fresh local binary even when a previous local binary exists.
     - A stalled dependency download times out. If a dependency download fails, including when it ends early, the wizard reports the download URL and reason without a traceback and exits with status 1 without saving the configuration, reporting completion, or starting the dashboard.
     - During automatic setup, a failed installation of a local Zellij or GitHub CLI binary leaves any previously installed copy usable, including one installed by another setup run.

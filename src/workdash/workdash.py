@@ -92,6 +92,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             CONFIG_PATH.lstat()
         except FileNotFoundError:
+            original_path = os.environ.get("PATH")
             try:
                 if _should_wrap_interactive_start(options):
                     launcher.zellij.exec_zellij_wrapped_workdash(argv, attach_only=True)
@@ -110,6 +111,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             except RuntimeError as error:
                 print(f"Error: {error}", file=sys.stderr, flush=True)
                 return 1
+            finally:
+                # The probe can use private binaries, but the wizard must detect system tools.
+                if original_path is None:
+                    os.environ.pop("PATH", None)
+                else:
+                    os.environ["PATH"] = original_path
             status = _run_configure(create_only=True)
             if status != 0:
                 return status

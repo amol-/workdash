@@ -41,6 +41,7 @@ Feature: Share the workdash site
     When a visitor browses the workdash site
     Then the homepage shows the install command and starting workdash before the feature tour
     And the homepage explains that setup provides missing GitHub CLI and Zellij binaries
+    And visitors using Workdash 0.5.0 see the manual setup command below the quickstart box
 
   @id:F-SITE-BROWSE-S002
   Scenario: Check the site before publishing
