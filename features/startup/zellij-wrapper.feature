@@ -91,6 +91,20 @@ Feature: Persistent dashboard Zellij session
       | outside Zellij                    |
       | inside a different Zellij session |
 
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S028
+  Scenario Outline: Complete first-time setup when the dashboard cannot be attached locally
+    Given the user is outside Zellij with no configuration file
+    And the dashboard address serves session `project`, which is <state> in local Zellij
+    When the user starts the dashboard in the named session
+    Then Workdash completes setup and tells the user to run it again
+    And the system exits successfully
+    And the system does not replace itself with Zellij
+
+    Examples:
+      | state   |
+      | missing |
+      | exited  |
+
   @id:F-STARTUP-ZELLIJ-WRAPPER-S021
   Scenario: Invalid JSON prevents a new dashboard from starting outside Zellij
     Given the system is not running inside a Zellij session

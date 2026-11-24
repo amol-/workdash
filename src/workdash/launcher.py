@@ -772,6 +772,8 @@ class Zellij:
                     f"Failed to list Zellij sessions: {details or error.returncode}"
                 ) from error
             sessions = {}
+        if attach_only and sessions.get(session_name, True):
+            return
         if dashboard_is_running(session_name, attach_only=attach_only):
             print("Workdash is already running; new options are ignored. Attaching...", flush=True)
             time.sleep(1)

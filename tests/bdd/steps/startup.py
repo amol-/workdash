@@ -852,6 +852,17 @@ def _address_serves_other(scenario_state):
     scenario_state["dashboard_at_address"] = "other"
 
 
+@given(
+    parsers.parse(
+        "the dashboard address serves session `project`, which is {state} in local Zellij"
+    )
+)
+def _address_serves_unattachable_project(scenario_state, state):
+    scenario_state["dashboard_at_address"] = "project"
+    if state == "exited":
+        scenario_state["named_dashboard"] = "exited"
+
+
 @then("Workdash completes setup and tells the user to run it again")
 def _reports_setup_complete(scenario_state, config_path):
     output = scenario_state["output"]
