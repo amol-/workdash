@@ -308,7 +308,7 @@ def is_live_zellij_pane(pane: dict[str, object]) -> bool:
     )
 
 
-def dashboard_is_running(session: str) -> bool:
+def dashboard_is_running(session: str, *, attach_only: bool = False) -> bool:
     """Whether a dashboard already serves ``session``.
 
     A recorded dashboard counts only while its process lives and its address still
@@ -316,7 +316,8 @@ def dashboard_is_running(session: str) -> bool:
     bind decides, which also covers dashboards started before records existed. A
     dashboard serving another session cannot be replaced, and an address that will
     not answer proves nothing, so both are reported instead of starting a dashboard
-    that could not bind or that would duplicate a live one.
+    that could not bind or that would duplicate a live one. An attach-only probe
+    treats a healthy dashboard for another session as no match.
     """
 
     # The control API speaks to this module, so the address and probe arrive late.
@@ -334,7 +335,7 @@ def dashboard_is_running(session: str) -> bool:
     reported = _dashboard_session_at(address)
     if reported == session:
         return True
-    if reported is not None:
+    if reported is not None and not attach_only:
         raise RuntimeError(
             f"Zellij session {reported!r} already has a Workdash dashboard at {address}. "
             "Stop it or set WORKDASH_HOST to a different address."
@@ -771,7 +772,7 @@ class Zellij:
                     f"Failed to list Zellij sessions: {details or error.returncode}"
                 ) from error
             sessions = {}
-        if dashboard_is_running(session_name):
+        if dashboard_is_running(session_name, attach_only=attach_only):
             print("Workdash is already running; new options are ignored. Attaching...", flush=True)
             time.sleep(1)
             command = [zellij, "attach", session_name]

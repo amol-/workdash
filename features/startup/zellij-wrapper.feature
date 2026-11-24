@@ -77,6 +77,20 @@ Feature: Persistent dashboard Zellij session
     Then the returning client's input reaches the dashboard pane
     And Workdash does not prompt for setup or recreate the configuration file
 
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S027
+  Scenario Outline: Complete first-time setup while a dashboard runs in another session
+    Given the user is <location> with no configuration file
+    And the dashboard address serves session `other`
+    When the user starts the dashboard in the named session
+    Then Workdash completes setup and tells the user to run it again
+    And the system exits successfully
+    And the system does not replace itself with Zellij
+
+    Examples:
+      | location                          |
+      | outside Zellij                    |
+      | inside a different Zellij session |
+
   @id:F-STARTUP-ZELLIJ-WRAPPER-S021
   Scenario: Invalid JSON prevents a new dashboard from starting outside Zellij
     Given the system is not running inside a Zellij session

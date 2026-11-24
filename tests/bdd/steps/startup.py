@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pytest_bdd import given, then, when
+from pytest_bdd import given, parsers, then, when
 
 import workdash.control as control_module
 import workdash.github_client as github_client_module
@@ -294,7 +294,7 @@ def _start_interactive_dashboard(
     _install_direct_start_fakes(scenario_state, monkeypatch)
     if (
         not scenario_state.get("config_access_denied")
-        and not scenario_state.get("config_moved_aside")
+        and not scenario_state.get("config_missing")
         and not config_path.exists()
     ):
         save_config(workdash_module.load_config(), config_path)
@@ -726,11 +726,7 @@ def _new_pane_is_named_workdash_tui(scenario_state):
 def _inside_zellij_with_running_dashboard(scenario_state, monkeypatch):
     scenario_state["inside_dashboard_pane"] = True
 
-    def dashboard_is_running(session):
-        assert session == "workdash-test"
-        return True
-
-    monkeypatch.setattr(launcher_module, "dashboard_is_running", dashboard_is_running)
+    monkeypatch.setattr(control_module, "probe_dashboard_session", lambda address: "workdash-test")
     monkeypatch.setattr(
         launcher_module.zellij,
         "name_dashboard_pane",
@@ -741,7 +737,7 @@ def _inside_zellij_with_running_dashboard(scenario_state, monkeypatch):
 @given("the configuration file has been moved aside")
 def _config_moved_aside(scenario_state, config_path, monkeypatch):
     config_path.unlink(missing_ok=True)
-    scenario_state["config_moved_aside"] = True
+    scenario_state["config_missing"] = True
     monkeypatch.setattr(
         workdash_module,
         "configure",
@@ -832,9 +828,35 @@ def _named_session_without_dashboard(scenario_state):
     scenario_state.update(outside_zellij=True, _zellij_installed=True, named_dashboard="stopped")
 
 
+@given(parsers.parse("the user is {location} with no configuration file"))
+def _first_run_without_config(scenario_state, config_path, monkeypatch, location):
+    outside_zellij = location == "outside Zellij"
+    config_path.unlink(missing_ok=True)
+    scenario_state.update(
+        config_missing=True,
+        outside_zellij=outside_zellij,
+        inside_dashboard_pane=not outside_zellij,
+        _zellij_installed=True,
+    )
+
+    def configure(*, github_client, create_only):
+        assert create_only
+        save_config(WorkdashConfig(github_username="testuser"), config_path)
+
+    monkeypatch.setattr(workdash_module, "configure", configure)
+
+
 @given("its address serves session `other`")
+@given("the dashboard address serves session `other`")
 def _address_serves_other(scenario_state):
     scenario_state["dashboard_at_address"] = "other"
+
+
+@then("Workdash completes setup and tells the user to run it again")
+def _reports_setup_complete(scenario_state, config_path):
+    output = scenario_state["output"]
+    assert "Run 'workdash' again to start the dashboard." in output, output
+    assert load_config(config_path).github_username == "testuser"
 
 
 @then("the system reports the other session and the address it serves")

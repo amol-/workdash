@@ -108,7 +108,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if (
                         session
                         and os.getenv("ZELLIJ_PANE_ID")
-                        and launcher.dashboard_is_running(session)
+                        and launcher.dashboard_is_running(session, attach_only=True)
                     ):
                         print("Workdash is already running; new options are ignored.", flush=True)
                         return 0

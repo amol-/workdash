@@ -799,7 +799,6 @@ def test_first_run_replaces_private_gh_without_a_system_install(
     monkeypatch.delenv("ZELLIJ", raising=False)
     monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
     monkeypatch.setattr(workdash_module.launcher, "_WORKDASH_LOCAL_BIN", private_bin)
-    monkeypatch.setattr(workdash_module.launcher, "dashboard_is_running", lambda session: False)
 
     from unittest.mock import MagicMock
 
