@@ -258,7 +258,7 @@ def save_config(
                 f"Configuration already exists at {path}. Your answers were not saved."
             ) from error
         except OSError as error:
-            if error.errno == errno.EOPNOTSUPP:
+            if error.errno in (errno.EOPNOTSUPP, errno.ENOTSUP):
                 reason = "the filesystem does not support hard links"
             elif error.errno == errno.EPERM:
                 reason = "creating a hard link was denied"

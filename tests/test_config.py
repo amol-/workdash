@@ -203,20 +203,25 @@ def test_create_only_save_preserves_config_created_at_publication(tmp_path, monk
 
 
 @pytest.mark.parametrize(
-    ("link_errno", "diagnostic"),
+    ("link_error", "diagnostic"),
     [
-        (errno.EOPNOTSUPP, "the filesystem does not support hard links"),
-        (errno.EPERM, "creating a hard link was denied"),
+        ("EOPNOTSUPP", "the filesystem does not support hard links"),
+        ("ENOTSUP", "the filesystem does not support hard links"),
+        ("EPERM", "creating a hard link was denied"),
     ],
 )
 def test_create_only_save_when_hardlink_is_unavailable_directs_to_explicit_setup(
-    tmp_path, monkeypatch, link_errno, diagnostic
+    tmp_path, monkeypatch, link_error, diagnostic
 ):
     config_path = tmp_path / "config.json"
     config = WorkdashConfig(github_username="octocat")
+    # Keep both unsupported errors independently testable on platforms that alias them.
+    if errno.ENOTSUP == errno.EOPNOTSUPP:
+        monkeypatch.setattr(errno, "ENOTSUP", max(errno.errorcode) + 1)
+    link_errno = getattr(errno, link_error)
 
     def failed_link(source, destination):
-        raise OSError(link_errno, os.strerror(link_errno))
+        raise OSError(link_errno, "simulated hard link failure")
 
     monkeypatch.setattr(os, "link", failed_link)
     with pytest.raises(RuntimeError, match="workdash --configure") as error:
