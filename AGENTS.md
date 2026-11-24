@@ -6,6 +6,11 @@ Before starting any work, read these files in order:
 2. **CONTRIBUTING.md** – Core rules, especially BDD-first workflow and the distinction between user-facing BDD scenarios and implementation-detail tests.
 3. **DESIGN.md** – Design direction; all solutions must adhere to it.
 
+## Repository and worktree assumptions
+
+- Use the repository's current name. Users only interact with the new name after a rename; do not add rename-specific handling.
+- Assume Workdash operates only in worktrees it creates and names. Do not add support for hand-made or manually renamed worktrees.
+
 ## Verifying visual/TUI behavior
 
 To reproduce or verify a rendering bug, drive a real running app inside a real
