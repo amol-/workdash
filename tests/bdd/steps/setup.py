@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from pytest_bdd import given, parsers, then, when
@@ -38,6 +42,77 @@ def _no_config(scenario_state: dict[str, Any], config_path: Path) -> None:
             "",  # todo repository default
         ],
     )
+
+
+@given(parsers.parse('the user enters "{username}" as their GitHub username'))
+def _enter_github_username(scenario_state: dict[str, Any], username: str) -> None:
+    scenario_state["input_responses"][2] = username
+
+
+@given('the user answers the GitHub username prompt with "@octocat" and then "octocat"')
+def _invalid_github_username_answer(scenario_state: dict[str, Any]) -> None:
+    scenario_state["input_responses"][2:3] = ["@octocat", "octocat"]
+
+
+@then("the wizard explains the GitHub username format")
+def _rejects_github_username(scenario_state: dict[str, Any]) -> None:
+    output = scenario_state["output"]
+    assert "Enter a GitHub username of 1–39 characters" in output
+
+
+@then(parsers.parse('the saved configuration keeps "{username}" as the GitHub username'))
+def _saved_github_username(scenario_state: dict[str, Any], username: str) -> None:
+    assert scenario_state["exit_code"] == 0
+    assert scenario_state["written_config"].github_username == username
+
+
+@then(parsers.parse('the wizard saves and reports "{selector}" as the default repository selector'))
+def _saved_default_selector(scenario_state: dict[str, Any], selector: str) -> None:
+    assert scenario_state["written_config"].repositories == (selector,)
+    assert f"Repositories set to: {selector}" in scenario_state["output"]
+
+
+@given(
+    parsers.parse(
+        'the user first leaves the repository selector blank, then enters "{bad}" and "{selector}"'
+    )
+)
+def _answer_repository_selector(scenario_state: dict[str, Any], bad: str, selector: str) -> None:
+    scenario_state["input_responses"][-1:-1] = ["", bad, selector]
+
+
+@then(
+    parsers.parse(
+        'the wizard asks for the repository selector again until it can save "{selector}"'
+    )
+)
+def _retries_repository_selector(scenario_state: dict[str, Any], selector: str) -> None:
+    prompts = scenario_state["prompts"]
+    assert sum(prompt.startswith("GitHub username") for prompt in prompts) == 1, prompts
+    assert sum(prompt.startswith("Repository selector") for prompt in prompts) == 3, prompts
+    assert "Enter a repository selector in owner/repo or owner/* form." in scenario_state["output"]
+    assert scenario_state["written_config"].repositories == (selector,)
+
+
+@given("another run saves a configuration while the user answers the wizard")
+def _another_run_saves_config(scenario_state: dict[str, Any]) -> None:
+    scenario_state["other_configuration"] = b'{"github_username": "other-user"}\n'
+
+
+@given(parsers.parse('the user answers the todo repository prompt with "{bad}" and then "{repo}"'))
+def _invalid_todo_repository_answer(scenario_state: dict[str, Any], bad: str, repo: str) -> None:
+    scenario_state["input_responses"][-1:] = [bad, repo]
+
+
+@given(
+    parsers.parse(
+        'the user first leaves the todo repository blank, then enters "{bad}" and "{repo}"'
+    )
+)
+def _answer_todo_repository_without_default(
+    scenario_state: dict[str, Any], bad: str, repo: str
+) -> None:
+    scenario_state["input_responses"][-1:] = ["", bad, repo]
 
 
 @given("a supported agent's command-line tool is on PATH")
@@ -212,21 +287,48 @@ def _zellij_not_on_path(scenario_state: dict[str, Any]) -> None:
     scenario_state.setdefault("on_path_tools", set()).discard("zellij")
 
 
+@given("the Zellij download stalls")
+def _zellij_download_stalls(
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario_state["use_real_zellij_installer"] = True
+    monkeypatch.setattr(
+        urllib.request, "urlopen", MagicMock(side_effect=urllib.error.URLError("timed out"))
+    )
+
+
+@given("the Zellij download ends before all bytes arrive")
+def _zellij_download_incomplete(
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario_state["use_real_zellij_installer"] = True
+    urlopen = MagicMock()
+    urlopen.return_value.__enter__.return_value.read.side_effect = http.client.IncompleteRead(
+        b"abc", 4
+    )
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+
 @given("GitHub CLI is not installed on PATH")
 def _gh_not_on_path(scenario_state: dict[str, Any]) -> None:
     scenario_state.setdefault("on_path_tools", set()).discard("gh")
+
+
+@given("the user presses Ctrl+C at the first wizard prompt")
+def _interrupt_wizard(scenario_state: dict[str, Any]) -> None:
+    scenario_state["interrupt_wizard"] = True
 
 
 class _UserHasNotAnswered(Exception):
     """The wizard asked an agent question the scenario's user has not answered (yet)."""
 
 
-def _run_configure_with_fakes(
+def _install_wizard_fakes(
     scenario_state: dict[str, Any],
     config_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> WorkdashConfig:
+) -> list[str]:
+    """Wire main's configure() call to the wizard fed by the scenario's answers."""
     on_path_tools = scenario_state.get("on_path_tools", set())
     responses = iter(scenario_state.get("input_responses", []))
     # By default the user ends both agent sections without adding agents.
@@ -237,10 +339,14 @@ def _run_configure_with_fakes(
     def input_fn(prompt: str) -> str:
         prompts.append(prompt)
         print(prompt)
+        if scenario_state.get("interrupt_wizard"):
+            raise KeyboardInterrupt
         if prompt.startswith("Analysis viewer") or prompt.startswith(
             ("Analysis format", "Does the analysis viewer")
         ):
             return next(analysis_answers)
+        if prompt.startswith("Todo repository") and "other_configuration" in scenario_state:
+            config_path.write_bytes(scenario_state["other_configuration"])
         if prompt.startswith(("Agents for", "Agent name")):
             try:
                 return next(agent_answers)
@@ -260,16 +366,21 @@ def _run_configure_with_fakes(
     def install_gh_fn() -> str:
         return scenario_state.get("installed_gh_binary", "/tmp/workdash-config/bin/gh")
 
+    use_real_zellij_installer = scenario_state.get("use_real_zellij_installer")
+    if use_real_zellij_installer:
+        monkeypatch.setattr(config_module.platform, "machine", lambda: "x86_64")
+        monkeypatch.setattr(config_module.platform, "system", lambda: "Linux")
+
     # Route configure() through our fakes without altering production code.
     monkeypatch.setattr(
         workdash_module,
         "configure",
-        lambda github_client: config_module.configure(
+        lambda **kwargs: config_module.configure(
             config_path,
-            github_client=github_client,
+            **kwargs,
             input_fn=input_fn,
             which_fn=which_fn,
-            install_zellij_fn=install_zellij_fn,
+            install_zellij_fn=None if use_real_zellij_installer else install_zellij_fn,
             install_gh_fn=install_gh_fn,
         ),
     )
@@ -282,11 +393,23 @@ def _run_configure_with_fakes(
     monkeypatch.setenv("SHELL", "/bin/sh")
     monkeypatch.delenv("ENV", raising=False)  # an interactive shell would source it
     monkeypatch.setenv("PATH", str(shell_bin))
+    return prompts
+
+
+def _run_configure_with_fakes(
+    scenario_state: dict[str, Any],
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> WorkdashConfig:
+    prompts = _install_wizard_fakes(scenario_state, config_path, monkeypatch)
     try:
         scenario_state["exit_code"] = workdash_module.main(["--configure"])
     except _UserHasNotAnswered:
         scenario_state["exit_code"] = None
-    scenario_state["output"] = capsys.readouterr().out
+    captured = capsys.readouterr()
+    scenario_state["output"] = captured.out
+    scenario_state["stderr"] = captured.err
     scenario_state["prompts"] = prompts
     written_config = load_config(config_path)
     scenario_state["written_config"] = written_config
@@ -677,6 +800,7 @@ def _existing_config_without_analysis_viewer(scenario_state, config_path):
 def _start_then_configure(scenario_state, config_path, monkeypatch, capsys):
     with monkeypatch.context() as patch:
         patch.setenv("ZELLIJ", "0")
+        patch.setattr(workdash_module, "CONFIG_PATH", config_path)
         patch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
         patch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
         scenario_state["startup_exit"] = workdash_module.main([])
@@ -703,3 +827,123 @@ def _other_settings_preserved(scenario_state, config_path):
     saved = json.loads(config_path.read_text())
     for key, value in scenario_state["original_settings"].items():
         assert saved[key] == value
+
+
+@given("the user has a configuration file missing a required field")
+def _config_file_missing_required_field(scenario_state: dict[str, Any], config_path: Path) -> None:
+    config_path.write_text(json.dumps({"github_username": "octocat"}), encoding="utf-8")
+    scenario_state["config_path"] = config_path
+    scenario_state.setdefault(
+        "on_path_tools", {"zellij", "gh", config_module._default_open_command(), "claude"}
+    )
+
+
+@when("the user starts the system")
+def _starts_the_system(
+    scenario_state: dict[str, Any],
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    prompts = _install_wizard_fakes(scenario_state, config_path, monkeypatch)
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
+    monkeypatch.setattr(
+        workdash_module,
+        "WorkdashBackend",
+        lambda *args, **kwargs: pytest.fail("startup loaded work items"),
+    )
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
+    scenario_state["exit_code"] = workdash_module.main([])
+    captured = capsys.readouterr()
+    scenario_state["output"] = captured.out + captured.err
+    scenario_state["stderr"] = captured.err
+    scenario_state["prompts"] = prompts
+    scenario_state["written_config"] = load_config(config_path)
+
+
+@then("the system reports that setup was cancelled and exits with status 130")
+def _reports_cancelled_setup(scenario_state: dict[str, Any], config_path: Path) -> None:
+    assert scenario_state["exit_code"] == 130
+    assert scenario_state["stderr"].strip() == "Configuration cancelled."
+    assert scenario_state["prompts"]
+    assert not config_path.exists()
+
+
+@then("the other run's configuration is unchanged")
+def _other_configuration_unchanged(scenario_state: dict[str, Any], config_path: Path) -> None:
+    assert config_path.read_bytes() == scenario_state["other_configuration"]
+
+
+@then("the system reports that setup did not save the user's answers")
+def _reports_setup_collision(scenario_state: dict[str, Any], config_path: Path) -> None:
+    assert f"Configuration already exists at {config_path}" in scenario_state["stderr"]
+    assert "Your answers were not saved" in scenario_state["stderr"]
+    assert "Configuration saved" not in scenario_state["output"]
+
+
+@then('the wizard says the todo repository must be in "owner/repo" form and asks again')
+def _reprompts_for_todo_repository(scenario_state: dict[str, Any]) -> None:
+    assert "Enter a todo repository in owner/repo form." in scenario_state["output"]
+    assert scenario_state["prompts"].count("Todo repository [octocat/todos]: ") == 2
+
+
+@then("the wizard asks for the todo repository again without suggesting a default")
+def _reprompts_for_todo_without_default(scenario_state: dict[str, Any]) -> None:
+    prompts = [p for p in scenario_state["prompts"] if p.startswith("Todo repository")]
+    assert len(prompts) == 3, prompts
+    assert all("[" not in p for p in prompts), prompts
+    assert "Enter a todo repository in owner/repo form." in scenario_state["output"]
+
+
+@then(parsers.parse('the saved configuration uses "{repo}" as the todo repository'))
+def _saved_todo_repository(scenario_state: dict[str, Any], repo: str) -> None:
+    assert scenario_state["exit_code"] == 0
+    assert scenario_state["written_config"].require_valid().todo_repository == repo
+
+
+@then("the system reports that the Zellij download timed out")
+def _reports_zellij_download_timeout(scenario_state: dict[str, Any]) -> None:
+    stderr = scenario_state["stderr"]
+    assert "Error: Failed to download https://github.com/zellij-org/zellij/" in stderr
+    assert "timed out" in stderr
+
+
+@then(
+    "the system reports the incomplete Zellij download without a traceback and exits with status 1"
+)
+def _reports_incomplete_zellij_download(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 1
+    assert scenario_state["stderr"].strip() == (
+        "Error: Failed to download https://github.com/zellij-org/zellij/releases/latest/download/"
+        "zellij-x86_64-unknown-linux-musl.tar.gz: IncompleteRead(3 bytes read, 4 more expected)"
+    )
+
+
+@then("no configuration file is saved")
+def _no_configuration_saved(config_path: Path) -> None:
+    assert not config_path.exists()
+
+
+@then("the system does not tell the user that setup completed or to run it again")
+def _does_not_report_setup_success(scenario_state: dict[str, Any]) -> None:
+    assert "Configuration complete" not in scenario_state["output"]
+    assert "Run 'workdash' again" not in scenario_state["output"]
+
+
+@then("the system tells the user to run the system again")
+def _tells_to_run_again(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0
+    assert "Run 'workdash' again to start the dashboard." in scenario_state["output"]
+
+
+@then("the system stops without starting the dashboard")
+def _stops_without_dashboard(scenario_state: dict[str, Any]) -> None:
+    assert "Loading work items" not in scenario_state["output"]
+
+
+@then("the system does not run the configuration wizard")
+def _does_not_run_wizard(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["prompts"] == []

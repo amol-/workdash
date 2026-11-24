@@ -298,6 +298,8 @@ def search_while_readiness_check_requested(blocking_state, monkeypatch, tmp_path
         )
         blocking_state["release"].set()
         await request
+        # Close search so the driver's final `q` quits instead of typing into the input.
+        await pilot.press("escape")
 
     _serve_and_drive(blocking_state, monkeypatch, tmp_path, interact)
 

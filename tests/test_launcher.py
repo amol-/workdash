@@ -1786,7 +1786,9 @@ def test_running_dashboard_attach_focuses_when_possible(monkeypatch, case):
     if case != "no_record":
         records.save(DashboardRecord("project", 42, "a:1", None if case == "old" else "3"))
     monkeypatch.setattr(launcher_module, "_resolve_zellij_binary", lambda: "zellij")
-    monkeypatch.setattr(launcher_module, "dashboard_is_running", lambda session: True)
+    monkeypatch.setattr(
+        launcher_module, "dashboard_is_running", lambda session, *, attach_only: True
+    )
     monkeypatch.setattr(launcher_module.time, "sleep", lambda _: None)
     client = MagicMock()
     client.wait.return_value = 0

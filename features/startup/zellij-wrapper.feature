@@ -13,7 +13,10 @@ Feature: Persistent dashboard Zellij session
     - Quitting the dashboard leaves the session running and tells the user that Ctrl+Q quits the whole session and all its panes. A dashboard restarted in that tab leaves the pane it replaced as a shell, so both panes are named `workdash tui`.
     - Inside Zellij, the dashboard starts in the current pane and uses the current session regardless of `--session`; when that session already has a dashboard, workdash reports that the new options are ignored and starts nothing.
     - Server-backed client commands never wrap.
-    - Startup preflight runs before starting a new dashboard; attaching to a running dashboard does not require it. Missing Zellij reports configuration guidance.
+    - Startup preflight runs before starting a new dashboard; attaching to a running dashboard does not require it. Missing Zellij reports configuration guidance unless configuration cannot be inspected, in which case Workdash reports the configuration inspection error.
+    - First-time setup can start automatically when the user runs `workdash`. If a dashboard opened by Workdash in a Zellij session cannot find its configuration file, the dashboard pane reports the missing file without prompting for setup or creating a configuration.
+    - Outside Zellij, an unreadable configuration file or one with invalid JSON does not prevent attaching to a running dashboard. With a usable Zellij client, Workdash can attach to a running dashboard at the selected address even if the configuration directory is inaccessible.
+    - When starting a new dashboard, Workdash reports a failure to inspect the configuration path in one line. If inspection succeeds, GitHub CLI authentication is checked before the configuration file is read. If authentication succeeds, a configuration read or JSON error stops startup with a one-line error naming the file and the problem.
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S013
   Scenario: Recover an exited selected session
@@ -56,6 +59,89 @@ Feature: Persistent dashboard Zellij session
     Then the system attaches to the named session
     And the system reports that the new options are ignored
     And the system does not start a dashboard
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S020
+  Scenario: Attach to a running dashboard despite invalid JSON
+    Given the named session `project` already has a running dashboard
+    And the configuration file contains invalid JSON
+    When the user starts the dashboard in the named session
+    Then the system attaches to the named session
+    And the system reports that the new options are ignored
+    And the system does not start a dashboard
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S025
+  Scenario: Return to a running dashboard after moving the configuration file aside
+    Given a running dashboard is in another tab of the named session
+    And the user has moved the configuration file aside
+    When the user returns to that session with Workdash and sends the most recent input
+    Then the returning client's input reaches the dashboard pane
+    And Workdash does not prompt for setup or recreate the configuration file
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S027
+  Scenario Outline: Complete first-time setup while a dashboard runs in another session
+    Given the user is <location> with no configuration file
+    And the dashboard address serves session `other`
+    When the user starts the dashboard in the named session
+    Then Workdash completes setup and tells the user to run it again
+    And the system exits successfully
+    And the system does not replace itself with Zellij
+
+    Examples:
+      | location                          |
+      | outside Zellij                    |
+      | inside a different Zellij session |
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S028
+  Scenario Outline: Complete first-time setup when the dashboard cannot be attached locally
+    Given the user is outside Zellij with no configuration file
+    And the dashboard address serves session `project`, which is <state> in local Zellij
+    When the user starts the dashboard in the named session
+    Then Workdash completes setup and tells the user to run it again
+    And the system exits successfully
+    And the system does not replace itself with Zellij
+
+    Examples:
+      | state   |
+      | missing |
+      | exited  |
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S021
+  Scenario: Invalid JSON prevents a new dashboard from starting outside Zellij
+    Given the system is not running inside a Zellij session
+    And Zellij is installed on PATH
+    And the configuration file contains invalid JSON
+    When the user starts the interactive dashboard
+    Then the system reports invalid configuration JSON in one line
+    And the system does not replace itself with Zellij
+    And the system exits with a non-zero status
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S022
+  Scenario: Attach to a running dashboard despite denied configuration access
+    Given the named session `project` already has a running dashboard
+    And access to the configuration directory is denied
+    When the user starts the dashboard in the named session
+    Then the system attaches to the named session
+    And the system exits successfully
+    And the system does not start a dashboard
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S023
+  Scenario: Denied configuration access prevents a new dashboard from starting
+    Given the named session `project` has no dashboard
+    And access to the configuration directory is denied
+    When the user starts the dashboard in the named session
+    Then the system reports denied configuration access in one line
+    And the system does not start a dashboard
+    And the system exits with a non-zero status
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S024
+  Scenario: Report denied configuration access when no Zellij client is available
+    Given the system is not running inside a Zellij session
+    And Zellij is not installed on PATH
+    And access to the configuration directory is denied
+    When the user starts the interactive dashboard
+    Then the system reports denied configuration access in one line
+    And the system does not replace itself with Zellij
+    And the system exits with a non-zero status
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S019
   Scenario: Return to a running dashboard in another tab
@@ -113,6 +199,15 @@ Feature: Persistent dashboard Zellij session
     Then the system reports that the new options are ignored
     And the system does not start a dashboard
     And the system exits successfully
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S026
+  Scenario: Starting Workdash from another pane after moving the configuration file aside
+    Given the system is running inside a Zellij session whose dashboard is already running
+    And the configuration file has been moved aside
+    When the user starts the interactive dashboard
+    Then the system reports that the new options are ignored
+    And the system exits successfully
+    And the configuration file is not recreated
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S012
   Scenario: Closing the terminal leaves the new session running
