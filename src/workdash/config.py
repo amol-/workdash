@@ -461,16 +461,17 @@ def _write_executable(destination: Path, binary: bytes, *, atomic: bool) -> str:
         destination.chmod(destination.stat().st_mode | execute_bits)
         return str(destination)
 
-    target = destination.resolve()
-    with tempfile.TemporaryDirectory(dir=target.parent) as directory:
-        staged = Path(directory) / target.name
+    with tempfile.TemporaryDirectory(dir=destination.parent) as directory:
+        staged = Path(directory) / destination.name
         staged.write_bytes(binary)
         try:
-            mode = target.stat().st_mode
+            mode = destination.lstat().st_mode
         except FileNotFoundError:
+            mode = None
+        if mode is None or stat.S_ISLNK(mode):
             mode = staged.stat().st_mode
         staged.chmod(stat.S_IMODE(mode) | execute_bits)
-        staged.replace(target)
+        staged.replace(destination)
     return str(destination)
 
 

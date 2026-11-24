@@ -1566,6 +1566,47 @@ def test_configure_upgrades_zellij_from_latest_platform_archive(
 
 
 @pytest.mark.parametrize("binary,on_path", [("zellij", "gh"), ("gh", "zellij")])
+def test_automatic_setup_replaces_private_dependency_symlink(
+    tmp_path, monkeypatch, binary, on_path
+):
+    destination = tmp_path / "bin" / binary
+    destination.parent.mkdir()
+    target = tmp_path / "shared-binary"
+    target.write_bytes(b"previous binary")
+    target.chmod(0o600)
+    destination.symlink_to(target)
+    new_file = tmp_path / "new-file"
+    new_file.touch()
+    expected_mode = (new_file.stat().st_mode & 0o777) | 0o111
+
+    payload = b"fresh binary"
+    archive_bytes = BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+        info = tarfile.TarInfo(binary)
+        info.size = len(payload)
+        archive.addfile(info, BytesIO(payload))
+    client = MagicMock()
+    client.release_asset_url.return_value = "https://example.test/gh.tar.gz"
+    client.download_release.return_value = archive_bytes.getvalue()
+    monkeypatch.setattr("workdash.config.platform.machine", lambda: "x86_64")
+    monkeypatch.setattr("workdash.config.platform.system", lambda: "Linux")
+
+    configure(
+        tmp_path / "config.json",
+        input_fn=lambda prompt: "octocat" if prompt == "GitHub username: " else "",
+        which_fn=_on_path(on_path, "claude", "xdg-open", "open"),
+        github_client=client,
+        create_only=True,
+    )
+
+    assert not destination.is_symlink()
+    assert destination.read_bytes() == payload
+    assert destination.stat().st_mode & 0o777 == expected_mode
+    assert target.read_bytes() == b"previous binary"
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("binary,on_path", [("zellij", "gh"), ("gh", "zellij")])
 def test_failed_automatic_installer_write_leaves_previous_install_usable(
     tmp_path, monkeypatch, binary, on_path
 ):
