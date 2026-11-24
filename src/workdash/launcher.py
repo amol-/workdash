@@ -461,13 +461,19 @@ def _launch_zellij_pane(
     zellij = _resolve_zellij_binary()
     session_args = ["--session", zellij_session] if zellij_session is not None else []
     held = not (blocking or close_on_exit)
-    # A symlink stores the whole ID atomically without replacing another
-    # pane's claim or the launcher's cancellation marker.
-    claim = 'ln -s "$ZELLIJ_PANE_ID" "$1" 2>/dev/null'
+    # One atomic claim per launch. Only the winning argv can reuse it, even
+    # when Zellij assigns that pane a different ID after session recovery.
+    claim = 'ln -s "$ZELLIJ_PANE_ID:$2" "$1" 2>/dev/null'
+    state_dir = None
     if held:
-        claim += ' || [ "$(readlink "$1" 2>/dev/null)" = "$ZELLIJ_PANE_ID" ]'
+        claim += ' || case "$(readlink "$1" 2>/dev/null)" in *":$2") true;; *) false;; esac'
+        state_home = Path(os.environ.get("XDG_STATE_HOME", ""))
+        if not state_home.is_absolute():
+            state_home = Path.home() / ".local" / "state"
+        state_dir = state_home / "workdash" / "pane-launches"
+        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     with ExitStack() as cleanup:
-        directory = Path(tempfile.mkdtemp(prefix="workdash-pane-"))
+        directory = Path(tempfile.mkdtemp(prefix="workdash-pane-", dir=state_dir))
         cleanup.callback(shutil.rmtree, directory)
         claim_dir = directory / "launch"
         claim_dir.mkdir()
@@ -476,7 +482,7 @@ def _launch_zellij_pane(
         cleanup.callback(claim_dir.rename, directory / "finished")
         marker = claim_dir / "pane"
         error = None
-        for _ in range(_ZELLIJ_PANE_LAUNCH_ATTEMPTS):
+        for attempt in range(_ZELLIJ_PANE_LAUNCH_ATTEMPTS):
             if _read_pane_marker(marker):
                 break
             argv = [
@@ -498,9 +504,10 @@ def _launch_zellij_pane(
                 "--",
                 "/bin/sh",
                 "-c",
-                f'[ -n "$ZELLIJ_PANE_ID" ] || exit 1; {claim} || exit 1; shift; exec "$@"',
+                f'[ -n "$ZELLIJ_PANE_ID" ] || exit 1; {claim} || exit 1; shift 2; exec "$@"',
                 "workdash-pane",
                 str(marker),
+                str(attempt),
                 *command,
             ]
             if blocking:
@@ -559,8 +566,8 @@ def _launch_zellij_pane(
             marker.symlink_to("cancelled")
         except FileExistsError:
             if held:
-                # Zellij panes outlive Workdash. Keep just the winner's receipt
-                # in private temporary storage for Enter, until system cleanup.
+                # A recovered Zellij pane still refers to this receipt after
+                # Workdash exits or the system clears temporary files.
                 cleanup.pop_all()
             return _format_zellij_pane_id(_read_pane_marker(marker))
         if error is not None:
@@ -570,7 +577,7 @@ def _launch_zellij_pane(
 
 def _read_pane_marker(marker: Path) -> str:
     with suppress(FileNotFoundError):
-        return os.readlink(marker)
+        return os.readlink(marker).partition(":")[0]
     return ""
 
 

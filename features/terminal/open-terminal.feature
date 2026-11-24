@@ -28,9 +28,10 @@ Feature: Open a terminal in the work item's worktree
     And the TUI reports that a terminal was opened
 
   @id:F-TERMINAL-OPEN-S012
-  Scenario: Restart an exited terminal in the same pane
+  Scenario: Restart an exited terminal after system temporary files are cleared
     Given a Workdash terminal is open in a worktree
     And the shell has exited leaving its Zellij pane held open
+    And the system has cleared temporary files
     When the user presses Enter in the held pane
     Then a fresh shell starts in the same pane in the worktree
 

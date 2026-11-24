@@ -46,6 +46,9 @@ def _open_terminal_for_restart(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     home = _temporary_home(tmp_path)
+    system_tmp = tmp_path / "system-tmp"
+    system_tmp.mkdir()
+    monkeypatch.setattr("tempfile.tempdir", str(system_tmp))
     monkeypatch.setenv("SHELL", "/bin/sh")
     env = dict(os.environ, TERM="xterm-256color", ENV=str(startup), HOME=home)
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
@@ -85,6 +88,13 @@ def _exit_held_terminal(restart_terminal):
                 return
         time.sleep(0.1)
     pytest.fail("the terminal did not exit and stay open")
+
+
+@given("the system has cleared temporary files")
+def _clear_terminal_system_tmp(tmp_path):
+    system_tmp = tmp_path / "system-tmp"
+    shutil.rmtree(system_tmp)
+    system_tmp.mkdir()
 
 
 @when("the user presses Enter in the held pane")

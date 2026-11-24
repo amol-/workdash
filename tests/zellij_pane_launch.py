@@ -26,7 +26,7 @@ def pane_launch(argv: list[str]) -> tuple[list[str], list[str]]:
 
     marker = pane_marker(argv)
     assert marker is not None, argv
-    return argv[: argv.index("--")], argv[argv.index(_PANE_MARKER_NAME) + 2 :]
+    return argv[: argv.index("--")], argv[argv.index(_PANE_MARKER_NAME) + 3 :]
 
 
 def mark_pane_started(argv: list[str], pane_id: str = "17") -> None:
@@ -34,4 +34,5 @@ def mark_pane_started(argv: list[str], pane_id: str = "17") -> None:
 
     marker = pane_marker(argv)
     if marker is not None:
-        marker.symlink_to(pane_id)
+        attempt = argv[argv.index(_PANE_MARKER_NAME) + 2]
+        marker.symlink_to(f"{pane_id}:{attempt}")
