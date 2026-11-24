@@ -292,7 +292,11 @@ def _start_interactive_dashboard(
         raise SystemExit(0)
 
     _install_direct_start_fakes(scenario_state, monkeypatch)
-    if not scenario_state.get("config_access_denied") and not config_path.exists():
+    if (
+        not scenario_state.get("config_access_denied")
+        and not scenario_state.get("config_moved_aside")
+        and not config_path.exists()
+    ):
         save_config(workdash_module.load_config(), config_path)
     monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
     monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
@@ -732,6 +736,22 @@ def _inside_zellij_with_running_dashboard(scenario_state, monkeypatch):
         "name_dashboard_pane",
         lambda session, pane: pytest.fail("a running dashboard keeps its pane name"),
     )
+
+
+@given("the configuration file has been moved aside")
+def _config_moved_aside(scenario_state, config_path, monkeypatch):
+    config_path.unlink(missing_ok=True)
+    scenario_state["config_moved_aside"] = True
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        lambda **kwargs: pytest.fail("setup must not run while the dashboard is running"),
+    )
+
+
+@then("the configuration file is not recreated")
+def _config_not_recreated(config_path):
+    assert not config_path.exists()
 
 
 @then("the system starts a dashboard in that session")

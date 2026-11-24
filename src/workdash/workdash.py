@@ -92,15 +92,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             CONFIG_PATH.lstat()
         except FileNotFoundError:
-            if _should_wrap_interactive_start(options):
-                try:
+            try:
+                if _should_wrap_interactive_start(options):
                     launcher.zellij.exec_zellij_wrapped_workdash(argv, attach_only=True)
-                except launcher.ZellijBinaryUnavailableError:
-                    # First-time setup can install the Zellij binary.
-                    pass
-                except RuntimeError as error:
-                    print(f"Error: {error}", file=sys.stderr, flush=True)
-                    return 1
+                elif os.getenv("ZELLIJ") and not options.persistent_pane:
+                    session = os.getenv("ZELLIJ_SESSION_NAME")
+                    if (
+                        session
+                        and os.getenv("ZELLIJ_PANE_ID")
+                        and launcher.dashboard_is_running(session)
+                    ):
+                        print("Workdash is already running; new options are ignored.", flush=True)
+                        return 0
+            except launcher.ZellijBinaryUnavailableError:
+                # First-time setup can install the Zellij binary.
+                pass
+            except RuntimeError as error:
+                print(f"Error: {error}", file=sys.stderr, flush=True)
+                return 1
             status = _run_configure(create_only=True)
             if status != 0:
                 return status

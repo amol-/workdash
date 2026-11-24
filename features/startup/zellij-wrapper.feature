@@ -171,6 +171,15 @@ Feature: Persistent dashboard Zellij session
     And the system does not start a dashboard
     And the system exits successfully
 
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S026
+  Scenario: Starting Workdash from another pane after moving the configuration file aside
+    Given the system is running inside a Zellij session whose dashboard is already running
+    And the configuration file has been moved aside
+    When the user starts the interactive dashboard
+    Then the system reports that the new options are ignored
+    And the system exits successfully
+    And the configuration file is not recreated
+
   @id:F-STARTUP-ZELLIJ-WRAPPER-S012
   Scenario: Closing the terminal leaves the new session running
     Given the system is not running inside a Zellij session
