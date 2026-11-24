@@ -6,10 +6,11 @@ import platform
 import shlex
 import shutil
 import tarfile
+import urllib.request
 import zipfile
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -1600,6 +1601,24 @@ def test_failed_automatic_installer_write_leaves_previous_install_usable(
     assert list(destination.parent.iterdir()) == [destination]
 
 
+def test_install_zellij_binary_uses_socket_timeout(tmp_path, monkeypatch):
+    url = (
+        "https://github.com/zellij-org/zellij/releases/latest/download/"
+        "zellij-x86_64-unknown-linux-musl.tar.gz"
+    )
+    response = MagicMock()
+    response.__enter__.return_value.read.side_effect = TimeoutError("timed out")
+    open_request = MagicMock(return_value=response)
+    monkeypatch.setattr(urllib.request, "urlopen", open_request)
+    monkeypatch.setattr("workdash.config.platform.machine", lambda: "x86_64")
+    monkeypatch.setattr("workdash.config.platform.system", lambda: "Linux")
+
+    with pytest.raises(RuntimeError, match="Failed to download .*zellij-.*: timed out"):
+        install_zellij_binary(tmp_path / "zellij")
+
+    open_request.assert_called_once_with(url, timeout=30)
+
+
 def test_install_gh_binary_downloads_latest_platform_archive(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1616,39 +1635,22 @@ def test_install_gh_binary_downloads_latest_platform_archive(
     archive_bytes = BytesIO()
     with zipfile.ZipFile(archive_bytes, mode="w") as archive:
         archive.writestr("gh_2.90.0_macOS_arm64/bin/gh", b"fake-gh")
-    urls: list[str] = []
-
-    class FakeResponse:
-        def __init__(self, payload: bytes) -> None:
-            self._payload = payload
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, _exc_type, _exc, _traceback):
-            return None
-
-        def read(self) -> bytes:
-            return self._payload
-
-    def fake_urlopen(url: str):
-        urls.append(url)
-        if url.endswith("/releases/latest"):
-            return FakeResponse(release_payload)
-        return FakeResponse(archive_bytes.getvalue())
-
+    open_request = MagicMock(
+        side_effect=[BytesIO(release_payload), BytesIO(archive_bytes.getvalue())]
+    )
+    monkeypatch.setattr(urllib.request, "urlopen", open_request)
     monkeypatch.setattr("workdash.config.platform.machine", lambda: "arm64")
     monkeypatch.setattr("workdash.config.platform.system", lambda: "Darwin")
     destination = tmp_path / "config" / "workdash" / "bin" / "gh"
 
-    installed = install_gh_binary(destination, urlopen_fn=fake_urlopen)
+    installed = install_gh_binary(destination)
 
     assert installed == str(destination)
     assert destination.read_bytes() == b"fake-gh"
     assert destination.stat().st_mode & 0o111
-    assert urls == [
-        "https://api.github.com/repos/cli/cli/releases/latest",
-        "https://example.test/gh_2.90.0_macOS_arm64.zip",
+    assert open_request.call_args_list == [
+        call("https://api.github.com/repos/cli/cli/releases/latest", timeout=30),
+        call("https://example.test/gh_2.90.0_macOS_arm64.zip", timeout=30),
     ]
 
 

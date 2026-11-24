@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from pytest_bdd import given, parsers, then, when
@@ -283,6 +286,18 @@ def _zellij_not_on_path(scenario_state: dict[str, Any]) -> None:
     scenario_state.setdefault("on_path_tools", set()).discard("zellij")
 
 
+@given("the Zellij download stalls")
+def _zellij_download_stalls(
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario_state["zellij_download_stalls"] = True
+    monkeypatch.setattr(config_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(config_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        urllib.request, "urlopen", MagicMock(side_effect=urllib.error.URLError("timed out"))
+    )
+
+
 @given("GitHub CLI is not installed on PATH")
 def _gh_not_on_path(scenario_state: dict[str, Any]) -> None:
     scenario_state.setdefault("on_path_tools", set()).discard("gh")
@@ -349,7 +364,9 @@ def _install_wizard_fakes(
             **kwargs,
             input_fn=input_fn,
             which_fn=which_fn,
-            install_zellij_fn=install_zellij_fn,
+            install_zellij_fn=None
+            if scenario_state.get("zellij_download_stalls")
+            else install_zellij_fn,
             install_gh_fn=install_gh_fn,
         ),
     )
@@ -873,6 +890,18 @@ def _saved_todo_repository(scenario_state: dict[str, Any], repo: str) -> None:
     assert scenario_state["written_config"].require_valid().todo_repository == repo
 
 
+@then("the system reports that the Zellij download timed out")
+def _reports_zellij_download_timeout(scenario_state: dict[str, Any]) -> None:
+    stderr = scenario_state["stderr"]
+    assert "Error: Failed to download https://github.com/zellij-org/zellij/" in stderr
+    assert "timed out" in stderr
+
+
+@then("no configuration file is saved")
+def _no_configuration_saved(config_path: Path) -> None:
+    assert not config_path.exists()
+
+
 @then("the system does not tell the user that setup completed or to run it again")
 def _does_not_report_setup_success(scenario_state: dict[str, Any]) -> None:
     assert "Configuration complete" not in scenario_state["output"]
@@ -881,12 +910,12 @@ def _does_not_report_setup_success(scenario_state: dict[str, Any]) -> None:
 
 @then("the system tells the user to run the system again")
 def _tells_to_run_again(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0
     assert "Run 'workdash' again to start the dashboard." in scenario_state["output"]
 
 
 @then("the system stops without starting the dashboard")
 def _stops_without_dashboard(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["exit_code"] == 0
     assert "Loading work items" not in scenario_state["output"]
 
 

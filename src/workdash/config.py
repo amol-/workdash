@@ -14,7 +14,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import urllib.request
 import zipfile
 from collections.abc import Callable
 from contextlib import suppress
@@ -478,14 +477,12 @@ def _write_executable(destination: Path, binary: bytes, *, atomic: bool) -> str:
 def install_zellij_binary(
     destination: Path = ZELLIJ_INSTALL_PATH,
     *,
-    urlopen_fn: Callable[[str], object] = urllib.request.urlopen,
     github_client: GitHubClient | None = None,
     atomic: bool = False,
 ) -> str:
     """Download and install the latest Zellij release binary.
 
     :param Path destination: Path where the executable should be installed.
-    :param urlopen_fn: Callable used to download the release archive.
     """
 
     from .github_client import GitHubClient
@@ -494,7 +491,7 @@ def install_zellij_binary(
     print(f"Downloading Zellij from {url}")
     if github_client is None:
         github_client = GitHubClient()
-    archive_bytes = github_client.download_release(url, urlopen_fn=urlopen_fn)
+    archive_bytes = github_client.download_release(url)
 
     try:
         with tarfile.open(fileobj=BytesIO(archive_bytes), mode="r:gz") as archive:
@@ -539,42 +536,25 @@ def _gh_release_asset_patterns() -> tuple[str, str]:
     return f"_{os_name}_{arch}{extension}", extension
 
 
-def _gh_release_download_url(
-    *,
-    urlopen_fn: Callable[[str], object] = urllib.request.urlopen,
-    github_client: GitHubClient | None = None,
-) -> str:
-    from .github_client import GitHubClient
-
-    archive_suffix, _extension = _gh_release_asset_patterns()
-    if github_client is None:
-        github_client = GitHubClient()
-    return github_client.release_asset_url(
-        GH_LATEST_RELEASE_API_URL, archive_suffix, urlopen_fn=urlopen_fn
-    )
-
-
 def install_gh_binary(
     destination: Path = GH_INSTALL_PATH,
     *,
-    urlopen_fn: Callable[[str], object] = urllib.request.urlopen,
     github_client: GitHubClient | None = None,
     atomic: bool = False,
 ) -> str:
     """Download and install the latest GitHub CLI release binary.
 
     :param Path destination: Path where the executable should be installed.
-    :param urlopen_fn: Callable used to download release metadata and archive bytes.
     """
 
     from .github_client import GitHubClient
 
     if github_client is None:
         github_client = GitHubClient()
-    download_url = _gh_release_download_url(urlopen_fn=urlopen_fn, github_client=github_client)
+    archive_suffix, extension = _gh_release_asset_patterns()
+    download_url = github_client.release_asset_url(GH_LATEST_RELEASE_API_URL, archive_suffix)
     print(f"Downloading GitHub CLI from {download_url}")
-    archive_bytes = github_client.download_release(download_url, urlopen_fn=urlopen_fn)
-    _archive_suffix, extension = _gh_release_asset_patterns()
+    archive_bytes = github_client.download_release(download_url)
 
     try:
         if extension == ".zip":

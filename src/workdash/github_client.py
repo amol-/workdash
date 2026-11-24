@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import urllib.parse
+import urllib.request
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -28,6 +29,7 @@ from .work_state import (
     select_ready_work,
 )
 
+_RELEASE_SOCKET_TIMEOUT_SECONDS = 30
 # GitHub computes mergeability in the background after it is first asked for,
 # so an UNKNOWN answer is asked once more after this delay.
 _MERGEABILITY_RETRY_DELAY_SECONDS = 3.0
@@ -985,17 +987,15 @@ class GitHubClient:
             return f"failed to run gh auth status: {error}"
         return None
 
-    def download_release(self, url: str, *, urlopen_fn: Callable[[str], object]) -> bytes:
+    def download_release(self, url: str) -> bytes:
         try:
-            with urlopen_fn(url) as response:
+            with urllib.request.urlopen(url, timeout=_RELEASE_SOCKET_TIMEOUT_SECONDS) as response:
                 return response.read()
         except OSError as error:
             raise RuntimeError(f"Failed to download {url}: {error}") from error
 
-    def release_asset_url(
-        self, url: str, archive_suffix: str, *, urlopen_fn: Callable[[str], object]
-    ) -> str:
-        release_bytes = self.download_release(url, urlopen_fn=urlopen_fn)
+    def release_asset_url(self, url: str, archive_suffix: str) -> str:
+        release_bytes = self.download_release(url)
         try:
             release = json.loads(release_bytes.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
