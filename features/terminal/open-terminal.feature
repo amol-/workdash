@@ -60,6 +60,15 @@ Feature: Open a terminal in the work item's worktree
     And no terminal is opened
     And no dialog or progress overlay remains
 
+  @id:F-TERMINAL-OPEN-S013
+  Scenario: Report a stalled terminal launch
+    Given the TUI has a work item selected
+    And Zellij stalls without opening the requested terminal
+    When the user chooses "t" from the code menu
+    Then the TUI reports that launching the terminal in Zellij timed out
+    And no terminal is opened
+    And no dialog or progress overlay remains
+
   @id:F-TERMINAL-OPEN-S006
   Scenario: Focus the existing terminal for the selected work item
     Given the TUI has a work item selected

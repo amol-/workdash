@@ -261,10 +261,14 @@ def open_markdown(
     )
 
 
-def _run_launch_command(command: list[str], *, context: str = "") -> subprocess.CompletedProcess:
+def _run_launch_command(
+    command: list[str], *, context: str = "", timeout: float | None = None
+) -> subprocess.CompletedProcess:
     prefix = f"{context}: " if context else ""
     try:
-        return subprocess.run(command, check=True, capture_output=True, text=True)
+        return subprocess.run(command, check=True, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"{prefix}command timed out after {error.timeout:g}s") from error
     except FileNotFoundError as error:
         raise RuntimeError(f"{prefix}required command '{command[0]}' is not on PATH.") from error
     except subprocess.CalledProcessError as error:
@@ -541,7 +545,9 @@ def _launch_zellij_pane(
                         pane_callback(None)
             else:
                 try:
-                    completed = _run_launch_command(argv, context=context)
+                    completed = _run_launch_command(
+                        argv, context=context, timeout=_ZELLIJ_COMMAND_TIMEOUT_SECONDS
+                    )
                 except RuntimeError as launch_error:
                     error = launch_error
                     break

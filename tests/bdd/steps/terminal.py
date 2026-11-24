@@ -123,6 +123,11 @@ def _next_terminal_launch_will_fail(scenario_state: dict[str, Any]) -> None:
     scenario_state["terminal_launch_fails"] = True
 
 
+@given("Zellij stalls without opening the requested terminal")
+def _terminal_launch_stalls(scenario_state: dict[str, Any]) -> None:
+    scenario_state["terminal_launch_stalls"] = True
+
+
 @given(parsers.parse('the selected work item uses the worktree directory "{worktree_dir}"'))
 def _selected_work_item_uses_worktree_directory(
     worktree_dir: str,
@@ -328,6 +333,8 @@ def run_terminal_scenario(
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps(panes), stderr="")
         if scenario_state.get("terminal_launch_fails"):
             raise subprocess.CalledProcessError(1, command, stderr="terminal launch failed")
+        if scenario_state.get("terminal_launch_stalls") and kwargs.get("timeout") is not None:
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
         terminal_commands.append(command)
         mark_pane_started(command, "22")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
@@ -415,6 +422,14 @@ def _reports_terminal_launch_error_details(scenario_state: dict[str, Any]) -> No
     status = scenario_state["terminal_status"]
     assert status.startswith("Terminal failed:")
     assert "terminal launch failed" in status
+
+
+@then("the TUI reports that launching the terminal in Zellij timed out")
+def _reports_terminal_launch_timeout(scenario_state: dict[str, Any]) -> None:
+    status = scenario_state["terminal_status"]
+    assert status.startswith("Terminal failed:")
+    assert "Failed to launch terminal in zellij" in status
+    assert "timed out" in status
 
 
 @then("no terminal is opened")

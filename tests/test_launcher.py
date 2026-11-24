@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import threading
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -1567,6 +1568,7 @@ def test_launch_pane_and_wait_blocks_on_the_pane_command(
     commands: list[list[str]] = []
 
     def fake_run(command, **kwargs):
+        assert kwargs.get("timeout") is None
         commands.append(command)
         mark_pane_started(command, "5")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
@@ -1835,7 +1837,10 @@ def test_launch_pane_finds_a_pane_that_starts_after_its_attempt(
     assert launch.pane_id == "terminal_23"
 
 
-@pytest.mark.parametrize("starts", ["too-late", "one-pending", "concurrent"])
+@pytest.mark.parametrize(
+    "starts",
+    ["too-late", "one-pending", "concurrent", "timeout-before-start", "timeout-during-cancel"],
+)
 def test_queued_panes_cannot_repeat_a_launch(tmp_path, monkeypatch, starts):
     launches = []
     runs = tmp_path / "runs"
@@ -1852,6 +1857,9 @@ def test_queued_panes_cannot_repeat_a_launch(tmp_path, monkeypatch, starts):
 
     def fake_run(argv, **kwargs):
         launches.append(argv)
+        if starts.startswith("timeout-"):
+            assert kwargs.get("timeout") == 10
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
         if len(launches) == 3 and starts != "too-late":
             # The first attempt can still win even after later requests are queued.
             panes = [run_pane(launches[0], 21)]
@@ -1863,8 +1871,23 @@ def test_queued_panes_cannot_repeat_a_launch(tmp_path, monkeypatch, starts):
 
     monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setattr(launcher_module.tempfile, "tempdir", str(system_tmp))
     monkeypatch.setattr(launcher_module, "_ZELLIJ_PANE_MARKER_TIMEOUT_SECONDS", 0)
+    clock = MagicMock()
+    if starts.startswith("timeout-"):
+        monkeypatch.setattr(launcher_module, "time", clock)
+
+    if starts == "timeout-during-cancel":
+        symlink_to = Path.symlink_to
+
+        def symlink_to_after_pane_claim(path, target, *args, **kwargs):
+            if target == "cancelled" and path == pane_marker(launches[0]):
+                # Let the queued pane win at the atomic claim, not during the RPC.
+                assert run_pane(launches[0], 21).wait(timeout=5) == 0
+            return symlink_to(path, target, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "symlink_to", symlink_to_after_pane_claim)
 
     def launch():
         return launcher_module.zellij.launch_pane(
@@ -1879,11 +1902,21 @@ def test_queued_panes_cannot_repeat_a_launch(tmp_path, monkeypatch, starts):
         with pytest.raises(RuntimeError, match="the Zellij pane never ran"):
             launch()
         expected = []
+    elif starts == "timeout-before-start":
+        with pytest.raises(RuntimeError, match="Failed to launch coding agent: .*timed out.*10s"):
+            launch()
+        expected = []
     else:
-        winner = launch().pane_id.removeprefix("terminal_")
+        pane_id = launch().pane_id
+        if starts == "timeout-during-cancel":
+            assert pane_id == "terminal_21"
+        winner = pane_id.removeprefix("terminal_")
         expected = [winner]
         assert runs.read_text().splitlines() == expected
 
+    if starts.startswith("timeout-"):
+        assert len(launches) == 1
+        clock.monotonic.assert_not_called()
     for index, argv in enumerate(launches, start=21):
         if str(index) not in expected:
             run_pane(argv, index).wait(timeout=5)
