@@ -1374,8 +1374,6 @@ def _attach_running_dashboard_focus_harness(
     config = tmp_path / "config.kdl"
     config.write_text("show_release_notes false\nshow_startup_tips false\n")
     home = _temporary_home(tmp_path)
-    # A dashboard already runs in this home, so the machine is configured: the returning
-    # client must attach instead of being offered first-time configuration.
     (tmp_path / "home" / ".config" / "workdash" / "config.json").write_text(
         json.dumps(
             {
@@ -1420,15 +1418,14 @@ def _attach_running_dashboard_focus_harness(
     sessions = []
     children = []
     output = bytearray()
+    returning_output = bytearray()
     stop_draining = threading.Event()
 
-    def drain(fd, capture=False):
+    def drain(fd, capture):
         while not stop_draining.is_set():
             try:
                 if select.select([fd], [], [], 0.1)[0]:
-                    data = os.read(fd, 65536)
-                    if capture:
-                        output.extend(data)
+                    capture.extend(os.read(fd, 65536))
             except OSError:
                 return
 
@@ -1467,7 +1464,7 @@ def _attach_running_dashboard_focus_harness(
             fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
             os.execve(zellij, [zellij, "--session", name], env)
         sessions.append((name, pid, fd))
-        drain_thread = threading.Thread(target=drain, args=(fd, True), daemon=True)
+        drain_thread = threading.Thread(target=drain, args=(fd, output), daemon=True)
         drain_thread.start()
         panes = wait_for(lambda ps: any(not p["is_plugin"] for p in ps))
         if duplicate_tab:
@@ -1518,8 +1515,10 @@ def _attach_running_dashboard_focus_harness(
             fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
             os.execve(sys.executable, [sys.executable, "-m", "workdash", "--session", name], env)
         children.append((child, child_fd))
-        drain_thread = threading.Thread(target=drain, args=(fd, True), daemon=True)
-        child_drain_thread = threading.Thread(target=drain, args=(child_fd,), daemon=True)
+        drain_thread = threading.Thread(target=drain, args=(fd, output), daemon=True)
+        child_drain_thread = threading.Thread(
+            target=drain, args=(child_fd, returning_output), daemon=True
+        )
         drain_thread.start()
         child_drain_thread.start()
         deadline = time.monotonic() + 10
@@ -1535,7 +1534,7 @@ def _attach_running_dashboard_focus_harness(
             time.sleep(0.01)
         assert len(new_clients) == 1 and (
             last_detach or new_clients[0][1] == f"terminal_{other['id']}"
-        ), f"new client did not attach to the other pane: {clients}"
+        ), f"new client did not attach: {clients}; CLI PTY: {returning_output[-3000:]!r}"
         new_client_id = new_clients[0][0]
         if new_last_input:
             deadline = time.monotonic() + 5
@@ -1554,7 +1553,7 @@ def _attach_running_dashboard_focus_harness(
                 time.sleep(0.01)
             assert "NEW_CLIENT_INPUT_PROOF" in screen
             (tmp_path / "focus-release").touch()
-        yield
+        yield returning_output
         focused = pane if has_pane else other
         focus_client = new_client_id if new_last_input or last_detach else client_id
         deadline = time.monotonic() + 10

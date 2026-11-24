@@ -68,6 +68,14 @@ Feature: Persistent dashboard Zellij session
     And the system reports that the new options are ignored
     And the system does not start a dashboard
 
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S025
+  Scenario: Return to a running dashboard after moving the configuration file aside
+    Given a running dashboard is in another tab of the named session
+    And the user has moved the configuration file aside
+    When the user returns to that session with Workdash and sends the most recent input
+    Then the returning client's input reaches the dashboard pane
+    And Workdash does not prompt for setup or recreate the configuration file
+
   @id:F-STARTUP-ZELLIJ-WRAPPER-S021
   Scenario: Invalid JSON prevents a new dashboard from starting outside Zellij
     Given the system is not running inside a Zellij session

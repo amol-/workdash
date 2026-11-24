@@ -875,12 +875,28 @@ def _dashboard_in_other_tab(tmp_path):
         harness.close()
 
 
-@when("the user returns to that session with Workdash and sends the most recent input")
+@given("the user has moved the configuration file aside")
+def _move_config_aside(real_dashboard_focus, tmp_path):
+    config = tmp_path / "home" / ".config" / "workdash" / "config.json"
+    config.rename(config.with_suffix(".backup"))
+
+
+@when(
+    "the user returns to that session with Workdash and sends the most recent input",
+    target_fixture="returning_cli_output",
+)
 def _return_to_dashboard_session(real_dashboard_focus):
-    next(real_dashboard_focus)
+    return next(real_dashboard_focus)
 
 
 @then("the returning client's input reaches the dashboard pane")
 def _dashboard_receives_input(real_dashboard_focus):
     with pytest.raises(StopIteration):
         next(real_dashboard_focus)
+
+
+@then("Workdash does not prompt for setup or recreate the configuration file")
+def _does_not_run_setup(returning_cli_output, tmp_path):
+    assert b"Attaching..." in returning_cli_output
+    assert b"Open command" not in returning_cli_output
+    assert not (tmp_path / "home" / ".config" / "workdash" / "config.json").exists()

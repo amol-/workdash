@@ -735,8 +735,12 @@ class Zellij:
 
     @staticmethod
     def exec_zellij_wrapped_workdash(
-        argv: Sequence[str] | None, preflight: Callable[[], bool] = lambda: True
+        argv: Sequence[str] | None,
+        preflight: Callable[[], bool] = lambda: True,
+        *,
+        attach_only: bool = False,
     ) -> None:
+        """Attach to a live dashboard, or start one unless setup is still needed."""
         zellij = _resolve_zellij_binary()
 
         original_args = list(argv) if argv is not None else sys.argv[1:]
@@ -772,6 +776,8 @@ class Zellij:
             time.sleep(1)
             command = [zellij, "attach", session_name]
             Zellij._attach_and_focus_dashboard(zellij, session_name, command)
+        elif attach_only:
+            return
         elif session_name in sessions:
             if sessions[session_name]:
                 try:

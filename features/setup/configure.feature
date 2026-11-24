@@ -12,7 +12,7 @@ Feature: First-time configuration
 
   Rules:
     - The configuration lives at ~/.config/workdash/config.json.
-    - When the configuration file is missing, starting the system runs the wizard before starting or attaching to Zellij. If setup succeeds, the system tells the user to run it again instead of starting the dashboard.
+    - When the configuration file is missing, starting the system runs the wizard unless it can attach to a running dashboard in the selected Zellij session. If setup succeeds, the system tells the user to run it again instead of starting the dashboard.
     - Automatic setup runs only when the configuration file is confirmed missing. If required settings are missing when starting a new dashboard, the system tells the user to run the wizard.
     - A configuration symlink with a missing target does not start automatic setup. Explicit `--configure` can create the target without replacing the symlink.
     - Automatic setup leaves a configuration saved by another run untouched and reports that it did not save the user's answers. Explicit `--configure` can still update an existing configuration.
