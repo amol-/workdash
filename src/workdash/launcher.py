@@ -32,13 +32,12 @@ _BROWSER_OPEN_COMMANDS = ("xdg-open", "open")
 _ITEM_DOCUMENT_COMMAND = ("workdash", "view")
 _BROWSER_OPEN_TIMEOUT_SECONDS = 4
 _WORKDASH_LOCAL_BIN = LOCAL_BIN_PATH
-# A Zellij session that is still starting answers unusably for a moment, so a pane
-# listing is attempted up to three times, two seconds apart, before it counts as
-# unavailable. Callers list panes while holding the session lock, so a persistent
-# failure delays them for about ten seconds in total.
+# A busy Zellij server can take several seconds to answer a listing, so repeatable
+# commands get a generous timeout. A pane listing is still attempted up to three
+# times, two seconds apart, before it counts as unavailable.
 _ZELLIJ_PANE_READ_ATTEMPTS = 3
 _ZELLIJ_PANE_READ_RETRY_SECONDS = 2.0
-_ZELLIJ_PANE_READ_TIMEOUT_SECONDS = 2.0
+_ZELLIJ_COMMAND_TIMEOUT_SECONDS = 10.0
 # Terminal control sequences in text captured from a pane or an error message.
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
 # Concurrent launches for one group must not each create their own tab.
@@ -674,7 +673,7 @@ def _read_zellij_panes(session: str) -> list[dict[str, object]]:
             check=True,
             capture_output=True,
             text=True,
-            timeout=_ZELLIJ_PANE_READ_TIMEOUT_SECONDS,
+            timeout=_ZELLIJ_COMMAND_TIMEOUT_SECONDS,
         )
     except subprocess.CalledProcessError as error:
         details = (error.stderr or "").strip() or (error.stdout or "").strip()
@@ -684,7 +683,7 @@ def _read_zellij_panes(session: str) -> list[dict[str, object]]:
     except subprocess.TimeoutExpired as error:
         raise RuntimeError(
             f"Failed to list Zellij panes for {session}: no answer within "
-            f"{_ZELLIJ_PANE_READ_TIMEOUT_SECONDS:.0f}s"
+            f"{_ZELLIJ_COMMAND_TIMEOUT_SECONDS:.0f}s"
         ) from error
     try:
         panes = json.loads(completed.stdout)
@@ -1215,7 +1214,7 @@ class Zellij:
                     check=True,
                     capture_output=True,
                     text=True,
-                    timeout=2,
+                    timeout=_ZELLIJ_COMMAND_TIMEOUT_SECONDS,
                 )
                 existing_clients = {
                     line.split()[0] for line in before.stdout.splitlines()[1:] if line.split()
@@ -1251,7 +1250,7 @@ class Zellij:
                                     check=True,
                                     capture_output=True,
                                     text=True,
-                                    timeout=2,
+                                    timeout=_ZELLIJ_COMMAND_TIMEOUT_SECONDS,
                                 )
                                 if any(
                                     line.split() and line.split()[0] not in existing_clients
@@ -1272,7 +1271,7 @@ class Zellij:
                                 ],
                                 check=True,
                                 capture_output=True,
-                                timeout=2,
+                                timeout=_ZELLIJ_COMMAND_TIMEOUT_SECONDS,
                             )
                             subprocess.run(
                                 [
@@ -1285,7 +1284,7 @@ class Zellij:
                                 ],
                                 check=True,
                                 capture_output=True,
-                                timeout=2,
+                                timeout=_ZELLIJ_COMMAND_TIMEOUT_SECONDS,
                             )
                             # Zellij may ignore pane-ID focus until a reattached client sends input.
                             if not existing_clients:
@@ -1306,7 +1305,7 @@ class Zellij:
                                         check=True,
                                         capture_output=True,
                                         text=True,
-                                        timeout=2,
+                                        timeout=_ZELLIJ_COMMAND_TIMEOUT_SECONDS,
                                     )
                                     lines = [
                                         line.split() for line in clients.stdout.splitlines()[1:]
@@ -1329,7 +1328,7 @@ class Zellij:
                                         ],
                                         check=True,
                                         capture_output=True,
-                                        timeout=2,
+                                        timeout=_ZELLIJ_COMMAND_TIMEOUT_SECONDS,
                                     )
                     raise SystemExit(client.wait())
                 finally:
