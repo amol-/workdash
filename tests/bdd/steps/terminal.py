@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
+import pty
 import shutil
+import struct
 import subprocess
+import termios
+import time
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,11 +23,89 @@ from textual.widgets import Static
 
 from workdash.agent_execution import executor
 from workdash.control import WorkdashSession, format_work_item_id
-from workdash.launcher import _zellij_pane_name_for_work_action, launch_terminal_context
+from workdash.launcher import _zellij_pane_name_for_work_action, launch_terminal_context, zellij
 from workdash.models import WorkItem
 from zellij_pane_launch import mark_pane_started
 
 from .common import make_valid_config, make_work_item, modal_screen_names, run_app
+
+
+@given("a Workdash terminal is open in a worktree", target_fixture="restart_terminal")
+def _open_terminal_for_restart(tmp_path, monkeypatch):
+    from test_zellij_integration import _cleanup_sessions, _temporary_home
+
+    binary = shutil.which("zellij")
+    if binary is None:
+        pytest.skip("Zellij is not installed")
+    name = f"workdash-restart-terminal-{uuid.uuid4().hex}"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    startup = tmp_path / "shell-startup"
+    startup.write_text(
+        'printf "%s %s\\n" "$ZELLIJ_PANE_ID" "$PWD" >> "$HOME/shell-starts"\n',
+        encoding="utf-8",
+    )
+    home = _temporary_home(tmp_path)
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    env = dict(os.environ, TERM="xterm-256color", ENV=str(startup), HOME=home)
+    for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
+        env.pop(key, None)
+    pid, fd = pty.fork()
+    if pid == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        os.execve(binary, [binary, "--session", name], env)
+    try:
+        for _ in range(50):
+            try:
+                if zellij.load_zellij_panes(name):
+                    break
+            except RuntimeError:
+                pass
+            time.sleep(0.1)
+        else:
+            pytest.fail("Zellij did not start")
+        launch = launch_terminal_context(str(worktree), zellij_session=name)
+        yield name, launch.pane_id, Path(home) / "shell-starts", str(worktree)
+    finally:
+        _cleanup_sessions(binary, env, [(name, pid, fd)])
+
+
+@given("the shell has exited leaving its Zellij pane held open")
+def _exit_held_terminal(restart_terminal):
+    name, pane_id, _, _ = restart_terminal
+    zellij.send_zellij_pane_input(name, pane_id, "exit 0")
+    for _ in range(50):
+        for pane in zellij.load_zellij_panes(name):
+            if (
+                not pane.get("is_plugin")
+                and f"terminal_{pane['id']}" == pane_id
+                and pane.get("exited")
+            ):
+                assert pane.get("exit_status") == 0, pane
+                return
+        time.sleep(0.1)
+    pytest.fail("the terminal did not exit and stay open")
+
+
+@when("the user presses Enter in the held pane")
+def _restart_held_terminal(restart_terminal):
+    name, pane_id, _, _ = restart_terminal
+    zellij.press_zellij_pane_enter(name, pane_id)
+
+
+@then("a fresh shell starts in the same pane in the worktree")
+def _terminal_restarted(restart_terminal):
+    name, pane_id, starts, worktree = restart_terminal
+    shell_start = f"{pane_id.removeprefix('terminal_')} {worktree}"
+    for _ in range(50):
+        if (
+            starts.exists()
+            and starts.read_text(encoding="utf-8").splitlines().count(shell_start) == 2
+        ):
+            assert "workdash-pane:" not in zellij.dump_zellij_pane(name, pane_id, full=True)
+            return
+        time.sleep(0.1)
+    pytest.fail(zellij.dump_zellij_pane(name, pane_id))
 
 
 @given("the next terminal launch will fail")

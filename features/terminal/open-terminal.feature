@@ -26,6 +26,13 @@ Feature: Open a terminal in the work item's worktree
     And no coding agent is started
     And the TUI reports that a terminal was opened
 
+  @id:F-TERMINAL-OPEN-S012
+  Scenario: Restart an exited terminal in the same pane
+    Given a Workdash terminal is open in a worktree
+    And the shell has exited leaving its Zellij pane held open
+    When the user presses Enter in the held pane
+    Then a fresh shell starts in the same pane in the worktree
+
   @id:F-TERMINAL-OPEN-S002
   Scenario: Work action launched from inside the dashboard uses the current Zellij session
     Given the system is running inside a Zellij session

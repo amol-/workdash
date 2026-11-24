@@ -454,12 +454,17 @@ def _launch_zellij_pane(
     """Launch one Zellij pane and return its ID once the pane proves it started.
 
     Zellij can accept a pane request, exit zero and never run the command, so the
-    pane writes its own ``$ZELLIJ_PANE_ID`` to a private marker before exec. An
-    attempt without a marker never started its command, so it is retried; a marker
-    is never launched over again. Returns ``None`` when every attempt left none.
+    pane writes its own ``$ZELLIJ_PANE_ID`` to a private marker before exec.
+    Workdash retries only while it has seen no marker, and returns ``None`` if
+    no pane proved it started.
     """
     zellij = _resolve_zellij_binary()
     session_args = ["--session", zellij_session] if zellij_session is not None else []
+    write_marker = 'printf "%s" "$ZELLIJ_PANE_ID" > "$1"'
+    if not (blocking or close_on_exit):
+        # Zellij reruns the same wrapper in a held pane after marker cleanup.
+        # A first start arriving after cleanup is indistinguishable from a rerun.
+        write_marker = '[ ! -e "${1%/*}" ] || ' + write_marker
     with tempfile.TemporaryDirectory(prefix="workdash-pane-") as directory:
         # Every attempt writes the same marker, so a pane that starts after an
         # earlier attempt gave up is still found instead of launched again.
@@ -486,7 +491,7 @@ def _launch_zellij_pane(
                 "--",
                 "/bin/sh",
                 "-c",
-                'printf "%s" "$ZELLIJ_PANE_ID" > "$1" || exit 1; shift; exec "$@"',
+                f'{write_marker} || exit 1; shift; exec "$@"',
                 "workdash-pane",
                 str(marker),
                 *command,
