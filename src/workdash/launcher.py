@@ -467,10 +467,17 @@ def _launch_zellij_pane(
     held = not (blocking or close_on_exit)
     # One atomic claim per launch. Only the winning argv can reuse it, even
     # when Zellij assigns that pane a different ID after session recovery.
-    claim = 'ln -s "$ZELLIJ_PANE_ID:$2" "$1" 2>/dev/null'
+    # Use the system utility path without changing the launched command's PATH.
+    claim = 'command -p ln -s "$ZELLIJ_PANE_ID:$2" "$1" 2>/dev/null'
+    on_loss = "exit 1"
     state_dir = None
     if held:
-        claim += ' || case "$(readlink "$1" 2>/dev/null)" in *":$2") true;; *) false;; esac'
+        claim += (
+            ' || case "$(command -p readlink "$1" 2>/dev/null)" in *":$2") true;; *) false;; esac'
+        )
+        # Target the losing pane even if the user has already moved focus.
+        close = shlex.quote(os.path.abspath(zellij))
+        on_loss = f'{close} action close-pane --pane-id "terminal_$ZELLIJ_PANE_ID"; exit 1'
         state_home = Path(os.environ.get("XDG_STATE_HOME", ""))
         if not state_home.is_absolute():
             state_home = Path.home() / ".local" / "state"
@@ -508,7 +515,8 @@ def _launch_zellij_pane(
                 "--",
                 "/bin/sh",
                 "-c",
-                f'[ -n "$ZELLIJ_PANE_ID" ] || exit 1; {claim} || exit 1; shift 2; exec "$@"',
+                f'[ -n "$ZELLIJ_PANE_ID" ] || exit 1; '
+                f'{claim} || {{ {on_loss}; }}; shift 2; exec "$@"',
                 "workdash-pane",
                 str(marker),
                 str(attempt),

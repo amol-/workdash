@@ -14,7 +14,8 @@ Feature: Open a terminal in the work item's worktree
     - The system reports the outcome of the action to the user.
     - Terminal-backed work actions open panes in the current Zellij session.
     - Terminal-backed work actions require an active Zellij session.
-    - One launch starts its command in at most one pane, even if Zellij is slow to respond. If Workdash reports that the pane never ran, no delayed pane starts the command afterward. Enter can restart the command in the held pane that did start it.
+    - One launch starts its command in at most one pane, even if Zellij is slow to respond. If Workdash reports that the pane never ran, no delayed pane starts the command afterward. A duplicate pane does not linger or leave focus on an exited copy. Enter can restart the command in the held pane that did start it.
+    - Terminal-backed commands can start and restart with a restricted PATH and keep that PATH.
     - Terminal-backed work actions do not create, inspect, attach, or resurrect shared sessions.
     - If preparing the worktree or launching the terminal subprocess fails, the system closes the progress overlay and reports the error details to the user.
 
@@ -29,7 +30,7 @@ Feature: Open a terminal in the work item's worktree
 
   @id:F-TERMINAL-OPEN-S012
   Scenario: Restart an exited terminal after system temporary files are cleared
-    Given a Workdash terminal is open in a worktree
+    Given a Workdash terminal is open in a worktree with a restricted PATH
     And the shell has exited leaving its Zellij pane held open
     And the system has cleared temporary files
     When the user presses Enter in the held pane

@@ -30,7 +30,10 @@ from zellij_pane_launch import mark_pane_started
 from .common import make_valid_config, make_work_item, modal_screen_names, run_app
 
 
-@given("a Workdash terminal is open in a worktree", target_fixture="restart_terminal")
+@given(
+    "a Workdash terminal is open in a worktree with a restricted PATH",
+    target_fixture="restart_terminal",
+)
 def _open_terminal_for_restart(tmp_path, monkeypatch):
     from test_zellij_integration import _cleanup_sessions, _temporary_home
 
@@ -40,9 +43,11 @@ def _open_terminal_for_restart(tmp_path, monkeypatch):
     name = f"workdash-restart-terminal-{uuid.uuid4().hex}"
     worktree = tmp_path / "worktree"
     worktree.mkdir()
+    restricted_path = tmp_path / "bin"
+    restricted_path.mkdir()
     startup = tmp_path / "shell-startup"
     startup.write_text(
-        'printf "%s %s\\n" "$ZELLIJ_PANE_ID" "$PWD" >> "$HOME/shell-starts"\n',
+        'printf "%s %s %s\\n" "$ZELLIJ_PANE_ID" "$PWD" "$PATH" >> "$HOME/shell-starts"\n',
         encoding="utf-8",
     )
     home = _temporary_home(tmp_path)
@@ -51,6 +56,8 @@ def _open_terminal_for_restart(tmp_path, monkeypatch):
     monkeypatch.setattr("tempfile.tempdir", str(system_tmp))
     monkeypatch.setenv("SHELL", "/bin/sh")
     env = dict(os.environ, TERM="xterm-256color", ENV=str(startup), HOME=home)
+    env.update(PATH=str(restricted_path), XDG_STATE_HOME=str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_STATE_HOME", env["XDG_STATE_HOME"])
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
         env.pop(key, None)
     pid, fd = pty.fork()
@@ -104,9 +111,9 @@ def _restart_held_terminal(restart_terminal):
 
 
 @then("a fresh shell starts in the same pane in the worktree")
-def _terminal_restarted(restart_terminal):
+def _terminal_restarted(restart_terminal, tmp_path):
     name, pane_id, starts, worktree = restart_terminal
-    shell_start = f"{pane_id.removeprefix('terminal_')} {worktree}"
+    shell_start = f"{pane_id.removeprefix('terminal_')} {worktree} {tmp_path / 'bin'}"
     for _ in range(50):
         if (
             starts.exists()
