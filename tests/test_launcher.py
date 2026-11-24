@@ -19,7 +19,7 @@ from workdash.launcher import (
     prepare_launch_agent_prompt,
 )
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
-from zellij_pane_launch import mark_pane_started, pane_launch
+from zellij_pane_launch import mark_pane_started, pane_launch, pane_marker
 
 
 def make_work_item(
@@ -113,6 +113,8 @@ def test_viewer_opens_full_size_floating_pane_in_current_or_selected_session(mon
                 "100%",
                 "--height",
                 "100%",
+                "--name",
+                "viewer",
             ],
             ["viewer", "--label", "two words", url],
         ),
@@ -139,6 +141,7 @@ def test_direct_viewer_does_not_require_zellij(monkeypatch):
 
 def test_viewer_rejects_zero_exit_for_missing_session(monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/zellij")
+    monkeypatch.setattr(launcher_module, "_ZELLIJ_PANE_MARKER_TIMEOUT_SECONDS", 0)
     run = MagicMock(
         return_value=subprocess.CompletedProcess(
             [], 0, stdout="workdash-live [Created 1m ago]\n", stderr="Session not found\n"
@@ -1791,6 +1794,116 @@ def test_launch_pane_waits_for_a_slow_pane_marker(monkeypatch: pytest.MonkeyPatc
 
     assert len(launches) == 1
     assert launch.pane_id == "terminal_23"
+
+
+def test_launch_pane_finds_a_pane_that_starts_after_its_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launches: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        launches.append(command)
+        if len(launches) == 2:
+            # The first launch was dropped, but its pane starts late, while the
+            # second attempt is still waiting for a marker.
+            mark_pane_started(launches[0], "23")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(launcher_module, "_ZELLIJ_PANE_MARKER_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(launcher_module, "_ZELLIJ_PANE_MARKER_TIMEOUT_SECONDS", 0.5)
+
+    launch = launcher_module.zellij.launch_pane(
+        "/tmp/owner_repo_52",
+        ["/bin/bash", "-ic", "agent"],
+        context="Failed to launch coding agent",
+        work_action="code",
+        zellij_session="workdash-main",
+    )
+
+    assert len({pane_marker(command) for command in launches}) == 1
+    assert len(launches) == 2
+    assert launch.pane_id == "terminal_23"
+
+
+def test_launch_pane_keeps_a_started_pane_despite_a_zellij_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launches: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        launches.append(command)
+        mark_pane_started(command, "23")
+        return subprocess.CompletedProcess(
+            command, 0, stdout="", stderr="warning: pane request delayed\n"
+        )
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launch = launcher_module.zellij.launch_pane(
+        "/tmp/owner_repo_52",
+        ["/bin/bash", "-ic", "agent"],
+        context="Failed to launch coding agent",
+        work_action="code",
+        zellij_session="workdash-main",
+    )
+
+    assert len(launches) == 1
+    assert launch.pane_id == "terminal_23"
+
+
+def test_launch_pane_and_wait_keeps_a_started_pane_despite_a_zellij_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launches: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        launches.append(command)
+        mark_pane_started(command, "23")
+        return subprocess.CompletedProcess(
+            command, 0, stdout="", stderr="warning: pane request delayed\n"
+        )
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    launcher_module.Zellij().launch_pane_and_wait(
+        "/tmp/owner_repo_52",
+        ["/bin/bash", "-ic", "agent"],
+        context="Failed to generate analysis",
+        work_action="analyse",
+        zellij_session="workdash-main",
+        group=None,
+    )
+
+    assert len(launches) == 1
+
+
+def test_launch_pane_and_wait_reports_a_pane_that_started_before_the_first_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(command, **kwargs):
+        mark_pane_started(command, "23")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(launcher_module, "_ZELLIJ_PANE_MARKER_POLL_SECONDS", 30)
+    panes: list[str | None] = []
+
+    launcher_module.Zellij().launch_pane_and_wait(
+        "/tmp/owner_repo_52",
+        ["/bin/bash", "-ic", "agent"],
+        context="Failed to generate analysis",
+        work_action="analyse",
+        zellij_session="workdash-main",
+        group=None,
+        pane_callback=panes.append,
+    )
+
+    assert panes == ["terminal_23", None]
 
 
 def test_a_review_launch_that_never_starts_its_pane_reports_the_pane_never_ran(

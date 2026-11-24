@@ -456,14 +456,18 @@ def _launch_zellij_pane(
 
     Zellij can accept a pane request, exit zero and never run the command, so the
     pane writes its own ``$ZELLIJ_PANE_ID`` to a private marker before exec. An
-    attempt without a marker never started its command, so it is retried; an attempt
-    with a marker is never repeated. Returns ``None`` when every attempt left none.
+    attempt without a marker never started its command, so it is retried; a marker
+    is never launched over again. Returns ``None`` when every attempt left none.
     """
     zellij = _resolve_zellij_binary()
     session_args = ["--session", zellij_session] if zellij_session is not None else []
     with tempfile.TemporaryDirectory(prefix="workdash-pane-") as directory:
-        for attempt in range(1, _ZELLIJ_PANE_LAUNCH_ATTEMPTS + 1):
-            marker = Path(directory) / f"pane-{attempt}"
+        # Every attempt writes the same marker, so a pane that starts after an
+        # earlier attempt gave up is still found instead of launched again.
+        marker = Path(directory) / "pane"
+        for _ in range(_ZELLIJ_PANE_LAUNCH_ATTEMPTS):
+            if pane_id := _read_pane_marker(marker):
+                return _format_zellij_pane_id(pane_id)
             argv = [
                 zellij,
                 *session_args,
@@ -490,11 +494,13 @@ def _launch_zellij_pane(
             ]
             if blocking:
                 done = threading.Event()
+                reported: list[str] = []
 
-                def report_pane(done=done, marker=marker) -> None:
+                def report_pane(done=done, marker=marker, reported=reported) -> None:
                     while not done.wait(_ZELLIJ_PANE_MARKER_POLL_SECONDS):
                         pane_id = _read_pane_marker(marker)
                         if pane_id:
+                            reported.append(pane_id)
                             if pane_callback is not None:
                                 pane_callback(_format_zellij_pane_id(pane_id))
                             return
@@ -512,14 +518,11 @@ def _launch_zellij_pane(
                     if reporter is not None:
                         done.set()
                         reporter.join()
+                        if not reported and (pane_id := _read_pane_marker(marker)):
+                            pane_callback(_format_zellij_pane_id(pane_id))
                         pane_callback(None)
             else:
                 completed = _run_launch_command(argv, context=context)
-            # Zellij reports its own failures on stderr while still exiting zero, so
-            # only the files the pane writes prove that its command ran.
-            details = completed.stderr.strip()
-            if details:
-                raise RuntimeError(f"{context}: {details}" if context else details)
             pane_id = _read_pane_marker(marker)
             if not blocking:
                 deadline = time.monotonic() + _ZELLIJ_PANE_MARKER_TIMEOUT_SECONDS
@@ -528,6 +531,11 @@ def _launch_zellij_pane(
                     pane_id = _read_pane_marker(marker)
             if pane_id:
                 return _format_zellij_pane_id(pane_id)
+            # Zellij reports its own failures on stderr while still exiting zero, so
+            # only the files the pane writes prove that its command ran.
+            details = completed.stderr.strip()
+            if details:
+                raise RuntimeError(f"{context}: {details}" if context else details)
         return None
 
 
@@ -769,6 +777,7 @@ class Zellij:
         pane_id = _launch_zellij_pane(
             command,
             zellij_session=session,
+            name=Path(command[0]).name,
             floating=True,
             close_on_exit=close_on_exit,
         )
@@ -855,7 +864,7 @@ class Zellij:
                         capture_output=True,
                         text=True,
                     ).stdout.strip()
-                _launch_zellij_pane(
+                pane_id = _launch_zellij_pane(
                     [
                         "env",
                         *(
@@ -870,6 +879,8 @@ class Zellij:
                     tab_id=tab,
                     name="workdash tui",
                 )
+                if pane_id is None:
+                    raise RuntimeError("Failed to start dashboard in Zellij: the pane never ran")
             except OSError as error:
                 raise RuntimeError(f"Failed to start dashboard in Zellij: {error}") from error
             except subprocess.CalledProcessError as error:

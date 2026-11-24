@@ -763,6 +763,8 @@ def _item_shown_in_pane(scenario_state: dict[str, Any]) -> None:
                 "100%",
                 "--height",
                 "100%",
+                "--name",
+                "sh",
                 "--close-on-exit",
             ],
             [
