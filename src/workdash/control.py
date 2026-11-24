@@ -953,13 +953,11 @@ class WorkdashSession:
                 if check:
                     time.sleep(_LAUNCH_VISIBILITY_INTERVAL_SECONDS)
                 listed = self._live_panes()
-                # No agent held the worktree before launching, so a live one now is ours.
-                running = _agent_panes_in_worktree(listed, repo_path)
-                if running:
-                    break
-                # Zellij holds the pane of an agent that exits at once, e.g. a missing binary.
                 pane = launcher.find_zellij_pane(listed, launch.pane_id)
                 if pane is not None and pane.get("title") == launch.pane_title:
+                    if launcher.is_live_zellij_pane(pane):
+                        break
+                    # Zellij holds the pane of an agent that exits at once.
                     del self._unconfirmed_launches[launch_key]
                     raise WorkdashControlError(
                         "agent_exited",
@@ -974,7 +972,7 @@ class WorkdashSession:
                     status=HTTPStatus.CONFLICT,
                 )
             del self._unconfirmed_launches[launch_key]
-            pane_id = launcher._format_zellij_pane_id(running[0]["id"])
+            pane_id = launcher._format_zellij_pane_id(pane["id"])
             launched = {
                 "status": "launched",
                 "item_id": item_id,
@@ -983,7 +981,7 @@ class WorkdashSession:
                 "cwd": launch.cwd,
                 "pane_title": launch.pane_title,
                 "pane_id": pane_id,
-                "tab_name": running[0].get("tab_name"),
+                "tab_name": pane.get("tab_name"),
             }
             if autostart and include_launch_reason:
                 launched["launch_reason"] = launch_reason
@@ -992,7 +990,7 @@ class WorkdashSession:
                 self.autoclose.supervise(
                     session=launch.session or self.zellij_session,
                     pane_id=pane_id,
-                    pane_title=str(running[0].get("title") or ""),
+                    pane_title=str(pane.get("title") or ""),
                     item=item,
                     repo_path=repo_path,
                     launched_at=launched_at,

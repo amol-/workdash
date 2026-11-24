@@ -7,6 +7,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,7 @@ _WORKDASH_LOCAL_BIN = LOCAL_BIN_PATH
 _ZELLIJ_PANE_READ_ATTEMPTS = 3
 _ZELLIJ_PANE_READ_RETRY_SECONDS = 2.0
 _ZELLIJ_COMMAND_TIMEOUT_SECONDS = 10.0
+_PANE_RECEIPT_SOCKET_GRACE_NS = 5_000_000_000
 # A pane launch proves itself only once the pane writes its own ID, so a launch is
 # retried up to three times, waiting up to five seconds per attempt for that proof.
 _ZELLIJ_PANE_LAUNCH_ATTEMPTS = 3
@@ -470,26 +472,36 @@ def _launch_zellij_pane(
     # Use the system utility path without changing the launched command's PATH.
     claim = 'command -p ln -s "$ZELLIJ_PANE_ID:$2" "$1" 2>/dev/null'
     on_loss = "exit 1"
-    state_dir = None
+    state_dir = sockets = None
     if held:
+        # Use the server's cache from the pane environment, not the caller's cache.
+        store = ""
+        if sys.platform == "linux":
+            store = (
+                '$(case "$XDG_CACHE_HOME" in /*) printf "%s/zellij:" "$XDG_CACHE_HOME";; '
+                '*) case "$HOME" in /*) printf "%s/.cache/zellij:" "$HOME";; esac;; esac)'
+            )
+        elif sys.platform == "darwin":
+            # Zellij's ProjectDirs uses this bundle ID on macOS.
+            store = '$(case "$HOME" in /*) printf "%s/Library/Caches/org.Zellij-Contributors.Zellij:" "$HOME";; esac)'
+        claim = f'command -p ln -s "$ZELLIJ_PANE_ID:{store}$2" "$1" 2>/dev/null'
         claim += (
             ' || case "$(command -p readlink "$1" 2>/dev/null)" in *":$2") true;; *) false;; esac'
         )
         # Target the losing pane even if the user has already moved focus.
         close = shlex.quote(os.path.abspath(zellij))
         on_loss = f'{close} action close-pane --pane-id "terminal_$ZELLIJ_PANE_ID"; exit 1'
-        state_home = Path(os.environ.get("XDG_STATE_HOME", ""))
-        if not state_home.is_absolute():
-            state_home = Path.home() / ".local" / "state"
-        state_dir = state_home / "workdash" / "pane-launches"
+        state_dir = _pane_receipt_dir()
         state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with suppress(OSError, ValueError, RuntimeError):
+            sockets = _zellij_receipt_sockets()
+
     with ExitStack() as cleanup:
         directory = Path(tempfile.mkdtemp(prefix="workdash-pane-", dir=state_dir))
         cleanup.callback(shutil.rmtree, directory)
         claim_dir = directory / "launch"
         claim_dir.mkdir()
-        # Hide the marker and its parent together: unlinking the marker first
-        # would let a delayed pane claim it again during cleanup.
+        # Retire the whole claim path so a delayed pane cannot win after cleanup.
         cleanup.callback(claim_dir.rename, directory / "finished")
         marker = claim_dir / "pane"
         error = None
@@ -579,11 +591,25 @@ def _launch_zellij_pane(
         try:
             marker.symlink_to("cancelled")
         except FileExistsError:
-            if held:
-                # A recovered Zellij pane still refers to this receipt after
-                # Workdash exits or the system clears temporary files.
+            target = ""
+            with suppress(FileNotFoundError):
+                target = os.readlink(marker)
+            pane_id = target.partition(":")[0]
+            if held and pane_id.isdigit():
+                # The winning pane needs its receipt after Workdash exits.
                 cleanup.pop_all()
-            return _format_zellij_pane_id(_read_pane_marker(marker))
+                if sockets is not None:
+                    with suppress(OSError, ValueError):
+                        claim = re.fullmatch(r"[0-9]+:(.*):[0-9]+", target, re.DOTALL)
+                        if claim and (cache := Path(claim[1])).is_absolute():
+                            owner = {
+                                "sockets": str(sockets),
+                                "layouts": str(cache / "contract_version_1/session_info"),
+                            }
+                            (directory / "completed").write_text(
+                                json.dumps(owner), encoding="utf-8"
+                            )
+            return _format_zellij_pane_id(pane_id)
         if error is not None:
             raise error
         return None
@@ -871,6 +897,12 @@ class Zellij:
                     f"Failed to list Zellij sessions: {details or error.returncode}"
                 ) from error
             sessions = {}
+
+        # Listing sessions also removes stale sockets before the sweep checks their age.
+        with suppress(OSError, ValueError, RuntimeError):
+            if (sockets := _zellij_receipt_sockets()) is not None:
+                _sweep_pane_receipts(_pane_receipt_dir(), sockets)
+
         if dashboard_is_running(session_name):
             print("Workdash is already running; new options are ignored. Attaching...", flush=True)
             time.sleep(1)
@@ -1435,3 +1467,109 @@ class Zellij:
 
 
 zellij = Zellij()
+
+
+def _pane_receipt_dir() -> Path:
+    state_home = Path(os.environ.get("XDG_STATE_HOME", ""))
+    if not state_home.is_absolute():
+        state_home = Path.home() / ".local" / "state"
+    return state_home / "workdash" / "pane-launches"
+
+
+def _sweep_pane_receipts(state_dir: Path, sockets: Path) -> None:
+    socket_stamp = _receipt_stamp(sockets)
+    if socket_stamp is not None:
+        _, _, socket_mtime_ns = socket_stamp
+        # Zellij can still publish an older layout after unlinking its socket.
+        if time.time_ns() - socket_mtime_ns < _PANE_RECEIPT_SOCKET_GRACE_NS:
+            return
+        for entry in sockets.iterdir():
+            if stat.S_ISSOCK(entry.lstat().st_mode):
+                return
+    observed = {sockets: socket_stamp}
+
+    receipts = {}
+    for directory in state_dir.glob("workdash-pane-*"):
+        with suppress(OSError, ValueError, TypeError):
+            owner = json.loads((directory / "completed").read_text(encoding="utf-8"))
+            if (
+                isinstance(owner, dict)
+                and owner.get("sockets") == str(sockets)
+                and (store := Path(owner.get("layouts", ""))).is_absolute()
+                and (directory / "launch/pane").is_symlink()
+            ):
+                receipts[directory] = store
+    if not receipts:
+        return
+
+    receipt_names = re.compile(r"workdash-pane-[a-z0-9_]+")
+    for store in set(receipts.values()):
+        observed[store] = _receipt_stamp(store)
+        if observed[store] is None:
+            continue
+        saved = set()
+        for session_dir in store.iterdir():
+            if not stat.S_ISDIR(session_dir.stat().st_mode):
+                continue
+            layout = session_dir / "session-layout.kdl"
+            observed[layout] = _receipt_stamp(layout)
+            if observed[layout] is not None:
+                text = layout.read_text(encoding="utf-8").strip()
+                # A partial write can end at an indented brace, not the root's brace.
+                if not (text.startswith("layout {\n") and text.endswith("\n}")):
+                    return
+                saved.update(receipt_names.findall(text))
+        receipts = {
+            directory: cache
+            for directory, cache in receipts.items()
+            if cache != store or directory.name not in saved
+        }
+    if not receipts:
+        return
+
+    for path, before in observed.items():
+        if _receipt_stamp(path) != before:
+            return
+    for directory in receipts:
+        (directory / "launch").rename(directory / "finished")
+        shutil.rmtree(directory)
+
+
+def _zellij_receipt_sockets() -> Path | None:
+    """Locate the socket namespace used by the Zellij client."""
+    if sys.platform not in {"linux", "darwin"}:
+        return None
+    socket_dir = os.environ.get("ZELLIJ_SOCKET_DIR")
+    if socket_dir is not None:
+        return (Path(socket_dir) / "contract_version_1").resolve()
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", ""))
+    if sys.platform == "linux" and runtime.is_absolute():
+        return (runtime / "zellij/contract_version_1").resolve()
+
+    tmp_dir = os.environ.get("TMPDIR")
+    if tmp_dir is None:
+        if sys.platform == "darwin":
+            # Zellij's Rust temp_dir uses confstr(_CS_DARWIN_USER_TEMP_DIR).
+            try:
+                tmp_dir = os.fsdecode(
+                    subprocess.check_output(
+                        ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"],
+                        stderr=subprocess.DEVNULL,
+                        timeout=_ZELLIJ_COMMAND_TIMEOUT_SECONDS,
+                    ).rstrip(b"\n")
+                )
+            except (OSError, subprocess.SubprocessError):
+                return None
+            if not Path(tmp_dir).is_absolute():
+                return None
+        else:
+            tmp_dir = "/tmp"
+    return (Path(tmp_dir) / f"zellij-{os.getuid()}/contract_version_1").resolve()
+
+
+def _receipt_stamp(path: Path) -> tuple[int, int, int] | None:
+    with suppress(FileNotFoundError):
+        info = path.stat()
+        # The CLI resets socket directory permissions even during read-only commands.
+        return info.st_dev, info.st_ino, info.st_mtime_ns
+    return None

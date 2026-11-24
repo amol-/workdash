@@ -527,12 +527,18 @@ def install_zellij_agent_fakes(
         time.sleep(scenario_state.get("launch_delay", 0))
         pane_id = 22 + len(launches)
         pane_title = f"code_{Path(repo_path).name}"
+        if scenario_state.get("launch_has_losing_pane"):
+            panes.append({"id": pane_id - 1, "title": pane_title, "pane_cwd": repo_path})
+            scenario_state["agent_pane_id"] = f"terminal_{pane_id}"
         if not scenario_state.get("launched_panes_invisible"):
             panes.append(
                 {"id": pane_id, "title": pane_title, "pane_cwd": repo_path, "tab_name": group}
             )
         return SimpleNamespace(
-            session=zellij_session, pane_id=None, pane_title=pane_title, cwd=repo_path
+            session=zellij_session,
+            pane_id=f"terminal_{pane_id}",
+            pane_title=pane_title,
+            cwd=repo_path,
         )
 
     # A scenario that proves the real pane read fakes Zellij at its process boundary.

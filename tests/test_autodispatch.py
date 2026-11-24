@@ -251,7 +251,10 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
         launches.append((repo, prompt, kwargs))
         panes.append(pane)
         return SimpleNamespace(
-            session="workdash", pane_id=None, pane_title=pane["title"], cwd=str(repo)
+            session="workdash",
+            pane_id=f"terminal_{pane['id']}",
+            pane_title=pane["title"],
+            cwd=str(repo),
         )
 
     monkeypatch.setattr("workdash.control.existing_worktree_path", worktree)
@@ -390,7 +393,7 @@ def test_dashboard_refreshes_elapsed_time_and_shows_real_ci_dispatch(
         prompts.append(prompt)
         panes.append({"id": 1, "title": "code_owner_repo_1", "pane_cwd": str(repo)})
         return SimpleNamespace(
-            session="workdash", pane_id=None, pane_title=panes[0]["title"], cwd=str(repo)
+            session="workdash", pane_id="terminal_1", pane_title=panes[0]["title"], cwd=str(repo)
         )
 
     monkeypatch.setattr("workdash.launcher.zellij.load_zellij_panes", lambda _: list(panes))
@@ -1887,7 +1890,10 @@ def test_autodispatch_review_feedback_cycle(monkeypatch, tmp_path):
             zellij.panes.append(pane)
             self.launches.put(prompt)
             return SimpleNamespace(
-                session="workdash", pane_id=None, pane_title=pane["title"], cwd=str(repo)
+                session="workdash",
+                pane_id=f"terminal_{pane['id']}",
+                pane_title=pane["title"],
+                cwd=str(repo),
             )
 
         def finish_implementation(self):
@@ -2985,7 +2991,10 @@ def test_automerge_redispatches_real_ready_work(monkeypatch, tmp_path, problem):
         prompts.append(prompt)
         panes.append({"id": len(prompts), "title": "code_owner_repo_1", "pane_cwd": str(repo)})
         return SimpleNamespace(
-            session="workdash", pane_id=None, pane_title=panes[-1]["title"], cwd=str(repo)
+            session="workdash",
+            pane_id=f"terminal_{len(prompts)}",
+            pane_title=panes[-1]["title"],
+            cwd=str(repo),
         )
 
     def merge(repo, number, sha):
@@ -3082,7 +3091,10 @@ def test_review_feedback_redispatches_real_ready_work(monkeypatch, tmp_path):
         prompts.append(prompt)
         panes.append({"id": len(prompts), "title": "code_owner_repo_1", "pane_cwd": str(repo)})
         return SimpleNamespace(
-            session="workdash", pane_id=None, pane_title=panes[-1]["title"], cwd=str(repo)
+            session="workdash",
+            pane_id=f"terminal_{len(prompts)}",
+            pane_title=panes[-1]["title"],
+            cwd=str(repo),
         )
 
     def merge(repo, number, sha):

@@ -184,6 +184,9 @@ already running, new options are ignored; otherwise it starts with the supplied
 options in the `dashboard` tab. Pressing `q` exits the dashboard but keeps the
 session and its panes; Ctrl+Q quits the entire session. Inside Zellij, Workdash
 runs in the current pane and uses the current session regardless of `--session`.
+Workdash keeps pane restart receipts while a Zellij session in the same socket
+namespace is active or has just shut down. On a later startup, once the namespace
+has settled, Workdash can reclaim receipts that no saved session refers to.
 
 
 ## What gets shown

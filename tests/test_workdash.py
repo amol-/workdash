@@ -1759,7 +1759,7 @@ def test_main_launch_callback_dispatches_agent_command_tokens_per_tool(
         panes.append({"id": 4, "title": "code_wt", "pane_cwd": repo})
         return SimpleNamespace(
             session=zellij_session,
-            pane_id=None,
+            pane_id="terminal_4",
             pane_title="code_wt",
             cwd=repo,
         )

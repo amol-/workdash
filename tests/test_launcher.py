@@ -2,6 +2,7 @@ import json
 import os
 import shlex
 import shutil
+import socket
 import subprocess
 import threading
 from datetime import UTC, datetime
@@ -2232,3 +2233,187 @@ def test_attach_does_not_cycle_panes_when_another_client_joins(monkeypatch):
     assert any("focus-pane-id" in command for command in commands)
     assert not any("focus-next-pane" in command for command in commands)
     client.wait.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("evidence", "retained"),
+    [
+        ("saved", True),
+        ("discarded", False),
+        ("socket-directory-alias", False),
+        ("unreadable", True),
+        ("truncated-layout", True),
+        ("relative-tmpdir", False),
+        ("session-transition", True),
+        ("different-namespace", True),
+        ("uncompleted", True),
+        ("unknown-store", True),
+    ],
+)
+def test_startup_reclaims_only_unreferenced_receipts(tmp_path, monkeypatch, evidence, retained):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("ZELLIJ_SOCKET_DIR", str(tmp_path / "sockets"))
+    monkeypatch.setattr(launcher_module.sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
+    sockets = tmp_path / "sockets" / "contract_version_1"
+    if evidence == "relative-tmpdir":
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("ZELLIJ_SOCKET_DIR")
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        monkeypatch.setenv("TMPDIR", "temp")
+        sockets = tmp_path / "temp" / f"zellij-{os.getuid()}" / "contract_version_1"
+    sockets.mkdir(parents=True)
+    os.utime(sockets, (1, 1))
+    if evidence == "socket-directory-alias":
+        alias = tmp_path / "socket-alias"
+        alias.symlink_to(sockets.parent, target_is_directory=True)
+        monkeypatch.setenv("ZELLIJ_SOCKET_DIR", str(alias))
+    saved = tmp_path / "cache/zellij/contract_version_1/session_info/old/session-layout.kdl"
+
+    def fake_run(argv, **kwargs):
+        if "list-sessions" in argv:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        assert "new-pane" in argv
+        mark_pane_started(
+            argv,
+            "23",
+            server_cache=None if evidence == "unknown-store" else str(tmp_path / "cache"),
+        )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert launcher_module.zellij.open_viewer("old", ["/bin/sh"]) == "terminal_23"
+    [previous] = list((tmp_path / "state").glob("workdash/pane-launches/*/launch/pane"))
+    if evidence in {"saved", "unreadable", "truncated-layout", "session-transition"}:
+        saved.parent.mkdir(parents=True)
+        if evidence == "unreadable":
+            saved.write_bytes(b"\xff")
+        elif evidence == "truncated-layout":
+            saved.write_text('layout {\n    tab name="first" {\n        pane\n    }\n')
+        elif evidence == "saved":
+            saved.write_text(
+                f'layout {{\n pane command="/bin/sh" {{\n args "-c" "script" "workdash-pane" "{previous}" "0" "/bin/sh"\n }}\n}}\n'
+            )
+        else:
+            saved.write_text("layout {\n pane\n}\n")
+            read_text = Path.read_text
+
+            def read_layout(path, **kwargs):
+                if path == saved:
+                    with monkeypatch.context() as bind, socket.socket(socket.AF_UNIX) as listener:
+                        bind.chdir(sockets)
+                        listener.bind("resurrecting")
+                return read_text(path, **kwargs)
+
+            monkeypatch.setattr(Path, "read_text", read_layout)
+    if evidence == "different-namespace":
+        monkeypatch.setenv("ZELLIJ_SOCKET_DIR", str(tmp_path / "other-sockets"))
+    if evidence == "socket-directory-alias":
+        monkeypatch.setenv("ZELLIJ_SOCKET_DIR", str(sockets.parent))
+    if evidence == "uncompleted":
+        (previous.parent.parent / "completed").unlink(missing_ok=True)
+    if evidence == "relative-tmpdir":
+        with monkeypatch.context() as startup:
+            startup.chdir(sockets.parent)
+            launcher_module.zellij.exec_zellij_wrapped_workdash([], lambda: False)
+        assert previous.is_symlink(), "the same relative TMPDIR points elsewhere from another cwd"
+    launcher_module.zellij.exec_zellij_wrapped_workdash([], lambda: False)
+    assert previous.is_symlink() is retained
+    if not retained:
+        assert not previous.parent.parent.exists()
+        # No delayed attempt can claim the old path after the proof is retired.
+        with pytest.raises(FileNotFoundError):
+            previous.symlink_to("75:1")
+
+
+def test_startup_preserves_receipt_before_delayed_layout_publication(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZELLIJ_SOCKET_DIR", str(tmp_path / "sockets"))
+    monkeypatch.setattr(launcher_module.sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
+    sockets = tmp_path / "sockets/contract_version_1"
+    sockets.mkdir(parents=True)
+    with monkeypatch.context() as bind, socket.socket(socket.AF_UNIX) as listener:
+        bind.chdir(sockets)
+        listener.bind("project")
+    saved = tmp_path / "cache/zellij/contract_version_1/session_info/project/session-layout.kdl"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("layout {\n pane\n}\n")
+
+    def fake_run(argv, **kwargs):
+        if "new-pane" in argv:
+            mark_pane_started(argv, "23", server_cache=str(tmp_path / "cache"))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        assert "list-sessions" in argv
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    launch = launcher_module._launch_zellij_pane
+    assert launch(["/bin/sh"], zellij_session="project") == "terminal_23"
+    [first] = (tmp_path / "state/workdash/pane-launches").glob("*/launch/pane")
+    (sockets / "project").unlink()
+    unlinked_at = sockets.stat().st_mtime_ns
+    monkeypatch.setattr(launcher_module.time, "time_ns", lambda: unlinked_at)
+    launcher_module.zellij.exec_zellij_wrapped_workdash([], lambda: False)
+    assert first.is_symlink(), "the socket was unlinked but Zellij can still publish a layout"
+
+    saved.write_text(f'layout {{\n pane command="/bin/sh" {{\n args "{first}"\n }}\n}}\n')
+    os.utime(sockets, (1, 1))
+    launcher_module.zellij.exec_zellij_wrapped_workdash([], lambda: False)
+    assert first.is_symlink(), "the now-restorable pane must still be able to restart"
+    saved.unlink()
+    assert launch(["/bin/sh"], zellij_session="other") == "terminal_23"
+    assert first.is_symlink(), "ordinary launches must not reclaim receipts"
+    launcher_module.zellij.exec_zellij_wrapped_workdash([], lambda: False)
+    assert not first.parent.parent.exists()
+
+
+def test_startup_uses_macos_server_home_for_receipt_reclamation(tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher_module.sys, "platform", "darwin")
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
+    monkeypatch.delenv("ZELLIJ_SOCKET_DIR", raising=False)
+    monkeypatch.delenv("TMPDIR", raising=False)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "linux-runtime"))
+    native_temp = tmp_path / "native-temp"
+    sockets = native_temp / f"zellij-{os.getuid()}" / "contract_version_1"
+    sockets.mkdir(parents=True)
+    os.utime(sockets, (1, 1))
+    native_lookup = MagicMock(return_value=os.fsencode(f"{native_temp}/\n"))
+    monkeypatch.setattr(subprocess, "check_output", native_lookup)
+    server_home = tmp_path / "server home"
+    server_cache = server_home / "Library/Caches/org.Zellij-Contributors.Zellij"
+    saved = server_cache / "contract_version_1/session_info/old/session-layout.kdl"
+    run = subprocess.run
+
+    def time_out(argv, *, timeout, **kwargs):
+        assert timeout > 0
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    def fake_run(argv, **kwargs):
+        if "list-sessions" in argv:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        assert "new-pane" in argv
+        return run(
+            argv[argv.index("--") + 1 :],
+            env={**os.environ, "HOME": str(server_home), "ZELLIJ_PANE_ID": "23"},
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert launcher_module.zellij.open_viewer("old", ["/bin/sh", "-c", "exit 0"]) == "terminal_23"
+    [receipt] = (tmp_path / "state/workdash/pane-launches").glob("*/launch/pane")
+    saved.parent.mkdir(parents=True)
+    saved.write_text(f'layout {{\n pane command="/bin/sh" {{\n args "{receipt}"\n }}\n}}\n')
+    launcher_module.zellij.exec_zellij_wrapped_workdash([], lambda: False)
+    assert receipt.is_symlink()
+    saved.unlink()
+    native_lookup.side_effect = time_out
+    launcher_module.zellij.exec_zellij_wrapped_workdash([], lambda: False)
+    assert receipt.is_symlink(), "startup could not determine the socket namespace"
+
+    native_lookup.side_effect = None
+    launcher_module.zellij.exec_zellij_wrapped_workdash([], lambda: False)
+    assert not receipt.parent.parent.exists()

@@ -905,7 +905,9 @@ def _coding_session(
     launch_agent = MagicMock(
         side_effect=lambda repo, *_args, **_kwargs: (
             panes.append({"id": 30, "title": "code_owner_repo_1", "pane_cwd": repo})
-            or SimpleNamespace(session=None, pane_id=None, pane_title="code_owner_repo_1", cwd=repo)
+            or SimpleNamespace(
+                session=None, pane_id="terminal_30", pane_title="code_owner_repo_1", cwd=repo
+            )
         )
     )
     monkeypatch.setattr(
@@ -1076,10 +1078,39 @@ def test_an_agent_that_exits_right_after_launch_fails_without_blocking_a_retry(
     assert launch_agent.call_count == 2
 
 
+@pytest.mark.parametrize(
+    ("winner_state", "code"),
+    [(None, "launch_unconfirmed"), ("held", "agent_exited"), ("wrong-title", "launch_unconfirmed")],
+)
+def test_code_does_not_accept_a_live_losing_retry(monkeypatch, tmp_path, winner_state, code):
+    panes = []
+    session, _, _, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
+
+    def launch(repo, *_args, **_kwargs):
+        title = "code_owner_repo_1"
+        panes.append({"id": 29, "title": title, "pane_cwd": repo})
+        if winner_state is not None:
+            panes.append(
+                {
+                    "id": 30,
+                    "title": title if winner_state == "held" else "other",
+                    "is_held": winner_state == "held",
+                }
+            )
+        return SimpleNamespace(session=None, pane_id="terminal_30", pane_title=title, cwd=repo)
+
+    launch_agent.side_effect = launch
+    with pytest.raises(control_module.WorkdashControlError) as error:
+        session.code(target="owner/repo#ISSUE-1", agent="pi")
+    assert error.value.code == code
+
+
 def test_code_waits_for_a_launched_agent_pane_that_zellij_lists_late(monkeypatch, tmp_path) -> None:
     session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
     launch_agent.side_effect = None
     late_pane = {"id": 8, "title": "code_owner_repo_1", "pane_cwd": str(worktree)}
+    launch_agent.return_value.pane_id = "terminal_8"
+    launch_agent.return_value.pane_title = "code_owner_repo_1"
     # Listings: before launch, first check after launch, second check after launch.
     monkeypatch.setattr(
         control_module.launcher.zellij,
@@ -2171,7 +2202,9 @@ def test_grouped_code_forwards_group_and_reports_live_tab(monkeypatch, tmp_path)
     session, _, _, launch = _coding_session(monkeypatch, tmp_path, panes)
     launch.side_effect = lambda repo, prompt, **kwargs: (
         panes.append({"id": 30, "title": "code_owner_repo_1", "pane_cwd": repo, "tab_name": "epic"})
-        or SimpleNamespace(session=None, pane_id=None, pane_title="code_owner_repo_1", cwd=repo)
+        or SimpleNamespace(
+            session=None, pane_id="terminal_30", pane_title="code_owner_repo_1", cwd=repo
+        )
     )
     result = session.code(target="owner/repo#ISSUE-1", group="epic")
     assert launch.call_args.kwargs["group"] == "epic"
@@ -3313,7 +3346,7 @@ def test_dispatch_uses_newly_actionable_pr_before_launch(monkeypatch, tmp_path):
     def start(repo, *_args, **_kwargs):
         title = f"code_{Path(repo).name}"
         panes.append({"id": 30, "title": title, "pane_cwd": repo})
-        return SimpleNamespace(session=None, pane_id=None, pane_title=title, cwd=repo)
+        return SimpleNamespace(session=None, pane_id="terminal_30", pane_title=title, cwd=repo)
 
     monkeypatch.setattr(session.backend.github_client, "find_ready_work", switch_checks)
     launch.side_effect = start
@@ -3563,7 +3596,7 @@ def test_dispatch_checks_out_pull_request_head_branch(monkeypatch, tmp_path):
     def start(repo, *_args, **_kwargs):
         title = f"code_{Path(repo).name}"
         panes.append({"id": 30, "title": title, "pane_cwd": repo})
-        return SimpleNamespace(session=None, pane_id=None, pane_title=title, cwd=repo)
+        return SimpleNamespace(session=None, pane_id="terminal_30", pane_title=title, cwd=repo)
 
     launch.side_effect = start
     git = MagicMock()
@@ -3866,7 +3899,7 @@ def test_dispatch_resumes_pushed_targeted_todo_branch(monkeypatch, tmp_path, cas
     launch.side_effect = lambda repo, *_args, **_kwargs: (
         panes.append({"id": 30, "title": "code_owner_other_todo_7", "pane_cwd": repo})
         or SimpleNamespace(
-            session=None, pane_id=None, pane_title="code_owner_other_todo_7", cwd=repo
+            session=None, pane_id="terminal_30", pane_title="code_owner_other_todo_7", cwd=repo
         )
     )
 

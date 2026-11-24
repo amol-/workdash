@@ -29,10 +29,13 @@ def pane_launch(argv: list[str]) -> tuple[list[str], list[str]]:
     return argv[: argv.index("--")], argv[argv.index(_PANE_MARKER_NAME) + 3 :]
 
 
-def mark_pane_started(argv: list[str], pane_id: str = "17") -> None:
+def mark_pane_started(
+    argv: list[str], pane_id: str = "17", *, server_cache: str | None = None
+) -> None:
     """Record that the pane of this launch started, as the pane itself would."""
 
     marker = pane_marker(argv)
     if marker is not None:
         attempt = argv[argv.index(_PANE_MARKER_NAME) + 2]
-        marker.symlink_to(f"{pane_id}:{attempt}")
+        cache = f"{server_cache}/zellij:" if server_cache is not None else ""
+        marker.symlink_to(f"{pane_id}:{cache}{attempt}")
