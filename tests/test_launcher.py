@@ -1759,16 +1759,18 @@ def test_launch_pane_gives_up_after_three_launches_without_a_marker(
 ) -> None:
     launches = _install_pane_launch(monkeypatch, starts_from=4)
 
-    launch = launcher_module.zellij.launch_pane(
-        "/tmp/owner_repo_52",
-        ["/bin/bash", "-ic", "agent"],
-        context="Failed to launch coding agent",
-        work_action="code",
-        zellij_session="workdash-main",
-    )
+    with pytest.raises(
+        RuntimeError, match="Failed to launch coding agent: the Zellij pane never ran"
+    ):
+        launcher_module.zellij.launch_pane(
+            "/tmp/owner_repo_52",
+            ["/bin/bash", "-ic", "agent"],
+            context="Failed to launch coding agent",
+            work_action="code",
+            zellij_session="workdash-main",
+        )
 
     assert len(launches) == 3
-    assert launch.pane_id is None
 
 
 def test_launch_pane_waits_for_a_slow_pane_marker(monkeypatch: pytest.MonkeyPatch) -> None:

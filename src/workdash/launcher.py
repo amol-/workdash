@@ -1102,6 +1102,8 @@ class Zellij:
                 _resolve_zellij_binary(), target_session, group, context=context
             ),
         )
+        if pane_id is None:
+            raise RuntimeError(f"{context}: the Zellij pane never ran")
         return ZellijPaneLaunch(
             session=target_session or None,
             pane_id=pane_id,
