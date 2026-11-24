@@ -454,11 +454,13 @@ def _zellij_release_url() -> str:
 
 
 def _write_executable(destination: Path, binary: bytes, *, atomic: bool) -> str:
-    if atomic and destination.parent.is_symlink():
-        raise RuntimeError(
-            f"Automatic setup refuses to install into the symlinked directory {destination.parent}. "
-            "If this symlink is intentional, run `workdash --configure`."
-        )
+    if atomic:
+        for directory in (destination.parent, destination.parent.parent):
+            if directory.is_symlink():
+                raise RuntimeError(
+                    f"Automatic setup refuses to install into the symlinked directory {directory}. "
+                    "If this symlink is intentional, run `workdash --configure`."
+                )
     destination.parent.mkdir(parents=True, exist_ok=True)
     execute_bits = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
     if not atomic:

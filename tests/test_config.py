@@ -1606,15 +1606,28 @@ def test_automatic_setup_replaces_private_dependency_symlink(
     assert target.stat().st_mode & 0o777 == 0o600
 
 
+@pytest.fixture(params=["config", "bin"])
+def symlinked_setup_directory(tmp_path, request):
+    config_dir = tmp_path / "workdash"
+    bin_dir = config_dir / "bin"
+    linked_dir = config_dir if request.param == "config" else bin_dir
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    linked_dir.parent.mkdir(exist_ok=True)
+    linked_dir.symlink_to(shared_dir, target_is_directory=True)
+    bin_dir.mkdir(exist_ok=True)
+    return config_dir / "config.json", linked_dir
+
+
 @pytest.mark.parametrize("binary,on_path", [("zellij", "gh"), ("gh", "zellij")])
-def test_automatic_setup_refuses_symlinked_bin_directory(tmp_path, monkeypatch, binary, on_path):
-    config_path = tmp_path / "config.json"
-    shared_bin = tmp_path / "shared-bin"
-    shared_bin.mkdir()
+def test_automatic_setup_refuses_symlinked_directory(
+    symlinked_setup_directory, monkeypatch, binary, on_path
+):
+    config_path, linked_dir = symlinked_setup_directory
+    original_target = linked_dir.readlink()
+    bin_dir = config_path.parent / "bin"
     for name in ("zellij", "gh"):
-        (shared_bin / name).write_text(f"existing {name}")
-    bin_dir = tmp_path / "bin"
-    bin_dir.symlink_to(shared_bin, target_is_directory=True)
+        (bin_dir / name).write_text(f"existing {name}")
 
     archive_bytes = BytesIO()
     with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
@@ -1635,21 +1648,30 @@ def test_automatic_setup_refuses_symlinked_bin_directory(tmp_path, monkeypatch, 
     with pytest.raises(RuntimeError, match="workdash --configure") as refusal:
         configure(config_path, which_fn=_on_path(on_path), github_client=client, create_only=True)
 
-    assert "symlink" in str(refusal.value)
-    assert str(bin_dir) in str(refusal.value)
-    assert bin_dir.readlink() == shared_bin
-    assert {file.name: file.read_text() for file in shared_bin.iterdir()} == {
+    assert f"symlinked directory {linked_dir}." in str(refusal.value)
+    assert linked_dir.readlink() == original_target
+    assert {file.name: file.read_text() for file in bin_dir.iterdir()} == {
         "zellij": "existing zellij",
         "gh": "existing gh",
     }
     assert not config_path.exists()
 
+    configure(
+        config_path,
+        input_fn=lambda prompt: "octocat" if prompt == "GitHub username: " else "",
+        which_fn=_on_path(on_path, "claude", "xdg-open"),
+        github_client=client,
+    )
 
-def test_automatic_setup_allows_symlinked_bin_when_dependencies_are_on_path(tmp_path):
-    config_path = tmp_path / "config.json"
-    shared_bin = tmp_path / "shared-bin"
-    shared_bin.mkdir()
-    (tmp_path / "bin").symlink_to(shared_bin, target_is_directory=True)
+    assert linked_dir.readlink() == original_target
+    assert (bin_dir / binary).read_bytes() == payload
+    assert json.loads(config_path.read_text())["github_username"] == "octocat"
+
+
+def test_automatic_setup_allows_symlinked_directory_when_dependencies_are_on_path(
+    symlinked_setup_directory,
+):
+    config_path, _ = symlinked_setup_directory
     client = MagicMock()
 
     configure(
@@ -1661,7 +1683,7 @@ def test_automatic_setup_allows_symlinked_bin_when_dependencies_are_on_path(tmp_
     )
 
     assert json.loads(config_path.read_text())["github_username"] == "octocat"
-    assert not list(shared_bin.iterdir())
+    assert not list((config_path.parent / "bin").iterdir())
     assert not client.mock_calls
 
 
