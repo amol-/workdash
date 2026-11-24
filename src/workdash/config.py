@@ -258,11 +258,15 @@ def save_config(
                 f"Configuration already exists at {path}. Your answers were not saved."
             ) from error
         except OSError as error:
-            if error.errno != errno.EOPNOTSUPP:
+            if error.errno == errno.EOPNOTSUPP:
+                reason = "the filesystem does not support hard links"
+            elif error.errno == errno.EPERM:
+                reason = "creating a hard link was denied"
+            else:
                 raise
             raise RuntimeError(
-                f"Automatic setup could not save {path} because the filesystem does not "
-                "support hard links. Run 'workdash --configure' to save the configuration."
+                f"Automatic setup could not save {path} because {reason}. "
+                "Run 'workdash --configure' to save the configuration."
             ) from error
     finally:
         if staged_path is not None:
@@ -748,12 +752,14 @@ def configure(
             print("GitHub username is required.")
             continue
         if len(response) > 39 or not re.fullmatch(
-            r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*(?:_[A-Za-z0-9]{3,8})?", response
+            r"[A-Za-z0-9][A-Za-z0-9-]*|[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*_[A-Za-z0-9]{3,8}",
+            response,
         ):
             print(
-                "Enter a GitHub username of 1–39 characters: ASCII letters and digits with "
-                "single hyphens between them, optionally followed by an underscore and a "
-                "3–8 character alphanumeric enterprise shortcode."
+                "Enter a GitHub username of 1–39 characters: start with an ASCII letter or digit "
+                "and use only ASCII letters, digits, or hyphens. Managed usernames use single "
+                "hyphens between letters and digits before the underscore and the 3–8 character "
+                "alphanumeric enterprise shortcode."
             )
             continue
         github_username = response
@@ -762,15 +768,9 @@ def configure(
     if not workdir:
         workdir = _prompt_with_default(input_fn, "Work directory", _DEFAULT_WORKDIR)
 
-    default_selector = f"{github_username}/*".lower()
-    try:
-        validate_repository_selectors([default_selector])
-    except ValueError:
-        default_selector = ""
-
     if not repositories:
-        if default_selector:
-            repositories = (default_selector,)
+        with suppress(ValueError):
+            repositories = tuple(validate_repository_selectors([f"{github_username}/*".lower()]))
         while not repositories:
             response = input_fn("Repository selector (owner/repo or owner/*): ")
             with suppress(ValueError):
@@ -782,8 +782,12 @@ def configure(
     todo_repository = config.todo_repository
     todo_default = f"{github_username}/todos"
     # A managed login can identify the user without being a usable default repository owner.
+    try:
+        validate_repository_selectors([todo_default.lower()])
+    except ValueError:
+        todo_default = ""
     while not is_repository_name(todo_repository):
-        if default_selector and is_repository_name(todo_default):
+        if is_repository_name(todo_default):
             todo_repository = _prompt_with_default(input_fn, "Todo repository", todo_default)
         else:
             todo_repository = input_fn("Todo repository (owner/repo required): ").strip()

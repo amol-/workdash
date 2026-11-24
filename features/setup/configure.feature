@@ -16,7 +16,7 @@ Feature: First-time configuration
     - Automatic setup runs only when the configuration file is confirmed missing. If required settings are missing when starting a new dashboard, the system tells the user to run the wizard.
     - A configuration symlink with a missing target does not start automatic setup. Explicit `--configure` can create the target without replacing the symlink.
     - Automatic setup leaves a configuration saved by another run untouched and reports that it did not save the user's answers. Explicit `--configure` can still update an existing configuration.
-    - If automatic setup cannot finish saving the configuration, it reports the failure without leaving an incomplete configuration. If the filesystem does not support safe publication by automatic setup, the user is directed to run `workdash --configure`; otherwise they can retry by starting the system again.
+    - If automatic setup cannot finish saving the configuration, it reports the failure without leaving an incomplete configuration. If safe publication is denied or unsupported, the user is directed to run `workdash --configure`. When publication is denied, the wizard does not guess why. For other failures, the user can retry by starting the system again.
     - If the configuration was saved but a temporary file could not be removed, the system warns about that file and still reports success.
     - Ctrl+C cancels the wizard with a short message and exit status 130, whether it started automatically or with `--configure`.
     - Required configuration fields are the GitHub username, open command, at least one repository selector, the work directory, the todo repository, and at least one agent.
@@ -27,7 +27,7 @@ Feature: First-time configuration
     - The wizard suggests only an available platform opener: `xdg-open` on Linux or `open` on macOS, explicitly explaining that Enter accepts it. Without a suggestion, empty input is rejected.
     - For a missing or invalid viewer terminal choice, the wizard asks "Does the viewer require its own terminal window? [y/N]", defaulting to No and preserving explicit boolean choices.
     - The wizard explains that advanced viewer commands can be edited in config.json.
-    - When the todo repository is empty or not in "owner/repo" form, the wizard prompts for it. It offers "<username>/todos" only when the username can form a default repository selector and the todo default is valid. Otherwise it requires an explicit "owner/repo". It explains the required format and asks again if the answer is invalid; the repository does not have to exist yet.
+    - When the todo repository is empty or not in "owner/repo" form, the wizard prompts for it. It offers "<username>/todos" only if that is a valid repository selector and names a specific repository. Otherwise it requires an explicit "owner/repo". It explains the required format and asks again if the answer is invalid; the repository does not have to exist yet.
     - Present agent command fields must be valid command lines; each valid command enables that agent action.
     - The wizard preserves previously filled valid fields while repairing missing or invalid viewer settings.
     - An agent has a unique name and an analyze command, a launch command, or both. An agent with an analyze command is an analysis agent; an agent with a launch command is a coding agent.
@@ -56,7 +56,7 @@ Feature: First-time configuration
     - Explicit `--configure` updates an installed binary in place. Upgrading a symlinked executable preserves the link, and upgrading an executable preserves its existing permissions while ensuring it is executable.
     - When a missing field has a default value, submitting an empty response accepts the default.
     - When a missing field has no default value, the wizard keeps prompting until the user provides a value.
-    - A newly entered GitHub username may contain ASCII letters or digits with single hyphens between them, followed by an optional underscore and a 3–8 character alphanumeric enterprise shortcode. The whole username may be at most 39 characters. The wizard keeps the username's case and asks again if the answer is invalid.
+    - A newly entered GitHub username starts with an ASCII letter or digit and may contain more ASCII letters, digits, or hyphens, including consecutive or trailing hyphens in legacy logins. A managed username may use single hyphens between letters and digits before the underscore and its 3–8 character alphanumeric enterprise shortcode. The whole username may be at most 39 characters. The wizard keeps the username's case and asks again if the answer is invalid.
     - When the repositories list is empty, the wizard defaults it to "<username>/*" with the owner in lowercase if that is a valid repository selector. Otherwise it asks for one valid "owner/repo" or "owner/*" selector and asks again if the answer is empty or invalid. Existing selectors are preserved.
     - If `listens` is not a list, the wizard reports how to correct it and leaves the configuration file unchanged.
     - The wizard writes the resulting configuration to the configuration file and reports where it was saved.
@@ -292,6 +292,20 @@ Feature: First-time configuration
       | invocation                                  | username      | selector          |
       | the user starts the system                  | mona-cat_octo | octo-org/*        |
       | the user runs the system with "--configure" | Mona-Cat_Octo | octo-org/projects |
+
+  @id:F-SETUP-CONFIGURE-S034
+  Scenario Outline: Setup accepts a legacy GitHub username and offers repository defaults
+    Given the user has no configuration file
+    And the user enters "<username>" as their GitHub username
+    When <invocation>
+    Then the saved configuration keeps "<username>" as the GitHub username
+    And the wizard saves and reports "<selector>" as the default repository selector
+    And the saved configuration uses "<username>/todos" as the todo repository
+
+    Examples:
+      | invocation                                  | username  | selector    |
+      | the user starts the system                  | Amol-     | amol-/*     |
+      | the user runs the system with "--configure" | john--doe | john--doe/* |
 
   @id:F-SETUP-CONFIGURE-S026
   Scenario: An existing configuration file is never reconfigured automatically

@@ -202,20 +202,28 @@ def test_create_only_save_preserves_config_created_at_publication(tmp_path, monk
     assert list(tmp_path.iterdir()) == [config_path]
 
 
-def test_create_only_save_on_filesystem_without_hardlinks_directs_to_explicit_setup(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    ("link_errno", "diagnostic"),
+    [
+        (errno.EOPNOTSUPP, "the filesystem does not support hard links"),
+        (errno.EPERM, "creating a hard link was denied"),
+    ],
+)
+def test_create_only_save_when_hardlink_is_unavailable_directs_to_explicit_setup(
+    tmp_path, monkeypatch, link_errno, diagnostic
 ):
     config_path = tmp_path / "config.json"
     config = WorkdashConfig(github_username="octocat")
 
-    def unsupported_link(source, destination):
-        raise OSError(errno.EOPNOTSUPP, "Operation not supported")
+    def failed_link(source, destination):
+        raise OSError(link_errno, os.strerror(link_errno))
 
-    monkeypatch.setattr(os, "link", unsupported_link)
+    monkeypatch.setattr(os, "link", failed_link)
     with pytest.raises(RuntimeError, match="workdash --configure") as error:
         save_config(config, config_path, create_only=True)
 
     assert str(config_path) in str(error.value)
+    assert diagnostic in str(error.value)
     assert list(tmp_path.iterdir()) == []
     save_config(config, config_path)
     assert load_config(config_path) == config
@@ -951,7 +959,17 @@ def test_configure_asks_about_agents_when_the_only_entry_has_no_commands(tmp_pat
 
 @pytest.mark.parametrize(
     "invalid_username",
-    ["", "Kat", "octo--cat", "a" * 40, "octocat_ab", "octocat_abcdefghi", "a" * 35 + "_octo"],
+    [
+        "",
+        "Kat",
+        "-octocat",
+        "octocat/repo",
+        "a" * 40,
+        "octocat_ab",
+        "octocat_abcdefghi",
+        "octo--cat_octo",
+        "a" * 35 + "_octo",
+    ],
 )
 def test_configure_reprompts_for_invalid_github_username(tmp_path, invalid_username):
     config_path = tmp_path / "config.json"
