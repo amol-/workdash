@@ -14,6 +14,7 @@ Feature: Persistent dashboard Zellij session
     - Inside Zellij, the dashboard starts in the current pane and uses the current session regardless of `--session`; when that session already has a dashboard, workdash reports that the new options are ignored and starts nothing.
     - Server-backed client commands never wrap.
     - Startup preflight runs before starting a new dashboard; attaching to a running dashboard does not require it. Missing Zellij reports configuration guidance unless configuration cannot be inspected, in which case Workdash reports the configuration inspection error.
+    - First-time setup can start automatically when the user runs `workdash`. If a dashboard opened by Workdash in a Zellij session cannot find its configuration file, the dashboard pane reports the missing file without prompting for setup or creating a configuration.
     - Outside Zellij, an unreadable configuration file or one with invalid JSON does not prevent attaching to a running dashboard. With a usable Zellij client, Workdash can attach to a running dashboard at the selected address even if the configuration directory is inaccessible.
     - When starting a new dashboard, Workdash reports a failure to inspect the configuration path in one line. If inspection succeeds, GitHub CLI authentication is checked before the configuration file is read. If authentication succeeds, a configuration read or JSON error stops startup with a one-line error naming the file and the problem.
 

@@ -751,6 +751,27 @@ def test_main_runs_configuration_when_the_config_file_is_missing(
     assert "zellij is not installed" not in captured.err
 
 
+def test_persistent_pane_reports_missing_config_without_running_setup(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    config_path = tmp_path / "session-home" / ".config" / "workdash" / "config.json"
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        lambda **kwargs: save_config(_VALID_CONFIG, config_path),
+    )
+
+    exit_code = workdash_module.main(["--persistent-pane"])
+
+    assert not config_path.exists(), "the dashboard pane must not create configuration"
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err == f"Error: Configuration file not found at {config_path}.\n"
+    assert not captured.out
+
+
 @pytest.mark.parametrize("path_is_set", [True, False], ids=["set-path", "unset-path"])
 def test_first_run_replaces_private_gh_without_a_system_install(
     monkeypatch: pytest.MonkeyPatch,

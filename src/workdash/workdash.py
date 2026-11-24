@@ -92,11 +92,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             CONFIG_PATH.lstat()
         except FileNotFoundError:
+            if options.persistent_pane:
+                print(
+                    f"Error: Configuration file not found at {CONFIG_PATH}.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return 1
             original_path = os.environ.get("PATH")
             try:
                 if _should_wrap_interactive_start(options):
                     launcher.zellij.exec_zellij_wrapped_workdash(argv, attach_only=True)
-                elif os.getenv("ZELLIJ") and not options.persistent_pane:
+                elif os.getenv("ZELLIJ"):
                     session = os.getenv("ZELLIJ_SESSION_NAME")
                     if (
                         session
