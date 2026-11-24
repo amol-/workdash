@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -291,7 +292,7 @@ def _start_interactive_dashboard(
         raise SystemExit(0)
 
     _install_direct_start_fakes(scenario_state, monkeypatch)
-    if not config_path.exists():
+    if not scenario_state.get("config_access_denied") and not config_path.exists():
         save_config(workdash_module.load_config(), config_path)
     monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
     monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
@@ -347,6 +348,37 @@ def _start_interactive_dashboard(
 @given("the configuration file contains invalid JSON")
 def _invalid_config_json(config_path: Path) -> None:
     config_path.write_text("{invalid json", encoding="utf-8")
+
+
+@given("access to the configuration directory is denied")
+def _deny_config_access(scenario_state, config_path, monkeypatch):
+    config_path.write_text("{}", encoding="utf-8")
+    scenario_state["config_access_denied"] = True
+    sessions_dir = config_path.parent / "sessions"
+    for module, name in ((os, "stat"), (os, "lstat"), (io, "open")):
+        original = getattr(module, name)
+
+        def denied(path, *args, original=original, **kwargs):
+            if isinstance(path, (str, Path)) and (
+                Path(path) == config_path or Path(path).is_relative_to(sessions_dir)
+            ):
+                raise PermissionError("Permission denied")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(module, name, denied)
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        lambda **kwargs: pytest.fail("denied configuration access must not start the wizard"),
+    )
+
+
+@then("the system reports denied configuration access in one line")
+def _reports_config_access_error(scenario_state, config_path):
+    (line,) = scenario_state["output"].splitlines()
+    assert line.startswith("Error:")
+    assert str(config_path) in line
+    assert "Permission denied" in line
 
 
 @then("the system reports invalid configuration JSON in one line")

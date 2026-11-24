@@ -45,6 +45,10 @@ ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
 _GROUP_TAB_LOCK = threading.Lock()
 
 
+class ZellijBinaryUnavailableError(RuntimeError):
+    """No executable Zellij client was found on PATH or in Workdash's bin directory."""
+
+
 @dataclass(frozen=True)
 class ZellijPaneLaunch:
     session: str | None
@@ -288,7 +292,7 @@ def _resolve_zellij_binary() -> str:
     inject_workdash_local_bin_into_path()
     zellij = shutil.which("zellij")
     if zellij is None:
-        raise RuntimeError(
+        raise ZellijBinaryUnavailableError(
             "zellij is not installed or not configured. Run 'workdash --configure' to set it up."
         )
     return zellij

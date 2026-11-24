@@ -97,5 +97,5 @@ def test_configure_entrypoint_uses_application_github_client(monkeypatch):
     monkeypatch.setattr(app, "GitHubClient", lambda: client)
     monkeypatch.setattr(app, "configure", configure)
     assert app.main(["--configure"]) == 0
-    configure.assert_called_once_with(github_client=client)
+    configure.assert_called_once_with(github_client=client, create_only=False)
     client.check_authentication.assert_not_called()

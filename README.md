@@ -179,7 +179,9 @@ Outside Zellij, the dashboard creates or attaches to the persistent `workdash`
 session. Use `--session NAME` to select another session. A new session has a
 dashboard above a shell, with Zellij's tab and status bars. If the dashboard is
 already running, new options are ignored; otherwise it starts with the supplied
-options in the `dashboard` tab. Pressing `q` exits the dashboard but keeps the
+options in the `dashboard` tab. With a usable Zellij client, you can attach to a
+running dashboard at the selected address even if local configuration is
+unreadable. Pressing `q` exits the dashboard but keeps the
 session and its panes; Ctrl+Q quits the entire session. Inside Zellij, Workdash
 runs in the current pane and uses the current session regardless of `--session`.
 

@@ -40,6 +40,44 @@ def _no_config(scenario_state: dict[str, Any], config_path: Path) -> None:
     )
 
 
+@given(parsers.parse('the user enters "{username}" as their GitHub username'))
+def _enter_github_username(scenario_state: dict[str, Any], username: str) -> None:
+    scenario_state["input_responses"][2] = username
+
+
+@given('the user answers the GitHub username prompt with "@octocat" and then "octocat"')
+def _invalid_github_username_answer(scenario_state: dict[str, Any]) -> None:
+    scenario_state["input_responses"][2:3] = ["@octocat", "octocat"]
+
+
+@then("the wizard explains that the username must be usable in a repository selector")
+def _rejects_github_username(scenario_state: dict[str, Any]) -> None:
+    output = scenario_state["output"]
+    assert "Enter a GitHub username that can be used in a repository selector" in output
+
+
+@then(parsers.parse('the saved configuration keeps "{username}" as the GitHub username'))
+def _saved_github_username(scenario_state: dict[str, Any], username: str) -> None:
+    assert scenario_state["exit_code"] == 0
+    assert scenario_state["written_config"].github_username == username
+
+
+@then(parsers.parse('the wizard saves and reports "{selector}" as the default repository selector'))
+def _saved_default_selector(scenario_state: dict[str, Any], selector: str) -> None:
+    assert scenario_state["written_config"].repositories == (selector,)
+    assert f"Repositories set to: {selector}" in scenario_state["output"]
+
+
+@given("another run saves a configuration while the user answers the wizard")
+def _another_run_saves_config(scenario_state: dict[str, Any]) -> None:
+    scenario_state["other_configuration"] = b'{"github_username": "other-user"}\n'
+
+
+@given('the user answers the todo repository prompt with "todos" and then "octocat/tasks"')
+def _invalid_todo_repository_answer(scenario_state: dict[str, Any]) -> None:
+    scenario_state["input_responses"][-1:] = ["todos", "octocat/tasks"]
+
+
 @given("a supported agent's command-line tool is on PATH")
 def _agent_on_path(scenario_state: dict[str, Any]) -> None:
     scenario_state.setdefault("on_path_tools", set()).add("claude")
@@ -248,6 +286,8 @@ def _install_wizard_fakes(
             ("Analysis format", "Does the analysis viewer")
         ):
             return next(analysis_answers)
+        if prompt.startswith("Todo repository") and "other_configuration" in scenario_state:
+            config_path.write_bytes(scenario_state["other_configuration"])
         if prompt.startswith(("Agents for", "Agent name")):
             try:
                 return next(agent_answers)
@@ -271,9 +311,9 @@ def _install_wizard_fakes(
     monkeypatch.setattr(
         workdash_module,
         "configure",
-        lambda github_client: config_module.configure(
+        lambda **kwargs: config_module.configure(
             config_path,
-            github_client=github_client,
+            **kwargs,
             input_fn=input_fn,
             which_fn=which_fn,
             install_zellij_fn=install_zellij_fn,
@@ -766,6 +806,30 @@ def _reports_cancelled_setup(scenario_state: dict[str, Any], config_path: Path) 
     assert scenario_state["stderr"].strip() == "Configuration cancelled."
     assert scenario_state["prompts"]
     assert not config_path.exists()
+
+
+@then("the other run's configuration is unchanged")
+def _other_configuration_unchanged(scenario_state: dict[str, Any], config_path: Path) -> None:
+    assert config_path.read_bytes() == scenario_state["other_configuration"]
+
+
+@then("the system reports that setup did not save the user's answers")
+def _reports_setup_collision(scenario_state: dict[str, Any], config_path: Path) -> None:
+    assert f"Configuration already exists at {config_path}" in scenario_state["stderr"]
+    assert "Your answers were not saved" in scenario_state["stderr"]
+    assert "Configuration saved" not in scenario_state["output"]
+
+
+@then('the wizard says the todo repository must be in "owner/repo" form and asks again')
+def _reprompts_for_todo_repository(scenario_state: dict[str, Any]) -> None:
+    assert "Enter a todo repository in owner/repo form." in scenario_state["output"]
+    assert scenario_state["prompts"].count("Todo repository [octocat/todos]: ") == 2
+
+
+@then('the saved configuration uses "octocat/tasks" as the todo repository')
+def _saved_todo_repository(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0
+    assert scenario_state["written_config"].require_valid().todo_repository == "octocat/tasks"
 
 
 @then("the system does not tell the user that setup completed or to run it again")

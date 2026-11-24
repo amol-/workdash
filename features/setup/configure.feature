@@ -13,7 +13,11 @@ Feature: First-time configuration
   Rules:
     - The configuration lives at ~/.config/workdash/config.json.
     - When the configuration file is missing, starting the system runs the wizard before starting or attaching to Zellij. If setup succeeds, the system tells the user to run it again instead of starting the dashboard.
-    - An existing configuration file is never reconfigured automatically. If required settings are missing when starting a new dashboard, the system tells the user to run the wizard.
+    - Automatic setup runs only when the configuration file is confirmed missing. If required settings are missing when starting a new dashboard, the system tells the user to run the wizard.
+    - A configuration symlink with a missing target does not start automatic setup. Explicit `--configure` can create the target without replacing the symlink.
+    - Automatic setup leaves a configuration saved by another run untouched and reports that it did not save the user's answers. Explicit `--configure` can still update an existing configuration.
+    - If automatic setup cannot finish saving the configuration, it reports the failure without leaving an incomplete configuration. If the filesystem does not support safe publication by automatic setup, the user is directed to run `workdash --configure`; otherwise they can retry by starting the system again.
+    - If the configuration was saved but a temporary file could not be removed, the system warns about that file and still reports success.
     - Ctrl+C cancels the wizard with a short message and exit status 130, whether it started automatically or with `--configure`.
     - Required configuration fields are the GitHub username, open command, at least one repository selector, the work directory, the todo repository, and at least one agent.
     - Every required field must be present for the system to start; the wizard backfills missing required fields, using a default when one exists.
@@ -23,7 +27,7 @@ Feature: First-time configuration
     - The wizard suggests only an available platform opener: `xdg-open` on Linux or `open` on macOS, explicitly explaining that Enter accepts it. Without a suggestion, empty input is rejected.
     - For a missing or invalid viewer terminal choice, the wizard asks "Does the viewer require its own terminal window? [y/N]", defaulting to No and preserving explicit boolean choices.
     - The wizard explains that advanced viewer commands can be edited in config.json.
-    - When the todo repository is empty or not in "owner/repo" form, the wizard prompts for it with the default "<username>/todos"; the repository does not have to exist yet.
+    - When the todo repository is empty or not in "owner/repo" form, the wizard prompts for it with the default "<username>/todos". It explains the required format and asks again if the answer is invalid; the repository does not have to exist yet.
     - Present agent command fields must be valid command lines; each valid command enables that agent action.
     - The wizard preserves previously filled valid fields while repairing missing or invalid viewer settings.
     - An agent has a unique name and an analyze command, a launch command, or both. An agent with an analyze command is an analysis agent; an agent with a launch command is a coding agent.
@@ -48,9 +52,11 @@ Feature: First-time configuration
     - When GitHub CLI is not detected on PATH, the wizard tells the user it will install a local GitHub CLI binary from the latest release URL and that a global GitHub CLI install can be used instead when it is on PATH.
     - When GitHub CLI is not detected on PATH, the wizard downloads the latest release binary for the current operating system and architecture under the workdash configuration directory and tells the user where it was installed.
     - Re-running the wizard always checks PATH for GitHub CLI first; if no PATH binary is available, it downloads a fresh local binary even when a previous local binary exists.
+    - During automatic setup, a failed installation of a local Zellij or GitHub CLI binary leaves any previously installed copy usable, including one installed by another setup run.
+    - Explicit `--configure` updates an installed binary in place. Upgrading a symlinked executable preserves the link, and upgrading an executable preserves its existing permissions while ensuring it is executable.
     - When a missing field has a default value, submitting an empty response accepts the default.
     - When a missing field has no default value, the wizard keeps prompting until the user provides a value.
-    - When the repositories list is empty and a GitHub username is known, the wizard defaults the repositories to "<username>/*" and tells the user what was set.
+    - When the repositories list is empty and a GitHub username is known, the wizard defaults the repositories to "<username>/*" with the owner in lowercase and tells the user what was set. To form this selector from a newly entered username, the wizard requires a username of 1–39 characters made up of ASCII letters or digits with optional single hyphens between them. It explains the problem and asks again if the answer is invalid.
     - If `listens` is not a list, the wizard reports how to correct it and leaves the configuration file unchanged.
     - The wizard writes the resulting configuration to the configuration file and reports where it was saved.
 
@@ -251,12 +257,48 @@ Feature: First-time configuration
     And the system tells the user to run the system again
     And the system stops without starting the dashboard
 
+  @id:F-SETUP-CONFIGURE-S031
+  Scenario: Automatic setup accepts a mixed-case GitHub username
+    Given the user has no configuration file
+    And the user enters "Octocat" as their GitHub username
+    When the user starts the system
+    Then the saved configuration keeps "Octocat" as the GitHub username
+    And the wizard saves and reports "octocat/*" as the default repository selector
+
+  @id:F-SETUP-CONFIGURE-S032
+  Scenario: Automatic setup rejects a username that cannot form a default repository selector
+    Given the user has no configuration file
+    And the user answers the GitHub username prompt with "@octocat" and then "octocat"
+    When the user starts the system
+    Then the wizard explains that the username must be usable in a repository selector
+    And the system prompts again for the GitHub username
+    And the saved configuration keeps "octocat" as the GitHub username
+    And the wizard saves and reports "octocat/*" as the default repository selector
+
   @id:F-SETUP-CONFIGURE-S026
   Scenario: An existing configuration file is never reconfigured automatically
     Given the user has a configuration file missing a required field
     When the user starts the system
     Then the system tells the user to run the configuration wizard
     And the system does not run the configuration wizard
+
+  @id:F-SETUP-CONFIGURE-S029
+  Scenario: Another run saves the configuration during automatic setup
+    Given the user has no configuration file
+    And another run saves a configuration while the user answers the wizard
+    When the user starts the system
+    Then the other run's configuration is unchanged
+    And the system reports that setup did not save the user's answers
+    And the system exits with a non-zero status
+    And the system does not tell the user that setup completed or to run it again
+
+  @id:F-SETUP-CONFIGURE-S030
+  Scenario: An invalid todo repository is rejected before saving
+    Given the user has no configuration file
+    And the user answers the todo repository prompt with "todos" and then "octocat/tasks"
+    When the user runs the system with "--configure"
+    Then the wizard says the todo repository must be in "owner/repo" form and asks again
+    And the saved configuration uses "octocat/tasks" as the todo repository
 
   @id:F-SETUP-CONFIGURE-S027
   Scenario: Cancel automatic setup

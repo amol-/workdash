@@ -1,10 +1,14 @@
+import errno
+import io
 import json
+import os
 import platform
 import shlex
 import shutil
 import tarfile
 import zipfile
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -144,6 +148,95 @@ def test_save_config_creates_parent_dirs_and_writes_json(tmp_path):
         "todo_repository": "octocat/todos",
         "listens": [],
     }
+
+
+def _fail_writes_after_first_byte(monkeypatch):
+    open_file = io.open
+
+    def open_with_failed_write(path, mode="r", *args, **kwargs):
+        file = open_file(path, mode, *args, **kwargs)
+        if "w" in mode or "x" in mode:
+            write = file.write
+
+            def fail_write(contents):
+                write(contents[:1])
+                file.flush()
+                raise OSError("simulated write failure")
+
+            file.write = fail_write
+        return file
+
+    monkeypatch.setattr(io, "open", open_with_failed_write)
+
+
+def test_failed_create_only_save_leaves_no_partial_config_and_can_be_retried(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    config = WorkdashConfig(github_username="octocat")
+    with monkeypatch.context() as patch:
+        _fail_writes_after_first_byte(patch)
+        with pytest.raises(OSError, match="simulated write failure"):
+            save_config(config, config_path, create_only=True)
+
+    assert list(tmp_path.iterdir()) == []
+    save_config(config, config_path, create_only=True)
+    assert load_config(config_path) == config
+    assert list(tmp_path.iterdir()) == [config_path]
+
+
+def test_create_only_save_preserves_config_created_at_publication(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    config = WorkdashConfig(github_username="octocat")
+    competing_bytes = b'{ "github_username": "other-user" }\n'
+    link = os.link
+
+    def publish_after_competing_save(source, destination):
+        with config_path.open("xb") as competing_config:
+            competing_config.write(competing_bytes)
+        link(source, destination)
+
+    monkeypatch.setattr(os, "link", publish_after_competing_save)
+    with pytest.raises(RuntimeError, match="Your answers were not saved"):
+        save_config(config, config_path, create_only=True)
+
+    assert config_path.read_bytes() == competing_bytes
+    assert list(tmp_path.iterdir()) == [config_path]
+
+
+def test_create_only_save_on_filesystem_without_hardlinks_directs_to_explicit_setup(
+    tmp_path, monkeypatch
+):
+    config_path = tmp_path / "config.json"
+    config = WorkdashConfig(github_username="octocat")
+
+    def unsupported_link(source, destination):
+        raise OSError(errno.EOPNOTSUPP, "Operation not supported")
+
+    monkeypatch.setattr(os, "link", unsupported_link)
+    with pytest.raises(RuntimeError, match="workdash --configure") as error:
+        save_config(config, config_path, create_only=True)
+
+    assert str(config_path) in str(error.value)
+    assert list(tmp_path.iterdir()) == []
+    save_config(config, config_path)
+    assert load_config(config_path) == config
+
+
+def test_create_only_save_warns_but_succeeds_if_staged_cleanup_fails(tmp_path, monkeypatch, capsys):
+    config_path = tmp_path / "config.json"
+    config = WorkdashConfig(github_username="octocat")
+
+    def denied_unlink(path, *, missing_ok=False):
+        raise PermissionError(errno.EACCES, "Permission denied", path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", denied_unlink)
+        save_config(config, config_path, create_only=True)
+
+    assert load_config(config_path) == config
+    (staged_path,) = set(tmp_path.iterdir()) - {config_path}
+    warning = capsys.readouterr().err
+    assert "Warning:" in warning
+    assert str(staged_path) in warning
 
 
 def test_validate_config_returns_empty_for_complete_config():
@@ -856,10 +949,11 @@ def test_configure_asks_about_agents_when_the_only_entry_has_no_commands(tmp_pat
     assert config.agents == {"claude": AgentConfig(analyze="claude -p", launch="claude")}
 
 
-def test_configure_reprompts_for_required_fields_without_defaults(tmp_path):
+@pytest.mark.parametrize("invalid_username", ["", "Kat", "octo--cat", "a" * 40])
+def test_configure_reprompts_for_invalid_github_username(tmp_path, invalid_username):
     config_path = tmp_path / "config.json"
     # Viewer defaults, both agent sections ended, username retry, workdir and todo defaults.
-    input_fn, prompts = _scripted_input("", "", "", "", "", "octocat", "", "")
+    input_fn, prompts = _scripted_input("", "", "", "", invalid_username, "Octo-Cat", "", "")
 
     config = configure(
         config_path,
@@ -867,17 +961,21 @@ def test_configure_reprompts_for_required_fields_without_defaults(tmp_path):
         which_fn=_on_path("zellij", "gh", "claude", "xdg-open"),
     )
 
-    assert config.github_username == "octocat"
+    assert config.github_username == "Octo-Cat"
+    assert config.repositories == ("octo-cat/*",)
     assert config.workdir == "~/wrk"
     assert sum("GitHub username" in prompt for prompt in prompts) == 2
 
 
-def test_configure_fills_only_missing_fields(tmp_path):
+@pytest.mark.parametrize(
+    ("stored_username", "selector"), [("Existing-User", "existing-user/*"), (123, "123/*")]
+)
+def test_configure_fills_only_missing_fields(tmp_path, stored_username, selector):
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
             {
-                "github_username": "existing-user",
+                "github_username": stored_username,
                 "open": "existing-open",
                 "analysis_viewer": {
                     "command": "workdash view",
@@ -909,14 +1007,14 @@ def test_configure_fills_only_missing_fields(tmp_path):
             f"/opt/homebrew/bin/{cmd}" if cmd in ("zellij", "gh", "existing-open") else None
         ),
     )
-    assert config.github_username == "existing-user"
+    assert config.github_username == stored_username
     assert list(config.agents.items()) == [
         ("claude", AgentConfig("existing-claude-analyze", "existing-claude-launch")),
         ("codex", AgentConfig("existing-codex-analyze", "existing-codex-launch")),
         ("pi", AgentConfig("existing-pi-analyze", "existing-pi-launch")),
     ]
     assert config.workdir == "~/src"
-    assert config.repositories == ("existing-user/*",)
+    assert config.repositories == (selector,)
 
 
 @pytest.mark.parametrize(
@@ -1115,6 +1213,24 @@ def test_configure_reprompts_for_a_malformed_todo_repository(tmp_path):
     ]
     assert config.todo_repository == "octocat/todos"
     assert config.require_valid() is config
+
+
+def test_configure_creates_missing_symlink_target_without_replacing_link(tmp_path):
+    config_path = tmp_path / "config.json"
+    dotfiles = tmp_path / "dotfiles"
+    dotfiles.mkdir()
+    target = dotfiles / "workdash.json"
+    config_path.symlink_to(target)
+
+    config = configure(
+        config_path,
+        input_fn=lambda prompt: "octocat" if prompt == "GitHub username: " else "",
+        which_fn=_on_path("zellij", "gh", "claude", "xdg-open", "open"),
+    )
+
+    assert config_path.readlink() == target
+    assert load_config(target).require_valid() == config
+    assert config.github_username == "octocat"
 
 
 def test_configure_preserves_existing_repositories(tmp_path):
@@ -1375,8 +1491,13 @@ def test_installers_use_falsy_github_client(tmp_path, monkeypatch: pytest.Monkey
     assert client.download_release.call_args.args[0] == "https://example.test/gh.zip"
 
 
-def test_install_zellij_binary_downloads_latest_platform_archive(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("create_only", "symlinked"),
+    [(False, False), (False, True), (True, False)],
+    ids=["explicit-file", "explicit-symlink", "automatic-file"],
+)
+def test_configure_upgrades_zellij_from_latest_platform_archive(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, create_only: bool, symlinked: bool
 ):
     archive_bytes = BytesIO()
     with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
@@ -1384,35 +1505,73 @@ def test_install_zellij_binary_downloads_latest_platform_archive(
         info = tarfile.TarInfo("zellij")
         info.size = len(payload)
         archive.addfile(info, BytesIO(payload))
-    urls: list[str] = []
-
-    class FakeResponse:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, _exc_type, _exc, _traceback):
-            return None
-
-        def read(self) -> bytes:
-            return archive_bytes.getvalue()
-
-    def fake_urlopen(url: str):
-        urls.append(url)
-        return FakeResponse()
-
+    client = MagicMock()
+    client.download_release.return_value = archive_bytes.getvalue()
     monkeypatch.setattr("workdash.config.platform.machine", lambda: "arm64")
     monkeypatch.setattr("workdash.config.platform.system", lambda: "Darwin")
     destination = tmp_path / "config" / "workdash" / "bin" / "zellij"
+    destination.parent.mkdir(parents=True)
+    target = destination
+    if symlinked:
+        target = tmp_path / "shared-zellij"
+        destination.symlink_to(target)
+    previous_bytes = b"previous-zellij"
+    target.write_bytes(previous_bytes)
+    target.chmod(0o640)
 
-    installed = install_zellij_binary(destination, urlopen_fn=fake_urlopen)
+    with destination.open("rb") as previous_install:
+        configure(
+            destination.parent.parent / "config.json",
+            input_fn=lambda prompt: "octocat" if prompt == "GitHub username: " else "",
+            which_fn=_on_path("gh", "claude", "xdg-open", "open"),
+            github_client=client,
+            create_only=create_only,
+        )
 
-    assert installed == str(destination)
-    assert destination.read_bytes() == b"fake-zellij"
-    assert destination.stat().st_mode & 0o111
-    assert urls == [
+        assert previous_install.read() == (previous_bytes if create_only else payload)
+    assert destination.is_symlink() == symlinked
+    assert destination.read_bytes() == payload
+    assert destination.stat().st_mode & 0o777 == 0o751
+    assert client.download_release.call_args.args[0] == (
         "https://github.com/zellij-org/zellij/releases/latest/download/"
         "zellij-aarch64-apple-darwin.tar.gz"
-    ]
+    )
+
+
+@pytest.mark.parametrize("binary,on_path", [("zellij", "gh"), ("gh", "zellij")])
+def test_failed_automatic_installer_write_leaves_previous_install_usable(
+    tmp_path, monkeypatch, binary, on_path
+):
+    destination = tmp_path / "bin" / binary
+    destination.parent.mkdir()
+    previous_bytes = b"previous complete binary"
+    destination.write_bytes(previous_bytes)
+    destination.chmod(0o755)
+    archive_bytes = BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+        payload = b"new complete binary"
+        info = tarfile.TarInfo(binary)
+        info.size = len(payload)
+        archive.addfile(info, BytesIO(payload))
+    client = MagicMock()
+    client.release_asset_url.return_value = "https://example.test/gh.tar.gz"
+    client.download_release.return_value = archive_bytes.getvalue()
+    monkeypatch.setattr("workdash.config.platform.machine", lambda: "x86_64")
+    monkeypatch.setattr("workdash.config.platform.system", lambda: "Linux")
+
+    with monkeypatch.context() as patch:
+        _fail_writes_after_first_byte(patch)
+        with pytest.raises(OSError, match="simulated write failure"):
+            configure(
+                tmp_path / "config.json",
+                which_fn=_on_path(on_path),
+                github_client=client,
+                create_only=True,
+            )
+
+    assert destination.read_bytes() == previous_bytes
+    assert destination.stat().st_mode & 0o111 == 0o111
+    assert list(destination.parent.iterdir()) == [destination]
 
 
 def test_install_gh_binary_downloads_latest_platform_archive(

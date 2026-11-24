@@ -87,18 +87,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.command == "show-config":
         return commands.show_config(json_output=options.json_output)
 
-    # First-time setup can install the Zellij binary the wrapper needs.
-    if options.command is None and not CONFIG_PATH.exists():
-        status = _run_configure()
-        if status != 0:
-            return status
-        print()
-        print("Configuration complete.")
-        print("Run 'workdash' again to start the dashboard.")
-        print()
-        return 0
+    config_access_error = None
+    if options.command is None:
+        try:
+            CONFIG_PATH.lstat()
+        except FileNotFoundError:
+            # First-time setup can install the Zellij binary the wrapper needs.
+            status = _run_configure(create_only=True)
+            if status != 0:
+                return status
+            print()
+            print("Configuration complete.")
+            print("Run 'workdash' again to start the dashboard.")
+            print()
+            return 0
+        except OSError as error:
+            # Attaching to a running dashboard does not need local configuration.
+            config_access_error = f"Cannot inspect configuration at {CONFIG_PATH}: {error}"
 
     def preflight() -> bool:
+        if config_access_error is not None:
+            print(f"Error: {config_access_error}", file=sys.stderr, flush=True)
+            return False
         commands._github_client = GitHubClient()
         inject_workdash_local_bin_into_path()
         gh_error = commands._github_client.check_authentication()
@@ -111,7 +121,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             launcher.zellij.exec_zellij_wrapped_workdash(argv, preflight)
         except RuntimeError as error:
-            print(f"Error: {error}", file=sys.stderr, flush=True)
+            message = str(error)
+            if config_access_error is not None and isinstance(
+                error, launcher.ZellijBinaryUnavailableError
+            ):
+                message = config_access_error
+            print(f"Error: {message}", file=sys.stderr, flush=True)
             return 1
         return 1
     elif not preflight():
@@ -474,6 +489,9 @@ class WorkdashCommands:
         except WorkdashConfigValidationError as error:
             _print_config_validation_error(error)
             return False
+        except RuntimeError as error:
+            print(f"Error: {error}", file=sys.stderr, flush=True)
+            return False
         return True
 
     def interactive(self) -> int:
@@ -688,11 +706,11 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
     raise AssertionError(f"Unsupported server-backed command: {options.command}")
 
 
-def _run_configure() -> int:
+def _run_configure(*, create_only: bool = False) -> int:
     """Run the setup wizard and report cancellation or failure."""
 
     try:
-        configure(github_client=GitHubClient())
+        configure(github_client=GitHubClient(), create_only=create_only)
     except KeyboardInterrupt:
         print("Configuration cancelled.", file=sys.stderr, flush=True)
         return 130

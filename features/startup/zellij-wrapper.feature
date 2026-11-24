@@ -13,8 +13,9 @@ Feature: Persistent dashboard Zellij session
     - Quitting the dashboard leaves the session running and tells the user that Ctrl+Q quits the whole session and all its panes. A dashboard restarted in that tab leaves the pane it replaced as a shell, so both panes are named `workdash tui`.
     - Inside Zellij, the dashboard starts in the current pane and uses the current session regardless of `--session`; when that session already has a dashboard, workdash reports that the new options are ignored and starts nothing.
     - Server-backed client commands never wrap.
-    - Startup preflight runs before starting a new dashboard; attaching to a running dashboard does not require it. Missing Zellij reports configuration guidance.
-    - Outside Zellij, an existing configuration file with invalid JSON does not prevent attaching to a running dashboard. If no dashboard is running in the selected session, invalid JSON stops startup with a one-line error.
+    - Startup preflight runs before starting a new dashboard; attaching to a running dashboard does not require it. Missing Zellij reports configuration guidance unless configuration cannot be inspected, in which case Workdash reports the configuration inspection error.
+    - Outside Zellij, an unreadable configuration file or one with invalid JSON does not prevent attaching to a running dashboard. With a usable Zellij client, Workdash can attach to a running dashboard at the selected address even if the configuration directory is inaccessible.
+    - When starting a new dashboard, Workdash reports a failure to inspect the configuration path in one line. If inspection succeeds, GitHub CLI authentication is checked before the configuration file is read. If authentication succeeds, a configuration read or JSON error stops startup with a one-line error naming the file and the problem.
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S013
   Scenario: Recover an exited selected session
@@ -74,6 +75,34 @@ Feature: Persistent dashboard Zellij session
     And the configuration file contains invalid JSON
     When the user starts the interactive dashboard
     Then the system reports invalid configuration JSON in one line
+    And the system does not replace itself with Zellij
+    And the system exits with a non-zero status
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S022
+  Scenario: Attach to a running dashboard despite denied configuration access
+    Given the named session `project` already has a running dashboard
+    And access to the configuration directory is denied
+    When the user starts the dashboard in the named session
+    Then the system attaches to the named session
+    And the system exits successfully
+    And the system does not start a dashboard
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S023
+  Scenario: Denied configuration access prevents a new dashboard from starting
+    Given the named session `project` has no dashboard
+    And access to the configuration directory is denied
+    When the user starts the dashboard in the named session
+    Then the system reports denied configuration access in one line
+    And the system does not start a dashboard
+    And the system exits with a non-zero status
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S024
+  Scenario: Report denied configuration access when no Zellij client is available
+    Given the system is not running inside a Zellij session
+    And Zellij is not installed on PATH
+    And access to the configuration directory is denied
+    When the user starts the interactive dashboard
+    Then the system reports denied configuration access in one line
     And the system does not replace itself with Zellij
     And the system exits with a non-zero status
 
