@@ -1607,6 +1607,65 @@ def test_automatic_setup_replaces_private_dependency_symlink(
 
 
 @pytest.mark.parametrize("binary,on_path", [("zellij", "gh"), ("gh", "zellij")])
+def test_automatic_setup_refuses_symlinked_bin_directory(tmp_path, monkeypatch, binary, on_path):
+    config_path = tmp_path / "config.json"
+    shared_bin = tmp_path / "shared-bin"
+    shared_bin.mkdir()
+    for name in ("zellij", "gh"):
+        (shared_bin / name).write_text(f"existing {name}")
+    bin_dir = tmp_path / "bin"
+    bin_dir.symlink_to(shared_bin, target_is_directory=True)
+
+    archive_bytes = BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+        payload = b"fake binary"
+        info = tarfile.TarInfo(binary)
+        info.size = len(payload)
+        archive.addfile(info, BytesIO(payload))
+    client = MagicMock()
+    client.release_asset_url.return_value = "https://example.test/gh.tar.gz"
+    client.download_release.return_value = archive_bytes.getvalue()
+    monkeypatch.setattr("workdash.config.platform.machine", lambda: "x86_64")
+    monkeypatch.setattr("workdash.config.platform.system", lambda: "Linux")
+    monkeypatch.setattr(
+        "workdash.config.tempfile.TemporaryDirectory",
+        MagicMock(side_effect=AssertionError("Dependency staging must not start")),
+    )
+
+    with pytest.raises(RuntimeError, match="workdash --configure") as refusal:
+        configure(config_path, which_fn=_on_path(on_path), github_client=client, create_only=True)
+
+    assert "symlink" in str(refusal.value)
+    assert str(bin_dir) in str(refusal.value)
+    assert bin_dir.readlink() == shared_bin
+    assert {file.name: file.read_text() for file in shared_bin.iterdir()} == {
+        "zellij": "existing zellij",
+        "gh": "existing gh",
+    }
+    assert not config_path.exists()
+
+
+def test_automatic_setup_allows_symlinked_bin_when_dependencies_are_on_path(tmp_path):
+    config_path = tmp_path / "config.json"
+    shared_bin = tmp_path / "shared-bin"
+    shared_bin.mkdir()
+    (tmp_path / "bin").symlink_to(shared_bin, target_is_directory=True)
+    client = MagicMock()
+
+    configure(
+        config_path,
+        input_fn=lambda prompt: "octocat" if prompt == "GitHub username: " else "",
+        which_fn=_on_path("gh", "zellij", "claude", "xdg-open", "open"),
+        github_client=client,
+        create_only=True,
+    )
+
+    assert json.loads(config_path.read_text())["github_username"] == "octocat"
+    assert not list(shared_bin.iterdir())
+    assert not client.mock_calls
+
+
+@pytest.mark.parametrize("binary,on_path", [("zellij", "gh"), ("gh", "zellij")])
 def test_failed_automatic_installer_write_leaves_previous_install_usable(
     tmp_path, monkeypatch, binary, on_path
 ):
