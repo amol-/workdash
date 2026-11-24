@@ -20,6 +20,7 @@ from workdash.config import AgentConfig, WorkdashConfig, load_config, save_confi
 from workdash.control import probe_dashboard_session
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.workdash import _print_work_items, _print_work_items_result
+from zellij_pane_launch import mark_pane_started, pane_launch
 
 
 @pytest.fixture(autouse=True)
@@ -360,7 +361,8 @@ def test_main_passes_configured_agent_choices_and_separate_viewers_to_tui(
 
     def fake_run(command, **kwargs):
         commands.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="terminal_17\n", stderr="")
+        mark_pane_started(command, "17")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     def fake_popen(command, **kwargs):
         commands.append(command)
@@ -387,25 +389,55 @@ def test_main_passes_configured_agent_choices_and_separate_viewers_to_tui(
     viewer_argv = ["term-copy", "--label", "two words"]
     if needs_pane:
         prefix = ["/usr/bin/zellij", "--session", "workdash-selected", "action"]
-        assert commands == [
+        assert commands[2] == [*prefix, "focus-pane-id", "terminal_17"]
+        assert [pane_launch(command) for command in commands[:2]] == [
+            (
+                [
+                    *prefix,
+                    "new-pane",
+                    "-f",
+                    "-x",
+                    "0",
+                    "-y",
+                    "0",
+                    "--width",
+                    "100%",
+                    "--height",
+                    "100%",
+                ],
+                [*viewer_argv, item.url],
+            ),
+            (
+                [
+                    *prefix,
+                    "new-pane",
+                    "-f",
+                    "-x",
+                    "0",
+                    "-y",
+                    "0",
+                    "--width",
+                    "100%",
+                    "--height",
+                    "100%",
+                    "--close-on-exit",
+                ],
+                ["analysis-viewer", html_path.as_uri()],
+            ),
+        ]
+    else:
+        assert commands == [[*viewer_argv, item.url], ["analysis-viewer", html_path.as_uri()]]
+
+    # An item document always needs a pane of its own, whatever the open command does.
+    commands.clear()
+    captured_kwargs["view_callback"](item)
+    assert [pane_launch(command) for command in commands] == [
+        (
             [
-                *prefix,
-                "new-pane",
-                "-f",
-                "-x",
-                "0",
-                "-y",
-                "0",
-                "--width",
-                "100%",
-                "--height",
-                "100%",
-                "--",
-                *viewer_argv,
-                item.url,
-            ],
-            [
-                *prefix,
+                "/usr/bin/zellij",
+                "--session",
+                "workdash-selected",
+                "action",
                 "new-pane",
                 "-f",
                 "-x",
@@ -417,44 +449,17 @@ def test_main_passes_configured_agent_choices_and_separate_viewers_to_tui(
                 "--height",
                 "100%",
                 "--close-on-exit",
-                "--",
-                "analysis-viewer",
-                html_path.as_uri(),
             ],
-            [*prefix, "focus-pane-id", "terminal_17"],
-        ]
-    else:
-        assert commands == [[*viewer_argv, item.url], ["analysis-viewer", html_path.as_uri()]]
-
-    # An item document always needs a pane of its own, whatever the open command does.
-    commands.clear()
-    captured_kwargs["view_callback"](item)
-    assert commands == [
-        [
-            "/usr/bin/zellij",
-            "--session",
-            "workdash-selected",
-            "action",
-            "new-pane",
-            "-f",
-            "-x",
-            "0",
-            "-y",
-            "0",
-            "--width",
-            "100%",
-            "--height",
-            "100%",
-            "--close-on-exit",
-            "--",
-            "sh",
-            "-c",
-            '"$@" || { printf "\\nPress Enter to close this pane.\\n"; read -r _; }',
-            "workdash-view",
-            "/usr/bin/workdash",
-            "view",
-            item.url,
-        ]
+            [
+                "sh",
+                "-c",
+                '"$@" || { printf "\\nPress Enter to close this pane.\\n"; read -r _; }',
+                "workdash-view",
+                "/usr/bin/workdash",
+                "view",
+                item.url,
+            ],
+        )
     ]
 
 

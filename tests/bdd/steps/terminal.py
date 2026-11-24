@@ -18,6 +18,7 @@ from workdash.agent_execution import executor
 from workdash.control import WorkdashSession, format_work_item_id
 from workdash.launcher import _zellij_pane_name_for_work_action, launch_terminal_context
 from workdash.models import WorkItem
+from zellij_pane_launch import mark_pane_started
 
 from .common import make_valid_config, make_work_item, modal_screen_names, run_app
 
@@ -57,6 +58,7 @@ def _launch_named_terminal_backed_work_action(
 
     def fake_run(*args, **kwargs):
         commands.append(args[0])
+        mark_pane_started(args[0], "21")
         return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
 
     monkeypatch.setenv("SHELL", "/bin/bash")
@@ -232,6 +234,7 @@ def run_terminal_scenario(
         if scenario_state.get("terminal_launch_fails"):
             raise subprocess.CalledProcessError(1, command, stderr="terminal launch failed")
         terminal_commands.append(command)
+        mark_pane_started(command, "22")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(control_module, "ensure_worktree", ensure_worktree)

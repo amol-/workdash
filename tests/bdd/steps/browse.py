@@ -12,6 +12,7 @@ from textual.widgets import Static
 
 from workdash.launcher import open_in_browser
 from workdash.models import WorkItem
+from zellij_pane_launch import mark_pane_started, pane_launch
 
 from .common import modal_screen_names, run_app
 
@@ -54,7 +55,8 @@ def run_open_scenario(
             if scenario_state.get("browser_open_hangs"):
                 assert kwargs.get("timeout") == 4
                 raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs["timeout"])
-            return subprocess.CompletedProcess(command, 0, stdout="terminal_19\n", stderr="")
+            mark_pane_started(command, "19")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         monkeypatch.setattr(
@@ -117,23 +119,23 @@ def _url_opened(scenario_state: dict[str, Any]) -> None:
 @then("the selected URL opens in a full-size floating pane in the current session")
 def _terminal_url_opened(scenario_state: dict[str, Any]) -> None:
     prefix = ["/usr/bin/zellij", "--session", "workdash-current", "action"]
-    assert scenario_state["open_invocations"] == [
-        [
-            *prefix,
-            "new-pane",
-            "-f",
-            "-x",
-            "0",
-            "-y",
-            "0",
-            "--width",
-            "100%",
-            "--height",
-            "100%",
-            "--",
-            "xdg-open",
-            scenario_state["selected_item"].url,
-        ],
+    assert [pane_launch(command) for command in scenario_state["open_invocations"]] == [
+        (
+            [
+                *prefix,
+                "new-pane",
+                "-f",
+                "-x",
+                "0",
+                "-y",
+                "0",
+                "--width",
+                "100%",
+                "--height",
+                "100%",
+            ],
+            ["xdg-open", scenario_state["selected_item"].url],
+        ),
     ]
 
 
