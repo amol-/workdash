@@ -197,7 +197,6 @@ def test_dashboard_initial_layout_and_shortcuts() -> None:
                 assert len([word for word in long_row.split() if word.endswith("d")]) >= 1, rows
             assert not table.show_horizontal_scrollbar
             await pilot.press("right", "right", "down")
-            await pilot.pause()
             assert table.scroll_x == 0
             assert table.cursor_row == 1
             hint = command.render()
@@ -511,30 +510,21 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
 
             # Press "a" to open the AnalyzeDialog, then "1" to choose Claude
             await pilot.press("a")
-            await pilot.pause()
             await pilot.press("1")
-            await pilot.pause()
 
             # Press "c" to open CodeDialog, then "2" to choose Codex
             await pilot.press("c")
-            await pilot.pause()
             await pilot.press("2")
-            await pilot.pause()
 
             # Press "c" to open CodeDialog, then "3" to choose pi
             await pilot.press("c")
-            await pilot.pause()
             await pilot.press("3")
-            await pilot.pause()
 
             # Press "c" to open CodeDialog, then "e" to choose VSCode
             await pilot.press("c")
-            await pilot.pause()
             await pilot.press("e")
-            await pilot.pause()
 
             await pilot.press("c", "t")
-            await pilot.pause()
 
             await pilot.press("q")
 
@@ -773,39 +763,29 @@ def test_workdash_app_footer_shows_success_status_for_actions(
             assert footer.render().plain == "Opened pr owner/repo#22."
 
             await pilot.press("r")
-            await pilot.pause()
             assert footer.render().plain == "Refreshed 1 item(s)."
 
             # Press "a" to open AnalyzeDialog, then "1" to choose Claude
             await pilot.press("a")
-            await pilot.pause()
             await pilot.press("1")
-            await pilot.pause()
             assert footer.render().plain == "Analyzed pr owner/repo#22 with claude."
 
             # Press "c" to open CodeDialog, then "2" to choose Codex
             await pilot.press("c")
-            await pilot.pause()
             await pilot.press("2")
-            await pilot.pause()
             assert footer.render().plain == "Launched codex for pr owner/repo#22."
 
             # Press "c" to open CodeDialog, then "3" to choose pi
             await pilot.press("c")
-            await pilot.pause()
             await pilot.press("3")
-            await pilot.pause()
             assert footer.render().plain == "Launched pi for pr owner/repo#22."
 
             # Press "c" to open CodeDialog, then "e" to choose VSCode
             await pilot.press("c")
-            await pilot.pause()
             await pilot.press("e")
-            await pilot.pause()
             assert footer.render().plain == "Launched VSCode for pr owner/repo#22."
 
             await pilot.press("c", "t")
-            await pilot.pause()
             assert footer.render().plain == "Opened terminal for pr owner/repo#22."
 
             await pilot.press("q")
@@ -845,9 +825,7 @@ def test_workdash_app_analyze_opens_markdown_file(
         async with app.run_test() as pilot:
             # Press "a" to open AnalyzeDialog, then "2" to choose Codex
             await pilot.press("a")
-            await pilot.pause()
             await pilot.press("2")
-            await pilot.pause()
             assert opened_paths == ["/tmp/analyses/owner_repo_ISSUE11.md"]
             await pilot.press("q")
 
@@ -889,7 +867,6 @@ def test_workdash_app_analyze_runs_without_blocking_ui_loop(
         async with app.run_test() as pilot:
             # Press "a" to open the dialog, then "1" to trigger analysis
             await pilot.press("a")
-            await pilot.pause()
             analyze_press = asyncio.create_task(pilot.press("1"))
             while not analyze_started.is_set():
                 await pilot.pause()
@@ -979,9 +956,7 @@ async def _wait_for_no_dialog(app: WorkdashApp, pilot) -> None:
 async def _choose_open(pilot) -> None:
     """Pick the menu's ``open`` choice, which needs the view menu first."""
     await pilot.press("v")
-    await pilot.pause()
     await pilot.press("o")
-    await pilot.pause()
 
 
 async def _wait_for_footer(footer: Static, expected: str, pilot) -> None:
@@ -1017,7 +992,6 @@ def test_analyze_dialog_shows_nine_agents_and_cached_analysis_without_scrolling(
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
             await pilot.press("a")
-            await pilot.pause()
             assert isinstance(app.screen, AnalyzeDialog)
             lines = [str(line.render()) for line in app.screen.query(".analyze-line")]
             assert lines[-2:] == ["(9) Analyze with agent9", "(Esc) Cancel"]
@@ -1050,7 +1024,6 @@ def test_code_dialog_shows_every_choice_without_scrolling() -> None:
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
             await pilot.press("c")
-            await pilot.pause()
             assert isinstance(app.screen, CodeDialog)
             lines = [str(line.render()) for line in app.screen.query(".code-line")]
             assert lines[1] == "(1) agent1"
@@ -1096,10 +1069,8 @@ def test_code_menu_auto_review_waits_with_a_progress_dialog_then_reports_complet
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
             await pilot.press("c")
-            await pilot.pause()
             assert isinstance(app.screen, CodeDialog)
             await pilot.press("r")
-            await pilot.pause()
             assert isinstance(app.screen, ReviewDialog)
             lines = [str(line.render()) for line in app.screen.query(".review-line")]
             assert lines == ["Review with:", "(1) claude", "(2) codex", "(Esc) Cancel"]
@@ -1268,7 +1239,6 @@ def test_code_dialog_actions_target_the_item_selected_when_the_dialog_opened(
 
             # A server refresh drops the selected item while the dialog is open.
             await pilot.press("c")
-            await pilot.pause()
             session.work_items = [other]
             app.refresh_from_session()
             await pilot.press("d")
@@ -1279,7 +1249,6 @@ def test_code_dialog_actions_target_the_item_selected_when_the_dialog_opened(
             assert worktree_calls == [selected]
 
             await pilot.press("c")
-            await pilot.pause()
             session.work_items = [selected]
             app.refresh_from_session()
             await pilot.press("t")
@@ -1315,7 +1284,6 @@ def test_agent_names_with_markup_characters_are_shown_literally() -> None:
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
             await pilot.press("c")
-            await pilot.pause()
             assert isinstance(app.screen, CodeDialog)
             lines = [str(line.render()) for line in app.screen.query(".code-line")]
             assert "(1) a[/b]" in lines
@@ -1367,26 +1335,20 @@ def test_workdash_app_uses_only_configured_tui_agent_choices(
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
             await pilot.press("a")
-            await pilot.pause()
             assert isinstance(app.screen, AnalyzeDialog)
             await pilot.press("2")
-            await pilot.pause()
             assert analyze_calls == []
             assert isinstance(app.screen, AnalyzeDialog)
             await pilot.press("1")
-            await pilot.pause()
             assert analyze_calls == [(work_item, "codex")]
 
             await pilot.press("c")
-            await pilot.pause()
             assert isinstance(app.screen, CodeDialog)
             await pilot.press("2")
-            await pilot.pause()
             assert worktree_attempts == []
             assert launch_calls == []
             assert isinstance(app.screen, CodeDialog)
             await pilot.press("e")
-            await pilot.pause()
             assert worktree_attempts == []
             assert launch_calls == [(work_item, "vscode")]
 
@@ -1431,7 +1393,6 @@ def test_workdash_app_analyze_uses_shared_callback_without_tui_worktree_prep() -
             footer = app.query_one("#status-footer", Static)
 
             await pilot.press("a")
-            await pilot.pause()
             await pilot.press("1")
             await _wait_for_footer(
                 footer,
@@ -1501,14 +1462,12 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
 
             # Press "a" to open AnalyzeDialog, then "1" to choose Claude
             await pilot.press("a")
-            await pilot.pause()
             await pilot.press("1")
             await _wait_for_footer(footer, "Analyze failed: codex analyze failed", pilot)
             _assert_no_modal_screens(app)
 
             # Press "c" to open CodeDialog, then "2" to choose Codex
             await pilot.press("c")
-            await pilot.pause()
             await pilot.press("2")
             await _wait_for_footer(footer, "Launch failed: codex launch failed", pilot)
             _assert_no_modal_screens(app)
@@ -1812,11 +1771,9 @@ async def _submit_search(app: WorkdashApp, pilot, query: str) -> None:
     """Open the search box and submit ``query``; no filter may be active."""
 
     await pilot.press("/")
-    await pilot.pause()
     assert isinstance(app.screen, SearchDialog)
     app.screen.query_one("#search-text", Input).value = query
     await pilot.press("enter")
-    await pilot.pause()
 
 
 def _listed_titles(app: WorkdashApp) -> list[str]:
@@ -1841,7 +1798,6 @@ def test_type_width_tracks_widest_visible_item_after_search() -> None:
             await _submit_search(app, pilot, "ship the docs")
             assert table.columns["type"].width == len("  VR 22")
             await pilot.press("/")
-            await pilot.pause()
             assert table.columns["type"].width == len("  IS+ 123456789")
 
     asyncio.run(run_smoke())
@@ -1895,14 +1851,12 @@ def test_workdash_app_search_matches_rendered_columns_ignoring_case() -> None:
             assert footer.render().plain == "Search matched 1 of 3 item(s)."
 
             await pilot.press("/")
-            await pilot.pause()
             # The same words in reversed order carry no match: the needle is one
             # literal substring, not a set of independently matched words.
             await _submit_search(app, pilot, "parser fix")
             assert _listed_titles(app) == []
 
             await pilot.press("/")
-            await pilot.pause()
             assert _listed_titles(app) == ["Unrelated chore", "Ship the docs", "* Fix the parser"]
             assert footer.render().plain == "Search cleared; 3 item(s) shown."
             # The search action is emphasized only while a filter is active.
@@ -1912,34 +1866,28 @@ def test_workdash_app_search_matches_rendered_columns_ignoring_case() -> None:
             assert _listed_titles(app) == ["Ship the docs"]
 
             await pilot.press("/")
-            await pilot.pause()
             await _submit_search(app, pilot, "issue#33")
             assert _listed_titles(app) == ["Unrelated chore"]
 
             await pilot.press("/")
-            await pilot.pause()
             await _submit_search(app, pilot, "is 33")
             assert _listed_titles(app) == ["Unrelated chore"]
 
             await pilot.press("/")
-            await pilot.pause()
             await _submit_search(app, pilot, "vr 22")
             assert _listed_titles(app) == ["Ship the docs"]
 
             await pilot.press("/")
-            await pilot.pause()
             await _submit_search(app, pilot, "check#22")
             assert _listed_titles(app) == ["Ship the docs"]
 
             await pilot.press("/")
-            await pilot.pause()
             # The Updated column is never searched: "6d" is the rendered
             # Updated value of the parser issue.
             await _submit_search(app, pilot, "6d")
             assert _listed_titles(app) == []
 
             await pilot.press("/")
-            await pilot.pause()
             # The suggestion marker is decoration, not searchable content.
             await _submit_search(app, pilot, "*")
             assert _listed_titles(app) == []
@@ -1956,9 +1904,7 @@ def test_workdash_app_search_box_dismissed_without_text_leaves_the_list_unchange
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
             await pilot.press("/")
-            await pilot.pause()
             await pilot.press("escape")
-            await pilot.pause()
             assert _listed_titles(app) == _ALL_SEARCH_TITLES
 
             await _submit_search(app, pilot, "")
@@ -2000,7 +1946,6 @@ def test_workdash_app_actions_use_the_row_selected_in_the_filtered_list() -> Non
             assert opened == [work_items[0]]
 
             await pilot.press("/")
-            await pilot.pause()
             await _submit_search(app, pilot, "no-such-item")
             assert app._selected_item() is None
             await pilot.press("v")
@@ -2089,7 +2034,6 @@ def test_workdash_app_failed_include_keeps_the_search_filter_active() -> None:
 
             # The filter is still live, so "/" clears it instead of reopening search.
             await pilot.press("/")
-            await pilot.pause()
             _assert_no_modal_screens(app)
             assert _listed_titles(app) == _ALL_SEARCH_TITLES
             await pilot.press("q")
@@ -2113,7 +2057,6 @@ def test_workdash_app_analyze_keeps_the_active_search_filter() -> None:
             # A fresh analysis re-renders the table to show the new suggestion
             # markers, but it does not change the loaded list, so the filter stays.
             await pilot.press("a")
-            await pilot.pause()
             await pilot.press("1")
             await _wait_for_footer(
                 app.query_one("#status-footer", Static),
@@ -2177,13 +2120,11 @@ def test_workdash_app_clearing_the_search_filter_keeps_the_selected_item() -> No
             assert _listed_titles(app) == ["epsilon parser", "gamma parser", "alpha parser"]
 
             await pilot.press("down", "down")
-            await pilot.pause()
             assert app._selected_item() is work_items[4]
 
             # Clearing the filter must keep the same item selected, not row 2 of
             # the full list ("gamma parser").
             await pilot.press("/")
-            await pilot.pause()
             assert _listed_titles(app) == _ALL_CURSOR_ANCHOR_TITLES
             assert app._selected_item() is work_items[4]
             assert table.cursor_row == 4
@@ -2210,7 +2151,6 @@ def test_workdash_app_session_refresh_keeps_the_selected_item_while_filtered() -
         async with app.run_test() as pilot:
             await _submit_search(app, pilot, "parser")
             await pilot.press("down", "down")
-            await pilot.pause()
             assert app._selected_item() is work_items[4]
 
             # A control-server push clears the filter and re-renders with no keypress.
@@ -2235,7 +2175,6 @@ def test_workdash_app_session_refresh_dropping_the_selected_item_clamps_the_curs
         async with app.run_test() as pilot:
             table = app.query_one("#work-items", DataTable)
             await pilot.press("down", "down", "down", "down")
-            await pilot.pause()
             assert app._selected_item() is work_items[4]
 
             session.work_items = work_items[:2]
@@ -2794,7 +2733,6 @@ def test_autodispatch_refresh_updates_search_membership() -> None:
     async def run():
         async with app.run_test(size=(80, 12)) as pilot:
             await pilot.press("/", "m", "a", "t", "c", "h", "enter")
-            await pilot.pause()
             table = app.query_one("#work-items", DataTable)
             table.move_cursor(row=10)
             await pilot.pause()
@@ -3798,7 +3736,6 @@ def test_view_menu_offers_view_and_open_for_the_selected_item() -> None:
             footer = app.query_one("#status-footer", Static)
 
             await pilot.press("v")
-            await pilot.pause()
             assert any(isinstance(screen, ViewDialog) for screen in app.screen_stack)
             menu = [str(widget.render()) for widget in app.screen.query(Static)]
             assert "(v) view" in menu and "(o) open" in menu
@@ -3813,15 +3750,12 @@ def test_view_menu_offers_view_and_open_for_the_selected_item() -> None:
             assert opened == [work_item]
 
             await pilot.press("v")
-            await pilot.pause()
             await pilot.press("escape")
-            await pilot.pause()
             _assert_no_modal_screens(app)
             assert viewed == [work_item] and opened == [work_item]
 
             # "o" alone no longer opens anything.
             await pilot.press("o")
-            await pilot.pause()
             _assert_no_modal_screens(app)
             assert opened == [work_item]
 
@@ -3855,7 +3789,6 @@ def test_view_menu_reports_a_failing_viewer() -> None:
         async with app.run_test() as pilot:
             footer = app.query_one("#status-footer", Static)
             await pilot.press("v")
-            await pilot.pause()
             await pilot.press("v")
             await _wait_for_footer(footer, "View failed: zellij pane failed", pilot)
             _assert_no_modal_screens(app)
@@ -4068,7 +4001,6 @@ def test_autodispatch_dispatch_iterations_leave_the_dashboard_interactive(monkey
                 await pilot.pause(0.6)
                 assert not isinstance(app.screen, BusyScreen)
                 await pilot.press("/")
-                await pilot.pause(0.2)
                 assert isinstance(app.screen, SearchDialog)
             finally:
                 release.set()

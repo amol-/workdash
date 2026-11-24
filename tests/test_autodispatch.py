@@ -696,7 +696,6 @@ async def _choose_open(pilot, opened: list) -> None:
     """Pick the view menu's open choice and wait for the open callback to run."""
     count = len(opened)
     await pilot.press("v")
-    await pilot.pause()
     await pilot.press("o")
     for _ in range(20):
         await pilot.pause()
@@ -834,13 +833,11 @@ def test_tui_reports_the_failure_of_the_session_the_user_started():
         async with app.run_test() as pilot:
             footer = app.query_one("#status-footer", Static)
             await pilot.press("d", "1")
-            await pilot.pause()
             assert footer.render().plain == (
                 "Started autodispatch for owner/repo#ISSUE-42: session-1."
             )
             # Another action replaces the footer before the session fails.
             await pilot.press("r")
-            await pilot.pause()
             assert footer.render().plain == "Refresh skipped."
             session.autodispatch_sessions.return_value = [
                 {**running, "status": "failed", "error": "\x1b[31mGitHub\x1b[0m\nunavailable"}
@@ -956,7 +953,6 @@ def test_tui_does_not_reannounce_the_session_it_started():
         async with app.run_test() as pilot:
             footer = app.query_one("#status-footer", Static)
             await pilot.press("d", "1")
-            await pilot.pause()
             assert (
                 footer.render().plain == "Started autodispatch for owner/repo#ISSUE-42: session-1."
             )
@@ -1056,7 +1052,6 @@ def test_tui_short_dashboard_scrolls_progress_and_keeps_table_visible(width):
             assert "owner/f0" in app.export_screenshot()
             assert "owner/f2" not in app.export_screenshot()
             await pilot.press("shift+tab", "end")
-            await pilot.pause()
             assert "owner/f2" in app.export_screenshot()
             assert any("IS 42" in strip.text for strip in app.screen._compositor.render_strips())
 
@@ -2554,7 +2549,6 @@ def test_tui_short_pane_keeps_a_work_item_visible_with_progress():
             assert progress.region.height > 0
             assert table.region.height >= 2
             await pilot.press(*(["down"] * 9))
-            await pilot.pause()
             rows = [strip.text for strip in app.screen._compositor.render_strips()]
             assert any("IS 10" in row for row in rows[table.region.y : status.region.y])
             await _choose_open(pilot, opened)
@@ -2606,7 +2600,19 @@ def test_tui_scrolling_remains_visible_when_progress_changes(size):
             progress = app.query_one("#autodispatch-progress", Static)
             status = app.query_one("#status-footer", Static)
             footer = app.query_one("#command-footer", Static)
-            await pilot.press(*(["down"] * 39))
+
+            def row_y(row):
+                return table.region.y + table._get_row_region(row).y - int(table.scroll_y)
+
+            def assert_selected_row_visible(row):
+                assert table.cursor_row == row
+                y = row_y(row)
+                assert table.region.y + table.header_height <= y < table.region.bottom
+                rows = [strip.text for strip in app.screen._compositor.render_strips()]
+                assert f"IS {row + 1} " in rows[y]
+
+            last_row = len(items) - 1
+            table.move_cursor(row=last_row)
             for entries in (
                 [],
                 [{"id": "1", "status": "failed", "scope": "owner/repo", "error": "failed"}],
@@ -2615,30 +2621,33 @@ def test_tui_scrolling_remains_visible_when_progress_changes(size):
                 session.autodispatch_sessions.return_value = entries
                 app._update_autodispatch_progress()
                 await pilot.pause()
+                # Let the table handle the resize from the progress panel's relayout.
+                await pilot.pause()
                 assert not entries or progress.region.y == 0
                 assert table.region.bottom <= footer.region.y < status.region.y
-                await _choose_open(pilot, opened)
-                assert opened[-1].number == 40
-                row_y = (
-                    table.region.y + table._get_row_region(table.cursor_row).y - int(table.scroll_y)
-                )
-                assert table.region.y <= row_y < footer.region.y
                 rows = [strip.text for strip in app.screen._compositor.render_strips()]
                 assert any("Failed: failed (owner/repo)" in row for row in rows) == bool(entries)
-                assert "IS 40" in rows[row_y]
-                for key, numbers in (("up", range(39, 0, -1)), ("down", range(2, 41))):
-                    for number in numbers:
-                        await pilot.press(key)
-                        row_y = (
-                            table.region.y
-                            + table._get_row_region(table.cursor_row).y
-                            - int(table.scroll_y)
-                        )
-                        assert table.region.y <= row_y < footer.region.y
-                        rows = [strip.text for strip in app.screen._compositor.render_strips()]
-                        assert f"IS {number} " in rows[row_y]
-                    await _choose_open(pilot, opened)
-                assert [item.number for item in opened[-2:]] == [1, 40]
+                assert_selected_row_visible(last_row)
+
+                # Jump to each viewport edge so the real keypress must scroll the table.
+                top_row = int(table.scroll_y)  # Work items are one line each.
+                table.move_cursor(row=top_row)
+                await pilot.pause()
+                assert_selected_row_visible(top_row)
+                assert row_y(top_row - 1) < table.region.y + table.header_height
+                await pilot.press("up")
+                assert_selected_row_visible(top_row - 1)
+                await _choose_open(pilot, opened)
+                assert opened[-1].number == top_row
+
+                table.move_cursor(row=last_row - 1)
+                await pilot.pause()
+                assert_selected_row_visible(last_row - 1)
+                assert row_y(last_row) >= table.region.bottom
+                await pilot.press("down")
+                assert_selected_row_visible(last_row)
+                await _choose_open(pilot, opened)
+                assert opened[-1].number == len(items)
 
     asyncio.run(exercise())
 
@@ -2824,7 +2833,6 @@ def test_tui_dispatch_replaces_selected_running_session():
             session.start_autodispatch_for_item.assert_not_called()
             assert session.autodispatch_sessions()[0]["id"] == "old"
             await pilot.press("d", "1")
-            await pilot.pause()
             session.start_autodispatch_for_item.assert_called_once_with(item, agent="pi")
 
     asyncio.run(exercise())
@@ -2848,11 +2856,9 @@ def test_tui_toggles_automerge_for_the_session_it_just_dispatched():
     async def exercise():
         async with app.run_test() as pilot:
             await pilot.press("d", "1")
-            await pilot.pause()
             # The dashboard learns the new session from the polled snapshot.
             await app._poll_autodispatch_progress()
             await pilot.press("m")
-            await pilot.pause()
             session.toggle_automerge.assert_called_once_with("new")
 
     asyncio.run(exercise())
@@ -2898,7 +2904,6 @@ def test_tui_refuses_ambiguous_automerge_toggle():
     async def exercise():
         async with app.run_test() as pilot:
             await pilot.press("m")
-            await pilot.pause()
             session.toggle_automerge.assert_not_called()
             assert "multiple" in app.query_one("#status-footer", Static).render().plain.lower()
 
@@ -3711,7 +3716,6 @@ def test_tui_dispatch_chooser_pages_and_selects_tenth():
             lines = [widget.render().plain for widget in app.screen.query(".review-line")]
             assert "(9) agent-9" in lines
             await pilot.press("right", "1")
-            await pilot.pause()
             session.start_autodispatch_for_item.assert_called_once_with(item, agent="agent-10")
 
     asyncio.run(exercise())

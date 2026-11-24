@@ -939,7 +939,11 @@ class GitHubClient:
             _extract_ci_state(pull_request),
             pull_request.get("reviewDecision"),
             _extract_pending_review_request(pull_request),
-            _closing_issues(pull_request),
+            _closing_issues(
+                pull_request,
+                references_error="Invalid gh GraphQL payload: missing closingIssuesReferences.",
+                issue_error="Invalid gh GraphQL payload: missing closing issue reference.",
+            ),
         )
 
     def branch_issue(self, repo: str, number: int) -> _IssueInfo:
@@ -1494,56 +1498,17 @@ class GitHubClient:
         report_progress = (
             progress_callback if progress_callback is not None else _noop_progress_callback
         )
-        command = [
-            "gh",
-            "search",
-            "prs",
-            "--author",
-            author_login,
-            "--state",
-            "open",
-            "--limit",
-            str(_ITEMS_FETCH_LIMIT),
-            "--json",
-            _PR_JSON_FIELDS,
-        ]
-        completed = _run_gh_command_with_retry(
-            command,
-            not_found_message=(
-                "Failed to run gh authored PR search: gh CLI is not installed or not on PATH."
-            ),
-            failure_message_prefix=(
-                f"Failed to list open authored PRs for {author_login!r} via gh"
-            ),
-        )
-        try:
-            payload = json.loads(completed.stdout)
-        except json.JSONDecodeError as error:
-            raise RuntimeError(
-                f"Failed to parse gh authored PR JSON for {author_login!r}: {error.msg}"
-            ) from error
-        parsed_items = self._parse_open_pull_request_payload(
-            payload,
-            context=f"authored for {author_login!r}",
+        parsed_items = self._search_open_pull_requests(
+            ["--author", author_login], login=author_login, relationship="authored"
         )
         if not parsed_items:
             return []
 
-        alias_selections: list[str] = []
-        for index, item in enumerate(parsed_items):
-            owner, _, name = item["repo"].partition("/")
-            alias_selections.append(
-                f"p{index}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
-                f"{{ pullRequest(number: {item['number']}) "
-                f"{{ {_AUTHORED_CI_SELECTION} {_UNRESOLVED_THREADS_SELECTION} }} }}"
-            )
-        ci_command = [
-            "gh",
-            "api",
-            "graphql",
-            "-f",
-            f"query={{ {' '.join(alias_selections)} }}",
-        ]
+        pull_requests = [(item["repo"], item["number"]) for item in parsed_items]
+        aliases = _pull_request_aliases(
+            pull_requests, f"{_AUTHORED_CI_SELECTION} {_UNRESOLVED_THREADS_SELECTION}"
+        )
+        ci_command = ["gh", "api", "graphql", "-f", f"query={{ {aliases} }}"]
         failure_message_prefix = f"Failed to inspect authored PR CI for {author_login!r} via gh"
         ci_completed = _run_gh_command_with_retry(
             ci_command,
@@ -1574,26 +1539,12 @@ class GitHubClient:
                 f"{failure_message_prefix}: "
                 f"{ci_completed.stderr.strip() or 'response contained no errors'}"
             )
-        skips_by_alias: dict[str, str] = {}
         subjects_by_alias = {
-            f"p{index}": f"{item['repo']}#{item['number']}"
-            for index, item in enumerate(parsed_items)
+            f"p{index}": f"{repo}#{number}" for index, (repo, number) in enumerate(pull_requests)
         }
-        for entry in errors or []:
-            entry_fields = entry if isinstance(entry, dict) else {}
-            message = entry_fields.get("message")
-            path = entry_fields.get("path")
-            alias = path[0] if isinstance(path, list) and path else None
-            subject = subjects_by_alias.get(alias)
-            if subject is None:
-                raise RuntimeError(f"{failure_message_prefix}: {message or 'unknown error'}")
-            if not isinstance(message, str) or not (
-                _is_repository_authorization_error(message) or _is_unresolvable_item_error(message)
-            ):
-                raise RuntimeError(
-                    f"{failure_message_prefix} ({subject}): {message or 'unknown error'}"
-                )
-            skips_by_alias[alias] = message
+        skips_by_alias = _aliased_pull_request_skips(
+            errors or [], subjects_by_alias, failure_message_prefix
+        )
 
         authored_pull_requests: list[AuthoredPullRequest] = []
         for index, item in enumerate(parsed_items):
@@ -1624,41 +1575,12 @@ class GitHubClient:
     ) -> list[ReviewRequestedPullRequest]:
         """List open PRs where the given user is directly a requested reviewer."""
 
-        command = [
-            "gh",
-            "search",
-            "prs",
-            f"user-review-requested:{reviewer_login}",
-            "--state",
-            "open",
-            "--limit",
-            str(_ITEMS_FETCH_LIMIT),
-            "--json",
-            _PR_JSON_FIELDS,
-        ]
-        completed = _run_gh_command_with_retry(
-            command,
-            not_found_message=(
-                "Failed to run gh review-requested PR search: "
-                "gh CLI is not installed or not on PATH."
-            ),
-            failure_message_prefix=(
-                f"Failed to list open review-requested PRs for {reviewer_login!r} via gh"
-            ),
+        items = self._search_open_pull_requests(
+            [f"user-review-requested:{reviewer_login}"],
+            login=reviewer_login,
+            relationship="review-requested",
         )
-        try:
-            payload = json.loads(completed.stdout)
-        except json.JSONDecodeError as error:
-            raise RuntimeError(
-                f"Failed to parse gh review-requested PR JSON for {reviewer_login!r}: {error.msg}"
-            ) from error
-        return [
-            ReviewRequestedPullRequest(**item)
-            for item in self._parse_open_pull_request_payload(
-                payload,
-                context=f"review-requested for {reviewer_login!r}",
-            )
-        ]
+        return [ReviewRequestedPullRequest(**item) for item in items]
 
     def list_open_reviewed_prs(
         self,
@@ -1666,41 +1588,10 @@ class GitHubClient:
     ) -> list[ReviewRequestedPullRequest]:
         """List open PRs that the given user has already reviewed."""
 
-        command = [
-            "gh",
-            "search",
-            "prs",
-            "--reviewed-by",
-            reviewer_login,
-            "--state",
-            "open",
-            "--limit",
-            str(_ITEMS_FETCH_LIMIT),
-            "--json",
-            _PR_JSON_FIELDS,
-        ]
-        completed = _run_gh_command_with_retry(
-            command,
-            not_found_message=(
-                "Failed to run gh reviewed PR search: gh CLI is not installed or not on PATH."
-            ),
-            failure_message_prefix=(
-                f"Failed to list open reviewed PRs for {reviewer_login!r} via gh"
-            ),
+        items = self._search_open_pull_requests(
+            ["--reviewed-by", reviewer_login], login=reviewer_login, relationship="reviewed"
         )
-        try:
-            payload = json.loads(completed.stdout)
-        except json.JSONDecodeError as error:
-            raise RuntimeError(
-                f"Failed to parse gh reviewed PR JSON for {reviewer_login!r}: {error.msg}"
-            ) from error
-        return [
-            ReviewRequestedPullRequest(**item)
-            for item in self._parse_open_pull_request_payload(
-                payload,
-                context=f"reviewed for {reviewer_login!r}",
-            )
-        ]
+        return [ReviewRequestedPullRequest(**item) for item in items]
 
     def list_open_assigned_issues(
         self,
@@ -2065,13 +1956,10 @@ class GitHubClient:
             raise RuntimeError(f"{context}: missing repository.issueOrPullRequest.")
         repo = repository.get("nameWithOwner")
         typename = node.get("__typename")
-        title, url, created_at, updated_at = (
-            node.get(key) for key in ("title", "url", "createdAt", "updatedAt")
-        )
-        if typename not in {"Issue", "PullRequest"} or not all(
-            isinstance(value, str) for value in (repo, title, url, created_at, updated_at)
-        ):
-            raise RuntimeError(f"{context}: missing or invalid fields.")
+        invalid_fields = RuntimeError(f"{context}: missing or invalid fields.")
+        if typename not in {"Issue", "PullRequest"} or not isinstance(repo, str):
+            raise invalid_fields
+        title, url, created_at, updated_at = _item_text_fields(node, invalid_fields)
         if typename == "Issue":
             total = _sub_issue_total(
                 node, RuntimeError(f"{context}: invalid subIssuesSummary.total.")
@@ -2092,15 +1980,11 @@ class GitHubClient:
                 if repo.lower() == todo_repository.lower()
                 else None,
             )
-        author = node.get("author")
-        author_login = author.get("login") if isinstance(author, dict) else None
-        authored_by_user = isinstance(author_login, str) and (
-            author_login.strip().lower() == github_username.strip().lower()
-        )
+        kind = _pull_request_kind(node, github_username)
         # Only an issue in the pull request's own repository can name its worktree.
-        closing_issues = self._closing_issues({"pullRequest": node}, subject=subject)
+        closing_issues = _linked_closing_issues(node, subject)
         return WorkItem(
-            kind=WorkItemKind.AUTHORED_PR if authored_by_user else WorkItemKind.TRACKED_PR,
+            kind=kind,
             item_type=WorkItemType.PR,
             repo=repo,
             number=number,
@@ -2284,20 +2168,13 @@ class GitHubClient:
             )
         if state.upper() != "OPEN":
             return None
-        title = payload.get("title")
-        url = payload.get("url")
-        created_at = payload.get("createdAt")
-        updated_at = payload.get("updatedAt")
-        if not (
-            isinstance(title, str)
-            and isinstance(url, str)
-            and isinstance(created_at, str)
-            and isinstance(updated_at, str)
-        ):
-            raise TransientFetchError(
+        title, url, created_at, updated_at = _item_text_fields(
+            payload,
+            TransientFetchError(
                 f"Malformed gh view payload for {parsed_url.repo}#{parsed_url.number}: "
                 "missing required fields."
-            )
+            ),
+        )
         # Convert parse errors into TransientFetchError so the included-items
         # store keeps the URL for a later retry instead of aborting the refresh
         # (other callers of parse_github_datetime still want the plain RuntimeError).
@@ -2309,19 +2186,9 @@ class GitHubClient:
                 f"gh payload contains invalid timestamp for "
                 f"{parsed_url.repo}#{parsed_url.number}: {error}"
             ) from error
-        author = payload.get("author")
-        author_login = author.get("login") if isinstance(author, dict) else None
-        # GitHub logins are case-insensitive and the configured username is free
-        # text, so both sides are compared normalized.
-        authored_by_user = isinstance(author_login, str) and (
-            author_login.strip().lower() == github_username.strip().lower()
-        )
+        kind = _pull_request_kind(payload, github_username)
         if parsed_url.item_type != WorkItemType.PR:
             kind = WorkItemKind.TRACKED_ISSUE
-        elif authored_by_user:
-            kind = WorkItemKind.AUTHORED_PR
-        else:
-            kind = WorkItemKind.TRACKED_PR
         return WorkItem(
             kind=kind,
             item_type=parsed_url.item_type,
@@ -2798,6 +2665,38 @@ class GitHubClient:
         repo_name = head_repo_info.get("name", "") if isinstance(head_repo_info, dict) else ""
         return f"{owner_login}/{repo_name}" if owner_login and repo_name else fallback_repo
 
+    def _search_open_pull_requests(
+        self, search_args: list[str], *, login: str, relationship: str
+    ) -> list[AuthoredPullRequest]:
+        command = [
+            "gh",
+            "search",
+            "prs",
+            *search_args,
+            "--state",
+            "open",
+            "--limit",
+            str(_ITEMS_FETCH_LIMIT),
+            "--json",
+            _PR_JSON_FIELDS,
+        ]
+        completed = _run_gh_command_with_retry(
+            command,
+            not_found_message=(
+                f"Failed to run gh {relationship} PR search: gh CLI is not installed or not on PATH."
+            ),
+            failure_message_prefix=f"Failed to list open {relationship} PRs for {login!r} via gh",
+        )
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                f"Failed to parse gh {relationship} PR JSON for {login!r}: {error.msg}"
+            ) from error
+        return self._parse_open_pull_request_payload(
+            payload, context=f"{relationship} for {login!r}"
+        )
+
     @staticmethod
     def _parse_open_pull_request_payload(
         payload: object,
@@ -2999,19 +2898,8 @@ class GitHubClient:
 
         # One aliased GraphQL document for every pull request: `gh pr view` per
         # pull request would cost a round trip each.
-        alias_selections = [
-            f"p{index}: repository(owner: {json.dumps(repo.partition('/')[0])}, "
-            f"name: {json.dumps(repo.partition('/')[2])}) "
-            f"{{ pullRequest(number: {number}) {{ {_CLOSING_ISSUES_SELECTION} }} }}"
-            for index, (repo, number) in enumerate(pull_requests)
-        ]
-        command = [
-            "gh",
-            "api",
-            "graphql",
-            "-f",
-            f"query={{ {' '.join(alias_selections)} }}",
-        ]
+        aliases = _pull_request_aliases(pull_requests, _CLOSING_ISSUES_SELECTION)
+        command = ["gh", "api", "graphql", "-f", f"query={{ {aliases} }}"]
         failure_message_prefix = "Failed to inspect linked issues via gh"
         completed = _run_gh_command_with_retry(
             command,
@@ -3035,71 +2923,27 @@ class GitHubClient:
                 f"{failure_message_prefix}: "
                 f"{completed.stderr.strip() or 'response contained no data'}"
             )
-        # Only the alias in an error's path attributes a failure to one pull
-        # request; the merged stderr concatenates every alias's message.
         errors = payload.get("errors")
-        skips_by_alias: dict[str, str] = {}
         subjects_by_alias = {
             f"p{index}": f"{repo}#{number}" for index, (repo, number) in enumerate(pull_requests)
         }
-        for entry in errors if isinstance(errors, list) else []:
-            entry_fields = entry if isinstance(entry, dict) else {}
-            message = entry_fields.get("message")
-            path = entry_fields.get("path")
-            alias = path[0] if isinstance(path, list) and path else None
-            subject = subjects_by_alias.get(alias)
-            if subject is None:
-                raise RuntimeError(f"{failure_message_prefix}: {message or 'unknown error'}")
-            if not isinstance(message, str) or not (
-                _is_repository_authorization_error(message) or _is_unresolvable_item_error(message)
-            ):
-                raise RuntimeError(
-                    f"{failure_message_prefix} ({subject}): {message or 'unknown error'}"
-                )
-            skips_by_alias[alias] = message
+        skips_by_alias = _aliased_pull_request_skips(
+            errors if isinstance(errors, list) else [], subjects_by_alias, failure_message_prefix
+        )
 
         linked_issues: dict[tuple[str, int], list[tuple[str, int]]] = {}
         for index, (repo, number) in enumerate(pull_requests):
             alias = f"p{index}"
             if alias in skips_by_alias:
                 continue
-            closing_issues = self._closing_issues(
-                repositories_by_alias.get(alias), subject=subjects_by_alias[alias]
-            )
+            repository = repositories_by_alias.get(alias)
+            pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
+            closing_issues = _linked_closing_issues(pull_request, subjects_by_alias[alias])
             if closing_issues:
                 linked_issues[(repo, number)] = closing_issues
         return linked_issues, {
             subjects_by_alias[alias]: reason for alias, reason in skips_by_alias.items()
         }
-
-    @staticmethod
-    def _closing_issues(repository_node: object, *, subject: str) -> list[tuple[str, int]]:
-        """Collect the ``(repo, number)`` issues one pull request closes.
-
-        :param object repository_node: One aliased ``repository`` GraphQL node.
-        :param str subject: ``owner/repo#number`` used in error messages.
-        """
-
-        context = f"Invalid gh linked issue payload for {subject}"
-        pull_request = (
-            repository_node.get("pullRequest") if isinstance(repository_node, dict) else None
-        )
-        if not isinstance(pull_request, dict):
-            raise RuntimeError(f"{context}: expected an object.")
-        references = pull_request.get("closingIssuesReferences")
-        nodes = references.get("nodes") if isinstance(references, dict) else None
-        if not isinstance(nodes, list):
-            raise RuntimeError(f"{context}: missing or invalid closingIssuesReferences.")
-        issues: list[tuple[str, int]] = []
-        for node in nodes:
-            node_fields = node if isinstance(node, dict) else {}
-            number = node_fields.get("number")
-            repository = node_fields.get("repository")
-            repo = repository.get("nameWithOwner") if isinstance(repository, dict) else None
-            if not isinstance(number, int) or not isinstance(repo, str) or not repo:
-                raise RuntimeError(f"{context}: missing or invalid closing issue reference.")
-            issues.append((repo, number))
-        return issues
 
 
 @dataclass(frozen=True, slots=True)
@@ -3121,12 +2965,43 @@ class _IssueInfo:
     state: str
 
 
-def _closing_issues(pull_request: dict[str, Any]) -> list[tuple[str, int]]:
+def _item_text_fields(node: dict[str, Any], error: Exception) -> tuple[str, str, str, str]:
+    title, url, created_at, updated_at = (
+        node.get(key) for key in ("title", "url", "createdAt", "updatedAt")
+    )
+    if not all(isinstance(value, str) for value in (title, url, created_at, updated_at)):
+        raise error
+    return title, url, created_at, updated_at
+
+
+def _pull_request_kind(node: dict[str, Any], github_username: str) -> WorkItemKind:
+    author = node.get("author")
+    login = author.get("login") if isinstance(author, dict) else None
+    # GitHub logins are case-insensitive and the configured username is free text.
+    if isinstance(login, str) and login.strip().lower() == github_username.strip().lower():
+        return WorkItemKind.AUTHORED_PR
+    return WorkItemKind.TRACKED_PR
+
+
+def _linked_closing_issues(pull_request: object, subject: str) -> list[tuple[str, int]]:
+    context = f"Invalid gh linked issue payload for {subject}"
+    if not isinstance(pull_request, dict):
+        raise RuntimeError(f"{context}: expected an object.")
+    return _closing_issues(
+        pull_request,
+        references_error=f"{context}: missing or invalid closingIssuesReferences.",
+        issue_error=f"{context}: missing or invalid closing issue reference.",
+    )
+
+
+def _closing_issues(
+    pull_request: dict[str, Any], *, references_error: str, issue_error: str
+) -> list[tuple[str, int]]:
     """Collect the ``(repo, number)`` issues one pull request closes."""
     references = pull_request.get("closingIssuesReferences")
     nodes = references.get("nodes") if isinstance(references, dict) else None
     if not isinstance(nodes, list):
-        raise RuntimeError("Invalid gh GraphQL payload: missing closingIssuesReferences.")
+        raise RuntimeError(references_error)
     issues: list[tuple[str, int]] = []
     for node in nodes:
         node_fields = node if isinstance(node, dict) else {}
@@ -3134,7 +3009,7 @@ def _closing_issues(pull_request: dict[str, Any]) -> list[tuple[str, int]]:
         repository = node_fields.get("repository")
         repo = repository.get("nameWithOwner") if isinstance(repository, dict) else None
         if not isinstance(number, int) or not isinstance(repo, str) or not repo:
-            raise RuntimeError("Invalid gh GraphQL payload: missing closing issue reference.")
+            raise RuntimeError(issue_error)
         issues.append((repo, number))
     return issues
 
@@ -3171,6 +3046,29 @@ def _pull_request_aliases(batch: Sequence[tuple[str, int]], fields: str) -> str:
         f"{{ pullRequest(number: {number}) {{ {fields} }} }}"
         for index, (repo, number) in enumerate(batch)
     )
+
+
+def _aliased_pull_request_skips(
+    errors: list[object], subjects_by_alias: dict[str, str], failure_message_prefix: str
+) -> dict[str, str]:
+    """Skip only inaccessible pull requests identified by the alias in the error path."""
+    skips_by_alias: dict[str, str] = {}
+    for entry in errors:
+        entry_fields = entry if isinstance(entry, dict) else {}
+        message = entry_fields.get("message")
+        path = entry_fields.get("path")
+        alias = path[0] if isinstance(path, list) and path else None
+        subject = subjects_by_alias.get(alias)
+        if subject is None:
+            raise RuntimeError(f"{failure_message_prefix}: {message or 'unknown error'}")
+        if not isinstance(message, str) or not (
+            _is_repository_authorization_error(message) or _is_unresolvable_item_error(message)
+        ):
+            raise RuntimeError(
+                f"{failure_message_prefix} ({subject}): {message or 'unknown error'}"
+            )
+        skips_by_alias[alias] = message
+    return skips_by_alias
 
 
 def _encode_todo_metadata(target: str | None) -> str:

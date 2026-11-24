@@ -149,7 +149,6 @@ def _run_request(state, monkeypatch, tmp_path, operation: str, *, press_keys=Fal
             # The dashboard is only driven once per scenario, so keys are pressed here,
             # while the operation still holds the dialog.
             await pilot.press("/")
-            await pilot.pause(0.2)
             state["keys_ignored"] = not isinstance(app.screen, SearchDialog)
         state["release"].set()
         await _wait_until(lambda: _dialog(app) is None, pilot)
@@ -157,10 +156,8 @@ def _run_request(state, monkeypatch, tmp_path, operation: str, *, press_keys=Fal
         request.join(10)
         if press_keys:
             await pilot.press("/")
-            await pilot.pause(0.2)
             state["search_opened"] = isinstance(app.screen, SearchDialog)
             await pilot.press("escape")
-            await pilot.pause(0.2)
 
     _serve_and_drive(state, monkeypatch, tmp_path, interact)
 
@@ -267,7 +264,6 @@ def start_autodispatch_while_searching(blocking_state, monkeypatch, tmp_path):
     async def interact(app, pilot):
         await _start_autodispatch(blocking_state, app, pilot)
         await pilot.press("/", "s", "e", "a", "r", "c", "h", "enter")
-        await pilot.pause(0.2)
         table = app.query_one("#work-items", DataTable)
         blocking_state["rows"] = [
             [str(cell) for cell in table.get_row_at(index)] for index in range(table.row_count)
@@ -287,7 +283,6 @@ def search_while_readiness_check_requested(blocking_state, monkeypatch, tmp_path
 
     async def interact(app, pilot):
         await pilot.press("/")
-        await pilot.pause(0.2)
         search = app.screen
         assert isinstance(search, SearchDialog)
         request = asyncio.create_task(
