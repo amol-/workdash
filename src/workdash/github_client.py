@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import shlex
@@ -991,7 +992,7 @@ class GitHubClient:
         try:
             with urllib.request.urlopen(url, timeout=_RELEASE_SOCKET_TIMEOUT_SECONDS) as response:
                 return response.read()
-        except OSError as error:
+        except (OSError, http.client.HTTPException) as error:
             raise RuntimeError(f"Failed to download {url}: {error}") from error
 
     def release_asset_url(self, url: str, archive_suffix: str) -> str:

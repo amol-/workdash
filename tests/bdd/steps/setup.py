@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import urllib.error
@@ -290,12 +291,22 @@ def _zellij_not_on_path(scenario_state: dict[str, Any]) -> None:
 def _zellij_download_stalls(
     scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    scenario_state["zellij_download_stalls"] = True
-    monkeypatch.setattr(config_module.platform, "machine", lambda: "x86_64")
-    monkeypatch.setattr(config_module.platform, "system", lambda: "Linux")
+    scenario_state["use_real_zellij_installer"] = True
     monkeypatch.setattr(
         urllib.request, "urlopen", MagicMock(side_effect=urllib.error.URLError("timed out"))
     )
+
+
+@given("the Zellij download ends before all bytes arrive")
+def _zellij_download_incomplete(
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario_state["use_real_zellij_installer"] = True
+    urlopen = MagicMock()
+    urlopen.return_value.__enter__.return_value.read.side_effect = http.client.IncompleteRead(
+        b"abc", 4
+    )
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
 
 
 @given("GitHub CLI is not installed on PATH")
@@ -355,6 +366,11 @@ def _install_wizard_fakes(
     def install_gh_fn() -> str:
         return scenario_state.get("installed_gh_binary", "/tmp/workdash-config/bin/gh")
 
+    use_real_zellij_installer = scenario_state.get("use_real_zellij_installer")
+    if use_real_zellij_installer:
+        monkeypatch.setattr(config_module.platform, "machine", lambda: "x86_64")
+        monkeypatch.setattr(config_module.platform, "system", lambda: "Linux")
+
     # Route configure() through our fakes without altering production code.
     monkeypatch.setattr(
         workdash_module,
@@ -364,9 +380,7 @@ def _install_wizard_fakes(
             **kwargs,
             input_fn=input_fn,
             which_fn=which_fn,
-            install_zellij_fn=None
-            if scenario_state.get("zellij_download_stalls")
-            else install_zellij_fn,
+            install_zellij_fn=None if use_real_zellij_installer else install_zellij_fn,
             install_gh_fn=install_gh_fn,
         ),
     )
@@ -895,6 +909,17 @@ def _reports_zellij_download_timeout(scenario_state: dict[str, Any]) -> None:
     stderr = scenario_state["stderr"]
     assert "Error: Failed to download https://github.com/zellij-org/zellij/" in stderr
     assert "timed out" in stderr
+
+
+@then(
+    "the system reports the incomplete Zellij download without a traceback and exits with status 1"
+)
+def _reports_incomplete_zellij_download(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 1
+    assert scenario_state["stderr"].strip() == (
+        "Error: Failed to download https://github.com/zellij-org/zellij/releases/latest/download/"
+        "zellij-x86_64-unknown-linux-musl.tar.gz: IncompleteRead(3 bytes read, 4 more expected)"
+    )
 
 
 @then("no configuration file is saved")

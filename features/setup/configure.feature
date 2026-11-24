@@ -52,7 +52,7 @@ Feature: First-time configuration
     - When GitHub CLI is not detected on PATH, the wizard tells the user it will install a local GitHub CLI binary from the latest release URL and that a global GitHub CLI install can be used instead when it is on PATH.
     - When GitHub CLI is not detected on PATH, the wizard downloads the latest release binary for the current operating system and architecture under the workdash configuration directory and tells the user where it was installed.
     - Re-running the wizard always checks PATH for GitHub CLI first; if no PATH binary is available, it downloads a fresh local binary even when a previous local binary exists.
-    - A stalled dependency download times out. The wizard reports the error and stops without saving the configuration, reporting completion, or starting the dashboard.
+    - A stalled dependency download times out. If a dependency download fails, including when it ends early, the wizard reports the download URL and reason without a traceback and exits with status 1 without saving the configuration, reporting completion, or starting the dashboard.
     - During automatic setup, a failed installation of a local Zellij or GitHub CLI binary leaves any previously installed copy usable, including one installed by another setup run.
     - Explicit `--configure` updates an installed binary in place. Upgrading a symlinked executable preserves the link, and upgrading an executable preserves its existing permissions while ensuring it is executable.
     - When a missing field has a default value, submitting an empty response accepts the default.
@@ -267,6 +267,17 @@ Feature: First-time configuration
     When the user starts the system
     Then the system reports that the Zellij download timed out
     And the system exits with a non-zero status
+    And no configuration file is saved
+    And the system does not tell the user that setup completed or to run it again
+    And the system stops without starting the dashboard
+
+  @id:F-SETUP-CONFIGURE-S036
+  Scenario: An incomplete dependency download stops automatic setup
+    Given the user has no configuration file
+    And Zellij is not installed on PATH
+    And the Zellij download ends before all bytes arrive
+    When the user starts the system
+    Then the system reports the incomplete Zellij download without a traceback and exits with status 1
     And no configuration file is saved
     And the system does not tell the user that setup completed or to run it again
     And the system stops without starting the dashboard
