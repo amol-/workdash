@@ -14,6 +14,7 @@ Feature: Persistent dashboard Zellij session
     - Inside Zellij, the dashboard starts in the current pane and uses the current session regardless of `--session`; when that session already has a dashboard, workdash reports that the new options are ignored and starts nothing.
     - Server-backed client commands never wrap.
     - Startup preflight runs before starting a new dashboard; attaching to a running dashboard does not require it. Missing Zellij reports configuration guidance.
+    - Outside Zellij, an existing configuration file with invalid JSON does not prevent attaching to a running dashboard. If no dashboard is running in the selected session, invalid JSON stops startup with a one-line error.
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S013
   Scenario: Recover an exited selected session
@@ -56,6 +57,25 @@ Feature: Persistent dashboard Zellij session
     Then the system attaches to the named session
     And the system reports that the new options are ignored
     And the system does not start a dashboard
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S020
+  Scenario: Attach to a running dashboard despite invalid JSON
+    Given the named session `project` already has a running dashboard
+    And the configuration file contains invalid JSON
+    When the user starts the dashboard in the named session
+    Then the system attaches to the named session
+    And the system reports that the new options are ignored
+    And the system does not start a dashboard
+
+  @id:F-STARTUP-ZELLIJ-WRAPPER-S021
+  Scenario: Invalid JSON prevents a new dashboard from starting outside Zellij
+    Given the system is not running inside a Zellij session
+    And Zellij is installed on PATH
+    And the configuration file contains invalid JSON
+    When the user starts the interactive dashboard
+    Then the system reports invalid configuration JSON in one line
+    And the system does not replace itself with Zellij
+    And the system exits with a non-zero status
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S019
   Scenario: Return to a running dashboard in another tab

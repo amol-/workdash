@@ -14,7 +14,13 @@ from dataclasses import dataclass
 
 from . import __version__, launcher
 from .backend import SuggestionMarkers, WorkdashBackend
-from .config import WorkdashConfig, WorkdashConfigValidationError, configure, load_config
+from .config import (
+    CONFIG_PATH,
+    WorkdashConfig,
+    WorkdashConfigValidationError,
+    configure,
+    load_config,
+)
 from .control import (
     WorkdashControlClient,
     WorkdashControlError,
@@ -81,23 +87,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.command == "show-config":
         return commands.show_config(json_output=options.json_output)
 
-    # A completely missing configuration file means first-time use: configure it, then
-    # let the user start again so the dashboard opens on a saved configuration. This
-    # runs before the Zellij wrapper, which needs the Zellij that setup installs.
-    if options.command is None:
-        try:
-            first_run = load_config().config_file_missing
-        except RuntimeError as error:
-            print(f"Error: {error}", file=sys.stderr, flush=True)
-            return 1
-        if first_run:
-            if _run_configure() != 0:
-                return 1
-            print()
-            print("Configuration complete.")
-            print("Run 'workdash' again to start the dashboard.")
-            print()
-            return 0
+    # First-time setup can install the Zellij binary the wrapper needs.
+    if options.command is None and not CONFIG_PATH.exists():
+        status = _run_configure()
+        if status != 0:
+            return status
+        print()
+        print("Configuration complete.")
+        print("Run 'workdash' again to start the dashboard.")
+        print()
+        return 0
 
     def preflight() -> bool:
         commands._github_client = GitHubClient()
@@ -690,10 +689,13 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
 
 
 def _run_configure() -> int:
-    """Run the setup wizard, reporting any failure as a one-line error."""
+    """Run the setup wizard and report cancellation or failure."""
 
     try:
         configure(github_client=GitHubClient())
+    except KeyboardInterrupt:
+        print("Configuration cancelled.", file=sys.stderr, flush=True)
+        return 130
     except WorkdashConfigValidationError as error:
         _print_config_validation_error(error)
         return 1

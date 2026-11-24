@@ -110,8 +110,6 @@ class WorkdashConfig:
     workdir: str = ""
     todo_repository: str = ""
     listens: tuple[str, ...] = ()
-    # True when load_config found no configuration file at all.
-    config_file_missing: bool = False
 
     def listener_addresses(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
         """Parse configured listeners and their accepted source networks."""
@@ -227,7 +225,7 @@ def load_config(path: Path = CONFIG_PATH) -> WorkdashConfig:
     """
 
     if not path.exists():
-        return WorkdashConfig(config_file_missing=True)
+        return WorkdashConfig()
     try:
         contents = path.read_text(encoding="utf-8")
     except OSError as error:

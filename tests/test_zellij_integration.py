@@ -21,9 +21,12 @@ import pytest
 
 
 def _temporary_home(tmp_path) -> str:
-    """Return a home that keeps dashboard records and Zellij's first run out of the real one."""
+    """Isolate Zellij and give dashboard harnesses an existing config file."""
 
-    (tmp_path / "home" / ".config" / "zellij").mkdir(parents=True)
+    config_dir = tmp_path / "home" / ".config"
+    (config_dir / "zellij").mkdir(parents=True)
+    (config_dir / "workdash").mkdir()
+    (config_dir / "workdash" / "config.json").write_text("{}", encoding="utf-8")
     return str(tmp_path / "home")
 
 
@@ -1373,7 +1376,6 @@ def _attach_running_dashboard_focus_harness(
     home = _temporary_home(tmp_path)
     # A dashboard already runs in this home, so the machine is configured: the returning
     # client must attach instead of being offered first-time configuration.
-    (tmp_path / "home" / ".config" / "workdash").mkdir(parents=True)
     (tmp_path / "home" / ".config" / "workdash" / "config.json").write_text(
         json.dumps(
             {

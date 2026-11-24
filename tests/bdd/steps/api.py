@@ -236,6 +236,9 @@ def _user_starts_workdash_with_server(
                 "items"
             ]
 
+    config_path = tmp_path / "config.json"
+    config_path.touch()
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
     monkeypatch.setattr(
@@ -1100,6 +1103,9 @@ def _start_two_server_dashboards(scenario_state, monkeypatch, tmp_path, request)
         def run(self, *, mouse):
             stopped.wait()
 
+    config_path = tmp_path / "config.json"
+    config_path.touch()
+    monkeypatch.setattr(cli, "CONFIG_PATH", config_path)
     monkeypatch.setattr(cli.GitHubClient, "check_authentication", lambda self: None)
     monkeypatch.setattr(cli, "load_config", lambda: api_config(tmp_path))
     monkeypatch.setattr(cli, "WorkdashBackend", Backend)

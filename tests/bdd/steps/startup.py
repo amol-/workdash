@@ -10,6 +10,7 @@ import socket
 import subprocess
 from http.client import HTTPConnection
 from importlib.metadata import version
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -105,29 +106,15 @@ def _config_has_malformed_agent_command(scenario_state: dict[str, Any]) -> None:
 
 
 @when("the user runs the system")
-def _user_runs_system(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_system(scenario_state, monkeypatch, capsys, [])
-
-
 @when("the user runs the system normally")
-def _user_runs_system_with_server(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_system(scenario_state, monkeypatch, capsys, [])
-
-
 def _run_system(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    argv: list[str],
+    config_path: Path,
 ) -> None:
+    config_path.touch()
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
     if "_malformed_config" in scenario_state:
         monkeypatch.delenv("ZELLIJ", raising=False)
     else:
@@ -213,7 +200,7 @@ def _run_system(
     else:  # pragma: no cover - defensive; no current scenario hits this
         raise AssertionError("Preflight scenario setup missing")
 
-    exit_code = workdash_module.main(argv)
+    exit_code = workdash_module.main([])
     captured = capsys.readouterr()
     scenario_state["exit_code"] = exit_code
     scenario_state["output"] = captured.out + captured.err
@@ -294,6 +281,7 @@ def _start_interactive_dashboard(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    config_path: Path,
     argv: list[str] | None = None,
 ) -> None:
     exec_calls: list[tuple[str, list[str]]] = []
@@ -303,11 +291,10 @@ def _start_interactive_dashboard(
         raise SystemExit(0)
 
     _install_direct_start_fakes(scenario_state, monkeypatch)
-    if "config_path" in scenario_state:
-        config_path = scenario_state["config_path"]
+    if not config_path.exists():
         save_config(workdash_module.load_config(), config_path)
-        monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
-    monkeypatch.setattr(github_client_module.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
     _install_startup_which(
         monkeypatch,
         zellij=bool(scenario_state.get("_zellij_installed")),
@@ -357,13 +344,26 @@ def _start_interactive_dashboard(
     scenario_state["exec_calls"] = exec_calls
 
 
+@given("the configuration file contains invalid JSON")
+def _invalid_config_json(config_path: Path) -> None:
+    config_path.write_text("{invalid json", encoding="utf-8")
+
+
+@then("the system reports invalid configuration JSON in one line")
+def _reports_invalid_config_json(scenario_state: dict[str, Any], config_path: Path) -> None:
+    lines = scenario_state["output"].splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith(f"Error: Configuration at {config_path} is not valid JSON:")
+
+
 @when("the user starts the interactive dashboard")
 def _user_starts_interactive_dashboard(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    config_path: Path,
 ) -> None:
-    _start_interactive_dashboard(scenario_state, monkeypatch, capsys)
+    _start_interactive_dashboard(scenario_state, monkeypatch, capsys, config_path)
 
 
 @when("the user starts a server-backed client command")
@@ -588,10 +588,10 @@ def _recovered_session(scenario_state):
     assert scenario_state["exec_calls"][0][1] == ["/usr/bin/zellij", "attach", "project"]
 
 
+@when("the user starts the dashboard in the named session")
 @when("the user starts the dashboard in the named session with configured listeners")
-def _start_named_session(scenario_state, monkeypatch, capsys, tmp_path, request):
+def _start_named_session(scenario_state, monkeypatch, capsys, config_path, request):
     scenario_state["configured_listeners"] = ("127.0.0.2@127.0.0.4",)
-    scenario_state["config_path"] = tmp_path / "config.json"
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         scenario_state["port"] = probe.getsockname()[1]
@@ -602,6 +602,7 @@ def _start_named_session(scenario_state, monkeypatch, capsys, tmp_path, request)
         scenario_state,
         monkeypatch,
         capsys,
+        config_path,
         argv=["--session", "project"],
     )
 

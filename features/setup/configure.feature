@@ -12,8 +12,9 @@ Feature: First-time configuration
 
   Rules:
     - The configuration lives at ~/.config/workdash/config.json.
-    - When the configuration file is missing, starting the system without any flag runs the wizard, then tells the user to run the system again instead of starting the dashboard.
-    - An existing configuration file is never reconfigured automatically, even when it has missing or invalid options; the system tells the user to run the wizard.
+    - When the configuration file is missing, starting the system runs the wizard before starting or attaching to Zellij. If setup succeeds, the system tells the user to run it again instead of starting the dashboard.
+    - An existing configuration file is never reconfigured automatically. If required settings are missing when starting a new dashboard, the system tells the user to run the wizard.
+    - Ctrl+C cancels the wizard with a short message and exit status 130, whether it started automatically or with `--configure`.
     - Required configuration fields are the GitHub username, open command, at least one repository selector, the work directory, the todo repository, and at least one agent.
     - Every required field must be present for the system to start; the wizard backfills missing required fields, using a default when one exists.
     - The analysis viewer is required; the wizard defaults to `workdash view` for Markdown in a terminal pane.
@@ -256,3 +257,18 @@ Feature: First-time configuration
     When the user starts the system
     Then the system tells the user to run the configuration wizard
     And the system does not run the configuration wizard
+
+  @id:F-SETUP-CONFIGURE-S027
+  Scenario: Cancel automatic setup
+    Given the user has no configuration file
+    And the user presses Ctrl+C at the first wizard prompt
+    When the user starts the system
+    Then the system reports that setup was cancelled and exits with status 130
+    And the system does not tell the user that setup completed or to run it again
+
+  @id:F-SETUP-CONFIGURE-S028
+  Scenario: Cancel explicitly requested setup
+    Given the user has no configuration file
+    And the user presses Ctrl+C at the first wizard prompt
+    When the user runs the system with "--configure"
+    Then the system reports that setup was cancelled and exits with status 130

@@ -217,6 +217,11 @@ def _gh_not_on_path(scenario_state: dict[str, Any]) -> None:
     scenario_state.setdefault("on_path_tools", set()).discard("gh")
 
 
+@given("the user presses Ctrl+C at the first wizard prompt")
+def _interrupt_wizard(scenario_state: dict[str, Any]) -> None:
+    scenario_state["interrupt_wizard"] = True
+
+
 class _UserHasNotAnswered(Exception):
     """The wizard asked an agent question the scenario's user has not answered (yet)."""
 
@@ -237,6 +242,8 @@ def _install_wizard_fakes(
     def input_fn(prompt: str) -> str:
         prompts.append(prompt)
         print(prompt)
+        if scenario_state.get("interrupt_wizard"):
+            raise KeyboardInterrupt
         if prompt.startswith("Analysis viewer") or prompt.startswith(
             ("Analysis format", "Does the analysis viewer")
         ):
@@ -296,7 +303,9 @@ def _run_configure_with_fakes(
         scenario_state["exit_code"] = workdash_module.main(["--configure"])
     except _UserHasNotAnswered:
         scenario_state["exit_code"] = None
-    scenario_state["output"] = capsys.readouterr().out
+    captured = capsys.readouterr()
+    scenario_state["output"] = captured.out
+    scenario_state["stderr"] = captured.err
     scenario_state["prompts"] = prompts
     written_config = load_config(config_path)
     scenario_state["written_config"] = written_config
@@ -687,6 +696,7 @@ def _existing_config_without_analysis_viewer(scenario_state, config_path):
 def _start_then_configure(scenario_state, config_path, monkeypatch, capsys):
     with monkeypatch.context() as patch:
         patch.setenv("ZELLIJ", "0")
+        patch.setattr(workdash_module, "CONFIG_PATH", config_path)
         patch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
         patch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
         scenario_state["startup_exit"] = workdash_module.main([])
@@ -732,6 +742,7 @@ def _starts_the_system(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     prompts = _install_wizard_fakes(scenario_state, config_path, monkeypatch)
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
     monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
     monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
     monkeypatch.setattr(
@@ -744,8 +755,23 @@ def _starts_the_system(
     scenario_state["exit_code"] = workdash_module.main([])
     captured = capsys.readouterr()
     scenario_state["output"] = captured.out + captured.err
+    scenario_state["stderr"] = captured.err
     scenario_state["prompts"] = prompts
     scenario_state["written_config"] = load_config(config_path)
+
+
+@then("the system reports that setup was cancelled and exits with status 130")
+def _reports_cancelled_setup(scenario_state: dict[str, Any], config_path: Path) -> None:
+    assert scenario_state["exit_code"] == 130
+    assert scenario_state["stderr"].strip() == "Configuration cancelled."
+    assert scenario_state["prompts"]
+    assert not config_path.exists()
+
+
+@then("the system does not tell the user that setup completed or to run it again")
+def _does_not_report_setup_success(scenario_state: dict[str, Any]) -> None:
+    assert "Configuration complete" not in scenario_state["output"]
+    assert "Run 'workdash' again" not in scenario_state["output"]
 
 
 @then("the system tells the user to run the system again")
