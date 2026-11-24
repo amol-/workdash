@@ -1542,7 +1542,7 @@ def test_zellij_pane_read_retries_two_unusable_answers_two_seconds_apart(monkeyp
     assert [call.args[0] for call in sleep.call_args_list] == [2.0, 2.0]
 
 
-def test_zellij_pane_read_gives_up_within_ten_seconds(monkeypatch):
+def test_zellij_pane_read_gives_up_after_a_bounded_wait(monkeypatch):
     sleep = MagicMock()
     monkeypatch.setattr("workdash.launcher.time", SimpleNamespace(sleep=sleep))
     run = MagicMock(side_effect=subprocess.TimeoutExpired("zellij", 5))
@@ -1550,9 +1550,14 @@ def test_zellij_pane_read_gives_up_within_ten_seconds(monkeypatch):
     monkeypatch.setattr("workdash.launcher.subprocess.run", run)
     with pytest.raises(RuntimeError, match="Zellij"):
         launcher_module.zellij.load_zellij_panes("workdash")
+    attempts = launcher_module._ZELLIJ_PANE_READ_ATTEMPTS
     timeouts = [call.kwargs["timeout"] for call in run.call_args_list]
     waits = [call.args[0] for call in sleep.call_args_list]
-    assert sum(timeouts) + sum(waits) <= 10
+    assert timeouts == [launcher_module._ZELLIJ_COMMAND_TIMEOUT_SECONDS] * attempts
+    assert sum(timeouts) + sum(waits) <= attempts * (
+        launcher_module._ZELLIJ_COMMAND_TIMEOUT_SECONDS
+        + launcher_module._ZELLIJ_PANE_READ_RETRY_SECONDS
+    )
 
 
 def test_launch_pane_and_wait_blocks_on_the_pane_command(
