@@ -50,10 +50,10 @@ def _invalid_github_username_answer(scenario_state: dict[str, Any]) -> None:
     scenario_state["input_responses"][2:3] = ["@octocat", "octocat"]
 
 
-@then("the wizard explains that the username must be usable in a repository selector")
+@then("the wizard explains the GitHub username format")
 def _rejects_github_username(scenario_state: dict[str, Any]) -> None:
     output = scenario_state["output"]
-    assert "Enter a GitHub username that can be used in a repository selector" in output
+    assert "Enter a GitHub username of 1–39 characters" in output
 
 
 @then(parsers.parse('the saved configuration keeps "{username}" as the GitHub username'))
@@ -68,14 +68,47 @@ def _saved_default_selector(scenario_state: dict[str, Any], selector: str) -> No
     assert f"Repositories set to: {selector}" in scenario_state["output"]
 
 
+@given(
+    parsers.parse(
+        'the user first leaves the repository selector blank, then enters "{bad}" and "{selector}"'
+    )
+)
+def _answer_repository_selector(scenario_state: dict[str, Any], bad: str, selector: str) -> None:
+    scenario_state["input_responses"][-1:-1] = ["", bad, selector]
+
+
+@then(
+    parsers.parse(
+        'the wizard asks for the repository selector again until it can save "{selector}"'
+    )
+)
+def _retries_repository_selector(scenario_state: dict[str, Any], selector: str) -> None:
+    prompts = scenario_state["prompts"]
+    assert sum(prompt.startswith("GitHub username") for prompt in prompts) == 1, prompts
+    assert sum(prompt.startswith("Repository selector") for prompt in prompts) == 3, prompts
+    assert "Enter a repository selector in owner/repo or owner/* form." in scenario_state["output"]
+    assert scenario_state["written_config"].repositories == (selector,)
+
+
 @given("another run saves a configuration while the user answers the wizard")
 def _another_run_saves_config(scenario_state: dict[str, Any]) -> None:
     scenario_state["other_configuration"] = b'{"github_username": "other-user"}\n'
 
 
-@given('the user answers the todo repository prompt with "todos" and then "octocat/tasks"')
-def _invalid_todo_repository_answer(scenario_state: dict[str, Any]) -> None:
-    scenario_state["input_responses"][-1:] = ["todos", "octocat/tasks"]
+@given(parsers.parse('the user answers the todo repository prompt with "{bad}" and then "{repo}"'))
+def _invalid_todo_repository_answer(scenario_state: dict[str, Any], bad: str, repo: str) -> None:
+    scenario_state["input_responses"][-1:] = [bad, repo]
+
+
+@given(
+    parsers.parse(
+        'the user first leaves the todo repository blank, then enters "{bad}" and "{repo}"'
+    )
+)
+def _answer_todo_repository_without_default(
+    scenario_state: dict[str, Any], bad: str, repo: str
+) -> None:
+    scenario_state["input_responses"][-1:] = ["", bad, repo]
 
 
 @given("a supported agent's command-line tool is on PATH")
@@ -826,10 +859,18 @@ def _reprompts_for_todo_repository(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["prompts"].count("Todo repository [octocat/todos]: ") == 2
 
 
-@then('the saved configuration uses "octocat/tasks" as the todo repository')
-def _saved_todo_repository(scenario_state: dict[str, Any]) -> None:
+@then("the wizard asks for the todo repository again without suggesting a default")
+def _reprompts_for_todo_without_default(scenario_state: dict[str, Any]) -> None:
+    prompts = [p for p in scenario_state["prompts"] if p.startswith("Todo repository")]
+    assert len(prompts) == 3, prompts
+    assert all("[" not in p for p in prompts), prompts
+    assert "Enter a todo repository in owner/repo form." in scenario_state["output"]
+
+
+@then(parsers.parse('the saved configuration uses "{repo}" as the todo repository'))
+def _saved_todo_repository(scenario_state: dict[str, Any], repo: str) -> None:
     assert scenario_state["exit_code"] == 0
-    assert scenario_state["written_config"].require_valid().todo_repository == "octocat/tasks"
+    assert scenario_state["written_config"].require_valid().todo_repository == repo
 
 
 @then("the system does not tell the user that setup completed or to run it again")

@@ -949,7 +949,10 @@ def test_configure_asks_about_agents_when_the_only_entry_has_no_commands(tmp_pat
     assert config.agents == {"claude": AgentConfig(analyze="claude -p", launch="claude")}
 
 
-@pytest.mark.parametrize("invalid_username", ["", "Kat", "octo--cat", "a" * 40])
+@pytest.mark.parametrize(
+    "invalid_username",
+    ["", "Kat", "octo--cat", "a" * 40, "octocat_ab", "octocat_abcdefghi", "a" * 35 + "_octo"],
+)
 def test_configure_reprompts_for_invalid_github_username(tmp_path, invalid_username):
     config_path = tmp_path / "config.json"
     # Viewer defaults, both agent sections ended, username retry, workdir and todo defaults.

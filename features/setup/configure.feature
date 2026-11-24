@@ -27,7 +27,7 @@ Feature: First-time configuration
     - The wizard suggests only an available platform opener: `xdg-open` on Linux or `open` on macOS, explicitly explaining that Enter accepts it. Without a suggestion, empty input is rejected.
     - For a missing or invalid viewer terminal choice, the wizard asks "Does the viewer require its own terminal window? [y/N]", defaulting to No and preserving explicit boolean choices.
     - The wizard explains that advanced viewer commands can be edited in config.json.
-    - When the todo repository is empty or not in "owner/repo" form, the wizard prompts for it with the default "<username>/todos". It explains the required format and asks again if the answer is invalid; the repository does not have to exist yet.
+    - When the todo repository is empty or not in "owner/repo" form, the wizard prompts for it. It offers "<username>/todos" only when the username can form a default repository selector and the todo default is valid. Otherwise it requires an explicit "owner/repo". It explains the required format and asks again if the answer is invalid; the repository does not have to exist yet.
     - Present agent command fields must be valid command lines; each valid command enables that agent action.
     - The wizard preserves previously filled valid fields while repairing missing or invalid viewer settings.
     - An agent has a unique name and an analyze command, a launch command, or both. An agent with an analyze command is an analysis agent; an agent with a launch command is a coding agent.
@@ -56,7 +56,8 @@ Feature: First-time configuration
     - Explicit `--configure` updates an installed binary in place. Upgrading a symlinked executable preserves the link, and upgrading an executable preserves its existing permissions while ensuring it is executable.
     - When a missing field has a default value, submitting an empty response accepts the default.
     - When a missing field has no default value, the wizard keeps prompting until the user provides a value.
-    - When the repositories list is empty and a GitHub username is known, the wizard defaults the repositories to "<username>/*" with the owner in lowercase and tells the user what was set. To form this selector from a newly entered username, the wizard requires a username of 1–39 characters made up of ASCII letters or digits with optional single hyphens between them. It explains the problem and asks again if the answer is invalid.
+    - A newly entered GitHub username may contain ASCII letters or digits with single hyphens between them, followed by an optional underscore and a 3–8 character alphanumeric enterprise shortcode. The whole username may be at most 39 characters. The wizard keeps the username's case and asks again if the answer is invalid.
+    - When the repositories list is empty, the wizard defaults it to "<username>/*" with the owner in lowercase if that is a valid repository selector. Otherwise it asks for one valid "owner/repo" or "owner/*" selector and asks again if the answer is empty or invalid. Existing selectors are preserved.
     - If `listens` is not a list, the wizard reports how to correct it and leaves the configuration file unchanged.
     - The wizard writes the resulting configuration to the configuration file and reports where it was saved.
 
@@ -266,14 +267,31 @@ Feature: First-time configuration
     And the wizard saves and reports "octocat/*" as the default repository selector
 
   @id:F-SETUP-CONFIGURE-S032
-  Scenario: Automatic setup rejects a username that cannot form a default repository selector
+  Scenario: Automatic setup rejects an invalid GitHub username
     Given the user has no configuration file
     And the user answers the GitHub username prompt with "@octocat" and then "octocat"
     When the user starts the system
-    Then the wizard explains that the username must be usable in a repository selector
+    Then the wizard explains the GitHub username format
     And the system prompts again for the GitHub username
     And the saved configuration keeps "octocat" as the GitHub username
     And the wizard saves and reports "octocat/*" as the default repository selector
+
+  @id:F-SETUP-CONFIGURE-S033
+  Scenario Outline: Setup accepts a managed GitHub username and asks for repositories separately
+    Given the user has no configuration file
+    And the user enters "<username>" as their GitHub username
+    And the user first leaves the repository selector blank, then enters "mona-cat_octo/*" and "<selector>"
+    And the user first leaves the todo repository blank, then enters "octo-org/*" and "octo-org/tasks"
+    When <invocation>
+    Then the saved configuration keeps "<username>" as the GitHub username
+    And the wizard asks for the repository selector again until it can save "<selector>"
+    And the wizard asks for the todo repository again without suggesting a default
+    And the saved configuration uses "octo-org/tasks" as the todo repository
+
+    Examples:
+      | invocation                                  | username      | selector          |
+      | the user starts the system                  | mona-cat_octo | octo-org/*        |
+      | the user runs the system with "--configure" | Mona-Cat_Octo | octo-org/projects |
 
   @id:F-SETUP-CONFIGURE-S026
   Scenario: An existing configuration file is never reconfigured automatically

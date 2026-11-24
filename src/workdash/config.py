@@ -17,6 +17,7 @@ import tempfile
 import urllib.request
 import zipfile
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from io import BytesIO
 from ipaddress import ip_network
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .git import is_repository_name
+from .repo_resolver import validate_repository_selectors
 
 if TYPE_CHECKING:
     from .github_client import GitHubClient
@@ -745,12 +747,13 @@ def configure(
         if not response:
             print("GitHub username is required.")
             continue
-        if not repositories and (
-            len(response) > 39 or not re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", response)
+        if len(response) > 39 or not re.fullmatch(
+            r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*(?:_[A-Za-z0-9]{3,8})?", response
         ):
             print(
-                "Enter a GitHub username that can be used in a repository selector. "
-                "Use 1–39 ASCII characters: letters, digits, and single hyphens between them."
+                "Enter a GitHub username of 1–39 characters: ASCII letters and digits with "
+                "single hyphens between them, optionally followed by an underscore and a "
+                "3–8 character alphanumeric enterprise shortcode."
             )
             continue
         github_username = response
@@ -759,17 +762,31 @@ def configure(
     if not workdir:
         workdir = _prompt_with_default(input_fn, "Work directory", _DEFAULT_WORKDIR)
 
-    if not repositories and github_username:
-        repositories = (f"{github_username}/*".lower(),)
+    default_selector = f"{github_username}/*".lower()
+    try:
+        validate_repository_selectors([default_selector])
+    except ValueError:
+        default_selector = ""
+
+    if not repositories:
+        if default_selector:
+            repositories = (default_selector,)
+        while not repositories:
+            response = input_fn("Repository selector (owner/repo or owner/*): ")
+            with suppress(ValueError):
+                repositories = tuple(validate_repository_selectors([response]))
+            if not repositories:
+                print("Enter a repository selector in owner/repo or owner/* form.")
         print(f"Repositories set to: {repositories[0]}")
 
     todo_repository = config.todo_repository
-    # An empty or hand-broken value is prompted for again, so --configure can
-    # always bring a locked-out configuration back to a usable todo repository.
+    todo_default = f"{github_username}/todos"
+    # A managed login can identify the user without being a usable default repository owner.
     while not is_repository_name(todo_repository):
-        todo_repository = _prompt_with_default(
-            input_fn, "Todo repository", f"{github_username}/todos"
-        )
+        if default_selector and is_repository_name(todo_default):
+            todo_repository = _prompt_with_default(input_fn, "Todo repository", todo_default)
+        else:
+            todo_repository = input_fn("Todo repository (owner/repo required): ").strip()
         if not is_repository_name(todo_repository):
             print("Enter a todo repository in owner/repo form.")
 
