@@ -35,8 +35,6 @@ class DashboardRecords:
 
     def load(self, session: str) -> DashboardRecord | None:
         path = self._path(session)
-        if not path.exists():
-            return None
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):

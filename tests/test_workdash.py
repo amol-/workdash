@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import workdash.config as config_module
 import workdash.control as control_module
 import workdash.github_client as github_client_module
 import workdash.workdash as workdash_module
@@ -28,6 +29,13 @@ def _fake_dashboard_server(monkeypatch):
     from unittest.mock import MagicMock
 
     monkeypatch.setattr(workdash_module, "WorkdashControlServer", MagicMock())
+
+
+@pytest.fixture(autouse=True)
+def _existing_config_path(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.touch()
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
 
 
 _VALID_CONFIG = WorkdashConfig(
@@ -697,6 +705,189 @@ def test_main_exits_with_error_when_gh_is_not_installed(
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "gh CLI is not installed" in captured.err
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [EOFError("EOF when reading a line"), PermissionError("denied")],
+)
+def test_main_reports_a_failed_wizard_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    failure: Exception,
+) -> None:
+    config_path = tmp_path / "missing.json"
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        lambda **kwargs: (_ for _ in ()).throw(failure),
+    )
+
+    exit_code = workdash_module.main([])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith(f"Error: {failure}")
+    assert "Run 'workdash' again" not in captured.out
+
+
+def test_main_runs_configuration_when_the_config_file_is_missing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    config_path = tmp_path / "missing.json"
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        lambda **kwargs: save_config(_VALID_CONFIG, config_path),
+    )
+    monkeypatch.setattr(
+        workdash_module,
+        "WorkdashBackend",
+        lambda *args, **kwargs: pytest.fail("first run should not load work items"),
+    )
+    # A machine without Zellij is the main first-time case: setup must run before
+    # anything needs the Zellij binary it installs.
+    monkeypatch.setattr(workdash_module.launcher.shutil, "which", lambda command: None)
+    monkeypatch.delenv("ZELLIJ", raising=False)
+
+    exit_code = workdash_module.main([])
+
+    assert exit_code == 0
+    assert load_config(config_path) == _VALID_CONFIG
+    captured = capsys.readouterr()
+    assert "Run 'workdash' again to start the dashboard." in captured.out
+    assert "zellij is not installed" not in captured.err
+
+
+def test_persistent_pane_reports_missing_config_without_running_setup(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    config_path = tmp_path / "session-home" / ".config" / "workdash" / "config.json"
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        lambda **kwargs: save_config(_VALID_CONFIG, config_path),
+    )
+
+    exit_code = workdash_module.main(["--persistent-pane"])
+
+    assert not config_path.exists(), "the dashboard pane must not create configuration"
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err == f"Error: Configuration file not found at {config_path}.\n"
+    assert not captured.out
+
+
+@pytest.mark.parametrize("path_is_set", [True, False], ids=["set-path", "unset-path"])
+def test_first_run_replaces_private_gh_without_a_system_install(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    path_is_set: bool,
+) -> None:
+    config_path = tmp_path / "missing.json"
+    private_bin = tmp_path / "bin"
+    private_bin.mkdir()
+    system_bin = tmp_path / "system-bin"
+    system_bin.mkdir()
+    gh = private_bin / "gh"
+    for binary in (private_bin / "zellij", gh, system_bin / "claude"):
+        binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        binary.chmod(0o755)
+    gh.write_text("not an executable format\n", encoding="utf-8")
+
+    original_path = str(system_bin) if path_is_set else None
+    if path_is_set:
+        monkeypatch.setenv("PATH", str(system_bin))
+    else:
+        monkeypatch.delenv("PATH", raising=False)
+        monkeypatch.setattr(os, "confstr", lambda name: str(system_bin))
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(workdash_module.launcher, "_WORKDASH_LOCAL_BIN", private_bin)
+
+    from unittest.mock import MagicMock
+
+    list_sessions = MagicMock(return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    monkeypatch.setattr(workdash_module.launcher.subprocess, "run", list_sessions)
+
+    def install_gh():
+        gh.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        return str(gh)
+
+    answers = iter(["/bin/sh", "", "", "", "", "octocat", "", ""])
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        lambda **kwargs: config_module.configure(
+            config_path,
+            **kwargs,
+            input_fn=lambda prompt: next(answers),
+            install_zellij_fn=lambda: str(private_bin / "zellij"),
+            install_gh_fn=install_gh,
+        ),
+    )
+
+    assert workdash_module.main([]) == 0
+    output = capsys.readouterr().out
+    assert f"Installed GitHub CLI to: {gh}" in output
+    assert "Run 'workdash' again to start the dashboard." in output
+    assert gh.read_text(encoding="utf-8").startswith("#!/bin/sh")
+    assert os.environ.get("PATH") == original_path
+    assert [call.args[0] for call in list_sessions.call_args_list] == [
+        [str(private_bin / "zellij"), "list-sessions", "--no-formatting"]
+    ]
+
+
+def test_main_does_not_configure_again_when_the_config_file_exists(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(WorkdashConfig(github_username="testuser"), config_path)
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        lambda **kwargs: pytest.fail("an existing config must not be reconfigured"),
+    )
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
+    _auth_status_succeeds(monkeypatch)
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
+
+    exit_code = workdash_module.main([])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "missing configuration fields" in captured.err
+    assert "workdash --configure" in captured.err
+
+
+def test_main_reports_a_dangling_config_symlink_without_running_the_wizard(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config-link.json"
+    config_path.symlink_to(tmp_path / "missing.json")
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        lambda **kwargs: pytest.fail("a dangling config symlink must not start the wizard"),
+    )
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
+    monkeypatch.setenv("ZELLIJ", "1")
+
+    assert workdash_module.main([]) == 1
+    assert "workdash --configure" in capsys.readouterr().err
+    assert config_path.is_symlink()
+    assert not config_path.exists()
 
 
 def test_main_exits_with_error_when_config_incomplete(
@@ -1563,14 +1754,32 @@ def test_main_configure_reports_invalid_listeners(monkeypatch, tmp_path, capsys)
     assert path.read_text() == original
 
 
+def test_main_configure_reports_an_unparsable_config_file_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    from workdash.config import configure
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{invalid json", encoding="utf-8")
+    monkeypatch.setattr(workdash_module, "configure", lambda **kwargs: configure(config_path))
+
+    exit_code = workdash_module.main(["--configure"])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("Error: Configuration at ")
+    assert "is not valid JSON" in captured.err
+
+
 def test_main_configure_runs_setup_and_exits(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     configure_called = False
 
-    def fake_configure(*, github_client):
+    def fake_configure(*, github_client, create_only):
         nonlocal configure_called
         configure_called = True
+        assert not create_only
         return _VALID_CONFIG
 
     monkeypatch.setattr(workdash_module, "configure", fake_configure)
@@ -1625,12 +1834,16 @@ def test_main_outside_zellij_replaces_process_with_zellij(
     assert wrapper_calls == [["--refresh"]]
 
 
-def test_main_exits_with_error_when_gh_is_not_authenticated(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_main_reports_gh_authentication_failure_before_invalid_config_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     def fake_run(*args, **kwargs):
         raise github_client_module.subprocess.CalledProcessError(1, ["gh", "auth", "status"])
 
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{invalid json", encoding="utf-8")
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
     monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     monkeypatch.setattr(github_client_module.subprocess, "run", fake_run)
     monkeypatch.setenv("ZELLIJ", "0")
@@ -1641,6 +1854,7 @@ def test_main_exits_with_error_when_gh_is_not_authenticated(
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "gh CLI is not authenticated" in captured.err
+    assert "is not valid JSON" not in captured.err
     assert (
         "Run this command to authenticate the GitHub CLI used by workdash:\n"
         "  /usr/bin/gh auth login\n"
@@ -1655,6 +1869,7 @@ def test_main_outside_zellij_checks_gh_before_replacing_process(
 
     monkeypatch.delenv("ZELLIJ", raising=False)
     monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(
         workdash_module.launcher.zellij,
         "exec_zellij_wrapped_workdash",
@@ -1683,6 +1898,25 @@ def test_main_outside_zellij_reports_missing_zellij(
     captured = capsys.readouterr()
     assert "zellij is not installed or not configured" in captured.err
     assert "--configure" in captured.err
+
+
+def test_main_preserves_a_zellij_wrapper_error_when_config_access_is_denied(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from unittest.mock import MagicMock
+
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    config_path = MagicMock(spec=Path)
+    config_path.lstat.side_effect = PermissionError("Configuration is inaccessible")
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(
+        workdash_module.launcher.zellij,
+        "exec_zellij_wrapped_workdash",
+        MagicMock(side_effect=RuntimeError("Failed to list Zellij sessions")),
+    )
+
+    assert workdash_module.main([]) == 1
+    assert capsys.readouterr().err == "Error: Failed to list Zellij sessions\n"
 
 
 @pytest.mark.parametrize(

@@ -14,7 +14,13 @@ from dataclasses import dataclass
 
 from . import __version__, launcher
 from .backend import SuggestionMarkers, WorkdashBackend
-from .config import WorkdashConfig, WorkdashConfigValidationError, configure, load_config
+from .config import (
+    CONFIG_PATH,
+    WorkdashConfig,
+    WorkdashConfigValidationError,
+    configure,
+    load_config,
+)
 from .control import (
     WorkdashControlClient,
     WorkdashControlError,
@@ -45,12 +51,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         logging.basicConfig(level=logging.DEBUG)
 
     if options.configure:
-        try:
-            configure(github_client=GitHubClient())
-        except WorkdashConfigValidationError as error:
-            _print_config_validation_error(error)
-            return 1
-        return 0
+        return _run_configure()
 
     commands = WorkdashCommands(host=options.host)
     if options.command in {
@@ -86,7 +87,59 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.command == "show-config":
         return commands.show_config(json_output=options.json_output)
 
+    config_access_error = None
+    if options.command is None:
+        try:
+            CONFIG_PATH.lstat()
+        except FileNotFoundError:
+            if options.persistent_pane:
+                print(
+                    f"Error: Configuration file not found at {CONFIG_PATH}.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return 1
+            original_path = os.environ.get("PATH")
+            try:
+                if _should_wrap_interactive_start(options):
+                    launcher.zellij.exec_zellij_wrapped_workdash(argv, attach_only=True)
+                elif os.getenv("ZELLIJ"):
+                    session = os.getenv("ZELLIJ_SESSION_NAME")
+                    if (
+                        session
+                        and os.getenv("ZELLIJ_PANE_ID")
+                        and launcher.dashboard_is_running(session, attach_only=True)
+                    ):
+                        print("Workdash is already running; new options are ignored.", flush=True)
+                        return 0
+            except launcher.ZellijBinaryUnavailableError:
+                # First-time setup can install the Zellij binary.
+                pass
+            except RuntimeError as error:
+                print(f"Error: {error}", file=sys.stderr, flush=True)
+                return 1
+            finally:
+                # The probe can use private binaries, but the wizard must detect system tools.
+                if original_path is None:
+                    os.environ.pop("PATH", None)
+                else:
+                    os.environ["PATH"] = original_path
+            status = _run_configure(create_only=True)
+            if status != 0:
+                return status
+            print()
+            print("Configuration complete.")
+            print("Run 'workdash' again to start the dashboard.")
+            print()
+            return 0
+        except OSError as error:
+            # Attaching to a running dashboard does not need local configuration.
+            config_access_error = f"Cannot inspect configuration at {CONFIG_PATH}: {error}"
+
     def preflight() -> bool:
+        if config_access_error is not None:
+            print(f"Error: {config_access_error}", file=sys.stderr, flush=True)
+            return False
         commands._github_client = GitHubClient()
         inject_workdash_local_bin_into_path()
         gh_error = commands._github_client.check_authentication()
@@ -98,10 +151,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if _should_wrap_interactive_start(options):
         try:
             launcher.zellij.exec_zellij_wrapped_workdash(argv, preflight)
-            return 1
         except RuntimeError as error:
-            print(f"Error: {error}", file=sys.stderr, flush=True)
+            message = str(error)
+            if config_access_error is not None and isinstance(
+                error, launcher.ZellijBinaryUnavailableError
+            ):
+                message = config_access_error
+            print(f"Error: {message}", file=sys.stderr, flush=True)
             return 1
+        return 1
     elif not preflight():
         return 1
 
@@ -462,6 +520,9 @@ class WorkdashCommands:
         except WorkdashConfigValidationError as error:
             _print_config_validation_error(error)
             return False
+        except RuntimeError as error:
+            print(f"Error: {error}", file=sys.stderr, flush=True)
+            return False
         return True
 
     def interactive(self) -> int:
@@ -674,6 +735,23 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             json_output=options.json_output,
         )
     raise AssertionError(f"Unsupported server-backed command: {options.command}")
+
+
+def _run_configure(*, create_only: bool = False) -> int:
+    """Run the setup wizard and report cancellation or failure."""
+
+    try:
+        configure(github_client=GitHubClient(), create_only=create_only)
+    except KeyboardInterrupt:
+        print("Configuration cancelled.", file=sys.stderr, flush=True)
+        return 130
+    except WorkdashConfigValidationError as error:
+        _print_config_validation_error(error)
+        return 1
+    except (RuntimeError, OSError, EOFError) as error:
+        print(f"Error: {error}", file=sys.stderr, flush=True)
+        return 1
+    return 0
 
 
 def _print_config_validation_error(error: WorkdashConfigValidationError) -> None:

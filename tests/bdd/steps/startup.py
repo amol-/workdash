@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -10,10 +11,11 @@ import socket
 import subprocess
 from http.client import HTTPConnection
 from importlib.metadata import version
+from pathlib import Path
 from typing import Any
 
 import pytest
-from pytest_bdd import given, then, when
+from pytest_bdd import given, parsers, then, when
 
 import workdash.control as control_module
 import workdash.github_client as github_client_module
@@ -106,29 +108,15 @@ def _config_has_malformed_agent_command(scenario_state: dict[str, Any]) -> None:
 
 
 @when("the user runs the system")
-def _user_runs_system(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_system(scenario_state, monkeypatch, capsys, [])
-
-
 @when("the user runs the system normally")
-def _user_runs_system_with_server(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_system(scenario_state, monkeypatch, capsys, [])
-
-
 def _run_system(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    argv: list[str],
+    config_path: Path,
 ) -> None:
+    config_path.touch()
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
     if "_malformed_config" in scenario_state:
         monkeypatch.delenv("ZELLIJ", raising=False)
     else:
@@ -214,7 +202,7 @@ def _run_system(
     else:  # pragma: no cover - defensive; no current scenario hits this
         raise AssertionError("Preflight scenario setup missing")
 
-    exit_code = workdash_module.main(argv)
+    exit_code = workdash_module.main([])
     captured = capsys.readouterr()
     scenario_state["exit_code"] = exit_code
     scenario_state["output"] = captured.out + captured.err
@@ -295,6 +283,7 @@ def _start_interactive_dashboard(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    config_path: Path,
     argv: list[str] | None = None,
 ) -> None:
     exec_calls: list[tuple[str, list[str]]] = []
@@ -304,11 +293,14 @@ def _start_interactive_dashboard(
         raise SystemExit(0)
 
     _install_direct_start_fakes(scenario_state, monkeypatch)
-    if "config_path" in scenario_state:
-        config_path = scenario_state["config_path"]
+    if (
+        not scenario_state.get("config_access_denied")
+        and not scenario_state.get("config_missing")
+        and not config_path.exists()
+    ):
         save_config(workdash_module.load_config(), config_path)
-        monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
-    monkeypatch.setattr(github_client_module.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
     _install_startup_which(
         monkeypatch,
         zellij=bool(scenario_state.get("_zellij_installed")),
@@ -359,13 +351,57 @@ def _start_interactive_dashboard(
     scenario_state["exec_calls"] = exec_calls
 
 
+@given("the configuration file contains invalid JSON")
+def _invalid_config_json(config_path: Path) -> None:
+    config_path.write_text("{invalid json", encoding="utf-8")
+
+
+@given("access to the configuration directory is denied")
+def _deny_config_access(scenario_state, config_path, monkeypatch):
+    config_path.write_text("{}", encoding="utf-8")
+    scenario_state["config_access_denied"] = True
+    sessions_dir = config_path.parent / "sessions"
+    for module, name in ((os, "stat"), (os, "lstat"), (io, "open")):
+        original = getattr(module, name)
+
+        def denied(path, *args, original=original, **kwargs):
+            if isinstance(path, (str, Path)) and (
+                Path(path) == config_path or Path(path).is_relative_to(sessions_dir)
+            ):
+                raise PermissionError("Permission denied")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(module, name, denied)
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        lambda **kwargs: pytest.fail("denied configuration access must not start the wizard"),
+    )
+
+
+@then("the system reports denied configuration access in one line")
+def _reports_config_access_error(scenario_state, config_path):
+    (line,) = scenario_state["output"].splitlines()
+    assert line.startswith("Error:")
+    assert str(config_path) in line
+    assert "Permission denied" in line
+
+
+@then("the system reports invalid configuration JSON in one line")
+def _reports_invalid_config_json(scenario_state: dict[str, Any], config_path: Path) -> None:
+    lines = scenario_state["output"].splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith(f"Error: Configuration at {config_path} is not valid JSON:")
+
+
 @when("the user starts the interactive dashboard")
 def _user_starts_interactive_dashboard(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    config_path: Path,
 ) -> None:
-    _start_interactive_dashboard(scenario_state, monkeypatch, capsys)
+    _start_interactive_dashboard(scenario_state, monkeypatch, capsys, config_path)
 
 
 @when("the user starts a server-backed client command")
@@ -590,10 +626,10 @@ def _recovered_session(scenario_state):
     assert scenario_state["exec_calls"][0][1] == ["/usr/bin/zellij", "attach", "project"]
 
 
+@when("the user starts the dashboard in the named session")
 @when("the user starts the dashboard in the named session with configured listeners")
-def _start_named_session(scenario_state, monkeypatch, capsys, tmp_path, request):
+def _start_named_session(scenario_state, monkeypatch, capsys, config_path, request):
     scenario_state["configured_listeners"] = ("127.0.0.2@127.0.0.4",)
-    scenario_state["config_path"] = tmp_path / "config.json"
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         scenario_state["port"] = probe.getsockname()[1]
@@ -604,6 +640,7 @@ def _start_named_session(scenario_state, monkeypatch, capsys, tmp_path, request)
         scenario_state,
         monkeypatch,
         capsys,
+        config_path,
         argv=["--session", "project"],
     )
 
@@ -691,16 +728,28 @@ def _new_pane_is_named_workdash_tui(scenario_state):
 def _inside_zellij_with_running_dashboard(scenario_state, monkeypatch):
     scenario_state["inside_dashboard_pane"] = True
 
-    def dashboard_is_running(session):
-        assert session == "workdash-test"
-        return True
-
-    monkeypatch.setattr(launcher_module, "dashboard_is_running", dashboard_is_running)
+    monkeypatch.setattr(control_module, "probe_dashboard_session", lambda address: "workdash-test")
     monkeypatch.setattr(
         launcher_module.zellij,
         "name_dashboard_pane",
         lambda session, pane: pytest.fail("a running dashboard keeps its pane name"),
     )
+
+
+@given("the configuration file has been moved aside")
+def _config_moved_aside(scenario_state, config_path, monkeypatch):
+    config_path.unlink(missing_ok=True)
+    scenario_state["config_missing"] = True
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        lambda **kwargs: pytest.fail("setup must not run while the dashboard is running"),
+    )
+
+
+@then("the configuration file is not recreated")
+def _config_not_recreated(config_path):
+    assert not config_path.exists()
 
 
 @then("the system starts a dashboard in that session")
@@ -781,9 +830,46 @@ def _named_session_without_dashboard(scenario_state):
     scenario_state.update(outside_zellij=True, _zellij_installed=True, named_dashboard="stopped")
 
 
+@given(parsers.parse("the user is {location} with no configuration file"))
+def _first_run_without_config(scenario_state, config_path, monkeypatch, location):
+    outside_zellij = location == "outside Zellij"
+    config_path.unlink(missing_ok=True)
+    scenario_state.update(
+        config_missing=True,
+        outside_zellij=outside_zellij,
+        inside_dashboard_pane=not outside_zellij,
+        _zellij_installed=True,
+    )
+
+    def configure(*, github_client, create_only):
+        assert create_only
+        save_config(WorkdashConfig(github_username="testuser"), config_path)
+
+    monkeypatch.setattr(workdash_module, "configure", configure)
+
+
 @given("its address serves session `other`")
+@given("the dashboard address serves session `other`")
 def _address_serves_other(scenario_state):
     scenario_state["dashboard_at_address"] = "other"
+
+
+@given(
+    parsers.parse(
+        "the dashboard address serves session `project`, which is {state} in local Zellij"
+    )
+)
+def _address_serves_unattachable_project(scenario_state, state):
+    scenario_state["dashboard_at_address"] = "project"
+    if state == "exited":
+        scenario_state["named_dashboard"] = "exited"
+
+
+@then("Workdash completes setup and tells the user to run it again")
+def _reports_setup_complete(scenario_state, config_path):
+    output = scenario_state["output"]
+    assert "Run 'workdash' again to start the dashboard." in output, output
+    assert load_config(config_path).github_username == "testuser"
 
 
 @then("the system reports the other session and the address it serves")
@@ -844,12 +930,28 @@ def _dashboard_in_other_tab(tmp_path):
         harness.close()
 
 
-@when("the user returns to that session with Workdash and sends the most recent input")
+@given("the user has moved the configuration file aside")
+def _move_config_aside(real_dashboard_focus, tmp_path):
+    config = tmp_path / "home" / ".config" / "workdash" / "config.json"
+    config.rename(config.with_suffix(".backup"))
+
+
+@when(
+    "the user returns to that session with Workdash and sends the most recent input",
+    target_fixture="returning_cli_output",
+)
 def _return_to_dashboard_session(real_dashboard_focus):
-    next(real_dashboard_focus)
+    return next(real_dashboard_focus)
 
 
 @then("the returning client's input reaches the dashboard pane")
 def _dashboard_receives_input(real_dashboard_focus):
     with pytest.raises(StopIteration):
         next(real_dashboard_focus)
+
+
+@then("Workdash does not prompt for setup or recreate the configuration file")
+def _does_not_run_setup(returning_cli_output, tmp_path):
+    assert b"Attaching..." in returning_cli_output
+    assert b"Open command" not in returning_cli_output
+    assert not (tmp_path / "home" / ".config" / "workdash" / "config.json").exists()

@@ -48,11 +48,9 @@ pip install -e '.[test]'
 ## First-time setup
 
 On the first run you need a configuration file at
-`~/.config/workdash/config.json`. Generate it interactively with:
-
-```bash
-workdash --configure
-```
+`~/.config/workdash/config.json`. Running `workdash` without one starts the
+interactive wizard and asks you to run `workdash` again to start the dashboard.
+`workdash --configure` reruns the wizard at any time.
 
 The wizard fills in:
 
@@ -63,9 +61,13 @@ The wizard fills in:
   latest release binary into the workdash configuration directory. Authentication
   is still handled by `gh`; run `gh auth login` if startup reports that `gh` is
   not authenticated.
-- The list of repositories to track (see *Repository selectors* below).
-- The todo repository where captured todos are created (defaults to
-  `<username>/todos`, see *Todos* below).
+- The repositories to track. The wizard defaults to `<username>/*` with a
+  lowercase owner when valid; otherwise it asks for a selector (see *Repository
+  selectors* below).
+- The todo repository where captured todos are created. If the username cannot
+  be used as a default repository owner (for example, a GitHub Enterprise
+  Managed User login), enter an explicit `owner/repo` instead of accepting the
+  usual `<username>/todos` default (see *Todos* below).
 - A working directory where per-item git worktrees will live.
 - The agents (see *Agents* below): `claude`, `codex`, and `pi` are added with
   their default commands when they are on your `PATH`, and you can add more.
@@ -181,7 +183,9 @@ Outside Zellij, the dashboard creates or attaches to the persistent `workdash`
 session. Use `--session NAME` to select another session. A new session has a
 dashboard above a shell, with Zellij's tab and status bars. If the dashboard is
 already running, new options are ignored; otherwise it starts with the supplied
-options in the `dashboard` tab. Pressing `q` exits the dashboard but keeps the
+options in the `dashboard` tab. With a usable Zellij client, you can attach to a
+running dashboard at the selected address even if local configuration is
+unreadable. Pressing `q` exits the dashboard but keeps the
 session and its panes; Ctrl+Q quits the entire session. Inside Zellij, Workdash
 runs in the current pane and uses the current session regardless of `--session`.
 Workdash keeps pane restart receipts while a Zellij session in the same socket

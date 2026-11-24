@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import platform
@@ -10,10 +11,12 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
-import urllib.request
+import tempfile
 import zipfile
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from io import BytesIO
 from ipaddress import ip_network
@@ -21,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .git import is_repository_name
+from .repo_resolver import validate_repository_selectors
 
 if TYPE_CHECKING:
     from .github_client import GitHubClient
@@ -224,11 +228,62 @@ def load_config(path: Path = CONFIG_PATH) -> WorkdashConfig:
     silently reverting to defaults.
     """
 
-    if not path.exists():
-        return WorkdashConfig()
+    return _config_from_json(_read_config_json(path))
+
+
+def save_config(
+    config: WorkdashConfig, path: Path = CONFIG_PATH, *, create_only: bool = False
+) -> None:
+    """Write *config* to *path*, creating parent directories as needed."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    contents = _config_to_json(config)
+    if not create_only:
+        path.write_text(contents, encoding="utf-8")
+        return
+
+    staged_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as staged:
+            staged_path = Path(staged.name)
+            staged.write(contents)
+        # Publish only complete contents without replacing a competing configuration.
+        try:
+            os.link(staged_path, path)
+        except FileExistsError as error:
+            raise RuntimeError(
+                f"Configuration already exists at {path}. Your answers were not saved."
+            ) from error
+        except OSError as error:
+            if error.errno in (errno.EOPNOTSUPP, errno.ENOTSUP):
+                reason = "the filesystem does not support hard links"
+            elif error.errno == errno.EPERM:
+                reason = "creating a hard link was denied"
+            else:
+                raise
+            raise RuntimeError(
+                f"Automatic setup could not save {path} because {reason}. "
+                "Run 'workdash --configure' to save the configuration."
+            ) from error
+    finally:
+        if staged_path is not None:
+            try:
+                staged_path.unlink(missing_ok=True)
+            except OSError as error:
+                print(
+                    f"Warning: Could not remove temporary configuration {staged_path}: {error}",
+                    file=sys.stderr,
+                )
+
+
+def _read_config_json(path: Path) -> dict:
     try:
         contents = path.read_text(encoding="utf-8")
-    except OSError as error:
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeDecodeError) as error:
         raise RuntimeError(f"Failed to read configuration at {path}: {error}") from error
     try:
         raw = json.loads(contents)
@@ -241,6 +296,10 @@ def load_config(path: Path = CONFIG_PATH) -> WorkdashConfig:
         raise RuntimeError(
             f"Configuration at {path} must be a JSON object, got {type(raw).__name__}."
         )
+    return raw
+
+
+def _config_from_json(raw: dict) -> WorkdashConfig:
     repositories_raw = raw.get("repositories")
     repositories = tuple(repositories_raw) if isinstance(repositories_raw, list) else ()
     agents_raw = raw.get("agents")
@@ -263,13 +322,6 @@ def load_config(path: Path = CONFIG_PATH) -> WorkdashConfig:
         if isinstance(raw.get("listens"), list)
         else raw.get("listens", ()),
     )
-
-
-def save_config(config: WorkdashConfig, path: Path = CONFIG_PATH) -> None:
-    """Write *config* to *path*, creating parent directories as needed."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_config_to_json(config), encoding="utf-8")
 
 
 def validate_config(config: WorkdashConfig) -> list[str]:
@@ -377,14 +429,6 @@ def _prompt_with_default(input_fn: Callable[[str], str], label: str, default: st
     return response or default
 
 
-def _prompt_required(input_fn: Callable[[str], str], label: str) -> str:
-    while True:
-        response = input_fn(f"{label}: ").strip()
-        if response:
-            return response
-        print(f"{label} is required.")
-
-
 def _zellij_release_target() -> str:
     machine = platform.machine()
     if machine == "arm64":
@@ -409,24 +453,44 @@ def _zellij_release_url() -> str:
     return f"https://github.com/zellij-org/zellij/releases/latest/download/zellij-{target}.tar.gz"
 
 
-def _write_executable(destination: Path, binary: bytes) -> str:
+def _write_executable(destination: Path, binary: bytes, *, atomic: bool) -> str:
+    if atomic:
+        for directory in (destination.parent, destination.parent.parent):
+            if directory.is_symlink():
+                raise RuntimeError(
+                    f"Automatic setup refuses to install into the symlinked directory {directory}. "
+                    "If this symlink is intentional, run `workdash --configure`."
+                )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(binary)
-    current_mode = destination.stat().st_mode
-    destination.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    execute_bits = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    if not atomic:
+        destination.write_bytes(binary)
+        destination.chmod(destination.stat().st_mode | execute_bits)
+        return str(destination)
+
+    with tempfile.TemporaryDirectory(dir=destination.parent) as directory:
+        staged = Path(directory) / destination.name
+        staged.write_bytes(binary)
+        try:
+            mode = destination.lstat().st_mode
+        except FileNotFoundError:
+            mode = None
+        if mode is None or stat.S_ISLNK(mode):
+            mode = staged.stat().st_mode
+        staged.chmod(stat.S_IMODE(mode) | execute_bits)
+        staged.replace(destination)
     return str(destination)
 
 
 def install_zellij_binary(
     destination: Path = ZELLIJ_INSTALL_PATH,
     *,
-    urlopen_fn: Callable[[str], object] = urllib.request.urlopen,
     github_client: GitHubClient | None = None,
+    atomic: bool = False,
 ) -> str:
     """Download and install the latest Zellij release binary.
 
     :param Path destination: Path where the executable should be installed.
-    :param urlopen_fn: Callable used to download the release archive.
     """
 
     from .github_client import GitHubClient
@@ -435,7 +499,7 @@ def install_zellij_binary(
     print(f"Downloading Zellij from {url}")
     if github_client is None:
         github_client = GitHubClient()
-    archive_bytes = github_client.download_release(url, urlopen_fn=urlopen_fn)
+    archive_bytes = github_client.download_release(url)
 
     try:
         with tarfile.open(fileobj=BytesIO(archive_bytes), mode="r:gz") as archive:
@@ -456,7 +520,7 @@ def install_zellij_binary(
     except tarfile.TarError as error:
         raise RuntimeError(f"Failed to extract Zellij archive: {error}") from error
 
-    return _write_executable(destination, binary)
+    return _write_executable(destination, binary, atomic=atomic)
 
 
 def _gh_release_asset_patterns() -> tuple[str, str]:
@@ -480,41 +544,25 @@ def _gh_release_asset_patterns() -> tuple[str, str]:
     return f"_{os_name}_{arch}{extension}", extension
 
 
-def _gh_release_download_url(
-    *,
-    urlopen_fn: Callable[[str], object] = urllib.request.urlopen,
-    github_client: GitHubClient | None = None,
-) -> str:
-    from .github_client import GitHubClient
-
-    archive_suffix, _extension = _gh_release_asset_patterns()
-    if github_client is None:
-        github_client = GitHubClient()
-    return github_client.release_asset_url(
-        GH_LATEST_RELEASE_API_URL, archive_suffix, urlopen_fn=urlopen_fn
-    )
-
-
 def install_gh_binary(
     destination: Path = GH_INSTALL_PATH,
     *,
-    urlopen_fn: Callable[[str], object] = urllib.request.urlopen,
     github_client: GitHubClient | None = None,
+    atomic: bool = False,
 ) -> str:
     """Download and install the latest GitHub CLI release binary.
 
     :param Path destination: Path where the executable should be installed.
-    :param urlopen_fn: Callable used to download release metadata and archive bytes.
     """
 
     from .github_client import GitHubClient
 
     if github_client is None:
         github_client = GitHubClient()
-    download_url = _gh_release_download_url(urlopen_fn=urlopen_fn, github_client=github_client)
+    archive_suffix, extension = _gh_release_asset_patterns()
+    download_url = github_client.release_asset_url(GH_LATEST_RELEASE_API_URL, archive_suffix)
     print(f"Downloading GitHub CLI from {download_url}")
-    archive_bytes = github_client.download_release(download_url, urlopen_fn=urlopen_fn)
-    _archive_suffix, extension = _gh_release_asset_patterns()
+    archive_bytes = github_client.download_release(download_url)
 
     try:
         if extension == ".zip":
@@ -549,7 +597,7 @@ def install_gh_binary(
     except (tarfile.TarError, zipfile.BadZipFile) as error:
         raise RuntimeError(f"Failed to extract GitHub CLI archive: {error}") from error
 
-    return _write_executable(destination, binary)
+    return _write_executable(destination, binary, atomic=atomic)
 
 
 def configure(
@@ -560,22 +608,29 @@ def configure(
     install_zellij_fn: Callable[[], str] | None = None,
     install_gh_fn: Callable[[], str] | None = None,
     github_client: GitHubClient | None = None,
+    create_only: bool = False,
 ) -> WorkdashConfig:
     """Interactive configuration that fills in missing fields.
 
     :param Path path: Config file path.
+    :param bool create_only: Start with defaults and refuse to overwrite a file.
     :param input_fn: Callable used to prompt the user (default: builtin input).
     :param which_fn: Callable used to detect commands on PATH (default: shutil.which).
     """
 
-    config = load_config(path)
+    raw = {} if create_only else _read_config_json(path)
+    config = _config_from_json(raw)
     if not isinstance(config.listens, (list, tuple)):
         raise WorkdashConfigValidationError([], [f"listens: expected a list; edit {path}"])
     install_zellij = install_zellij_fn or (
-        lambda: install_zellij_binary(path.parent / "bin" / "zellij", github_client=github_client)
+        lambda: install_zellij_binary(
+            path.parent / "bin" / "zellij", github_client=github_client, atomic=create_only
+        )
     )
     install_gh = install_gh_fn or (
-        lambda: install_gh_binary(path.parent / "bin" / "gh", github_client=github_client)
+        lambda: install_gh_binary(
+            path.parent / "bin" / "gh", github_client=github_client, atomic=create_only
+        )
     )
 
     detected_zellij = which_fn("zellij")
@@ -619,11 +674,7 @@ def configure(
             print("Enter a valid command whose executable exists on PATH or at an explicit path.")
 
     # Legacy runtime configs default to direct opening, but setup must ask for the choice.
-    open_needs_pane = (
-        json.loads(path.read_text(encoding="utf-8")).get("open_needs_pane")
-        if path.exists()
-        else None
-    )
+    open_needs_pane = raw.get("open_needs_pane")
     while not isinstance(open_needs_pane, bool):
         response = (
             input_fn("Does the viewer require its own terminal window? [y/N] ").strip().lower()
@@ -681,26 +732,55 @@ def configure(
             print("At least one agent is required.")
     print(f"To add or edit agents later, edit 'agents' in {path}.")
 
+    repositories = config.repositories
     github_username = config.github_username
-    if not github_username:
-        github_username = _prompt_required(input_fn, "GitHub username")
+    while not github_username:
+        response = input_fn("GitHub username: ").strip()
+        if not response:
+            print("GitHub username is required.")
+            continue
+        if len(response) > 39 or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9-]*|[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*_[A-Za-z0-9]{3,8}",
+            response,
+        ):
+            print(
+                "Enter a GitHub username of 1–39 characters: start with an ASCII letter or digit "
+                "and use only ASCII letters, digits, or hyphens. Managed usernames use single "
+                "hyphens between letters and digits before the underscore and the 3–8 character "
+                "alphanumeric enterprise shortcode."
+            )
+            continue
+        github_username = response
 
     workdir = config.workdir
     if not workdir:
         workdir = _prompt_with_default(input_fn, "Work directory", _DEFAULT_WORKDIR)
 
-    repositories = config.repositories
-    if not repositories and github_username:
-        repositories = (f"{github_username}/*",)
-        print(f"Repositories set to: {github_username}/*")
+    if not repositories:
+        with suppress(ValueError):
+            repositories = tuple(validate_repository_selectors([f"{github_username}/*".lower()]))
+        while not repositories:
+            response = input_fn("Repository selector (owner/repo or owner/*): ")
+            with suppress(ValueError):
+                repositories = tuple(validate_repository_selectors([response]))
+            if not repositories:
+                print("Enter a repository selector in owner/repo or owner/* form.")
+        print(f"Repositories set to: {repositories[0]}")
 
     todo_repository = config.todo_repository
-    # An empty or hand-broken value is prompted for again, so --configure can
-    # always bring a locked-out configuration back to a usable todo repository.
-    if not is_repository_name(todo_repository):
-        todo_repository = _prompt_with_default(
-            input_fn, "Todo repository", f"{github_username}/todos"
-        )
+    todo_default = f"{github_username}/todos"
+    # A managed login can identify the user without being a usable default repository owner.
+    try:
+        validate_repository_selectors([todo_default.lower()])
+    except ValueError:
+        todo_default = ""
+    while not is_repository_name(todo_repository):
+        if is_repository_name(todo_default):
+            todo_repository = _prompt_with_default(input_fn, "Todo repository", todo_default)
+        else:
+            todo_repository = input_fn("Todo repository (owner/repo required): ").strip()
+        if not is_repository_name(todo_repository):
+            print("Enter a todo repository in owner/repo form.")
 
     new_config = WorkdashConfig(
         github_username=github_username,
@@ -713,7 +793,7 @@ def configure(
         todo_repository=todo_repository,
         listens=config.listens,
     )
-    save_config(new_config, path)
+    save_config(new_config, path, create_only=create_only)
     print(
         f'Configuration saved to {path}. Add trusted LAN listeners to "listens", e.g. "10.0.0.50@10.0.0.213".'
     )

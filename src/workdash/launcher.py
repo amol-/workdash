@@ -51,6 +51,10 @@ ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
 _GROUP_TAB_LOCK = threading.Lock()
 
 
+class ZellijBinaryUnavailableError(RuntimeError):
+    """No executable Zellij client was found on PATH or in Workdash's bin directory."""
+
+
 @dataclass(frozen=True)
 class ZellijPaneLaunch:
     session: str | None
@@ -299,7 +303,7 @@ def _resolve_zellij_binary() -> str:
     inject_workdash_local_bin_into_path()
     zellij = shutil.which("zellij")
     if zellij is None:
-        raise RuntimeError(
+        raise ZellijBinaryUnavailableError(
             "zellij is not installed or not configured. Run 'workdash --configure' to set it up."
         )
     return zellij
@@ -315,7 +319,7 @@ def is_live_zellij_pane(pane: dict[str, object]) -> bool:
     )
 
 
-def dashboard_is_running(session: str) -> bool:
+def dashboard_is_running(session: str, *, attach_only: bool = False) -> bool:
     """Whether a dashboard already serves ``session``.
 
     A recorded dashboard counts only while its process lives and its address still
@@ -323,7 +327,8 @@ def dashboard_is_running(session: str) -> bool:
     bind decides, which also covers dashboards started before records existed. A
     dashboard serving another session cannot be replaced, and an address that will
     not answer proves nothing, so both are reported instead of starting a dashboard
-    that could not bind or that would duplicate a live one.
+    that could not bind or that would duplicate a live one. An attach-only probe
+    treats a healthy dashboard for another session as no match.
     """
 
     # The control API speaks to this module, so the address and probe arrive late.
@@ -341,7 +346,7 @@ def dashboard_is_running(session: str) -> bool:
     reported = _dashboard_session_at(address)
     if reported == session:
         return True
-    if reported is not None:
+    if reported is not None and not attach_only:
         raise RuntimeError(
             f"Zellij session {reported!r} already has a Workdash dashboard at {address}. "
             "Stop it or set WORKDASH_HOST to a different address."
@@ -865,8 +870,12 @@ class Zellij:
 
     @staticmethod
     def exec_zellij_wrapped_workdash(
-        argv: Sequence[str] | None, preflight: Callable[[], bool] = lambda: True
+        argv: Sequence[str] | None,
+        preflight: Callable[[], bool] = lambda: True,
+        *,
+        attach_only: bool = False,
     ) -> None:
+        """Attach to a live dashboard, or start one unless setup is still needed."""
         zellij = _resolve_zellij_binary()
 
         original_args = list(argv) if argv is not None else sys.argv[1:]
@@ -903,11 +912,15 @@ class Zellij:
             if (sockets := _zellij_receipt_sockets()) is not None:
                 _sweep_pane_receipts(_pane_receipt_dir(), sockets)
 
-        if dashboard_is_running(session_name):
+        if attach_only and sessions.get(session_name, True):
+            return
+        if dashboard_is_running(session_name, attach_only=attach_only):
             print("Workdash is already running; new options are ignored. Attaching...", flush=True)
             time.sleep(1)
             command = [zellij, "attach", session_name]
             Zellij._attach_and_focus_dashboard(zellij, session_name, command)
+        elif attach_only:
+            return
         elif session_name in sessions:
             if sessions[session_name]:
                 try:
