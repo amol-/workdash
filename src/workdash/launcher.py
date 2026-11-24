@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -460,18 +460,25 @@ def _launch_zellij_pane(
     """
     zellij = _resolve_zellij_binary()
     session_args = ["--session", zellij_session] if zellij_session is not None else []
-    write_marker = 'printf "%s" "$ZELLIJ_PANE_ID" > "$1"'
-    if not (blocking or close_on_exit):
-        # Zellij reruns the same wrapper in a held pane after marker cleanup.
-        # A first start arriving after cleanup is indistinguishable from a rerun.
-        write_marker = '[ ! -e "${1%/*}" ] || ' + write_marker
-    with tempfile.TemporaryDirectory(prefix="workdash-pane-") as directory:
-        # Every attempt writes the same marker, so a pane that starts after an
-        # earlier attempt gave up is still found instead of launched again.
-        marker = Path(directory) / "pane"
+    held = not (blocking or close_on_exit)
+    # A symlink stores the whole ID atomically without replacing another
+    # pane's claim or the launcher's cancellation marker.
+    claim = 'ln -s "$ZELLIJ_PANE_ID" "$1" 2>/dev/null'
+    if held:
+        claim += ' || [ "$(readlink "$1" 2>/dev/null)" = "$ZELLIJ_PANE_ID" ]'
+    with ExitStack() as cleanup:
+        directory = Path(tempfile.mkdtemp(prefix="workdash-pane-"))
+        cleanup.callback(shutil.rmtree, directory)
+        claim_dir = directory / "launch"
+        claim_dir.mkdir()
+        # Hide the marker and its parent together: unlinking the marker first
+        # would let a delayed pane claim it again during cleanup.
+        cleanup.callback(claim_dir.rename, directory / "finished")
+        marker = claim_dir / "pane"
+        error = None
         for _ in range(_ZELLIJ_PANE_LAUNCH_ATTEMPTS):
-            if pane_id := _read_pane_marker(marker):
-                return _format_zellij_pane_id(pane_id)
+            if _read_pane_marker(marker):
+                break
             argv = [
                 zellij,
                 *session_args,
@@ -491,7 +498,7 @@ def _launch_zellij_pane(
                 "--",
                 "/bin/sh",
                 "-c",
-                f'{write_marker} || exit 1; shift; exec "$@"',
+                f'[ -n "$ZELLIJ_PANE_ID" ] || exit 1; {claim} || exit 1; shift; exec "$@"',
                 "workdash-pane",
                 str(marker),
                 *command,
@@ -526,7 +533,11 @@ def _launch_zellij_pane(
                             pane_callback(_format_zellij_pane_id(pane_id))
                         pane_callback(None)
             else:
-                completed = _run_launch_command(argv, context=context)
+                try:
+                    completed = _run_launch_command(argv, context=context)
+                except RuntimeError as launch_error:
+                    error = launch_error
+                    break
             pane_id = _read_pane_marker(marker)
             if not blocking:
                 deadline = time.monotonic() + _ZELLIJ_PANE_MARKER_TIMEOUT_SECONDS
@@ -534,17 +545,33 @@ def _launch_zellij_pane(
                     time.sleep(_ZELLIJ_PANE_MARKER_POLL_SECONDS)
                     pane_id = _read_pane_marker(marker)
             if pane_id:
-                return _format_zellij_pane_id(pane_id)
+                break
             # Zellij reports its own failures on stderr while still exiting zero, so
             # only the files the pane writes prove that its command ran.
             details = completed.stderr.strip()
             if details:
-                raise RuntimeError(f"{context}: {details}" if context else details)
+                error = RuntimeError(f"{context}: {details}" if context else details)
+                break
+
+        # Decide cancellation and a last-moment start atomically, not by reading
+        # an empty path and then racing the pane to remove it.
+        try:
+            marker.symlink_to("cancelled")
+        except FileExistsError:
+            if held:
+                # Zellij panes outlive Workdash. Keep just the winner's receipt
+                # in private temporary storage for Enter, until system cleanup.
+                cleanup.pop_all()
+            return _format_zellij_pane_id(_read_pane_marker(marker))
+        if error is not None:
+            raise error
         return None
 
 
 def _read_pane_marker(marker: Path) -> str:
-    return marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+    with suppress(FileNotFoundError):
+        return os.readlink(marker)
+    return ""
 
 
 def _zellij_pane_name_for_work_action(work_action: str, repo_path: str) -> str:

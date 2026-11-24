@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -1832,6 +1833,58 @@ def test_launch_pane_finds_a_pane_that_starts_after_its_attempt(
     assert len({pane_marker(command) for command in launches}) == 1
     assert len(launches) == 2
     assert launch.pane_id == "terminal_23"
+
+
+@pytest.mark.parametrize("starts", ["too-late", "one-pending", "concurrent"])
+def test_queued_panes_cannot_repeat_a_launch(tmp_path, monkeypatch, starts):
+    launches = []
+    runs = tmp_path / "runs"
+
+    def run_pane(argv, pane_id):
+        return subprocess.Popen(
+            argv[argv.index("--") + 1 :],
+            env={**os.environ, "ZELLIJ_PANE_ID": str(pane_id)},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def fake_run(argv, **kwargs):
+        launches.append(argv)
+        if len(launches) == 3 and starts != "too-late":
+            panes = [run_pane(launches[-1], 23)]
+            if starts == "concurrent":
+                panes.append(run_pane(launches[0], 21))
+            for pane in panes:
+                pane.wait(timeout=5)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(launcher_module.tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(launcher_module, "_ZELLIJ_PANE_MARKER_TIMEOUT_SECONDS", 0)
+
+    def launch():
+        return launcher_module.zellij.launch_pane(
+            str(tmp_path),
+            ["/bin/sh", "-c", 'echo "$ZELLIJ_PANE_ID" >> "$1"', "agent", str(runs)],
+            context="Failed to launch coding agent",
+            work_action="code",
+            zellij_session="workdash-main",
+        )
+
+    if starts == "too-late":
+        with pytest.raises(RuntimeError, match="the Zellij pane never ran"):
+            launch()
+        expected = []
+    else:
+        winner = launch().pane_id.removeprefix("terminal_")
+        expected = [winner]
+        assert runs.read_text().splitlines() == expected
+
+    for index, argv in enumerate(launches, start=21):
+        if str(index) not in expected:
+            run_pane(argv, index).wait(timeout=5)
+    assert (runs.read_text().splitlines() if runs.exists() else []) == expected
 
 
 def test_launch_pane_keeps_a_started_pane_despite_a_zellij_warning(

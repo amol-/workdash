@@ -34,4 +34,4 @@ def mark_pane_started(argv: list[str], pane_id: str = "17") -> None:
 
     marker = pane_marker(argv)
     if marker is not None:
-        marker.write_text(pane_id, encoding="utf-8")
+        marker.symlink_to(pane_id)
