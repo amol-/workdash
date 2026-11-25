@@ -1,13 +1,13 @@
 @feature:F-TRIAGE-SUGGESTED
 Feature: Suggested next item
 
-  Alongside the full list, the system picks one work item to highlight as
+  Alongside the dashboard list, the system picks one work item to highlight as
   the recommended next thing to pick up, so the user does not have to
   reason about priorities to get started.
 
   Rules:
-    - Exactly one work item is marked as suggested when the list is non-empty.
     - The suggested item is the oldest open work item by creation date.
+    - When its repository is excluded, no replacement is suggested.
     - When several items share the oldest creation date, pull requests are preferred over issues.
     - The suggested item's title is prefixed with "* " in both the TUI and list command.
 

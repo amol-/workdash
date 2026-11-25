@@ -14,7 +14,7 @@ Feature: List work items
     - Reviewing a CHECK item needs no extra action: the next refresh finds the same pull request as a reviewed one and lists it as a REVIEW item instead.
     - A pull request that closes an issue replaces that issue: the issue is not listed on its own, so the same work never occupies two rows. This holds for PR, REVIEW, and CHECK items alike, and also for an issue the user included by URL.
     - The closed issue is dropped while the list is loaded, so it can no longer be addressed by its Workdash item ID or its URL. Including it again by URL brings it back for the rest of the session, and the next refresh drops it again.
-    - Tracked repositories can hold years of open work, so the number of discovered work items is capped and the oldest ones beyond that cap are dropped. Todo items and items the user included by URL are asked for by hand, so they are always listed even when they are older than everything else.
+    - Tracked repositories can hold years of open work, so the number of discovered work items is capped and the oldest ones beyond that cap are dropped. Todo items and items the user included by URL are asked for by hand, so they are not capped even when they are older than everything else.
     - An authored pull request's Type column is prefixed with a one-character symbol for the latest CI result GitHub reports on it: passing, failing, or still running. Every other row, including issues and pull requests the user did not author, is prefixed with a blank instead so the Type labels stay aligned.
     - An authored pull request's Type column carries a second one-character symbol for its review state, independent of the CI symbol: a green checkmark when the review is approved, a red cross when changes are requested, a yellow question mark when a reviewer is requested but has not yet reviewed, a blue question mark when a reviewer left review comments nobody has resolved yet without approving or requesting changes, and a blank when neither applies. Approval and requested changes win over unresolved comments.
     - The Repo column is capped at 15 characters, leaving the title more room. A longer repository is truncated on its left so the repository name itself stays readable, and the leading character is replaced with an ellipsis to show the owner was cut.
@@ -168,3 +168,11 @@ Feature: List work items
     When the user opens the dashboard
     Then the pull request appears on the dashboard
     And the issue it closes does not appear on the dashboard
+
+  @id:F-TRIAGE-LIST-S020
+  Scenario: Hide repositories from the dashboard
+    Given work items in `team/old`, `team/current`, and `archive/project`
+    And the configuration excludes `Team/OLD` and `Archive/*`
+    When the user opens the dashboard with these exclusions
+    Then only `team/current` appears in the work table
+    And no work item is marked as suggested

@@ -1564,6 +1564,51 @@ def test_code_api_rejects_a_non_boolean_flag(field, value) -> None:
     session.code.assert_not_called()
 
 
+def test_list_api_hides_repositories_without_restricting_explicit_targets(tmp_path) -> None:
+    hidden = _github_issue("archive/private", 7)
+    hidden_todo = _github_issue(
+        "owner/todos", 9, todo_target="git@gitlab.example.com:Platform_Team/import*export.git"
+    )
+    visible = _github_issue("archives/public", 8)
+    items = [hidden, hidden_todo, visible]
+    markers = {(WorkItemType.ISSUE, hidden.repo, hidden.number): "*"}
+    analysis_path = tmp_path / "analysis.md"
+    analysis_path.write_text("# Cached\n")
+    backend = MagicMock()
+    backend.load_items.return_value = (items, markers)
+    backend.analyze_item.return_value = str(analysis_path)
+    session = WorkdashSession(
+        config=WorkdashConfig(excluded_repositories=["Archive/*", "platform_team/*"]),
+        backend=backend,
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+    app = control_module._make_turbogears_app(session)
+    expected_item_ids = [format_work_item_id(item) for item in items]
+    expected_markers = markers.copy()
+
+    response = Request.blank(
+        "/api/v0/list", method="POST", content_type="application/json", body=b'{"refresh":true}'
+    ).get_response(app)
+    assert response.status_int == 200
+    listed = json.loads(response.text)["result"]["items"]
+    assert [(row["id"], row["suggested"]) for row in listed] == [("archives/public#ISSUE-8", False)]
+    assert [format_work_item_id(item) for item in session.work_items] == expected_item_ids
+    assert session.suggestion_markers == expected_markers
+
+    response = Request.blank(
+        "/api/v0/analyze",
+        method="POST",
+        content_type="application/json",
+        body=b'{"target":"archive/private#ISSUE-7","agent":"cached"}',
+    ).get_response(app)
+    assert response.status_int == 200
+    assert json.loads(response.text)["result"]["item_id"] == "archive/private#ISSUE-7"
+    backend.github_client.fetch_item.assert_not_called()
+    backend.analyze_item.assert_called_once_with(hidden, tool="cached")
+
+
 def test_analyze_uses_the_cached_analysis_of_an_item_fetched_from_github(tmp_path) -> None:
     analysis_path = tmp_path / "analysis.md"
     analysis_path.write_text("# Cached\n")

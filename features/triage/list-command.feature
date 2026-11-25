@@ -13,7 +13,7 @@ Feature: List command
     - The list command never starts the TUI and requires no keyboard input.
     - Without `--refresh`, the list command emits the server's current in-memory dashboard items.
     - With `--refresh`, the list command asks the server to refresh dashboard items before returning them.
-    - The list command emits one row per work item sorted by last update, most recently updated first.
+    - The list command emits one row per non-excluded work item sorted by last update, most recently updated first.
     - Each row reports the item type, Workdash item ID, last update date, and title.
     - The item type reported on a row is `ISSUE`, `PR`, `REVIEW`, or `CHECK`.
     - Workdash item IDs are formatted as `repo#ISSUE-N`, `repo#PR-N`, `repo#REVIEW-N`, or `repo#CHECK-N`.
@@ -81,3 +81,10 @@ Feature: List command
     When the user runs `workdash list`
     Then the command reports that `workdash` must be running
     And the command exits with a non-zero status
+
+  @id:F-TRIAGE-LIST-COMMAND-S009
+  Scenario: List work items after repository exclusions
+    Given work items in `team/old`, `team/current`, and `archive/project`
+    And the configuration excludes `Team/OLD` and `Archive/*`
+    When the user runs `workdash list`
+    Then only `team/current` appears in the command output

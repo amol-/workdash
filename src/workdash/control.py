@@ -52,7 +52,7 @@ from .models import (
     display_repo,
     format_type_label,
 )
-from .repo_resolver import validate_repository_selectors
+from .repo_resolver import dashboard_items, validate_repository_selectors
 from .repo_worktree import (
     analysis_worktree,
     ensure_worktree,
@@ -186,14 +186,15 @@ class WorkdashSession:
             return self._busy[-1] if self._busy else None
 
     def list_items(self, *, refresh: bool = False) -> dict[str, object]:
-        """Return the dashboard items currently known to the shared session."""
+        """Return the visible dashboard items without removing anything from the session."""
 
         notify_items_changed = False
         with self._lock:
             if refresh:
                 self.work_items, self.suggestion_markers = self.backend.load_items()
                 notify_items_changed = True
-            payload = _work_items_payload(self.work_items, self.suggestion_markers)
+            visible_items = dashboard_items(self.work_items, self.config.excluded_repositories)
+            payload = _work_items_payload(visible_items, self.suggestion_markers)
         if notify_items_changed:
             self._notify_items_changed()
         return payload
