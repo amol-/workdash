@@ -160,7 +160,7 @@ def _session_processes(zellij, env, sessions, *, pane_groups=None):
                 argv = Path(f"/proc/{pid}/cmdline").read_bytes().removesuffix(b"\0").split(b"\0")
             except (FileNotFoundError, ProcessLookupError, PermissionError):
                 continue
-            if len(argv) != 3 or argv[1] != b"--server" or not os.path.isabs(argv[0]):
+            if len(argv) < 3 or argv[1] != b"--server" or not os.path.isabs(argv[0]):
                 continue
             socket_arg = os.fsdecode(argv[2])
         else:
@@ -409,6 +409,10 @@ def test_zellij_cleanup_kills_and_verifies_recorded_pids_after_ps_timeout(
         "renamed-binary",
         "long-tmpdir",
         pytest.param(
+            "debug-server",
+            marks=pytest.mark.skipif(sys.platform != "linux", reason="Linux server argv"),
+        ),
+        pytest.param(
             "non-ascii-binary-dir",
             marks=pytest.mark.skipif(sys.platform != "linux", reason="Linux ps C locale"),
         ),
@@ -428,6 +432,17 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
         link.symlink_to(binary)
         monkeypatch.setenv("PATH", str(bin_dir), prepend=os.pathsep)
         zellij = str(link)
+    elif case == "debug-server":
+        wrapper = tmp_path / "zellij"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            'if [ "$#" -eq 2 ] && [ "$1" = --session ]; then set -- "$@" --debug; fi\n'
+            f'exec {shlex.quote(zellij)} "$@"\n',
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o700)
+        monkeypatch.setenv("PATH", str(tmp_path), prepend=os.pathsep)
+        zellij = str(wrapper)
     elif case == "long-tmpdir":
         long_tmpdir = tmp_path / ("long-" * 24)
         long_tmpdir.mkdir()
@@ -563,6 +578,9 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
             server_pid = live[pane_pid].parent
             assert server_pid > 1
             fallback = {(pid, live[pid].started): name for pid in (server_pid, pane_pid, child_pid)}
+            if case == "debug-server":
+                argv = Path(f"/proc/{server_pid}/cmdline").read_bytes().split(b"\0")
+                assert b"--debug" in argv[3:]
             owned = _session_processes(zellij, os.environ, {name: set()})
             if interrupt_cleanup or case in {"first-ps-timeout", "late-child"}:
                 fault.setattr(subprocess, "run", run_during_teardown)
@@ -582,7 +600,7 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
         if case == "first-ps-timeout":
             assert timed_out and deleted
         live = _live_processes()
-        assert {pane_pid, child_pid} < {pid for pid, _ in owned}
+        assert {server_pid, pane_pid, child_pid} <= {pid for pid, _ in owned}
         survivors = {
             pid for pid, started in owned | fallback if pid in live and live[pid].started == started
         }
