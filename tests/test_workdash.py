@@ -2414,6 +2414,24 @@ def test_all_clients_accept_host_on_either_side(monkeypatch, args):
     )
 
 
+def test_main_show_config_json_reports_agents_and_default_server(monkeypatch, capsys):
+    monkeypatch.delenv("WORKDASH_HOST", raising=False)
+    config = replace(
+        _VALID_CONFIG,
+        agents={
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+            "pi": AgentConfig(launch="pi"),
+        },
+    )
+    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
+
+    assert workdash_module.main(["show-config", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "agents": {"analyze": ["codex"], "code": ["codex", "pi"]},
+        "server": {"host": "127.0.0.1", "port": 8765},
+    }
+
+
 def test_address_validation_and_host_only_default(monkeypatch, capsys):
     monkeypatch.delenv("WORKDASH_HOST", raising=False)
     assert control_module.server_address() == ("127.0.0.1", 8765)

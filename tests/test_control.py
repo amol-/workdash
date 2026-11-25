@@ -2459,6 +2459,44 @@ def test_probe_refuses_a_server_that_is_not_a_dashboard(monkeypatch) -> None:
         thread.join()
 
 
+def test_show_config_api_reports_session_agents_and_default_server(monkeypatch):
+    monkeypatch.delenv("WORKDASH_HOST", raising=False)
+    session = WorkdashSession(
+        config=WorkdashConfig(
+            agents={
+                "codex": AgentConfig(analyze="codex exec", launch="codex"),
+                "claude": AgentConfig(analyze="claude -p", launch="claude"),
+                "pi": AgentConfig(launch="pi"),
+            },
+        ),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    request = Request.blank(
+        "/api/v0/show-config",
+        method="POST",
+        headers={"X-Workdash": version("workdash")},
+        environ={"REMOTE_ADDR": "127.0.0.1"},
+        content_type="application/json",
+        body=b"{}",
+    )
+
+    response = request.get_response(app)
+
+    assert response.status_int == 200
+    payload = response.json
+    assert payload["ok"] is True
+    assert payload["result"] == {
+        "agents": {"analyze": ["codex", "claude"], "code": ["codex", "claude", "pi"]},
+        "server": {"host": "127.0.0.1", "port": 8765},
+    }
+
+
 def test_show_config_payload_reports_environment_server_address(monkeypatch):
     monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:18765")
     assert control_module.show_config_payload(WorkdashConfig())["server"] == {

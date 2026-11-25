@@ -136,13 +136,6 @@ def _workdash_info_reports_pane_id(pane_id: str, scenario_state: dict[str, Any])
     scenario_state["pane_id"] = pane_id
 
 
-@when("a client requests the show-config API")
-def _client_requests_show_config_api(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    _call_api(scenario_state, work_items, tmp_path, "show-config")
-
-
 @when(parsers.parse("a client requests code for `{item_id}` with agent `{agent}`"))
 def _client_requests_code(
     item_id: str,
@@ -260,21 +253,6 @@ def _client_requests_terminal(
 def _api_reports_the_zellij_session(session: str, scenario_state: dict[str, Any]) -> None:
     assert scenario_state["api_status"] == 200
     assert scenario_state["api_payload"]["result"]["session"] == session
-
-
-@then("the API returns the configured analysis agents")
-def _api_returns_configured_analysis_agents(scenario_state: dict[str, Any]) -> None:
-    assert _api_result(scenario_state)["agents"]["analyze"] == ["codex", "claude"]
-
-
-@then("the API returns the configured coding agents")
-def _api_returns_configured_coding_agents(scenario_state: dict[str, Any]) -> None:
-    assert _api_result(scenario_state)["agents"]["code"] == ["codex", "claude", "pi"]
-
-
-@then("the API returns the server host and port")
-def _api_returns_server_host_and_port(scenario_state: dict[str, Any]) -> None:
-    assert _api_result(scenario_state)["server"] == {"host": "127.0.0.1", "port": 8765}
 
 
 @then("the server does not prepare a worktree")

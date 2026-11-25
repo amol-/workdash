@@ -303,6 +303,19 @@ def test_require_valid_accepts_partial_agent_config():
     assert config.tui_code_choices() == []
 
 
+def test_agents_without_a_command_are_omitted_from_that_capability():
+    config = WorkdashConfig(
+        agents={
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+            "claude": AgentConfig(launch="claude"),
+            "pi": AgentConfig(analyze="pi -p"),
+        },
+    )
+
+    assert config.configured_analyze_agents() == ["codex", "pi"]
+    assert config.configured_code_agents() == ["codex", "claude"]
+
+
 def test_agents_are_offered_by_name_in_configuration_order():
     config = WorkdashConfig(
         agents={
