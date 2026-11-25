@@ -197,12 +197,31 @@ class FakeGitHub:
                 ref = (
                     f"{_queried_repository(query)}#{re.search(r'issue\(number: (\d+)\)', query)[1]}"
                 )
-                connection = self._issue_node(ref)["closedByPullRequestsReferences"]
+                nodes = self._issue_node(ref)["closedByPullRequestsReferences"]["nodes"]
+                if "author { login }" in query:
+                    for node in nodes:
+                        repo, number = node["repository"]["nameWithOwner"], node["number"]
+                        pr_ref = f"{repo}#{number}"
+                        pr = self.pull_requests[pr_ref]
+                        node.update(
+                            title=f"Pull request {pr_ref}",
+                            url=f"https://github.com/{repo}/pull/{number}",
+                            createdAt=pr["created"],
+                            updatedAt=pr["updated"] or pr["created"],
+                            author={"login": pr["author"]},
+                            closingIssuesReferences={
+                                "nodes": [
+                                    {
+                                        "number": issue_no,
+                                        "repository": {"nameWithOwner": issue_repo},
+                                    }
+                                    for issue_repo, issue_no in map(_split, pr["closes"])
+                                ]
+                            },
+                        )
                 data = {
                     "repository": {
-                        "issue": {
-                            "closedByPullRequestsReferences": self._page(query, connection["nodes"])
-                        }
+                        "issue": {"closedByPullRequestsReferences": self._page(query, nodes)}
                     }
                 }
                 return subprocess.CompletedProcess(

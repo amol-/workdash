@@ -1215,7 +1215,6 @@ def test_code_without_autostart_launches_the_unchanged_briefing(monkeypatch, tmp
     session.code(target="owner/repo#ISSUE-1", agent="pi")
 
     assert _launched_prompt(launch_agent) == "PROMPT"
-    assert github.operations == ["ReadyIssueTree"]
 
 
 def test_code_with_autostart_adds_the_implementation_appendix_once(monkeypatch, tmp_path) -> None:
@@ -1487,15 +1486,18 @@ def test_autostarting_a_review_reads_no_github_state_and_stays_review_only(
     assert github.operations == []
 
 
-def test_autostart_reports_a_failed_work_state_lookup_without_launching(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    ("autostart", "operation"), [(True, "ReadyIssueTree"), (False, "ItemLookup")]
+)
+def test_code_reports_a_failed_github_lookup_without_launching(
+    monkeypatch, tmp_path, autostart, operation
 ) -> None:
     github = install_fake_github(monkeypatch)
-    github.failures["ReadyIssueTree"] = failure("HTTP 502: Bad Gateway")
+    github.failures[operation] = failure("HTTP 502: Bad Gateway")
     session, _worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
 
     with pytest.raises(WorkdashControlError) as raised:
-        session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+        session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=autostart)
 
     assert (raised.value.code, raised.value.status) == ("github_error", HTTPStatus.BAD_GATEWAY)
     launch_agent.assert_not_called()
@@ -2938,17 +2940,20 @@ def test_issue_redirect_preserves_issue_analysis(monkeypatch, tmp_path):
     assert prepare.call_args.kwargs["analysis_path"] == session.analysis_url(issue)
 
 
+@pytest.mark.parametrize("pr_repo", ["owner/repo", "other/implementation"])
 def test_plan_first_issue_resumes_authored_pr_branch_without_existing_worktree(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, pr_repo
 ):
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
-    github.add_pull_request("owner/repo#51", closes=("owner/repo#1",))
+    github.add_pull_request("owner/repo#50", closes=("owner/repo#1",), author="someone-else")
+    github.add_pull_request(f"{pr_repo}#51", closes=("owner/repo#1",))
     session, _worktree, _ensure, launch, prepare = _authored_session(monkeypatch, tmp_path)
     monkeypatch.setattr(control_module, "existing_worktree_path", lambda *_args, **kwargs: None)
     result = session.code(target="owner/repo#ISSUE-1", agent="pi")
     assert result["item_id"] == "owner/repo#ISSUE-1"
-    assert prepare.call_args.args[0].number == 51
+    pr = prepare.call_args.args[0]
+    assert (pr.repo, pr.number) == (pr_repo, 51)
     assert "AUTOSTART" not in _launched_prompt(launch)
 
 

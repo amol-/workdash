@@ -19,7 +19,7 @@ import workdash.config as config_module
 import workdash.control as control_module
 import workdash.github_client as github_client_module
 import workdash.workdash as workdash_module
-from gh_work_state_fake import install_fake_github
+from gh_work_state_fake import failure, install_fake_github
 from workdash.config import AgentConfig, WorkdashConfig, load_config, save_config
 from workdash.control import WorkdashSession, probe_dashboard_session
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
@@ -1600,21 +1600,24 @@ def test_main_code_json_outputs_server_response(
 
 
 @pytest.mark.parametrize(
-    ("flags", "pr_checkout_branch", "pr_pane_running"),
+    ("flags", "pr_checkout_branch", "pr_pane_running", "readiness_unavailable"),
     [
-        pytest.param([], None, False, id="issue-only"),
-        pytest.param([], "other-branch", True, id="unverified-pr-pane"),
-        pytest.param([], "local-pr", False, id="verified-idle-pr"),
-        pytest.param([], "local-pr", True, id="plan-first-pr-pane"),
-        pytest.param(["--autostart"], "local-pr", True, id="autostart-pr-pane"),
+        pytest.param([], None, False, False, id="issue-only"),
+        pytest.param([], None, False, True, id="issue-only-without-readiness"),
+        pytest.param([], "other-branch", True, False, id="unverified-pr-pane"),
+        pytest.param([], "local-pr", False, False, id="verified-idle-pr"),
+        pytest.param([], "local-pr", True, False, id="plan-first-pr-pane"),
+        pytest.param(["--autostart"], "local-pr", True, False, id="autostart-pr-pane"),
     ],
 )
 def test_main_code_selects_checkout_for_issue_with_linked_pr(
-    monkeypatch, tmp_path, capsys, flags, pr_checkout_branch, pr_pane_running
+    monkeypatch, tmp_path, capsys, flags, pr_checkout_branch, pr_pane_running, readiness_unavailable
 ):
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
     github.add_pull_request("owner/repo#51", closes=("owner/repo#1",))
+    if readiness_unavailable:
+        github.failures["ReadyIssueTree"] = failure("gh: subIssuesSummary unavailable")
     config = replace(_VALID_CONFIG, workdir=str(tmp_path))
     issue_checkout = worktree_path(config.workdir, "owner/repo", 1)
     pr_checkout = worktree_path(config.workdir, "owner/repo", 51)

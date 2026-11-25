@@ -822,10 +822,8 @@ class WorkdashSession:
                 ) from error
         if not autostart and item.item_type == WorkItemType.ISSUE:
             try:
-                state = self.backend.github_client.work_pull_request(
-                    item,
-                    github_username=self.config.github_username,
-                    todo_repository=self.config.todo_repository,
+                pull_request = self.backend.github_client.linked_authored_open_pull_request(
+                    item, github_username=self.config.github_username
                 )
             except RuntimeError as error:
                 raise WorkdashControlError(
@@ -833,8 +831,8 @@ class WorkdashSession:
                     f"GitHub lookup for {target!r} failed: {error}",
                     status=HTTPStatus.BAD_GATEWAY,
                 ) from error
-            if state is not None and state.state == "OPEN":
-                item = state.item
+            if pull_request is not None:
+                item = pull_request
         if autostart:
             try:
                 item, autostart_text, launch_reason = autostart_briefing(

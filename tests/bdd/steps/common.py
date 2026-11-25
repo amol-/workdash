@@ -613,6 +613,11 @@ def install_github_item_lookup(
             }
             payload = {"data": {"repository": {"issue": issue}}}
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+        if re.search(r"\{ issue\(number: \d+\) \{ closedByPullRequestsReferences", command[-1]):
+            connection = {"nodes": [], "pageInfo": {"hasNextPage": False}}
+            issue = {"closedByPullRequestsReferences": connection}
+            payload = {"data": {"repository": {"issue": issue}}}
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
         if match is None:
             raise AssertionError(f"Unexpected GitHub query: {command}")
         repo, number = f"{match[1]}/{match[2]}", int(match[3])
