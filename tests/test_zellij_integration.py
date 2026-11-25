@@ -17,6 +17,8 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager, nullcontext, suppress
+from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -87,11 +89,25 @@ def _cleanup_sessions(zellij, env, sessions, *, previously_owned=None):
 def _session_processes(env, sessions):
     """Find the server by its private socket path, even if Workdash started it."""
     live = _live_processes()
+    socket_dir = Path(env["ZELLIJ_SOCKET_DIR"]).resolve()
+    listing = subprocess.run(
+        ["ps", "-ww", "-U", str(os.getuid()), "-o", "pid=", "-o", "args="],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=True,
+        timeout=1,
+    ).stdout
+    candidates = set()
+    for line in listing.splitlines():
+        if " --server " in line and f"/{socket_dir.name}/" in line:
+            pid = line.split(maxsplit=1)[0]
+            if pid.isdecimal() and int(pid) in live:
+                candidates.add(int(pid))
+
     servers = {}
-    for pid, (_, _, command) in live.items():
-        if command != "zellij":
-            continue
-        # Read argv separately so a pane's multiline arguments cannot become process rows.
+    for pid in candidates:
+        # Re-read candidates by PID: multiline arguments can look like rows in the bulk listing.
         args = subprocess.run(
             ["ps", "-ww", "-p", str(pid), "-o", "args="],
             capture_output=True,
@@ -99,12 +115,19 @@ def _session_processes(env, sessions):
             errors="replace",
             timeout=1,
         ).stdout.strip()
-        executable, _, socket = args.partition(" --server ")
-        socket = os.path.normpath(socket)
-        if os.path.basename(executable) == "zellij" and socket.startswith(
-            env["ZELLIJ_SOCKET_DIR"] + "/"
+        executable, flag, socket_arg = args.partition(" --server ")
+        if not flag:
+            continue
+        socket = Path(socket_arg)
+        if (
+            socket.name in sessions
+            and socket.is_absolute()
+            and socket.resolve().parent.is_relative_to(socket_dir)
+            # ps flattens argv; reject a match embedded in another command's arguments.
+            and os.path.isabs(executable)
+            and os.path.isfile(executable)
         ):
-            servers[os.path.basename(socket)] = pid
+            servers[socket.name] = pid
 
     owned = {}
     for name, clients in sessions.items():
@@ -120,7 +143,21 @@ def _session_processes(env, sessions):
 def _live_processes():
     # Start times keep snapshots taken before a mid-test kill from targeting reused PIDs.
     result = subprocess.run(
-        ["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "stat=", "-o", "lstart=", "-o", "ucomm="],
+        [
+            "ps",
+            "-U",
+            str(os.getuid()),
+            "-o",
+            "pid=",
+            "-o",
+            "ppid=",
+            "-o",
+            "stat=",
+            "-o",
+            "lstart=",
+            "-o",
+            "ucomm=",
+        ],
         env={**os.environ, "LC_ALL": "C"},
         capture_output=True,
         text=True,
@@ -142,10 +179,14 @@ def _live_processes():
     return processes
 
 
+def _private_socket_dir():
+    # Unix socket paths have a short length limit, even when TMPDIR is long.
+    return tempfile.TemporaryDirectory(prefix="wd-zellij-", dir="/tmp")
+
+
 @contextmanager
 def _private_zellij_env(monkeypatch):
-    # Unix socket paths are short, so don't nest them under pytest's test directory.
-    with tempfile.TemporaryDirectory(prefix="wd-zellij-") as sockets, monkeypatch.context() as env:
+    with _private_socket_dir() as sockets, monkeypatch.context() as env:
         for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
             env.delenv(key, raising=False)
         env.setenv("ZELLIJ_SOCKET_DIR", sockets)
@@ -159,14 +200,57 @@ def zellij_socket_dir(monkeypatch):
         yield
 
 
+def test_zellij_cleanup_does_not_signal_pid_from_multiline_args(tmp_path, monkeypatch):
+    unrelated_pid = 12345
+    socket = tmp_path / "contract_version_1" / "test-session"
+    env = {"ZELLIJ_SOCKET_DIR": str(tmp_path)}
+
+    def run(command, **kwargs):
+        stdout = ""
+        if command[0] == "ps":
+            if "ucomm=" in command:
+                stdout = f"{unrelated_pid} 1 S Mon Jan  1 00:00:00 2024 sleep\n"
+            elif "-p" in command:
+                assert command[command.index("-p") + 1] == str(unrelated_pid)
+                stdout = "/bin/sleep 120\n"
+            else:
+                stdout = (
+                    "12346 pane-command multiline argument:\n"
+                    f"{unrelated_pid} {sys.executable} --server {socket}\n"
+                    ": end of argument\n"
+                )
+        return subprocess.CompletedProcess(command, 0, stdout)
+
+    kill = Mock(side_effect=AssertionError("cleanup signaled the unrelated process"))
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(os, "kill", kill)
+    fd = os.open(os.devnull, os.O_RDONLY)
+    _cleanup_sessions("zellij", env, [(socket.name, os.getpid(), fd)])
+    kill.assert_not_called()
+
+
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
 @pytest.mark.parametrize(
-    "body_error,leave_survivor",
-    [(None, False), (AssertionError, False), (KeyboardInterrupt, False), (None, True)],
-    ids=["normal", "failure", "ctrl-c", "survivor"],
+    "case",
+    ["normal", "failure", "ctrl-c", "survivor", "renamed-binary", "long-tmpdir"],
 )
-def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, body_error, leave_survivor):
+def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
     zellij = shutil.which("zellij")
+    if case == "renamed-binary":
+        binary = tmp_path / "terminal-multiplexer"
+        shutil.copy2(zellij, binary)
+        link = tmp_path / "zellij"
+        link.symlink_to(binary)
+        monkeypatch.setenv("PATH", str(tmp_path), prepend=os.pathsep)
+        zellij = str(link)
+    elif case == "long-tmpdir":
+        long_tmpdir = tmp_path / ("long-" * 24)
+        long_tmpdir.mkdir()
+        monkeypatch.setenv("TMPDIR", str(long_tmpdir))
+        monkeypatch.setattr(tempfile, "tempdir", None)
+
+    body_error = {"failure": AssertionError, "ctrl-c": KeyboardInterrupt}.get(case)
+    leave_survivor = case == "survivor"
     ready = tmp_path / "pane-pid"
     pane_pid = None
     kill = os.kill
@@ -364,7 +448,7 @@ def test_launch_pane_and_wait_blocks_until_the_pane_command_exits_in_its_group_t
     from workdash.launcher import zellij as zellij_client
 
     zellij = shutil.which("zellij")
-    name = f"workdash-wait-test-{uuid.uuid4().hex}"
+    name = f"workdash-wait-{uuid.uuid4().hex[:8]}"
     env = os.environ.copy()
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
         env.pop(key, None)
@@ -728,13 +812,13 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
     from workdash import launcher
 
     zellij = shutil.which("zellij")
-    sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
+    sockets = _private_socket_dir()
     monkeypatch.setenv("ZELLIJ_SOCKET_DIR", sockets.name)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     config = tmp_path / "config.kdl"
     config.write_text("")
     monkeypatch.setenv("ZELLIJ_CONFIG_FILE", str(config))
-    name = f"workdash-viewer-test-{uuid.uuid4().hex}"
+    name = f"workdash-viewer-{uuid.uuid4().hex[:8]}"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     executable = bin_dir / "workdash"
@@ -869,7 +953,7 @@ def test_cli_and_api_analysis_preserve_focus_in_real_zellij(tmp_path, monkeypatc
     from workdash.workdash import main
 
     zellij = shutil.which("zellij")
-    sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
+    sockets = _private_socket_dir()
     monkeypatch.setenv("ZELLIJ_SOCKET_DIR", sockets.name)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     config = tmp_path / "config.kdl"
@@ -1073,12 +1157,11 @@ def test_cli_and_api_analysis_preserve_focus_in_real_zellij(tmp_path, monkeypatc
 @pytest.mark.parametrize("repeat", range(2))
 def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected, repeat):
     import socket
-    import tempfile
 
     from workdash.control import WorkdashControlClient, WorkdashControlError
 
     zellij = shutil.which("zellij")
-    sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
+    sockets = _private_socket_dir()
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         old_port = probe.getsockname()[1]
@@ -1175,7 +1258,6 @@ def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
 def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
     import socket
-    import tempfile
 
     from workdash.control import WorkdashControlClient, WorkdashControlError
 
@@ -1206,7 +1288,7 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
     config.write_text(
         "session_serialization false\ndisable_session_metadata true\nserialization_interval 1\n"
     )
-    with tempfile.TemporaryDirectory(prefix="wd-zellij-") as sockets:
+    with _private_socket_dir() as sockets:
         env = os.environ.copy()
         for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
             env.pop(key, None)
@@ -1417,7 +1499,7 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
 def test_dashboard_analysis_focuses_viewer_in_real_zellij(tmp_path, choice, repeat):
     import socket
 
-    sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
+    sockets = _private_socket_dir()
     config = tmp_path / "config.kdl"
     config.write_text("show_release_notes false\nshow_startup_tips false\n")
     zellij = shutil.which("zellij")
@@ -1533,7 +1615,7 @@ def _attach_running_dashboard_focus_harness(
     import socket
 
     zellij = shutil.which("zellij")
-    name = f"workdash-focus-{uuid.uuid4().hex}"
+    name = f"workdash-focus-{uuid.uuid4().hex[:8]}"
     env = os.environ.copy()
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "XDG_CONFIG_HOME"):
         env.pop(key, None)
@@ -1553,7 +1635,7 @@ def _attach_running_dashboard_focus_harness(
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     shell.chmod(0o755)
-    sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
+    sockets = _private_socket_dir()
     config = tmp_path / "config.kdl"
     config.write_text("show_release_notes false\nshow_startup_tips false\n")
     home = _temporary_home(tmp_path)
