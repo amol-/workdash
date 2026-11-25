@@ -41,13 +41,6 @@ def _dashboard_records_in_tmp_path(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _pane_launch_state_in_tmp_path(tmp_path, monkeypatch):
-    """Keep restart receipts out of the developer's state directory."""
-
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-
-
-@pytest.fixture(autouse=True)
 def _no_answering_dashboard(monkeypatch):
     """Keep dashboard startup from probing a dashboard that may run on this machine."""
 

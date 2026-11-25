@@ -1228,30 +1228,6 @@ def _asks_server_to_code_with_autostart_and_autoclose(scenario_state: dict[str, 
     assert (request["payload"]["autostart"], request["payload"]["autoclose"]) == (True, True)
 
 
-@given("a launch retry starts the agent while the first pane is still visible with the same title")
-def _launch_has_losing_pane(scenario_state, monkeypatch):
-    scenario_state["launch_has_losing_pane"] = True
-    monkeypatch.setattr(
-        scenario_state["api_session"].autoclose,
-        "supervise",
-        lambda **kwargs: scenario_state.setdefault("supervised_panes", []).append(
-            kwargs["pane_id"]
-        ),
-    )
-
-
-@then("the command reports the pane running the agent")
-def _reports_running_agent(scenario_state):
-    assert scenario_state["exit_code"] == 0
-    assert f"Pane id: {scenario_state['agent_pane_id']}" in scenario_state["stdout"]
-
-
-@then("the server enables autoclose on that pane")
-def _supervises_running_agent(scenario_state):
-    assert "Autoclose: enabled" in scenario_state["stdout"]
-    assert scenario_state["supervised_panes"] == [scenario_state["agent_pane_id"]]
-
-
 @then("the command asks no server to code")
 def _asks_no_server_to_code(scenario_state: dict[str, Any]) -> None:
     assert scenario_state.get("control_requests", []) == []

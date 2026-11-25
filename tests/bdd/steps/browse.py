@@ -135,6 +135,7 @@ def _terminal_url_opened(scenario_state: dict[str, Any]) -> None:
                 "100%",
                 "--name",
                 "xdg-open",
+                "--close-on-exit",
             ],
             ["xdg-open", scenario_state["selected_item"].url],
         ),

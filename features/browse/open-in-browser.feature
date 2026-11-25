@@ -10,7 +10,7 @@ Feature: Open a work item in the browser
     - The viewer receives the URL literally after any configured arguments, without shell expansion.
     - Legacy configurations without a viewer terminal choice open directly; direct viewers do not require Zellij.
     - A viewer requiring its own terminal opens in a full-size floating pane in the current session, without creating a session or preparing a worktree.
-    - Launch failures report the configured viewer command; viewer child errors remain visible in its terminal.
+    - A missing or non-executable viewer in the pane's working directory and environment is reported as a launch failure naming the configured command. The viewer pane closes when its command exits.
     - The TUI reports the outcome of the open action to the user.
     - If the browser command fails, the system closes the progress overlay and reports the error details to the user.
     - If the browser command does not respond promptly, the system closes the progress overlay and reports that opening a browser may not be supported from this session.

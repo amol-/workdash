@@ -726,7 +726,7 @@ def _analysis_url_opened(scenario_state: dict[str, Any]) -> None:
     expected_url = scenario_state["cache"].build_analysis_path(item).resolve().as_uri()
     if scenario_state.get("pane_viewer"):
         scenario_state["viewer_run"].assert_called_once_with(
-            "workdash-main", ["term-view", "--quiet", expected_url], close_on_exit=True
+            "workdash-main", ["term-view", "--quiet", expected_url]
         )
     else:
         scenario_state["viewer_run"].assert_called_once_with(

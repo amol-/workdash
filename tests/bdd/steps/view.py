@@ -768,7 +768,7 @@ def _item_shown_in_pane(scenario_state: dict[str, Any]) -> None:
                 "--close-on-exit",
             ],
             [
-                "sh",
+                "/bin/sh",
                 "-c",
                 '"$@" || { printf "\\nPress Enter to close this pane.\\n"; read -r _; }',
                 "workdash-view",

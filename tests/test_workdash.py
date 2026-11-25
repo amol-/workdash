@@ -414,6 +414,7 @@ def test_main_passes_configured_agent_choices_and_separate_viewers_to_tui(
                     "100%",
                     "--name",
                     "term-copy",
+                    "--close-on-exit",
                 ],
                 [*viewer_argv, item.url],
             ),

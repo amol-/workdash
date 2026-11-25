@@ -375,12 +375,3 @@ Feature: CLI orchestration commands
     And GitHub repository `owner/repo` has open issue #42
     When the user runs `workdash code owner/repo#ISSUE-42 --agent pi --autoclose`
     Then the command asks the server to code with autostart and autoclose enabled
-
-  @id:F-CLI-ORCHESTRATION-S047
-  Scenario: Code with autoclose follows the agent when a launch is retried
-    Given a server-backed Workdash session is ready to answer
-    And GitHub repository `owner/repo` has open issue #42
-    And a launch retry starts the agent while the first pane is still visible with the same title
-    When the user runs `workdash code owner/repo#ISSUE-42 --agent pi --autoclose`
-    Then the command reports the pane running the agent
-    And the server enables autoclose on that pane

@@ -1080,11 +1080,22 @@ def test_an_agent_that_exits_right_after_launch_fails_without_blocking_a_retry(
 
 @pytest.mark.parametrize(
     ("winner_state", "code"),
-    [(None, "launch_unconfirmed"), ("held", "agent_exited"), ("wrong-title", "launch_unconfirmed")],
+    [
+        ("live", None),
+        (None, "launch_unconfirmed"),
+        ("held", "agent_exited"),
+        ("wrong-title", "launch_unconfirmed"),
+    ],
 )
-def test_code_does_not_accept_a_live_losing_retry(monkeypatch, tmp_path, winner_state, code):
+def test_code_reports_and_supervises_only_the_winning_retry(
+    monkeypatch, tmp_path, winner_state, code
+):
     panes = []
     session, _, _, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
+    supervise = MagicMock()
+    monkeypatch.setattr(session.autoclose, "supervise", supervise)
+
+    monkeypatch.setattr(session.backend.github_client, "work_pull_request", lambda *a, **kw: None)
 
     def launch(repo, *_args, **_kwargs):
         title = "code_owner_repo_1"
@@ -1093,16 +1104,28 @@ def test_code_does_not_accept_a_live_losing_retry(monkeypatch, tmp_path, winner_
             panes.append(
                 {
                     "id": 30,
-                    "title": title if winner_state == "held" else "other",
+                    "title": "other" if winner_state == "wrong-title" else title,
                     "is_held": winner_state == "held",
                 }
             )
         return SimpleNamespace(session=None, pane_id="terminal_30", pane_title=title, cwd=repo)
 
     launch_agent.side_effect = launch
-    with pytest.raises(control_module.WorkdashControlError) as error:
-        session.code(target="owner/repo#ISSUE-1", agent="pi")
-    assert error.value.code == code
+    options = dict(target="owner/repo#ISSUE-1", agent="pi", autostart=True, autoclose=True)
+    if code is None:
+        result = session.code(**options)
+        assert (result["status"], result["pane_id"], result["autoclose_enabled"]) == (
+            "launched",
+            "terminal_30",
+            True,
+        )
+        supervise.assert_called_once()
+        assert supervise.call_args.kwargs["pane_id"] == "terminal_30"
+    else:
+        with pytest.raises(control_module.WorkdashControlError) as error:
+            session.code(**options)
+        assert error.value.code == code
+        supervise.assert_not_called()
 
 
 def test_code_waits_for_a_launched_agent_pane_that_zellij_lists_late(monkeypatch, tmp_path) -> None:

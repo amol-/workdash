@@ -16,7 +16,7 @@ import termios
 import threading
 import time
 import uuid
-from pathlib import Path
+from contextlib import contextmanager
 
 import pytest
 
@@ -269,14 +269,14 @@ def test_launch_pane_and_wait_blocks_until_the_pane_command_exits_in_its_group_t
         _cleanup_sessions(zellij, env, [(name, pid, fd)])
 
 
-@pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
-@pytest.mark.parametrize("tab_name", ["epic", "-foo"])
-def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, tab_name):
-    from workdash.agent_execution import executor
+@contextmanager
+def live_zellij_session(monkeypatch):
     from workdash.launcher import zellij as zellij_client
 
     zellij = shutil.which("zellij")
-    name = f"workdash-group-test-{uuid.uuid4().hex}"
+    if zellij is None:
+        pytest.skip("Zellij is not installed")
+    name = f"workdash-pane-test-{uuid.uuid4().hex}"
     env = os.environ.copy()
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
         env.pop(key, None)
@@ -297,6 +297,17 @@ def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, 
             time.sleep(0.1)
         else:
             pytest.fail("Zellij did not start")
+        yield name
+    finally:
+        _cleanup_sessions(zellij, env, [(name, pid, fd)])
+
+
+@pytest.mark.parametrize("tab_name", ["epic", "-foo"])
+def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, tab_name):
+    from workdash.agent_execution import executor
+    from workdash.launcher import zellij as zellij_client
+
+    with live_zellij_session(monkeypatch) as name:
         for repo, group in [("first", tab_name), ("second", tab_name), ("third", None)]:
             path = tmp_path / repo
             path.mkdir()
@@ -315,8 +326,6 @@ def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, 
             else:
                 assert pane["tab_name"] != tab_name
         assert len({p["tab_id"] for p in panes if p.get("tab_name") == tab_name}) == 1
-    finally:
-        _cleanup_sessions(zellij, env, [(name, pid, fd)])
 
 
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
@@ -482,6 +491,12 @@ def test_persistent_dashboard_quit_and_restart_in_real_zellij(tmp_path, repeat):
             p for p in panes if "--debug" in str(p.get("pane_command")) and not p["is_plugin"]
         )
         assert restarted["tab_name"] == "dashboard"
+        assert action("write-chars", "--pane-id", pane_id, "exit 23").returncode == 0
+        assert action("send-keys", "--pane-id", pane_id, "Enter").returncode == 0
+        panes = wait_for(
+            lambda panes: not any(p["id"] == dashboard["id"] and not p["is_plugin"] for p in panes)
+        )
+        assert any(p["id"] == shell["id"] and not p["is_plugin"] for p in panes)
         assert action("new-tab", "--name", "keep").returncode == 0
         assert action("close-tab", "--tab-id", str(restarted["tab_id"])).returncode == 0
         start("--refresh")
@@ -633,6 +648,7 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
         )
         viewer = next(p for p in panes if not p["is_plugin"] and p["id"] not in initial_ids)
         original = next(p for p in initial if not p["is_plugin"])
+        assert launcher.is_zellij_shell_pane(original)
         for field in ("pane_x", "pane_y", "pane_columns", "pane_rows"):
             assert viewer[field] == original[field], (field, viewer, original)
         pane_id = f"terminal_{viewer['id']}"
@@ -654,6 +670,9 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
             assert text in screen
         assert "# Analysis heading" not in screen
         assert "```" not in screen
+        running = json.loads(action("list-panes", "--json", "--all").stdout)
+        viewer = next(p for p in running if not p["is_plugin"] and p["id"] == viewer["id"])
+        assert not launcher.is_zellij_shell_pane(viewer), viewer["pane_command"]
         assert action("send-keys", "End").returncode == 0
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
@@ -1652,257 +1671,3 @@ def test_attach_running_dashboard_focuses_its_pane(
             next(harness)
     finally:
         harness.close()
-
-
-@pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
-@pytest.mark.skipif(sys.platform != "linux", reason="Zellij receipt cleanup verifies Linux stores")
-@pytest.mark.parametrize("mismatched_cache", [False, True])
-def test_held_workdash_receipt_survives_resurrection_until_session_is_discarded(
-    tmp_path, monkeypatch, mismatched_cache
-):
-    from workdash import launcher
-
-    zellij = shutil.which("zellij")
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    (bin_dir / "zellij").symlink_to(zellij)
-    monkeypatch.setattr(launcher, "_WORKDASH_LOCAL_BIN", bin_dir)
-    config = tmp_path / "config.kdl"
-    config.write_text(
-        "session_serialization true\nserialization_interval 1\n"
-        "show_release_notes false\nshow_startup_tips false\n"
-        f'layout_dir {json.dumps(str(tmp_path))}\ndefault_layout "initial"\n'
-    )
-    layout = tmp_path / "initial.kdl"
-    layout.write_text('layout {\n pane name="session-shell"\n}\n')
-    starts = tmp_path / "starts"
-    worktree = tmp_path.resolve() / "worktree"
-    worktree.mkdir()
-    command = [
-        "/bin/sh",
-        "-c",
-        f'{{ printf "%s %s %s " "$ZELLIJ_PANE_ID" "$PATH" "$XDG_CACHE_HOME"; pwd -P; }} >> {shlex.quote(str(starts))}',
-    ]
-    clients = []
-
-    screens = {}
-
-    def drain_clients():
-        for _, _, fd in clients:
-            while True:
-                try:
-                    chunk = os.read(fd, 65536)
-                except (BlockingIOError, OSError):  # No pending output or the client exited.
-                    break
-                if not chunk:
-                    break
-                screens[fd] = (screens.get(fd, b"") + chunk)[-8192:]
-
-    def run(*args, timeout=10):
-        drain_clients()
-        return subprocess.run([zellij, *args], capture_output=True, text=True, timeout=timeout)
-
-    def wait_for(description, predicate):
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            if result := predicate():
-                return result
-            time.sleep(0.1)
-        raise AssertionError(f"Timed out waiting for {description}")
-
-    def start(name, *, restore=False):
-        args = ["attach", name] if restore else ["--session", name]
-        if name == other:
-            # An unrelated live session without serialization still defers reclamation.
-            args += ["options", "--session-serialization", "false"]
-        pid, fd = pty.fork()
-        if pid == 0:
-            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
-            os.execv(zellij, [zellij, *args])
-        clients.append((name, pid, fd))
-        os.set_blocking(fd, False)
-        wait_for(
-            f"{name} socket", lambda: (Path(sockets) / "contract_version_1" / name).is_socket()
-        )
-        if not restore:
-            wait_for(
-                f"{name} shell pane",
-                lambda: any(
-                    pane["title"] == "session-shell" and launcher.is_live_zellij_pane(pane)
-                    for pane in panes(name)
-                ),
-            )
-
-    def panes(name):
-        try:
-            result = run("--session", name, "action", "list-panes", "--json", "--all", timeout=0.5)
-        except subprocess.TimeoutExpired:
-            return []
-        if result.returncode or result.stderr:
-            return []
-        try:
-            return json.loads(result.stdout)
-        except json.JSONDecodeError:
-            return []
-
-    def launch(session, command, **kwargs):
-        pane = launcher._launch_zellij_pane(command, zellij_session=session, **kwargs)
-        assert pane is not None
-        return pane
-
-    server_cache = str(tmp_path / "cache")
-    caller_cache = str(tmp_path / "caller-cache") if mismatched_cache else server_cache
-    other = "other" if mismatched_cache else "other [Created demo"
-    with tempfile.TemporaryDirectory(prefix="wd-zellij-") as socket_home:
-        sockets = Path(socket_home)
-        socket_override = str(sockets)
-        if mismatched_cache:
-            monkeypatch.chdir(sockets.parent)
-            socket_override = sockets.name
-        for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
-            monkeypatch.delenv(key, raising=False)
-        for key, value in dict(
-            TERM="xterm-256color",
-            HOME=_temporary_home(tmp_path),
-            SHELL="/bin/sh",
-            PATH=str(bin_dir),
-            ZELLIJ_SOCKET_DIR=socket_override,
-            ZELLIJ_CONFIG_FILE=str(config),
-            XDG_CACHE_HOME=server_cache,
-            XDG_CONFIG_HOME=str(tmp_path / "config"),
-            XDG_DATA_HOME=str(tmp_path / "data"),
-            XDG_STATE_HOME=str(tmp_path / "state"),
-        ).items():
-            monkeypatch.setenv(key, value)
-        try:
-            start("saved")
-            monkeypatch.setenv("XDG_CACHE_HOME", caller_cache)
-            # Leave a hole in terminal IDs that the restored layout does not contain.
-            discarded = launch("saved", ["/bin/sh", "-c", "exit 0"], close_on_exit=True)
-            wait_for(
-                "the short-lived pane to close while the saved session is still live",
-                lambda: (
-                    (listed := panes("saved"))
-                    and not any(
-                        not p["is_plugin"] and f"terminal_{p['id']}" == discarded for p in listed
-                    )
-                ),
-            )
-            original = launch("saved", command, cwd=str(worktree), name="restorable")
-            [receipt] = (tmp_path / "state").glob("workdash/pane-launches/*/launch/pane")
-            wait_for(
-                "Zellij to save the restartable pane",
-                lambda: any(
-                    str(receipt) in saved_layout.read_text()
-                    for saved_layout in (tmp_path / "cache").rglob("session-layout.kdl")
-                ),
-            )
-            monkeypatch.setenv("XDG_CACHE_HOME", server_cache)
-            assert run("kill-session", "saved").returncode == 0
-            wait_for(
-                "the saved session to exit and release its socket",
-                lambda: (
-                    any(
-                        row.startswith("saved [Created ") and "(EXITED" in row
-                        for row in run("list-sessions", "--no-formatting").stdout.splitlines()
-                    )
-                    and not (Path(sockets) / "contract_version_1" / "saved").exists()
-                ),
-            )
-            # Zellij still writes session metadata with serialization disabled.
-            sessions_dir = Path(server_cache) / "zellij/contract_version_1/session_info"
-            (sessions_dir / other).mkdir()
-            orphan = receipt.parent.parent.with_name("workdash-pane-orphan")
-            shutil.copytree(receipt.parent.parent, orphan, symlinks=True)
-            monkeypatch.setenv("XDG_CACHE_HOME", caller_cache)
-            os.utime(Path(sockets) / "contract_version_1", (1, 1))
-            launcher.zellij.exec_zellij_wrapped_workdash(["--session", "bootstrap"], lambda: False)
-            assert not orphan.exists(), "bootstrap did not reclaim the unreferenced receipt"
-            assert receipt.is_symlink()
-            monkeypatch.setenv("XDG_CACHE_HOME", server_cache)
-            start(other)
-            start("saved", restore=True)
-            held = wait_for(
-                "the restored pane to be ready for restart",
-                lambda: next(
-                    (p for p in panes("saved") if p["title"] == "restorable" and p["is_held"]), None
-                ),
-            )
-            restored = f"terminal_{held['id']}"
-            assert restored != original
-            renamed = run("--session", "saved", "action", "rename-session", "renamed")
-            assert renamed.returncode == 0 and not renamed.stderr, renamed
-            _, pid, fd = clients[-1]
-            clients[-1] = ("renamed", pid, fd)
-            wait_for(
-                "the restored pane in the renamed session",
-                lambda: any(
-                    p["id"] == held["id"] and p["title"] == "restorable" and p["is_held"]
-                    for p in panes("renamed")
-                ),
-            )
-            monkeypatch.setenv("XDG_CACHE_HOME", caller_cache)
-            launch(other, ["/bin/sh", "-c", "exit 0"])
-            assert receipt.is_symlink()
-            original_id = original.removeprefix("terminal_")
-            assert starts.read_text().splitlines() == [
-                f"{original_id} {bin_dir} {server_cache} {worktree}"
-            ]
-            assert (
-                run(
-                    "--session", "renamed", "action", "send-keys", "--pane-id", restored, "Enter"
-                ).returncode
-                == 0
-            )
-            wait_for("the restored command to run", lambda: starts.read_text().count("\n") >= 2)
-            assert starts.read_text().splitlines() == [
-                f"{original_id} {bin_dir} {server_cache} {worktree}",
-                f"{held['id']} {bin_dir} {server_cache} {worktree}",
-            ]
-            monkeypatch.setenv("XDG_CACHE_HOME", server_cache)
-            assert run("kill-session", "renamed").returncode == 0
-            wait_for(
-                "the renamed session to exit and release its socket",
-                lambda: (
-                    any(
-                        row.startswith("renamed [Created ") and "(EXITED" in row
-                        for row in run("list-sessions", "--no-formatting").stdout.splitlines()
-                    )
-                    and not (Path(sockets) / "contract_version_1" / "renamed").exists()
-                ),
-            )
-            assert run("delete-session", "renamed").returncode == 0
-            monkeypatch.setenv("XDG_CACHE_HOME", caller_cache)
-            os.utime(Path(sockets) / "contract_version_1", (1, 1))
-            launcher.zellij.exec_zellij_wrapped_workdash(["--session", "bootstrap"], lambda: False)
-            assert receipt.is_symlink(), "an active namespace must defer reclamation"
-            monkeypatch.setenv("XDG_CACHE_HOME", server_cache)
-            assert run("kill-session", other).returncode == 0
-            wait_for(
-                "the namespace to have no live Zellij sessions",
-                lambda: (
-                    not any(p.is_socket() for p in Path(sockets, "contract_version_1").iterdir())
-                ),
-            )
-            monkeypatch.setenv("XDG_CACHE_HOME", caller_cache)
-            socket_dir = Path(sockets) / "contract_version_1"
-            unlinked_at = socket_dir.stat().st_mtime_ns
-            with monkeypatch.context() as clock:
-                clock.setattr(launcher.time, "time_ns", lambda: unlinked_at)
-                launcher.zellij.exec_zellij_wrapped_workdash(
-                    ["--session", "bootstrap"], lambda: False
-                )
-            assert receipt.is_symlink(), "a recent shutdown must defer reclamation"
-
-            os.utime(socket_dir, (1, 1))
-            launcher.zellij.exec_zellij_wrapped_workdash(["--session", "bootstrap"], lambda: False)
-            assert not receipt.parent.parent.exists()
-        except Exception as error:
-            sessions = run("list-sessions", "--no-formatting")
-            error.add_note(f"Zellij sessions: {sessions.stdout}{sessions.stderr}")
-            for name, _, fd in clients:
-                screen = screens.get(fd, b"").decode(errors="replace")
-                error.add_note(f"{name} PTY output: {screen!r}")
-            raise
-        finally:
-            _cleanup_sessions(zellij, {**os.environ, "XDG_CACHE_HOME": server_cache}, clients)

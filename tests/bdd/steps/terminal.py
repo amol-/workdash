@@ -2,16 +2,10 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
-import os
-import pty
 import shutil
-import struct
 import subprocess
-import termios
 import time
-import uuid
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,106 +17,45 @@ from textual.widgets import Static
 
 from workdash.agent_execution import executor
 from workdash.control import WorkdashSession, format_work_item_id
-from workdash.launcher import _zellij_pane_name_for_work_action, launch_terminal_context, zellij
+from workdash.launcher import (
+    _zellij_pane_name_for_work_action,
+    find_zellij_pane,
+    is_live_zellij_pane,
+    launch_terminal_context,
+    zellij,
+)
 from workdash.models import WorkItem
 from zellij_pane_launch import mark_pane_started
 
 from .common import make_valid_config, make_work_item, modal_screen_names, run_app
 
 
-@given(
-    "a Workdash terminal is open in a worktree with a restricted PATH",
-    target_fixture="restart_terminal",
-)
-def _open_terminal_for_restart(tmp_path, monkeypatch):
-    from test_zellij_integration import _cleanup_sessions, _temporary_home
+@given("a Workdash terminal is open in a worktree", target_fixture="terminal_pane")
+def _open_terminal_in_worktree(tmp_path, monkeypatch):
+    from test_zellij_integration import live_zellij_session
 
-    binary = shutil.which("zellij")
-    if binary is None:
-        pytest.skip("Zellij is not installed")
-    name = f"workdash-restart-terminal-{uuid.uuid4().hex}"
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
-    restricted_path = tmp_path / "bin"
-    restricted_path.mkdir()
-    startup = tmp_path / "shell-startup"
-    startup.write_text(
-        'printf "%s %s %s\\n" "$ZELLIJ_PANE_ID" "$PWD" "$PATH" >> "$HOME/shell-starts"\n',
-        encoding="utf-8",
-    )
-    home = _temporary_home(tmp_path)
-    system_tmp = tmp_path / "system-tmp"
-    system_tmp.mkdir()
-    monkeypatch.setattr("tempfile.tempdir", str(system_tmp))
-    monkeypatch.setenv("SHELL", "/bin/sh")
-    env = dict(os.environ, TERM="xterm-256color", ENV=str(startup), HOME=home)
-    env.update(PATH=str(restricted_path), XDG_STATE_HOME=str(tmp_path / "state"))
-    monkeypatch.setenv("XDG_STATE_HOME", env["XDG_STATE_HOME"])
-    for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
-        env.pop(key, None)
-    pid, fd = pty.fork()
-    if pid == 0:
-        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
-        os.execve(binary, [binary, "--session", name], env)
-    try:
-        for _ in range(50):
-            try:
-                if zellij.load_zellij_panes(name):
-                    break
-            except RuntimeError:
-                pass
-            time.sleep(0.1)
-        else:
-            pytest.fail("Zellij did not start")
-        launch = launch_terminal_context(str(worktree), zellij_session=name)
-        yield name, launch.pane_id, Path(home) / "shell-starts", str(worktree)
-    finally:
-        _cleanup_sessions(binary, env, [(name, pid, fd)])
+    with live_zellij_session(monkeypatch) as session:
+        launch = launch_terminal_context(str(tmp_path), zellij_session=session)
+        pane = find_zellij_pane(zellij.load_zellij_panes(session), launch.pane_id)
+        assert pane is not None and is_live_zellij_pane(pane)
+        yield session, launch.pane_id
 
 
-@given("the shell has exited leaving its Zellij pane held open")
-def _exit_held_terminal(restart_terminal):
-    name, pane_id, _, _ = restart_terminal
-    zellij.send_zellij_pane_input(name, pane_id, "exit 0")
-    for _ in range(50):
-        for pane in zellij.load_zellij_panes(name):
-            if (
-                not pane.get("is_plugin")
-                and f"terminal_{pane['id']}" == pane_id
-                and pane.get("exited")
-            ):
-                assert pane.get("exit_status") == 0, pane
-                return
-        time.sleep(0.1)
-    pytest.fail("the terminal did not exit and stay open")
+@when("the user exits the shell")
+def _exit_terminal_shell(terminal_pane):
+    session, pane_id = terminal_pane
+    zellij.send_zellij_pane_input(session, pane_id, "exit 0")
 
 
-@given("the system has cleared temporary files")
-def _clear_terminal_system_tmp(tmp_path):
-    system_tmp = tmp_path / "system-tmp"
-    shutil.rmtree(system_tmp)
-    system_tmp.mkdir()
-
-
-@when("the user presses Enter in the held pane")
-def _restart_held_terminal(restart_terminal):
-    name, pane_id, _, _ = restart_terminal
-    zellij.press_zellij_pane_enter(name, pane_id)
-
-
-@then("a fresh shell starts in the same pane in the worktree")
-def _terminal_restarted(restart_terminal, tmp_path):
-    name, pane_id, starts, worktree = restart_terminal
-    shell_start = f"{pane_id.removeprefix('terminal_')} {worktree} {tmp_path / 'bin'}"
-    for _ in range(50):
-        if (
-            starts.exists()
-            and starts.read_text(encoding="utf-8").splitlines().count(shell_start) == 2
-        ):
-            assert "workdash-pane:" not in zellij.dump_zellij_pane(name, pane_id, full=True)
+@then("that terminal pane closes")
+def _terminal_closes(terminal_pane):
+    session, pane_id = terminal_pane
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if find_zellij_pane(zellij.load_zellij_panes(session), pane_id) is None:
             return
         time.sleep(0.1)
-    pytest.fail(zellij.dump_zellij_pane(name, pane_id))
+    pytest.fail(f"terminal pane {pane_id} stayed open after exit")
 
 
 @given("the next terminal launch will fail")
@@ -215,8 +148,7 @@ def _work_action_opens_current_zellij_session(scenario_state: dict[str, Any]) ->
     command = commands[0]
     assert Path(command[0]).name == "zellij"
     assert command[1:3] == ["action", "new-pane"]
-    cwd_index = command.index("--cwd")
-    assert command[cwd_index : cwd_index + 3] == ["--cwd", scenario_state["worktree_path"], "--"]
+    assert command[command.index("--cwd") + 1] == scenario_state["worktree_path"]
 
 
 @then("the system does not target the shared `workdash` Zellij session")
@@ -320,6 +252,17 @@ def run_terminal_scenario(
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir(exist_ok=True)
     panes = _scenario_panes(scenario_state, worktree_path, tmp_path)
+    if scenario_state.get("open_viewer"):
+        panes.insert(
+            0,
+            {
+                "id": 3,
+                "title": "view",
+                "pane_command": '/bin/sh -c claim="$ZELLIJ_PANE_ID"; ... '
+                "workdash-pane /tmp/workdash-pane-test/launch/pane workdash view analysis.md",
+                "pane_cwd": str(worktree_path),
+            },
+        )
     # A transient failure: only the advisory check for an existing terminal fails.
     lookup_failures = 1 if scenario_state.get("terminal_lookup_fails") else 0
 
@@ -442,6 +385,11 @@ def _reports_terminal_launch_timeout(scenario_state: dict[str, Any]) -> None:
 @then("no terminal is opened")
 def _no_terminal_opened(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["terminal_calls"] == []
+
+
+@given("a viewer is open in that worktree")
+def _viewer_open(scenario_state):
+    scenario_state["open_viewer"] = True
 
 
 @given("a plain shell is already open in that worktree alongside a coding agent")

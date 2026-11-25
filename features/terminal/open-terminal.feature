@@ -8,16 +8,13 @@ Feature: Open a terminal in the work item's worktree
   Rules:
     - Choosing "t" in the TUI code menu opens a terminal whose working directory is the worktree of the selected work item.
     - If the worktree does not yet exist, the system prepares it before opening the terminal.
-    - The TUI focuses an existing Workdash terminal in the worktree even when it is running a program or its shell changed directory. It also reuses a live shell, including the user's configured shell, but not an agent, diff pane, or other program. A terminal in another worktree under the configured working directory is not reused even if the directories have the same name. Outside that directory, a terminal carrying this worktree's Workdash title is treated as this worktree's terminal.
+    - The TUI focuses an existing Workdash terminal in the worktree even when it is running a program or its shell changed directory. It also reuses a live shell, including the user's configured shell, but not an agent, diff pane, viewer, or other program. A terminal in another worktree under the configured working directory is not reused even if the directories have the same name. Outside that directory, a terminal carrying this worktree's Workdash title is treated as this worktree's terminal.
     - Looking for an existing terminal is advisory: when the system cannot check, it opens a new terminal instead of failing.
     - No coding agent is started by this action.
     - The system reports the outcome of the action to the user.
     - Terminal-backed work actions open panes in the current Zellij session.
     - Terminal-backed work actions require an active Zellij session.
-    - One launch starts its command in at most one pane, even if Zellij is slow to respond. If Workdash reports that the pane never ran, no delayed pane starts the command afterward. A duplicate pane does not linger or leave focus on an exited copy. Enter can restart the command in the held pane that did start it.
-    - Terminal-backed commands can start and restart with a restricted PATH and keep that PATH.
-    - Terminal-backed work actions do not create, inspect, attach, or resurrect shared sessions.
-    - If preparing the worktree or launching the terminal subprocess fails, the system closes the progress overlay and reports the error details to the user.
+    - If preparing the worktree or launching the terminal subprocess fails, including when the configured shell is unavailable in the pane, the system closes the progress overlay and reports the error details to the user.
 
   @id:F-TERMINAL-OPEN-S001
   Scenario: Open a terminal in the selected item's worktree
@@ -29,12 +26,10 @@ Feature: Open a terminal in the work item's worktree
     And the TUI reports that a terminal was opened
 
   @id:F-TERMINAL-OPEN-S012
-  Scenario: Restart an exited terminal after system temporary files are cleared
-    Given a Workdash terminal is open in a worktree with a restricted PATH
-    And the shell has exited leaving its Zellij pane held open
-    And the system has cleared temporary files
-    When the user presses Enter in the held pane
-    Then a fresh shell starts in the same pane in the worktree
+  Scenario: Close a Workdash terminal by exiting its shell
+    Given a Workdash terminal is open in a worktree
+    When the user exits the shell
+    Then that terminal pane closes
 
   @id:F-TERMINAL-OPEN-S002
   Scenario: Work action launched from inside the dashboard uses the current Zellij session
@@ -73,6 +68,7 @@ Feature: Open a terminal in the work item's worktree
   @id:F-TERMINAL-OPEN-S006
   Scenario: Focus the existing terminal for the selected work item
     Given the TUI has a work item selected
+    And a viewer is open in that worktree
     And a plain shell is already open in that worktree alongside a coding agent
     When the user chooses "t" from the code menu
     Then the existing terminal is focused without opening another
@@ -88,6 +84,13 @@ Feature: Open a terminal in the work item's worktree
   Scenario: Programs in the worktree are not mistaken for a shell
     Given the TUI has a work item selected
     And an editor and a test runner are open in that worktree
+    When the user chooses "t" from the code menu
+    Then a terminal is opened in that worktree
+
+  @id:F-TERMINAL-OPEN-S014
+  Scenario: Open a terminal when only a viewer is open in the worktree
+    Given the TUI has a work item selected
+    And a viewer is open in that worktree
     When the user chooses "t" from the code menu
     Then a terminal is opened in that worktree
 
