@@ -130,6 +130,7 @@ def ensure_worktree(
     github_client=None,
     todo_repository: str = "",
     existing: Path | None = None,
+    pr_head: tuple[str, str] | None = None,
 ) -> str:
     """Ensure a worktree exists for the given work item and return its path.
 
@@ -139,11 +140,12 @@ def ensure_worktree(
     :param str workdir: Base working directory (may use ~ for home).
     :param WorkItem item: The work item to prepare a worktree for.
     :param Path existing: An already resolved worktree to reuse without selecting again.
+    :param pr_head: Preserve a named PR's (branch, repository) even if its issue has a checkout.
     """
     git = git if git is not None else GitHelper()
     github = github_client if github_client is not None else GitHubClient()
     if existing is None:
-        existing = existing_worktree_path(workdir, item, git=git)
+        existing = existing_worktree_path(workdir, item, git=git, pr_head=pr_head)
     if existing is not None:
         # Local divergence or missing upstream shouldn't block the user.
         with contextlib.suppress(subprocess.CalledProcessError, OSError):
@@ -155,8 +157,13 @@ def ensure_worktree(
         return str(existing)
 
     todo_target = item.todo_target
-    repo, branch = worktree_branch(item, github_client=github)
+    if pr_head is None:
+        repo, branch = worktree_branch(item, github_client=github)
+    else:
+        branch, repo = pr_head
     wt = worktree_path(workdir, repo, worktree_item_number(item), todo=todo_target is not None)
+    if pr_head is not None and wt.exists():
+        wt = worktree_path(workdir, repo, item.number)
     main = main_repo_path(workdir, repo)
     _require_repository_paths(repo, main, wt, git=git)
 

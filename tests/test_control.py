@@ -3801,16 +3801,16 @@ def test_plan_first_authored_pr_and_issue_use_same_context_and_worktree(monkeypa
         results.append(
             (
                 result["item_id"],
-                ensure.call_args.args[1],
-                prepare.call_args.args,
-                {k: v for k, v in prepare.call_args.kwargs.items() if k != "github_client"},
+                result["cwd"],
+                prepare.call_args.kwargs["analysis_path"],
                 launch.call_args.args,
             )
         )
+        briefing_item = prepare.call_args.args[0]
+        assert briefing_item is ensure.call_args.args[1]
+        assert (briefing_item.item_type, briefing_item.number) == (WorkItemType.PR, 51)
     assert results[0] == results[1]
-    assert results[0][1] is results[0][2][0]
-    assert (results[0][1].item_type, results[0][1].number) == (WorkItemType.PR, 51)
-    assert "%23ISSUE-1/analysis" in results[0][3]["analysis_path"]
+    assert "%23ISSUE-1/analysis" in results[0][2]
 
 
 @pytest.mark.parametrize(

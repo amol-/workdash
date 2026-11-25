@@ -774,6 +774,7 @@ class WorkdashSession:
             )
         item = self._require_item(target)
         item_id = format_work_item_id(item)
+        keep_named_pr = not autostart and item.kind == WorkItemKind.AUTHORED_PR
         agents = self.config.configured_code_agents()
         if agent is not None and agent not in agents and not (allow_vscode and agent == "vscode"):
             raise self._unusable_agent_error(agent, "code", "launch")
@@ -788,11 +789,12 @@ class WorkdashSession:
         # Without Zellij no agent pane can exist, and VSCode needs none to launch.
         no_zellij_vscode = self.zellij_session is None and selected_agent == "vscode"
         if item.kind not in REVIEW_KINDS:
-            # Honor a local claim before resolving linked work on GitHub. A linked PR's
-            # checkout, if different, is checked below.
+            # A shared issue directory cannot claim a named PR until its head is verified.
             with self._lock:
                 repo_path = existing_worktree_path(self.config.workdir, item, git=git)
-                if repo_path is not None:
+                if repo_path is not None and (
+                    not keep_named_pr or repo_path.name.endswith(f"_{item.number}")
+                ):
                     panes = [] if no_zellij_vscode else self._live_panes()
                     claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
                     if claimed is not None:
@@ -811,9 +813,10 @@ class WorkdashSession:
                     linked = min(
                         state.linked_issues, key=lambda issue: (issue.repo.lower(), issue.number)
                     )
-                    item = self._require_item(f"{linked.repo}#ISSUE-{linked.number}")
-                    analysis_item = item
-                    item_id = format_work_item_id(item)
+                    analysis_item = self._require_item(f"{linked.repo}#ISSUE-{linked.number}")
+                    item_id = format_work_item_id(analysis_item)
+                    if not keep_named_pr:
+                        item = analysis_item
             except RuntimeError as error:
                 raise WorkdashControlError(
                     "github_error",
@@ -875,10 +878,15 @@ class WorkdashSession:
                     repo_path is None or analysis_item.todo_target
                 ) and git.branch_tracks_repository(issue_path, *selected_head):
                     repo_path = issue_path
-                if repo_path is None:
+                if repo_path is None and not keep_named_pr:
                     repo_path, item, selected_head = issue_path, analysis_item, None
             else:
-                repo_path = existing_worktree_path(self.config.workdir, item, git=git)
+                repo_path = existing_worktree_path(
+                    self.config.workdir,
+                    item,
+                    git=git,
+                    pr_head=selected_head if keep_named_pr else None,
+                )
                 if (
                     selected_head is not None
                     and analysis_item is not None
@@ -887,11 +895,9 @@ class WorkdashSession:
                     todo_path = existing_worktree_path(self.config.workdir, analysis_item, git=git)
                     if todo_path is not None:
                         repo_path = todo_path
-                if repo_path is None and selected_head is not None:
-                    branch, repo = selected_head
-                    repo_path = existing_worktree_for_branch(
-                        self.config.workdir, repo, branch, git=git
-                    )
+            if repo_path is None and selected_head is not None:
+                branch, repo = selected_head
+                repo_path = existing_worktree_for_branch(self.config.workdir, repo, branch, git=git)
             if repo_path is not None:
                 claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
                 if claimed is not None:
@@ -904,7 +910,8 @@ class WorkdashSession:
                 git=git,
                 github_client=self.backend.github_client,
                 todo_repository=self.config.todo_repository,
-                existing=repo_path if issue_path is not None else None,
+                existing=repo_path if issue_path is not None or keep_named_pr else None,
+                pr_head=selected_head if keep_named_pr else None,
             )
             claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
             if claimed is not None:

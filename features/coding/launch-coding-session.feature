@@ -12,7 +12,9 @@ Feature: Launch a coding session
     - The dialog lists the configured coding agents by name in configuration order, with VSCode Copilot offered as `(e) edit`.
     - Before launching a session, the system prepares the worktree for the selected work item.
     - The launched coding agent is started inside the work item's worktree.
-    - The launched coding agent is preloaded with GitHub context and, when available, the issue analysis for implementation or pull request analysis for review. An authored pull request with a linked issue is coded as that issue, with the same context and worktree selection as coding the issue; an authored pull request without a linked issue remains the target.
+    - The launched coding agent is preloaded with GitHub context and, when available, the issue analysis for implementation or pull request analysis for review.
+    - A plan-first request naming an authored pull request uses that pull request's branch and briefs the agent on that pull request. If it closes an issue, Workdash reports the issue's identity and uses its cached analysis when available. Neither another pull request closing the issue nor an idle checkout on a different branch replaces the named pull request.
+    - An autostart request naming an authored pull request with a linked issue is treated as a request for that issue. An authored pull request without a linked issue remains the target.
     - For an issue, the GitHub context includes the issue's comments.
     - For a pull request, the GitHub context includes the pull request's conversation comments.
     - For a pull request, the GitHub context includes the pull request's reviews.
@@ -408,7 +410,7 @@ Feature: Launch a coding session
     And the agent is told to follow its configured practices and skills
 
   @id:F-CODING-LAUNCH-S038
-  Scenario: Coding an authored pull request and its issue is the same implementation task
+  Scenario: Autostarting an authored pull request and its issue is the same implementation task
     Given a server-backed Workdash session is ready to answer
     And GitHub issue `owner/repo#42` is open and closed by authored pull request `owner/repo#51` with failed CI
     And the issue and pull request each have cached analysis

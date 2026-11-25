@@ -14,6 +14,7 @@ import pytest
 from pytest_bdd import given, parsers, then, when
 
 import workdash.github_client as github_client_module
+from gh_work_state_fake import HEAD_SHA, check_run, install_fake_github
 from workdash.backend import compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashControlError
@@ -863,6 +864,97 @@ def _run_close_json(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _run_workdash(["close", "terminal_26", "--json"], scenario_state, monkeypatch, capsys)
+
+
+@given("two authored pull requests #50 and #51 close issue `owner/repo#1`")
+def _two_authored_prs(scenario_state, monkeypatch):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_pull_request("owner/repo#50", closes=("owner/repo#1",))
+    github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#1",),
+        checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+    )
+    session = scenario_state["api_session"]
+    session.work_items[0].analysis = "Cached analysis for issue #1"
+    client = session.backend.github_client
+    monkeypatch.setattr(
+        client, "fetch_worktree_head", lambda item: (f"pr-{item.number}", item.repo)
+    )
+    monkeypatch.setattr(client, "fetch_launch_context", lambda item: {"body": item.title})
+
+
+@given(parsers.parse("issue #1 has {checkout}"))
+def _linked_pr_checkouts(scenario_state, tmp_path, checkout):
+    main = Path(scenario_state["api_session"].config.workdir) / "owner_repo"
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-qb", "main", str(main)], check=True)
+
+    def git(*args):
+        subprocess.run(["git", "-C", str(main), *args], check=True, capture_output=True)
+
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "initial",
+    )
+    for branch in ("pr-50", "pr-51", "issue-1"):
+        git("branch", branch)
+    git("clone", "--bare", ".", str(remote))
+    url = "https://github.com/owner/repo.git"
+    git("config", f"url.{remote}.insteadOf", url)
+    git("remote", "add", "origin", url)
+    git("fetch", "origin")
+    git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    if checkout == "an idle checkout":
+        idle = main.parent / "owner_repo_1"
+        git("worktree", "add", str(idle), "issue-1")
+        (idle / "local.txt").write_text("keep the idle checkout")
+        scenario_state["idle_issue_checkout"] = idle
+
+
+@when("the user runs `workdash code https://github.com/owner/repo/pull/51`")
+def _code_named_pr(scenario_state, monkeypatch, capsys):
+    from workdash import workdash as cli
+
+    session = scenario_state["api_session"]
+    install_zellij_agent_fakes(scenario_state, monkeypatch)
+    monkeypatch.setattr(
+        cli.WorkdashControlClient,
+        "request",
+        lambda self, endpoint, payload: session.code(**payload),
+    )
+    scenario_state["exit_code"] = cli.main(["code", "https://github.com/owner/repo/pull/51"])
+    scenario_state["stdout"], scenario_state["stderr"] = capsys.readouterr()
+
+
+@then("the command reports a launched coding session")
+def _reports_coding_session(scenario_state):
+    assert scenario_state["exit_code"] == 0, scenario_state["stderr"]
+    assert "Status: launched" in scenario_state["stdout"]
+    assert "Item: owner/repo#ISSUE-1" in scenario_state["stdout"]
+
+
+@then(
+    "the agent starts on pull request #51's branch with a plan-first briefing for #51 and context from issue #1"
+)
+def _named_pr_branch_and_briefing(scenario_state):
+    ((cwd, prompt, _, _),) = scenario_state["agent_launches"]
+    branch = ["git", "branch", "--show-current"]
+    assert subprocess.check_output(branch, cwd=cwd, text=True).strip() == "pr-51"
+    assert "- url: https://github.com/owner/repo/pull/51" in prompt
+    assert "https://github.com/owner/repo/pull/50" not in prompt
+    assert "Do not start implementing code yet." in prompt
+    assert "%23ISSUE-1/analysis" in prompt
+    if idle := scenario_state.get("idle_issue_checkout"):
+        assert subprocess.check_output(branch, cwd=idle, text=True).strip() == "issue-1"
+        assert (idle / "local.txt").read_text() == "keep the idle checkout"
 
 
 @when("the user runs an orchestration command")

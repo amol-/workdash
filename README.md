@@ -625,14 +625,18 @@ review-only session. The HTTP `POST /api/v0/code` takes optional boolean
 `autostart` and `autoclose`, both
 false when omitted. `already_running` injects nothing into the running agent.
 
-Coding an authored pull request linked to an issue is the same implementation
-task as coding that issue: it uses the issue target and cached issue analysis,
-when available, while continuing the pull request branch. An authored pull
-request without a linked issue remains the target. Reviewing somebody else's
-pull request uses its cached pull request analysis instead; linked issues are
-background, not instructions to implement. An open parent whose descendants are
-closed is briefed to verify its goal and, if already implemented, prove the
-workflow with a test.
+In plan-first mode, naming an authored pull request checks out its branch and
+briefs the agent on that pull request. If it closes an issue, Workdash reports
+the issue's identity and uses its cached analysis when available. Another pull
+request closing the same issue or an idle checkout on a different branch does
+not replace the named pull request. Naming the issue instead can reuse an idle
+issue checkout. With `--autostart` (including `--autoclose`), naming an authored
+pull request with a linked issue is treated as a request for that issue.
+An authored pull request without a linked issue remains the target.
+Reviewing somebody else's pull request uses its cached pull request analysis
+instead; linked issues are background, not instructions to implement. An open
+parent whose descendants are closed is briefed to verify its goal and, if
+already implemented, prove the workflow with a test.
 
 Human output reports the status, item, agent, selected session, actual tab, cwd,
 pane title, and pane id when available, plus an `Autoclose` line saying whether
