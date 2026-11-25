@@ -255,7 +255,7 @@ def _custom_viewer_saved(scenario_state: dict[str, Any]) -> None:
     assert "advanced viewer commands" in scenario_state["output"]
 
 
-@given("the user already has a configuration with agents")
+@given("the user already has a complete configuration with agents")
 def _configuration_with_agents(scenario_state: dict[str, Any], config_path: Path) -> None:
     config_path.write_text(
         json.dumps(
@@ -263,6 +263,11 @@ def _configuration_with_agents(scenario_state: dict[str, Any], config_path: Path
                 "github_username": "existing-user",
                 "open": "existing-open",
                 "open_needs_pane": False,
+                "analysis_viewer": {
+                    "command": "workdash view",
+                    "format": "markdown",
+                    "needs_pane": True,
+                },
                 "agents": {
                     "pi": {"analyze": "pi -p", "launch": "pi"},
                     "aider": {"analyze": "aider --yes", "launch": ""},
@@ -469,6 +474,16 @@ def _system_writes_values(
 @then("the system reports the saved configuration path")
 def _reports_saved_path(scenario_state: dict[str, Any], config_path: Path) -> None:
     assert f"Configuration saved to {config_path}" in scenario_state["output"]
+
+
+@then("after reporting the saved configuration path, the wizard explains how to hide repositories")
+def _reports_repository_exclusion_hint(scenario_state: dict[str, Any], config_path: Path) -> None:
+    output = scenario_state["output"]
+    hint = (
+        'Hide repositories from the dashboard by adding "owner/repo" or "owner/*" '
+        f'entries to "excluded_repositories" in {config_path}.'
+    )
+    assert output.index(f"Configuration saved to {config_path}") < output.index(hint)
 
 
 @then("the system tells the user which Zellij binary was detected")
@@ -747,9 +762,10 @@ def _tells_agents_can_be_edited_later(
     assert scenario_state["output"].index(hint) < scenario_state["output"].index("GitHub username")
 
 
-@then("the system does not ask about agents")
-def _does_not_ask_about_agents(scenario_state: dict[str, Any]) -> None:
-    assert not any(prompt.startswith("Agent") for prompt in scenario_state["prompts"])
+@then("the system saves the configuration without prompting")
+def _saves_without_prompting(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0
+    assert scenario_state["prompts"] == []
     assert "Agents for" not in scenario_state["output"]
 
 
@@ -793,7 +809,10 @@ def _wizard_asks_for_view_again(scenario_state):
 @given("the user has an existing configuration missing the analysis viewer")
 def _existing_config_without_analysis_viewer(scenario_state, config_path):
     _configuration_with_agents(scenario_state, config_path)
-    scenario_state["original_settings"] = json.loads(config_path.read_text())
+    raw = json.loads(config_path.read_text())
+    del raw["analysis_viewer"]
+    config_path.write_text(json.dumps(raw))
+    scenario_state["original_settings"] = raw
 
 
 @when("the user starts Workdash and then runs the configuration wizard")

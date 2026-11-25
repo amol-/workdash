@@ -20,6 +20,7 @@ from workdash.tui import (
     AnalyzeDialog,
     BusyScreen,
     CodeDialog,
+    IncludeDialog,
     ReviewDialog,
     SearchDialog,
     ViewDialog,
@@ -1785,6 +1786,43 @@ def _listed_titles(app: WorkdashApp) -> list[str]:
 _ALL_SEARCH_TITLES = ["Unrelated chore", "Ship the docs", "Fix the parser"]
 
 
+def test_dashboard_exclusions_remain_after_refresh_and_search() -> None:
+    hidden, visible, other = _search_work_items()
+    # The displayed repository is the todo target, not where the issue is stored.
+    hidden = replace(
+        hidden, repo="owner/todos", todo_target="https://gitlab.example.com/Platform_Team/tool.git"
+    )
+    markers = {(hidden.item_type, hidden.repo, hidden.number): "*"}
+    refreshed = replace(visible, title="Updated docs")
+    backend = MagicMock()
+    backend.load_items.return_value = ([hidden, refreshed, other], markers)
+    session = WorkdashSession(
+        config=replace(_DEFAULT_TUI_CONFIG, excluded_repositories=["PLATFORM_TEAM/TOOL"]),
+        backend=backend,
+        work_items=[hidden, visible, other],
+        suggestion_markers=markers,
+        zellij_session="workdash-main",
+    )
+    app = WorkdashApp(session=session, refresh_callback=lambda: session.list_items(refresh=True))
+
+    async def run_smoke() -> None:
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+            await _submit_search(app, pilot, "fix the parser")
+            assert footer.render().plain == "Search matched 0 of 2 item(s)."
+            assert _listed_titles(app) == []
+
+            await pilot.press("r")
+            assert _listed_titles(app) == ["Unrelated chore", "Updated docs"]
+            assert footer.render().plain == "Refreshed 2 item(s)."
+            assert session.work_items == [hidden, refreshed, other]
+
+            await _submit_search(app, pilot, "unrelated chore")
+            assert _listed_titles(app) == ["Unrelated chore"]
+
+    asyncio.run(run_smoke())
+
+
 def test_type_width_tracks_widest_visible_item_after_search() -> None:
     work_items = _search_work_items()
     work_items[0].number = 123456789
@@ -2008,6 +2046,41 @@ def test_workdash_app_include_of_an_already_tracked_item_clears_the_search_filte
             await pilot.press("q")
 
     asyncio.run(run_smoke())
+
+
+def test_reincluding_a_hidden_issue_saves_its_url_without_selecting_it(tmp_path) -> None:
+    from workdash.backend import WorkdashBackend
+    from workdash.included_items import IncludedItemsStore
+
+    hidden, visible, _ = _search_work_items()
+    store = IncludedItemsStore(tmp_path / "included.json")
+    session = WorkdashSession(
+        config=replace(_DEFAULT_TUI_CONFIG, excluded_repositories=["owner/repo"]),
+        backend=WorkdashBackend(included_items_store=store, github_client=MagicMock()),
+        work_items=[hidden, visible],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+    app = WorkdashApp(
+        session=session, include_callback=lambda url, _: session.include_item_by_url(url)
+    )
+
+    async def run() -> None:
+        async with app.run_test() as pilot:
+            await pilot.press("i")
+            assert isinstance(app.screen, IncludeDialog)
+            app.screen.query_one("#include-url", Input).value = hidden.url
+            await pilot.press("enter")
+
+            footer = app.query_one("#status-footer", Static)
+            await _wait_for_footer(
+                footer, "Already tracking issue owner/repo#11; repository is excluded.", pilot
+            )
+            assert _listed_titles(app) == ["Ship the docs"]
+            assert app._selected_item() is visible
+            assert hidden.url in store.load()
+
+    asyncio.run(run())
 
 
 def test_workdash_app_failed_include_keeps_the_search_filter_active() -> None:

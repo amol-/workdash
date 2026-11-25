@@ -120,10 +120,11 @@ Feature: First-time configuration
 
   @id:F-SETUP-CONFIGURE-S016
   Scenario: Configured agents are not asked about again
-    Given the user already has a configuration with agents
+    Given the user already has a complete configuration with agents
     When the user runs the system with "--configure"
-    Then the system does not ask about agents
+    Then the system saves the configuration without prompting
     And the saved configuration keeps the same agents in the same order
+    And after reporting the saved configuration path, the wizard explains how to hide repositories
 
   @id:F-SETUP-CONFIGURE-S017
   Scenario: A command whose program cannot be found is rejected
