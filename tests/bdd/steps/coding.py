@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,6 +20,7 @@ from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import CodeDialog
 
 from .common import (
+    NOW_UTC,
     install_zellij_agent_fakes,
     make_valid_config,
     make_work_item,
@@ -29,6 +31,26 @@ from .common import (
 @given("the next coding session launch will fail")
 def _next_coding_session_launch_will_fail(scenario_state: dict[str, Any]) -> None:
     scenario_state["coding_launch_fails"] = True
+
+
+@given("the selected work item has a cached analysis")
+def _selected_has_cached_analysis(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    cache = AnalysisCache(tmp_path / "cache")
+    item = make_work_item(
+        number=77,
+        title="Cached analysis target",
+        updated_at=NOW_UTC - timedelta(days=1),
+        created_at=NOW_UTC - timedelta(days=5),
+    )
+    cache.save(item, "# cached analysis\nbody")
+    item.analysis = cache.load_analysis(item)
+    item.analyzed_at = cache.load_analysis_date(item) or (NOW_UTC - timedelta(days=2))
+    work_items.clear()
+    work_items.append(item)
+    scenario_state["selected_item"] = item
+    scenario_state["cache"] = cache
 
 
 @given("the selected work item is a pull request the user authored")
@@ -270,7 +292,27 @@ def _coding_dialog_open(scenario_state: dict[str, Any], work_items: list[WorkIte
     if not work_items:
         work_items.append(make_work_item(number=60, title="Coding cancel target"))
     scenario_state["selected_item"] = work_items[0]
-    scenario_state["dialog_kind"] = "coding"
+
+
+@when("the user cancels the dialog")
+def _cancel_coding_dialog(scenario_state, work_items):
+    from .common import run_app
+
+    launched = []
+    prepared = []
+
+    async def interactions(app, pilot):
+        await pilot.press("c")
+        await pilot.press("escape")
+
+    run_app(
+        work_items=list(work_items),
+        launch_callback=lambda item, tool: launched.append((item, tool)),
+        worktree_callback=prepared.append,
+        interactions=interactions,
+    )
+    scenario_state["launch_calls"] = launched
+    scenario_state["worktree_calls"] = prepared
 
 
 @given("the selected work item already has an open coding-agent pane")

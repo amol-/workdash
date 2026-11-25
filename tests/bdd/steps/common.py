@@ -121,13 +121,6 @@ def _configure_agents(scenario_state: dict[str, Any], agents: dict[str, AgentCon
         session.config = replace(session.config, agents=agents)
 
 
-@given(parsers.parse("the analysis agents `{first}` and `{second}` are configured in that order"))
-def _analysis_agents_configured_in_order(
-    first: str, second: str, scenario_state: dict[str, Any]
-) -> None:
-    _configure_agents(scenario_state, {name: AgentConfig(analyze=name) for name in (first, second)})
-
-
 @given(parsers.parse("the coding agents `{first}` and `{second}` are configured in that order"))
 def _coding_agents_configured_in_order(
     first: str, second: str, scenario_state: dict[str, Any]
@@ -154,7 +147,6 @@ def run_app(
     open_url_callback=None,
     open_markdown_callback=None,
     refresh_callback=None,
-    analyze_callback=None,
     launch_callback=None,
     review_callback=None,
     worktree_callback=None,
@@ -162,18 +154,10 @@ def run_app(
     include_callback=None,
     todo_callback=None,
     session: WorkdashSession | None = None,
-    busy_messages: list[str] | None = None,
     config: WorkdashConfig | None = None,
     focus_callback=None,
 ) -> None:
-    """Drive ``WorkdashApp`` through an async pilot routine for BDD tests.
-
-    :param list[str] | None busy_messages: If supplied, every ``message``
-        string passed to ``WorkdashApp._run_with_busy_screen`` during this
-        run is appended to it. Lets step definitions assert that the busy
-        screen was pushed with the production-expected label without
-        racing against its transient pop.
-    """
+    """Drive ``WorkdashApp`` through an async pilot routine for BDD tests."""
 
     from workdash.tui import WorkdashApp
 
@@ -190,7 +174,6 @@ def run_app(
         open_url_callback=open_url_callback,
         open_markdown_callback=open_markdown_callback,
         refresh_callback=refresh_callback,
-        analyze_callback=analyze_callback,
         launch_callback=launch_callback,
         review_callback=review_callback,
         worktree_callback=worktree_callback,
@@ -203,14 +186,6 @@ def run_app(
         now_utc=now_utc,
         focus_callback=focus_callback,
     )
-    if busy_messages is not None:
-        original_run_with_busy_screen = WorkdashApp._run_with_busy_screen
-
-        async def _recording_run_with_busy_screen(self, *, message, callback):
-            busy_messages.append(message)
-            return await original_run_with_busy_screen(self, message=message, callback=callback)
-
-        app._run_with_busy_screen = _recording_run_with_busy_screen.__get__(app)
 
     async def _driver() -> None:
         async with app.run_test() as pilot:
@@ -287,11 +262,7 @@ def _no_dialog_or_progress_overlay_remains(scenario_state: dict[str, Any]) -> No
 
 @then("the system reports the worktree error details to the user")
 def _reports_worktree_error_details(scenario_state: dict[str, Any]) -> None:
-    status = (
-        scenario_state.get("coding_status")
-        or scenario_state.get("analyze_status")
-        or scenario_state.get("branchdiff_status")
-    )
+    status = scenario_state.get("coding_status") or scenario_state.get("branchdiff_status")
     assert status is not None, scenario_state
     prefix = "Launch failed" if "coding_status" in scenario_state else "Worktree setup failed"
     assert f"{prefix}: worktree failed" in status

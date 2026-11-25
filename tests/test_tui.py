@@ -976,6 +976,47 @@ async def _wait_for_footer(footer: Static, expected: str, pilot) -> None:
     assert footer.render().plain == expected
 
 
+@pytest.mark.parametrize("cached", [False, True])
+def test_analyze_dialog_lists_agent_choices_in_configuration_order(cached):
+    item = _search_work_items()[0]
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    item.analyzed_at = datetime(2026, 2, 24, tzinfo=UTC) if cached else None
+    config = WorkdashConfig(
+        agents={
+            "pi": AgentConfig(analyze="pi -p"),
+            "codex": AgentConfig(launch="codex"),
+            "claude": AgentConfig(analyze="claude -p"),
+        }
+    )
+    analyze = MagicMock()
+    app = WorkdashApp(
+        work_items=[item],
+        analyze_callback=analyze,
+        analyze_choices=config.tui_analyze_choices(),
+        now_utc=now,
+    )
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            await pilot.press("a")
+            assert isinstance(app.screen, AnalyzeDialog)
+            lines = [line.render().plain for line in app.screen.query(".analyze-line")]
+            assert [line for line in lines if "Analyze with" in line] == [
+                "(1) Analyze with pi",
+                "(2) Analyze with claude",
+            ]
+            if cached:
+                assert "Last analyzed: 2d ago" in lines
+                assert "(a) Open analysis" in lines
+            else:
+                assert "No previous analysis." in lines
+                assert "(a) Open analysis" not in lines
+            await pilot.press("escape")
+            analyze.assert_not_called()
+
+    asyncio.run(exercise())
+
+
 def test_analyze_dialog_shows_nine_agents_and_cached_analysis_without_scrolling() -> None:
     work_item = WorkItem(
         kind=WorkItemKind.TRACKED_PR,
@@ -1366,7 +1407,7 @@ def test_workdash_app_uses_only_configured_tui_agent_choices(
     asyncio.run(run_smoke())
 
 
-def test_workdash_app_analyze_uses_shared_callback_without_tui_worktree_prep() -> None:
+def test_workdash_app_reports_shared_analysis_failure_without_opening_viewer() -> None:
     now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
     work_item = WorkItem(
         kind=WorkItemKind.TRACKED_PR,
@@ -1389,11 +1430,13 @@ def test_workdash_app_analyze_uses_shared_callback_without_tui_worktree_prep() -
         analyze_calls.append((item, tool))
         raise RuntimeError("Invalid configured analysis command for agent 'claude'")
 
+    open_markdown = MagicMock()
     app = WorkdashApp(
         work_items=[work_item],
         worktree_callback=worktree_callback,
         analyze_callback=analyze_callback,
         analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
+        open_markdown_callback=open_markdown,
         now_utc=now_utc,
     )
 
@@ -1411,6 +1454,7 @@ def test_workdash_app_analyze_uses_shared_callback_without_tui_worktree_prep() -
             _assert_no_modal_screens(app)
             assert analyze_calls == [(work_item, "claude")]
             assert worktree_attempts == []
+            open_markdown.assert_not_called()
 
             await pilot.press("q")
 
@@ -1436,9 +1480,6 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
     def failing_refresh_callback() -> list[WorkItem]:
         raise RuntimeError("gh refresh failed")
 
-    def failing_analyze_callback(_: WorkItem, __tool: str = "codex") -> str:
-        raise RuntimeError("codex analyze failed")
-
     def failing_launch_callback(_: WorkItem, __tool: str = "codex") -> None:
         raise RuntimeError("codex launch failed")
 
@@ -1449,9 +1490,7 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
         work_items=[work_item],
         open_callback=failing_open_callback,
         refresh_callback=failing_refresh_callback,
-        analyze_callback=failing_analyze_callback,
         launch_callback=failing_launch_callback,
-        analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
         code_choices=_DEFAULT_TUI_CONFIG.tui_code_choices(),
         terminal_callback=failing_terminal_callback,
         now_utc=now_utc,
@@ -1469,12 +1508,6 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
             await _wait_for_footer(footer, "Refresh failed: gh refresh failed", pilot)
             _assert_no_modal_screens(app)
             assert _listed_titles(app) == [work_item.title]
-
-            # Press "a" to open AnalyzeDialog, then "1" to choose Claude
-            await pilot.press("a")
-            await pilot.press("1")
-            await _wait_for_footer(footer, "Analyze failed: codex analyze failed", pilot)
-            _assert_no_modal_screens(app)
 
             # Press "c" to open CodeDialog, then "2" to choose Codex
             await pilot.press("c")

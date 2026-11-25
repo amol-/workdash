@@ -1374,10 +1374,6 @@ def _user_presses_key(
     # Dispatch on the key to the correct domain-specific handler.
     if key == "r":
         _run_refresh_scenario(scenario_state, work_items, tmp_path)
-    elif key == "a":
-        from . import analysis
-
-        analysis.run_analyze_dialog_scenario(scenario_state, work_items)
     elif key == "c":
         from . import coding
 
@@ -1438,11 +1434,6 @@ def _dashboard_lists_refreshed_title(
 @then("the system reports how many work items are now shown")
 def _reports_count(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
     assert scenario_state["refresh_status"] == f"Refreshed {len(work_items) + 1} item(s)."
-
-
-@then("the system reports the failure to the user")
-def _reports_failure(scenario_state: dict[str, Any]) -> None:
-    assert "analysis failed" in scenario_state["analyze_status"]
 
 
 # --------------------------------------------------------------------------

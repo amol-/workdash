@@ -892,11 +892,12 @@ def test_cli_and_api_analysis_preserve_focus_in_real_zellij(tmp_path, monkeypatc
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(request)
                     try:
-                        wait_for(
-                            lambda panes: any(
-                                p.get("title") == f"analyse_{tmp_path.name}" for p in panes
-                            )
+                        pane_title = f"analyse_{tmp_path.name}"
+                        panes = wait_for(
+                            lambda panes: any(p.get("title") == pane_title for p in panes)
                         )
+                        pane = next(p for p in panes if p.get("title") == pane_title)
+                        assert pane["tab_name"] == "repo"
                         deadline = time.monotonic() + 15
                         while (
                             not started.exists()

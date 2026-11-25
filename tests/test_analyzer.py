@@ -191,6 +191,7 @@ def test_analyze_for_issue_uses_issue_template_and_no_diff(
     assert "Needs investigation." in launches[0]["stdout"]
     prompt = recorded_prompt(tmp_path)
     assert "analyzing a GitHub issue" in prompt
+    assert "Inspect the local source code" in prompt
     assert "well-formed CommonMark Markdown" in prompt
     assert "Do not include scripts in the analysis document" in prompt
     assert ".diff" not in prompt
@@ -561,15 +562,23 @@ def test_analyze_reports_an_unusable_shell_without_launching_a_pane(
 
 
 @pytest.mark.parametrize(
-    "target", ["https://gitlab.com/owner/repo.git", "git@codeberg.org:owner/repo.git"]
+    ("target", "host", "source_link"),
+    [
+        ("https://github.com/owner/repo", "GitHub", "github.com/owner/repo/blob/main"),
+        ("https://gitlab.com/owner/repo", "GitLab", "gitlab.com/owner/repo/-/blob/main"),
+        ("https://codeberg.org/owner/repo", "Codeberg", "codeberg.org/owner/repo/src/branch/main"),
+        ("https://gitlab.com/owner/repo.git", "GitLab", "gitlab.com/owner/repo/-/blob/main"),
+        ("git@codeberg.org:owner/repo.git", "Codeberg", "codeberg.org/owner/repo/src/branch/main"),
+    ],
 )
 def test_analysis_process_runs_in_worktree_with_code_and_todo_discussion(
-    target, tmp_path, monkeypatch
+    target, host, source_link, tmp_path, monkeypatch
 ):
     item = make_work_item(WorkItemType.ISSUE)
     item.repo = "testuser/todos"
     item.todo_target = target
-    (tmp_path / "source.py").write_text("local source")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/cards.py").write_text("\n" * 11 + "def cards(): return 42\n")
     initial_cwd = Path.cwd()
 
     def gh(command):
@@ -584,14 +593,18 @@ def test_analysis_process_runs_in_worktree_with_code_and_todo_discussion(
 
     install_gh(monkeypatch, gh)
     launches = install_pane_launch(monkeypatch)
-    script = (
-        "import pathlib,sys; prompt=sys.argv[1]; "
-        f"assert 'The code repository is {target}' in prompt; "
-        "assert 'todo discussion' in prompt; "
-        "assert 'file path and line number without a URL' in prompt; "
-        "print(pathlib.Path('source.py').read_text())"
+    agent = install_agent(
+        tmp_path, "print(pathlib.Path('src/cards.py').read_text().splitlines()[11])\n"
     )
 
-    assert analyze(item, [sys.executable, "-c", script], cwd=tmp_path) == "local source"
+    assert analyze(item, agent, cwd=tmp_path) == "def cards(): return 42"
     assert launches[0]["repo_path"] == str(tmp_path)
     assert Path.cwd() == initial_cwd
+    prompt = " ".join(recorded_prompt(tmp_path).split())
+    assert f"The code repository is {target}" in prompt
+    assert "todo discussion" in prompt
+    assert "code repository's own hosting service" in prompt
+    assert "Inspect the local Git checkout to determine the default branch" in prompt
+    assert "Use the actual repository and branch, not the example values" in prompt
+    assert "file path and line number without a URL" in prompt
+    assert f"- {host}: [`src/cards.py:12`](https://{source_link}/src/cards.py#L12)" in prompt

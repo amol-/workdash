@@ -30,6 +30,7 @@ from gh_work_state_fake import (
     thread,
     todo_body,
 )
+from pane_launch_fake import install_pane_launch
 from workdash.analysis_cache import AnalysisCache
 from workdash.backend import IncludeResult, WorkdashBackend
 from workdash.config import AgentConfig, WorkdashConfig
@@ -5394,9 +5395,10 @@ def test_analysis_documents_serve_cached_content_without_header(tmp_path, cached
     markdown = "# Cached analysis\n\nRecommended next step.\n"
     if cached:
         cache.save(item, markdown)
+        item.analysis = cache.load_analysis(item)
     session = WorkdashSession(
         config=WorkdashConfig(),
-        backend=SimpleNamespace(analysis_cache=cache),
+        backend=WorkdashBackend(analysis_cache=cache),
         work_items=[item],
         suggestion_markers={},
         zellij_session=None,
@@ -5405,16 +5407,31 @@ def test_analysis_documents_serve_cached_content_without_header(tmp_path, cached
         control_module._make_turbogears_app(session)
     )
     path = "/api/items/owner/repo%23ISSUE-1/analysis"
-    response = Request.blank(path, environ={"REMOTE_ADDR": "127.0.0.1"}).get_response(app)
+    peer = {"REMOTE_ADDR": "127.0.0.1"}
     if not cached:
+        response = Request.blank(path, environ=peer).get_response(app)
         assert response.status_int == 404
         assert response.json["ok"] is False
         assert response.json["error"]["code"] == "not_found"
         return
+    result = Request.blank(
+        "/api/v0/analyze",
+        method="POST",
+        host="dashboard.test:9876",
+        headers={"X-Workdash": version("workdash")},
+        content_type="application/json",
+        body=b'{"target":"owner/repo#ISSUE-1"}',
+        environ=peer,
+    ).get_response(app)
+    assert result.status_int == 200
+    urls = result.json["result"]
+    assert urls["markdown_url"] == f"http://dashboard.test:9876{path}"
+    assert urls["html_url"] == urls["markdown_url"] + "/html"
+    response = Request.blank(urls["markdown_url"], environ=peer).get_response(app)
     assert response.status_int == 200
     assert response.content_type == "text/markdown"
     assert response.body == markdown.encode()
-    html = Request.blank(path + "/html", environ={"REMOTE_ADDR": "127.0.0.1"}).get_response(app)
+    html = Request.blank(urls["html_url"], environ=peer).get_response(app)
     assert html.status_int == 200
     assert html.content_type == "text/html"
     assert "<h1>Cached analysis</h1>" in html.text
@@ -5445,8 +5462,34 @@ def test_control_boundary_allows_trailing_slash_analysis_documents():
         assert call(path, method).status_int == 403, path
 
 
-@pytest.mark.parametrize("fail", [False, True])
-def test_issue_analysis_uses_disposable_default_branch_worktree(tmp_path, monkeypatch, fail):
+def test_fresh_analysis_needs_a_session_before_preparing_worktree(tmp_path, monkeypatch):
+    item = _work_item(number=1, title="Issue")
+    workdir = tmp_path / "work"
+    config = WorkdashConfig(workdir=str(workdir), agents={"pi": AgentConfig(analyze="pi")})
+    github = MagicMock(spec=GitHubClient)
+    backend = WorkdashBackend(config=config, github_client=github, cache_root=tmp_path / "cache")
+    launches = install_pane_launch(monkeypatch)
+    session = WorkdashSession(
+        config=config,
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    with pytest.raises(
+        WorkdashControlError, match="Analysis requires a known Workdash Zellij session"
+    ):
+        session.analyze(target="owner/repo#ISSUE-1", prefer_cache=False)
+
+    assert not workdir.exists()
+    github.clone_repository.assert_not_called()
+    github.fetch_analysis_context.assert_not_called()
+    assert not launches
+
+
+@pytest.mark.parametrize("outcome", ["success", "error", "empty"])
+def test_issue_analysis_uses_disposable_default_branch_worktree(tmp_path, monkeypatch, outcome):
     source = tmp_path / "source"
     source.mkdir()
 
@@ -5462,48 +5505,59 @@ def test_issue_analysis_uses_disposable_default_branch_worktree(tmp_path, monkey
     git("add", ".")
     git("commit", "-m", "initial")
     item = _work_item(number=1, title="Issue")
-    backend = MagicMock()
-    paths = []
-    output = tmp_path / "analysis.md"
-    output.write_text("analysis")
-
-    def analyze(requested_item, *, tool, **kwargs):
-        if tool == "cached":
-            return None
-        path = Path(kwargs["cwd"])
-        paths.append(path)
-        assert (path / "code.txt").read_text() == "default code"
-        assert git("rev-parse", "--abbrev-ref", "HEAD", cwd=path) == "HEAD"
-        (path / "agent-created").write_text("untracked")
-        if fail:
-            raise RuntimeError("agent failed")
-        return str(output)
-
-    backend.analyze_item.side_effect = analyze
-
-    def clone(repo, target):
-        subprocess.run(["git", "clone", str(source), str(target)], check=True, capture_output=True)
-
-    backend.github_client.clone_repository.side_effect = clone
+    github = MagicMock(spec=GitHubClient)
+    github.fetch_analysis_context.return_value = {"body": "Issue discussion"}
+    github.clone_repository.side_effect = lambda repo, target: git(
+        "clone", str(source), str(target)
+    )
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    launches = install_pane_launch(monkeypatch)
+    script = (
+        "import pathlib, subprocess, sys\n"
+        "assert pathlib.Path('code.txt').read_text() == 'default code'\n"
+        "assert subprocess.check_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD']) == b'HEAD\\n'\n"
+        "assert 'Issue discussion' in sys.argv[-1]\n"
+        "pathlib.Path('agent-created').touch()\n"
+        + {
+            "success": "print('# Fresh analysis')",
+            "error": "print('# Partial analysis')\nsys.exit('agent failed')",
+            "empty": "pass",
+        }[outcome]
+    )
+    workdir = tmp_path / "work"
+    config = WorkdashConfig(
+        workdir=str(workdir),
+        agents={"pi": AgentConfig(analyze=shlex.join([sys.executable, "-c", script]))},
+    )
+    backend = WorkdashBackend(config=config, github_client=github, cache_root=tmp_path / "cache")
+    cache = backend.analysis_cache
+    if outcome != "success":
+        cache.save(item, "# Prior analysis")
     session = WorkdashSession(
-        config=WorkdashConfig(
-            workdir=str(tmp_path / "work"), agents={"pi": AgentConfig(analyze="pi")}
-        ),
+        config=config,
         backend=backend,
         work_items=[item],
         suggestion_markers={},
         zellij_session="test",
     )
-    if fail:
-        with pytest.raises(RuntimeError, match="agent failed"):
-            session.analyze(target="owner/repo#ISSUE-1")
+    if outcome == "success":
+        result = session.analyze(target="owner/repo#ISSUE-1", prefer_cache=False)
+        assert result["status"] == "generated"
+        assert Path(result["path"]).read_text() == cache.load_analysis(item) == "# Fresh analysis"
     else:
-        assert session.analyze(target="owner/repo#ISSUE-1")["status"] == "generated"
-    assert len(paths) == 1 and not paths[0].exists()
-    main = tmp_path / "work" / "owner_repo"
+        message = "agent failed" if outcome == "error" else "Analysis failed for owner/repo#ISSUE-1"
+        with pytest.raises(RuntimeError, match=message):
+            session.analyze(target="owner/repo#ISSUE-1", prefer_cache=False)
+        assert cache.load_analysis(item) == "# Prior analysis"
+    [launch] = launches
+    assert not Path(launch["repo_path"]).exists()
+    assert launch["pane_name"] == "analyse_owner_repo_1"
+    assert launch["group"] == "repo"
+    main = workdir / "owner_repo"
+    assert not (workdir / "owner_repo_1").exists()
     assert len(git("worktree", "list", "--porcelain", cwd=main).split("worktree ")) == 2
-    assert "issue-1" not in git("branch", "--list", cwd=main)
-    backend.github_client.create_issue_branch.assert_not_called()
+    assert git("branch", "-a", "--list", "*issue-1", cwd=main) == ""
+    github.create_issue_branch.assert_not_called()
 
 
 @pytest.mark.parametrize("fail", [False, True])

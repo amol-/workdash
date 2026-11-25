@@ -13,7 +13,7 @@ monolithic conftest.
 from __future__ import annotations
 
 from .steps import (
-    analysis as _analysis,
+    analysis_tui as _analysis_tui,
 )
 from .steps import (
     api as _api,
@@ -87,7 +87,7 @@ for _step_module in (
     _worktrees,
     _setup,
     _startup,
-    _analysis,
+    _analysis_tui,
     _coding,
     _terminal,
     _show_config,
@@ -104,6 +104,7 @@ for _step_module in (
     for _name in dir(_step_module):
         if _name.startswith("pytestbdd_stepdef_") or _name in {
             "scenario_state",
+            "analysis_dashboard",
             "review_state",
             "work_items",
             "valid_config",

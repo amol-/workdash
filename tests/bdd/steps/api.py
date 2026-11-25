@@ -16,7 +16,6 @@ from pytest_bdd import given, parsers, then, when
 from webob import Request
 
 import workdash.control as control_module
-from workdash.analysis_cache import AnalysisCache
 from workdash.control import (
     _make_turbogears_app,
     _source_and_header_guarded_wsgi_app,
@@ -517,59 +516,3 @@ def _both_responses_unconfirmed(scenario_state: dict[str, Any]) -> None:
         (409, "launch_unconfirmed"),
         (409, "launch_unconfirmed"),
     ]
-
-
-@given("a server-backed Workdash session has an item with a cached analysis")
-def _item_with_cached_analysis(scenario_state, work_items, tmp_path):
-    item = make_work_item(number=1)
-    work_items[:] = [item]
-    set_session_items(scenario_state, work_items)
-    cache = AnalysisCache(tmp_path / "analysis-cache")
-    cache.save(item, "# cached analysis\nbody\n")
-    item.analysis = cache.load_analysis(item)
-    item.analyzed_at = cache.load_analysis_date(item)
-    scenario_state["analysis_cache"] = cache
-    session = ensure_api_session(scenario_state, work_items, tmp_path)
-    session.backend.analysis_cache = cache
-
-
-@when("a client requests its analysis through the connected host")
-def _request_analysis_through_host(scenario_state, work_items, tmp_path, monkeypatch):
-    session = ensure_api_session(scenario_state, work_items, tmp_path)
-    cache = scenario_state["analysis_cache"]
-    monkeypatch.setattr(
-        session.backend, "analyze_item", lambda item, **kwargs: str(cache.build_analysis_path(item))
-    )
-    app = _source_and_header_guarded_wsgi_app(_make_turbogears_app(session))
-    req = Request.blank(
-        "/api/v0/analyze",
-        method="POST",
-        host="dashboard.test:9876",
-        headers={"X-Workdash": version("workdash")},
-        content_type="application/json",
-        body=b'{"target":"owner/repo#ISSUE-1"}',
-    )
-    req.environ["REMOTE_ADDR"] = "127.0.0.1"
-    result = req.get_response(app)
-    assert result.status_int == 200
-    scenario_state["analysis_urls"] = result.json["result"]
-    scenario_state["analysis_app"] = app
-
-
-@then("the returned Markdown and HTML URLs use that host and serve the analysis")
-def _analysis_formats_served(scenario_state):
-    result = scenario_state["analysis_urls"]
-    base = "http://dashboard.test:9876/api/items/owner/repo%23ISSUE-1/analysis"
-    assert result["markdown_url"] == base
-    assert result["html_url"] == base + "/html"
-    for key, content_type, content in (
-        ("markdown_url", "text/markdown", "# cached analysis"),
-        ("html_url", "text/html", "<h1>cached analysis</h1>"),
-    ):
-        req = Request.blank(result[key])
-        req.environ["REMOTE_ADDR"] = "127.0.0.1"
-        response = req.get_response(scenario_state["analysis_app"])
-        assert response.status_int == 200
-        assert response.content_type == content_type
-        assert content in response.text
-        assert "body" in response.text
