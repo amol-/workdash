@@ -1207,18 +1207,25 @@ def _run_code_with_autostart_option(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    with pytest.raises(SystemExit) as parse_error:
-        _run_workdash(
-            ["code", "owner/repo#ISSUE-1", "--autostart"], scenario_state, monkeypatch, capsys
-        )
-    scenario_state["exit_code"] = parse_error.value.code
+    _run_workdash(
+        ["code", "owner/repo#ISSUE-1", "--autostart"], scenario_state, monkeypatch, capsys
+    )
 
 
-@then("the command asks the server to code with autostart enabled")
-def _asks_server_to_code_with_autostart(scenario_state: dict[str, Any]) -> None:
+@then("the command asks for neither autostart nor autoclose")
+def _asks_for_neither_autostart_nor_autoclose(scenario_state: dict[str, Any]) -> None:
+    [request] = scenario_state["control_requests"]
+    assert request["endpoint"] == "code"
+    assert "autostart" not in request["payload"]
+    assert "autoclose" not in request["payload"]
+
+
+@then("the command asks for autostart without autoclose")
+def _asks_for_autostart_without_autoclose(scenario_state: dict[str, Any]) -> None:
     [request] = scenario_state["control_requests"]
     assert request["endpoint"] == "code"
     assert request["payload"]["autostart"] is True
+    assert "autoclose" not in request["payload"]
 
 
 @then("the command asks the server to code with autostart and autoclose enabled")
@@ -1226,11 +1233,6 @@ def _asks_server_to_code_with_autostart_and_autoclose(scenario_state: dict[str, 
     [request] = scenario_state["control_requests"]
     assert request["endpoint"] == "code"
     assert (request["payload"]["autostart"], request["payload"]["autoclose"]) == (True, True)
-
-
-@then("the command asks no server to code")
-def _asks_no_server_to_code(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("control_requests", []) == []
 
 
 @then("the command requests terminal launch from the local Workdash server")

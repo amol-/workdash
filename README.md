@@ -165,7 +165,7 @@ workdash autodispatch SCOPE [--group NAME] [--agent NAME] [--host HOST] [--json]
 workdash autodispatch-stop SESSION_ID [--host HOST] [--json]  # stop a session
 workdash analyze ITEM [--agent NAME] [--group NAME] [--json]  # analyze an item
 workdash review ITEM [--agent NAME] [--group NAME] [--json]   # autonomously review an open PR
-workdash code ITEM [--agent NAME] [--group NAME] [--autoclose] [--json]  # launch an autonomous coding agent, or report the running one
+workdash code ITEM [--agent NAME] [--group NAME] [--autostart] [--autoclose] [--json]  # launch a coding agent, or report the running one
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
 workdash todo TEXT [--target REPOSITORY] [--body BODY] [--json]  # capture a todo
 workdash todo --close ITEM [--json]  # close a todo
@@ -577,7 +577,7 @@ The document is agent-produced, not independent verification of GitHub's review 
 
 ## Code command
 
-`workdash code ITEM [--agent NAME] [--group NAME] [--autoclose] [--json]` requires a running
+`workdash code ITEM [--agent NAME] [--group NAME] [--autostart] [--autoclose] [--json]` requires a running
 `workdash` session and launches a configured coding agent for a work
 item. `ITEM` accepts the same items as `workdash analyze`. With `--group NAME`,
 the server opens a new agent pane in the named Zellij tab, creating it if needed;
@@ -604,7 +604,11 @@ terminal in another worktree under the configured `workdir`, even one whose
 directory has the same name. Outside `workdir` a terminal carrying this
 worktree's Workdash title is treated as this worktree's terminal.
 
-`workdash code` always autostarts the agent: its briefing ends with an appendix
+By default, `workdash code` uses the same plan-first briefing as the TUI's `c`:
+for implementation, the agent proposes a plan and waits for your instructions
+before editing, committing, or pushing.
+
+With `--autostart`, the briefing ends with an appendix
 telling it to work without routine confirmation, commit, push, and open a pull
 request that closes the issue (or update the existing one), and verify the pull request's current head: CI `passing`, or GitHub reporting no required or
 observed checks (`no_checks`), and a clean merge. It never merges or closes
@@ -617,9 +621,8 @@ issue an open pull request of yours closes resumes that pull request in place, a
 request with review feedback, merge conflicts, or failing CI is repaired on its
 own branch with every reason included. A pull request waiting on CI, review, or
 merge is described, not reworked, and somebody else's pull request stays a
-review-only session. There is no `--autostart` option; the TUI's `c` keeps the
-plan-first briefing and never commits or pushes by itself, and the HTTP
-`POST /api/v0/code` takes optional boolean `autostart` and `autoclose`, both
+review-only session. The HTTP `POST /api/v0/code` takes optional boolean
+`autostart` and `autoclose`, both
 false when omitted. `already_running` injects nothing into the running agent.
 
 Coding an authored pull request linked to an issue is the same implementation
@@ -643,7 +646,8 @@ and asks the server to supervise the pane it just launched. The CLI polls
 nothing itself: it sends `autostart` and `autoclose` to the server, which owns
 the GitHub lookups, the messages, and the pane. Autoclose requires autostart, so
 the HTTP API answers `bad_request` (400) to `{"autoclose": true}` without
-`autostart: true`; the CLI always autostarts, and the TUI asks for neither.
+`autostart: true`. In the CLI, `--autoclose` implies `--autostart`; the TUI's
+code menu asks for neither.
 `already_running` never turns a pane started elsewhere into a supervised one, and
 the response reports `autoclose_enabled` only when a request asked for it.
 

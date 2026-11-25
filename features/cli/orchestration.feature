@@ -32,8 +32,8 @@ Feature: CLI orchestration commands
     - `workdash code` launches only configured coding agents reported by `workdash show-config`.
     - `workdash code --group NAME` asks the server to open a new agent in the named Zellij tab, creating it if needed; without the option it opens in the current tab.
     - Code results report the actual tab of the agent pane, including an already-running pane, in human and JSON output.
-    - `workdash code` always asks the server to autostart the agent, so the new agent works autonomously from its briefing; there is no `--autostart` option and the TUI never asks for it.
-    - `workdash code --autoclose` asks the server to supervise the new pane as well; the CLI polls nothing itself and `--autoclose` never asks for autoclose without autostart.
+    - `workdash code` launches a plan-first coding session by default. Use `--autostart` to have the new agent work autonomously from its briefing.
+    - `workdash code --autoclose` implies `--autostart` and asks the server to supervise the new pane; the CLI polls nothing itself.
     - A configured agent that lacks the command for the requested action is reported as unable to do that action, not as unconfigured.
     - Without `--agent`, `workdash analyze` and `workdash code` use the first configured agent for that action, in configuration order.
     - `workdash analyze`, `workdash code`, and `workdash terminal` accept any explicit target the JSON API accepts, including items `workdash list` does not show; the server resolves it.
@@ -325,18 +325,20 @@ Feature: CLI orchestration commands
     And the command exits with a non-zero status
 
   @id:F-CLI-ORCHESTRATION-S040
-  Scenario: Code always asks the server to autostart the agent
+  Scenario: Code launches a plan-first coding session by default
     Given a server-backed Workdash session is ready to answer
     And GitHub repository `owner/repo` has open issue #1
     When the user runs `workdash code owner/repo#ISSUE-1 --agent pi`
-    Then the command asks the server to code with autostart enabled
-    And the agent is briefed with the original prompt followed by the autonomous appendix once
+    Then the agent is briefed with exactly the original prompt
+    And the command asks for neither autostart nor autoclose
 
   @id:F-CLI-ORCHESTRATION-S041
-  Scenario: Code has no autostart option
+  Scenario: Code with autostart launches an autonomous coding session
+    Given a server-backed Workdash session is ready to answer
+    And GitHub repository `owner/repo` has open issue #1
     When the user runs `workdash code owner/repo#ISSUE-1 --autostart`
-    Then the command exits with a non-zero status
-    And the command asks no server to code
+    Then the agent is briefed with the original prompt followed by the autonomous appendix once
+    And the command asks for autostart without autoclose
 
   @id:F-CLI-ORCHESTRATION-S042
   Scenario Outline: Host selection is rejected for non-client commands

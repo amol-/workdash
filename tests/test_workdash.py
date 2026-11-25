@@ -1046,7 +1046,7 @@ def test_main_exits_with_config_guidance_when_startup_config_command_is_malforme
         (
             ["code", "owner/repo#ISSUE-1", "--agent", "pi"],
             "code",
-            {"target": "owner/repo#ISSUE-1", "agent": "pi", "autostart": True},
+            {"target": "owner/repo#ISSUE-1", "agent": "pi"},
         ),
         (["read", "terminal_23"], "pane/content", {"pane_id": "terminal_23", "full": False}),
         (
@@ -1451,7 +1451,7 @@ def test_main_analyze_reports_server_error(
     [
         (
             ["code", "owner/repo#ISSUE-1", "--agent", "pi"],
-            {"target": "owner/repo#ISSUE-1", "agent": "pi", "autostart": True},
+            {"target": "owner/repo#ISSUE-1", "agent": "pi"},
             {
                 "status": "launched",
                 "item_id": "owner/repo#ISSUE-1",
@@ -1580,7 +1580,6 @@ def test_main_code_json_outputs_server_response(
             assert payload == {
                 "target": "https://github.com/owner/repo/issues/1",
                 "agent": "codex",
-                "autostart": True,
             }
             return response
 
@@ -2350,9 +2349,10 @@ def test_workdash_control_skill_examples_are_valid_commands_and_explain_code_cla
     assert "no `workdash claim` command" in skill
     with pytest.raises(SystemExit):
         workdash_module._parse_args(["claim", "owner/repo#1"])
-    # Agents must learn what CLI code does, how the TUI differs, and that nothing is merged.
+    # Agents must learn both CLI launch modes and that nothing is merged.
+    assert any(argv[0] == "code" and "--autostart" in argv for argv in examples)
     for text in (
-        "There is no `--autostart` option: the CLI always asks for",
+        "`workdash code ITEM` uses the plan-first briefing by default",
         "plan-first briefing",
         "resumes that pull request in place",
         "merge conflicts, or failing CI",
@@ -2363,8 +2363,6 @@ def test_workdash_control_skill_examples_are_valid_commands_and_explain_code_cla
     ):
         assert text in " ".join(skill.split())
     assert "--autoclose" not in skill
-    with pytest.raises(SystemExit):
-        workdash_module._parse_args(["code", "owner/repo#1", "--autostart"])
     # Ready previews issue-only dispatch, which supervises one selected task.
     for text in (
         "Pull requests are never ready items",
@@ -2389,7 +2387,6 @@ def test_code_group_is_forwarded_to_remote_server_and_reports_actual_tab(monkeyp
                 "target": "owner/repo#1",
                 "agent": None,
                 "group": "epic",
-                "autostart": True,
             }
             return {
                 "status": "already_running",
