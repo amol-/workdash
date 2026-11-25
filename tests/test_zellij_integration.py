@@ -42,14 +42,14 @@ def _cleanup_sessions(zellij, env, sessions, *, previously_owned=None):
     owned = dict(previously_owned or {})
     try:
         # Record descendants before Zellij can hang them up and orphan them.
-        current = _session_processes(env, by_name)
+        current = _session_processes(zellij, env, by_name)
         owned.update(current)
         # Stop startup/attach clients so they cannot launch a server during deletion.
         for (pid, _), name in current.items():
             if pid in by_name[name]:
                 with suppress(ProcessLookupError, PermissionError):
                     os.kill(pid, signal.SIGKILL)
-        owned.update(_session_processes(env, by_name))
+        owned.update(_session_processes(zellij, env, by_name))
         for name in by_name:
             with suppress(subprocess.TimeoutExpired):
                 subprocess.run(
@@ -59,26 +59,30 @@ def _cleanup_sessions(zellij, env, sessions, *, previously_owned=None):
                     timeout=1,
                 )
 
-        owned.update(_session_processes(env, by_name))
-        live = _live_processes()
-        for pid, started in owned:
-            if pid in live and live[pid][1] == started:
-                with suppress(ProcessLookupError, PermissionError):
-                    os.kill(pid, signal.SIGKILL)
-
-        deadline = time.monotonic() + 1
-        while True:
+        try:
+            owned.update(_session_processes(zellij, env, by_name))
+        finally:
             live = _live_processes()
-            survivors = [
-                f"{name}: PID {pid} ({live[pid][2]})"
-                for (pid, started), name in owned.items()
-                if pid in live and live[pid][1] == started
-            ]
-            if not survivors:
-                return
-            if time.monotonic() >= deadline:
-                raise AssertionError("Zellij cleanup left live processes: " + "; ".join(survivors))
-            time.sleep(0.05)
+            for pid, started in owned:
+                if pid in live and live[pid][1] == started:
+                    with suppress(ProcessLookupError, PermissionError):
+                        os.kill(pid, signal.SIGKILL)
+
+            deadline = time.monotonic() + 1
+            while True:
+                live = _live_processes()
+                survivors = [
+                    f"{name}: PID {pid} ({live[pid][2]})"
+                    for (pid, started), name in owned.items()
+                    if pid in live and live[pid][1] == started
+                ]
+                if not survivors:
+                    break
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        "Zellij cleanup left live processes: " + "; ".join(survivors)
+                    )
+                time.sleep(0.05)
     finally:
         for _, pid, fd in sessions:
             with suppress(ChildProcessError):
@@ -86,7 +90,7 @@ def _cleanup_sessions(zellij, env, sessions, *, previously_owned=None):
             os.close(fd)
 
 
-def _session_processes(env, sessions):
+def _session_processes(zellij, env, sessions):
     """Find the server by its private socket path, even if Workdash started it."""
     live = _live_processes()
     socket_dir = Path(env["ZELLIJ_SOCKET_DIR"]).resolve()
@@ -108,24 +112,32 @@ def _session_processes(env, sessions):
     servers = {}
     for pid in candidates:
         # Re-read candidates by PID: multiline arguments can look like rows in the bulk listing.
-        args = subprocess.run(
-            ["ps", "-ww", "-p", str(pid), "-o", "args="],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=1,
-        ).stdout.strip()
-        executable, flag, socket_arg = args.partition(" --server ")
-        if not flag:
-            continue
+        if sys.platform == "linux":
+            # ps can rewrite non-ASCII paths and lose argument boundaries.
+            try:
+                argv = Path(f"/proc/{pid}/cmdline").read_bytes().removesuffix(b"\0").split(b"\0")
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+            if len(argv) != 3 or argv[1] != b"--server" or not os.path.isabs(argv[0]):
+                continue
+            socket_arg = os.fsdecode(argv[2])
+        else:
+            args = subprocess.run(
+                ["ps", "-ww", "-p", str(pid), "-o", "args="],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=1,
+            ).stdout.strip()
+            executable, flag, socket_arg = args.partition(" --server ")
+            # With flattened argv, require the known binary to reject embedded matches.
+            if not flag or executable not in {os.path.abspath(zellij), os.path.realpath(zellij)}:
+                continue
         socket = Path(socket_arg)
         if (
             socket.name in sessions
             and socket.is_absolute()
             and socket.resolve().parent.is_relative_to(socket_dir)
-            # ps flattens argv; reject a match embedded in another command's arguments.
-            and os.path.isabs(executable)
-            and os.path.isfile(executable)
         ):
             servers[socket.name] = pid
 
@@ -223,25 +235,84 @@ def test_zellij_cleanup_does_not_signal_pid_from_multiline_args(tmp_path, monkey
 
     kill = Mock(side_effect=AssertionError("cleanup signaled the unrelated process"))
     monkeypatch.setattr(subprocess, "run", run)
+    if sys.platform == "linux":
+        monkeypatch.setattr(Path, "read_bytes", lambda path: b"/bin/sleep\x00120\0")
     monkeypatch.setattr(os, "kill", kill)
     fd = os.open(os.devnull, os.O_RDONLY)
     _cleanup_sessions("zellij", env, [(socket.name, os.getpid(), fd)])
     kill.assert_not_called()
 
 
+def test_zellij_cleanup_kills_and_verifies_recorded_pids_after_ps_timeout(tmp_path, monkeypatch):
+    pid = 12345
+    session = "test-session"
+    deleted = killed = verified = False
+    timeout = None
+
+    def run(command, **kwargs):
+        nonlocal deleted, timeout, verified
+        stdout = ""
+        if command[0] == "zellij":
+            assert command[1:] == ["delete-session", "--force", session]
+            deleted = True
+        elif deleted and timeout is None:
+            timeout = subprocess.TimeoutExpired(command, kwargs["timeout"])
+            raise timeout
+        elif "ucomm=" in command:
+            if killed:
+                verified = True
+            else:
+                stdout = f"{pid} 1 S Mon Jan  1 00:00:00 2024 pane\n"
+        return subprocess.CompletedProcess(command, 0, stdout)
+
+    def kill(target, sig):
+        nonlocal killed
+        assert (target, sig) == (pid, signal.SIGKILL)
+        killed = True
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(os, "kill", kill)
+    fd = os.open(os.devnull, os.O_RDONLY)
+    with pytest.raises(subprocess.TimeoutExpired) as error:
+        _cleanup_sessions(
+            "zellij",
+            {"ZELLIJ_SOCKET_DIR": str(tmp_path)},
+            [(session, os.getpid(), fd)],
+            previously_owned={(pid, ("Mon", "Jan", "1", "00:00:00", "2024")): session},
+        )
+    assert error.value is timeout
+    assert killed and verified
+
+
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
 @pytest.mark.parametrize(
     "case",
-    ["normal", "failure", "ctrl-c", "survivor", "renamed-binary", "long-tmpdir"],
+    [
+        "normal",
+        "failure",
+        "ctrl-c",
+        "survivor",
+        "renamed-binary",
+        "long-tmpdir",
+        pytest.param(
+            "non-ascii-binary-dir",
+            marks=pytest.mark.skipif(sys.platform != "linux", reason="Linux ps C locale"),
+        ),
+    ],
 )
 def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
     zellij = shutil.which("zellij")
-    if case == "renamed-binary":
-        binary = tmp_path / "terminal-multiplexer"
+    if case in {"renamed-binary", "non-ascii-binary-dir"}:
+        bin_dir = tmp_path / "bin"
+        if case == "non-ascii-binary-dir":
+            bin_dir = tmp_path / "bin-è"
+            monkeypatch.setenv("LC_ALL", "C")
+        bin_dir.mkdir()
+        binary = bin_dir / "terminal-multiplexer"
         shutil.copy2(zellij, binary)
-        link = tmp_path / "zellij"
+        link = bin_dir / "zellij"
         link.symlink_to(binary)
-        monkeypatch.setenv("PATH", str(tmp_path), prepend=os.pathsep)
+        monkeypatch.setenv("PATH", str(bin_dir), prepend=os.pathsep)
         zellij = str(link)
     elif case == "long-tmpdir":
         long_tmpdir = tmp_path / ("long-" * 24)
@@ -251,7 +322,8 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
 
     body_error = {"failure": AssertionError, "ctrl-c": KeyboardInterrupt}.get(case)
     leave_survivor = case == "survivor"
-    ready = tmp_path / "pane-pid"
+    ready = tmp_path / "pane-pids"
+    pane_pids = ()
     pane_pid = None
     kill = os.kill
     previous_socket_dir = os.environ.get("ZELLIJ_SOCKET_DIR")
@@ -283,7 +355,12 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
                     "-c",
                     "import os, signal, time\nfrom pathlib import Path\n"
                     "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
-                    f"Path({str(ready)!r}).write_text(str(os.getpid()))\n"
+                    "child = os.fork()\n"
+                    "if child:\n"
+                    f"    ready = Path({str(ready)!r})\n"
+                    "    pending = ready.with_suffix('.tmp')\n"
+                    "    pending.write_text(f'{os.getpid()} {child}')\n"
+                    "    pending.rename(ready)\n"
                     "time.sleep(120)\n",
                 ],
                 check=True,
@@ -291,10 +368,13 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
                 timeout=5,
             )
             deadline = time.monotonic() + 10
-            while not ready.exists() or not ready.read_text():
+            while not ready.exists():
                 assert time.monotonic() < deadline, "pane did not start"
                 time.sleep(0.05)
-            pane_pid = int(ready.read_text())
+            pane_pids = tuple(map(int, ready.read_text().split()))
+            pane_pid, child_pid = pane_pids
+            live = _live_processes()
+            assert pane_pid in live and live[child_pid][0] == pane_pid
             if leave_survivor:
                 monkeypatch.setattr(os, "kill", kill_except_pane)
             if body_error:
@@ -303,14 +383,15 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
         assert not os.path.exists(socket_dir)
         if leave_survivor:
             assert f"{name}: PID {pane_pid} (" in str(cleanup_error.value)
-        state = subprocess.run(
-            ["ps", "-o", "stat=", "-p", str(pane_pid)], capture_output=True, text=True
-        ).stdout.strip()
-        assert bool(state and not state.startswith("Z")) == leave_survivor, state
+        survivors = set(pane_pids) & _live_processes().keys()
+        assert survivors == ({pane_pid} if leave_survivor else set())
     finally:
-        if pane_pid in _live_processes():
-            with suppress(ProcessLookupError):
-                kill(pane_pid, signal.SIGKILL)
+        if ready.exists():
+            live = _live_processes()
+            for pid in map(int, ready.read_text().split()):
+                if pid in live:
+                    with suppress(ProcessLookupError):
+                        kill(pid, signal.SIGKILL)
 
 
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
@@ -1317,7 +1398,9 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
             return subprocess.run([zellij, *args], env=env, capture_output=True, text=True)
 
         def stop_for_resurrection():
-            previously_owned.update(_session_processes(env, {name: {pid for pid, _ in clients}}))
+            previously_owned.update(
+                _session_processes(zellij, env, {name: {pid for pid, _ in clients}})
+            )
             assert run("kill-session", name).returncode == 0
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
