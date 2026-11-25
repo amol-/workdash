@@ -18,6 +18,7 @@ import time
 import uuid
 from contextlib import contextmanager, nullcontext, suppress
 from pathlib import Path
+from typing import NamedTuple
 from unittest.mock import Mock
 
 import pytest
@@ -40,12 +41,21 @@ def _cleanup_sessions(zellij, env, sessions, *, previously_owned=None):
     for name, pid, fd in sessions:
         by_name.setdefault(name, set()).add(pid)
     owned = dict(previously_owned or {})
+    pane_groups = {}
+    interrupted = False
+
+    def defer_interrupt(signum, frame):
+        nonlocal interrupted
+        interrupted = True
+
+    # Defer Ctrl+C in pytest; run cleanup commands outside its foreground group.
+    previous_handler = signal.signal(signal.SIGINT, defer_interrupt)
     try:
         # Record descendants before Zellij can hang them up and orphan them.
         try:
-            current = _session_processes(zellij, env, by_name)
+            current = _session_processes(zellij, env, by_name, pane_groups=pane_groups)
         except subprocess.TimeoutExpired:
-            current = _session_processes(zellij, env, by_name)
+            current = _session_processes(zellij, env, by_name, pane_groups=pane_groups)
         owned.update(current)
         # Stop startup/attach clients so they cannot launch a server during deletion.
         for (pid, _), name in current.items():
@@ -53,7 +63,7 @@ def _cleanup_sessions(zellij, env, sessions, *, previously_owned=None):
                 with suppress(ProcessLookupError, PermissionError):
                     os.kill(pid, signal.SIGKILL)
         try:
-            owned.update(_session_processes(zellij, env, by_name))
+            owned.update(_session_processes(zellij, env, by_name, pane_groups=pane_groups))
             for name in by_name:
                 with suppress(subprocess.TimeoutExpired):
                     subprocess.run(
@@ -61,20 +71,26 @@ def _cleanup_sessions(zellij, env, sessions, *, previously_owned=None):
                         env=env,
                         capture_output=True,
                         timeout=1,
+                        start_new_session=True,
                     )
             owned.update(_session_processes(zellij, env, by_name))
         finally:
-            _kill_and_verify_owned_processes(owned)
+            _kill_and_verify_owned_processes(owned, pane_groups)
     finally:
-        for _, pid, fd in sessions:
-            with suppress(ChildProcessError):
-                os.waitpid(pid, os.WNOHANG)
-            os.close(fd)
+        try:
+            for _, pid, fd in sessions:
+                with suppress(ChildProcessError):
+                    os.waitpid(pid, os.WNOHANG)
+                os.close(fd)
+        finally:
+            signal.signal(signal.SIGINT, previous_handler)
+            if interrupted:
+                signal.raise_signal(signal.SIGINT)
 
 
-def _kill_and_verify_owned_processes(owned):
+def _kill_and_verify_owned_processes(owned, pane_groups=None):
     deadline = time.monotonic() + 1
-    signaled = False
+    signaled = set()
     remaining = 1
     survivors = {}
     while True:
@@ -84,18 +100,25 @@ def _kill_and_verify_owned_processes(owned):
             timeout = error
         else:
             timeout = None
-            survivors = {
-                pid: f"{name}: PID {pid} ({live[pid][2]})"
-                for (pid, started), name in owned.items()
-                if pid in live and live[pid][1] == started
+            # An orphan still belongs to its pane group after the leader exits.
+            # A different live leader means the group ID has been reused.
+            live_groups = {
+                pgid: name
+                for (pgid, started), name in (pane_groups or {}).items()
+                if pgid not in live or live[pgid].started == started
             }
+            survivors = {}
+            for pid, process in live.items():
+                identity = pid, process.started
+                name = owned.get(identity) or live_groups.get(process.pgid)
+                if name is not None:
+                    survivors[identity] = f"{name}: PID {pid} ({process.command})"
             if not survivors:
                 break
-            if not signaled:
-                for pid in survivors:
-                    with suppress(ProcessLookupError, PermissionError):
-                        os.kill(pid, signal.SIGKILL)
-                signaled = True
+            for pid, started in survivors.keys() - signaled:
+                with suppress(ProcessLookupError, PermissionError):
+                    os.kill(pid, signal.SIGKILL)
+                signaled.add((pid, started))
         remaining = deadline - time.monotonic()
         if remaining > 0:
             time.sleep(min(0.05, remaining))
@@ -108,7 +131,7 @@ def _kill_and_verify_owned_processes(owned):
             raise timeout
 
 
-def _session_processes(zellij, env, sessions):
+def _session_processes(zellij, env, sessions, *, pane_groups=None):
     """Find the server by its private socket path, even if Workdash started it."""
     live = _live_processes()
     socket_dir = Path(env["ZELLIJ_SOCKET_DIR"]).resolve()
@@ -119,6 +142,7 @@ def _session_processes(zellij, env, sessions):
         errors="replace",
         check=True,
         timeout=1,
+        start_new_session=True,
     ).stdout
     candidates = set()
     for line in listing.splitlines():
@@ -146,6 +170,7 @@ def _session_processes(zellij, env, sessions):
                 text=True,
                 errors="replace",
                 timeout=1,
+                start_new_session=True,
             ).stdout.strip()
             executable, flag, socket_arg = args.partition(" --server ")
             # With flattened argv, require the known binary to reject embedded matches.
@@ -161,13 +186,26 @@ def _session_processes(zellij, env, sessions):
 
     owned = {}
     for name, clients in sessions.items():
-        pids = {pid for pid in clients if pid in live and live[pid][0] == os.getpid()}
+        roots = {pid for pid in clients if pid in live and live[pid].parent == os.getpid()}
         if name in servers:
-            pids.add(servers[name])
-        while descendants := {pid for pid, (parent, _, _) in live.items() if parent in pids} - pids:
+            roots.add(servers[name])
+        pids = roots.copy()
+        while descendants := {pid for pid, proc in live.items() if proc.parent in pids} - pids:
             pids.update(descendants)
-        owned.update({(pid, live[pid][1]): name for pid in pids})
+        owned.update({(pid, live[pid].started): name for pid in pids})
+        if pane_groups is not None:
+            # Only follow groups led by owned descendants, not the client's or server's group.
+            pane_groups.update(
+                {(pid, live[pid].started): name for pid in pids - roots if live[pid].pgid == pid}
+            )
     return owned
+
+
+class _LiveProcess(NamedTuple):
+    parent: int
+    started: tuple[str, ...]
+    command: str
+    pgid: int
 
 
 def _live_processes(*, timeout=1):
@@ -182,6 +220,8 @@ def _live_processes(*, timeout=1):
             "-o",
             "ppid=",
             "-o",
+            "pgid=",
+            "-o",
             "stat=",
             "-o",
             "lstart=",
@@ -194,17 +234,16 @@ def _live_processes(*, timeout=1):
         errors="replace",
         check=True,
         timeout=timeout,
+        start_new_session=True,
     )
     processes = {}
     for line in result.stdout.splitlines():
-        fields = line.split(maxsplit=8)
-        if len(fields) >= 8 and fields[0].isdigit() and fields[1].isdigit():
-            pid, parent, state, *started = fields[:8]
+        fields = line.split(maxsplit=9)
+        if len(fields) >= 9 and all(field.isdigit() for field in fields[:3]):
+            pid, parent, pgid, state, *started = fields[:9]
             if not state.startswith("Z"):
-                processes[int(pid)] = (
-                    int(parent),
-                    tuple(started),
-                    fields[8] if len(fields) == 9 else "",
+                processes[int(pid)] = _LiveProcess(
+                    int(parent), tuple(started), fields[9] if len(fields) == 10 else "", int(pgid)
                 )
     return processes
 
@@ -239,7 +278,7 @@ def test_zellij_cleanup_does_not_signal_pid_from_multiline_args(tmp_path, monkey
         stdout = ""
         if command[0] == "ps":
             if "ucomm=" in command:
-                stdout = f"{unrelated_pid} 1 S Mon Jan  1 00:00:00 2024 sleep\n"
+                stdout = f"{unrelated_pid} 1 1 S Mon Jan  1 00:00:00 2024 sleep\n"
             elif "-p" in command:
                 assert command[command.index("-p") + 1] == str(unrelated_pid)
                 stdout = "/bin/sleep 120\n"
@@ -295,12 +334,12 @@ def test_zellij_cleanup_kills_and_verifies_recorded_pids_after_ps_timeout(
             advance(timeout.timeout)
             raise timeout
         elif "ucomm=" in command:
-            stdout = f"{reused_pid} 1 S Mon Jan  1 00:00:01 2024 unrelated\n"
+            stdout = f"{reused_pid} 1 1 S Mon Jan  1 00:00:01 2024 unrelated\n"
             if killed:
                 verified = True
             else:
                 matched = deleted and (discovered or bool(timeouts))
-                stdout += f"{pid} 1 S Mon Jan  1 00:00:00 2024 pane\n"
+                stdout += f"{pid} 1 1 S Mon Jan  1 00:00:00 2024 pane\n"
         elif deleted:
             discovered = True
         return subprocess.CompletedProcess(command, 0, stdout)
@@ -355,6 +394,9 @@ def test_zellij_cleanup_kills_and_verifies_recorded_pids_after_ps_timeout(
         "ctrl-c",
         "ctrl-c-delete",
         "ctrl-c-scan",
+        "ctrl-c-first-ps",
+        "ctrl-c-verify",
+        "late-child",
         "first-ps-timeout",
         "survivor",
         "renamed-binary",
@@ -387,11 +429,12 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
 
     body_error = {"failure": AssertionError, "ctrl-c": KeyboardInterrupt}.get(case)
     leave_survivor = case == "survivor"
-    interrupt_cleanup = case in {"ctrl-c-delete", "ctrl-c-scan"}
+    interrupt_cleanup = case.startswith("ctrl-c-")
     scans = 0
-    interrupt = None
-    timed_out = deleted = False
+    sent_interrupt = post_delete_scan = timed_out = deleted = False
     ready = tmp_path / "pane-pids"
+    release = tmp_path / "fork-late-child"
+    late_ready = tmp_path / "late-child-pid"
     owned = {}
     fallback = {}
     kill = os.kill
@@ -403,26 +446,54 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
             kill(pid, sig)
 
     def run_during_teardown(command, **kwargs):
-        nonlocal scans, interrupt, timed_out, deleted
-        if case == "first-ps-timeout" and command[0] == "ps" and not timed_out:
+        nonlocal scans, sent_interrupt, post_delete_scan, timed_out, deleted
+        ps = command[0] == "ps"
+        if case == "first-ps-timeout" and ps and not timed_out:
             timed_out = True
             raise subprocess.TimeoutExpired(command, kwargs["timeout"])
         delete = command == [zellij, "delete-session", "--force", name]
-        scan = command[0] == "ps" and "-U" in command and "args=" in command
+        scan = ps and "-U" in command and "args=" in command
         if scan:
             scans += 1
-        if (case == "ctrl-c-scan" and scan and scans == 2) or (case == "ctrl-c-delete" and delete):
-            try:
-                signal.raise_signal(signal.SIGINT)
-            except KeyboardInterrupt as error:
-                interrupt = error
-                raise
+            post_delete_scan |= deleted
+        if not sent_interrupt and (
+            (case == "ctrl-c-first-ps" and ps)
+            or (case == "ctrl-c-scan" and scan and scans == 2)
+            or (case == "ctrl-c-delete" and delete)
+            or (case == "ctrl-c-verify" and post_delete_scan and "ucomm=" in command)
+        ):
+            sent_interrupt = True
+            kill(os.getpid(), signal.SIGINT)
+        if delete and case == "late-child":
+            # The pane cannot fork this child until cleanup has taken its last snapshot.
+            release.touch()
+            deadline = time.monotonic() + 5
+            while not late_ready.exists():
+                assert time.monotonic() < deadline, "late child did not start"
+                time.sleep(0.01)
+            late_pid = int(late_ready.read_text())
+            live = _live_processes()
+            fallback[late_pid, live[late_pid].started] = name
+            assert live[late_pid].parent == pane_pid
+            assert os.getpgid(late_pid) == os.getpgid(pane_pid)
         result = run(command, **kwargs)
         if delete:
             deleted = result.returncode == 0
+            if case == "late-child":
+                deadline = time.monotonic() + 5
+                while server_pid in (live := _live_processes()):
+                    assert time.monotonic() < deadline, "Zellij server did not exit"
+                    time.sleep(0.01)
+                assert (late_pid, live[late_pid].started) in fallback
         return result
 
-    if interrupt_cleanup:
+    def previous_interrupt_handler(signum, frame):
+        assert signal.getsignal(signum) is previous_interrupt_handler
+        raise KeyboardInterrupt("delivered to prior handler")
+
+    if case == "ctrl-c-verify":
+        expected = pytest.raises(KeyboardInterrupt, match="delivered to prior handler")
+    elif interrupt_cleanup:
         expected = pytest.raises(KeyboardInterrupt)
     elif leave_survivor:
         expected = pytest.raises(AssertionError, match="Zellij cleanup left live processes")
@@ -431,6 +502,10 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
     else:
         expected = nullcontext()
 
+    original_handler = signal.getsignal(signal.SIGINT)
+    prior_handler = (
+        previous_interrupt_handler if case == "ctrl-c-verify" else signal.default_int_handler
+    )
     try:
         with (
             expected as cleanup_error,
@@ -457,6 +532,14 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
                     "    pending = ready.with_suffix('.tmp')\n"
                     "    pending.write_text(f'{os.getpid()} {child}')\n"
                     "    pending.rename(ready)\n"
+                    f"    if {case == 'late-child'}:\n"
+                    f"        while not Path({str(release)!r}).exists(): time.sleep(0.01)\n"
+                    "        late = os.fork()\n"
+                    "        if late:\n"
+                    f"            ready = Path({str(late_ready)!r})\n"
+                    "            pending = ready.with_suffix('.tmp')\n"
+                    "            pending.write_text(str(late))\n"
+                    "            pending.rename(ready)\n"
                     "time.sleep(120)\n",
                 ],
                 check=True,
@@ -470,13 +553,14 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
             pane_pid, child_pid = map(int, ready.read_text().split())
             live = _live_processes()
             # Zellij starts the pane directly; discovery must not supply the expected server PID.
-            server_pid = live[pane_pid][0]
+            server_pid = live[pane_pid].parent
             assert server_pid > 1
-            server_started = live[server_pid][1]
-            fallback = {(pid, live[pid][1]): name for pid in (server_pid, pane_pid, child_pid)}
+            fallback = {(pid, live[pid].started): name for pid in (server_pid, pane_pid, child_pid)}
             owned = _session_processes(zellij, os.environ, {name: set()})
-            if interrupt_cleanup or case == "first-ps-timeout":
+            if interrupt_cleanup or case in {"first-ps-timeout", "late-child"}:
                 fault.setattr(subprocess, "run", run_during_teardown)
+            if interrupt_cleanup:
+                signal.signal(signal.SIGINT, prior_handler)
             if leave_survivor:
                 fault.setattr(os, "kill", kill_except_pane)
             if body_error:
@@ -484,20 +568,23 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
         assert os.environ.get("ZELLIJ_SOCKET_DIR") == previous_socket_dir
         assert not os.path.exists(socket_dir)
         if interrupt_cleanup:
-            assert cleanup_error.value is interrupt
+            assert sent_interrupt
+            assert signal.getsignal(signal.SIGINT) is prior_handler
         if leave_survivor:
             assert f"{name}: PID {pane_pid} (" in str(cleanup_error.value)
         if case == "first-ps-timeout":
             assert timed_out and deleted
         live = _live_processes()
-        if case == "ctrl-c-delete":
-            assert server_pid not in live or live[server_pid][1] != server_started, (
-                f"cleanup left Zellij server PID {server_pid} alive"
-            )
         assert {pane_pid, child_pid} < {pid for pid, _ in owned}
-        survivors = {pid for pid, started in owned if pid in live and live[pid][1] == started}
+        survivors = {
+            pid for pid, started in owned | fallback if pid in live and live[pid].started == started
+        }
         assert survivors == ({pane_pid} if leave_survivor else set())
+        if case == "late-child":
+            assert deleted and len(fallback) == 4
     finally:
+        if interrupt_cleanup:
+            signal.signal(signal.SIGINT, original_handler)
         if owned or fallback:
             _kill_and_verify_owned_processes(owned | fallback)
 
