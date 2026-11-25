@@ -34,8 +34,9 @@ Feature: Persistent dashboard Zellij session
   @id:F-STARTUP-ZELLIJ-WRAPPER-S002
   Scenario: Interactive startup inside Zellij starts directly
     Given the system is running inside a Zellij session
+    And the user has a tracked issue titled "Fix the issue"
     When the user starts the interactive dashboard
-    Then the system starts the dashboard directly
+    Then the dashboard opens in the current pane and shows "Fix the issue"
 
   @id:F-STARTUP-ZELLIJ-WRAPPER-S004
   Scenario: Server-backed client commands do not wrap themselves

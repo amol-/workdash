@@ -1,8 +1,10 @@
 import base64
+import errno
 import json
 import os
 import re
 import shlex
+import socket
 import subprocess
 import threading
 from contextlib import nullcontext
@@ -10,6 +12,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -17,6 +20,7 @@ import workdash.config as config_module
 import workdash.control as control_module
 import workdash.github_client as github_client_module
 import workdash.workdash as workdash_module
+from workdash.backend import compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig, load_config, save_config
 from workdash.control import probe_dashboard_session
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
@@ -26,8 +30,6 @@ from zellij_pane_launch import mark_pane_started, pane_launch
 
 @pytest.fixture(autouse=True)
 def _fake_dashboard_server(monkeypatch):
-    from unittest.mock import MagicMock
-
     monkeypatch.setattr(workdash_module, "WorkdashControlServer", MagicMock())
 
 
@@ -2325,9 +2327,87 @@ def test_host_is_rejected_for_nonclient_commands(monkeypatch, capsys, args):
     assert "--host" in message and "client" in message
 
 
-def test_server_inside_zellij_requires_current_session_name(monkeypatch, capsys):
-    from unittest.mock import MagicMock
+def test_startup_serves_each_dashboard_with_its_own_state_and_session(monkeypatch):
+    with socket.socket() as first, socket.socket() as second:
+        first.bind(("127.0.0.1", 0))
+        second.bind(("127.0.0.1", 0))
+        addresses = [f"127.0.0.1:{sock.getsockname()[1]}" for sock in (first, second)]
+    names = ["workdash-one", "demo"]
+    items = [[replace(_issue(number=i), title=f"Issue {i}")] for i in (1, 2)]
+    markers = [compute_suggestion_markers(rows) for rows in items]
+    dashboards = []
 
+    class Dashboard:
+        def __init__(self, **kwargs):
+            dashboards.append(kwargs)
+
+        def run(self, *, mouse):
+            if len(dashboards) == 1:
+                with monkeypatch.context() as other:
+                    other.setenv("ZELLIJ_SESSION_NAME", names[1])
+                    other.setenv("WORKDASH_HOST", addresses[1])
+                    assert workdash_module.main([]) == 0
+                return
+
+            for index, (address, name, dashboard) in enumerate(zip(addresses, names, dashboards)):
+                session = dashboard["session"]
+                assert dashboard["work_items"] is session.work_items
+                assert dashboard["suggestion_markers"] is session.suggestion_markers
+                assert session.suggestion_markers == markers[index]
+                client = control_module.WorkdashControlClient(address)
+                assert client.request("info", {"panes": "none"})["session"] == name
+                assert [row["title"] for row in client.request("list")["items"]] == [
+                    items[index][0].title
+                ]
+
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", names[0])
+    monkeypatch.setenv("WORKDASH_HOST", addresses[0])
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setattr(
+        workdash_module.launcher.zellij, "list_workdash_sessions", lambda: [names[0]]
+    )
+    loads = iter(zip(items, markers))
+    backend = SimpleNamespace(load_items=lambda **kwargs: next(loads))
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", lambda **kwargs: backend)
+    monkeypatch.setattr(
+        workdash_module, "WorkdashControlServer", control_module.WorkdashControlServer
+    )
+    monkeypatch.setattr(workdash_module, "WorkdashApp", Dashboard)
+
+    assert workdash_module.main([]) == 0
+    assert len(dashboards) == 2
+
+
+def test_startup_reports_an_occupied_server_address_before_running_tui(monkeypatch, capsys):
+    def bind_occupied(host, port, app):
+        assert (host, port) == ("127.0.0.1", 18765)
+        raise OSError(errno.EADDRINUSE, os.strerror(errno.EADDRINUSE))
+
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:18765")
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    backend = SimpleNamespace(load_items=lambda **kwargs: ([], {}))
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", lambda **kwargs: backend)
+    app = MagicMock()
+    monkeypatch.setattr(workdash_module, "WorkdashApp", app)
+    monkeypatch.setattr(
+        workdash_module, "WorkdashControlServer", control_module.WorkdashControlServer
+    )
+    monkeypatch.setattr(control_module, "make_server", bind_occupied)
+
+    assert workdash_module.main([]) != 0
+    error = capsys.readouterr().err
+    assert "Cannot bind Workdash server at 127.0.0.1:18765" in error
+    assert os.strerror(errno.EADDRINUSE) in error
+    assert "WORKDASH_HOST" in error
+    app.return_value.run.assert_not_called()
+
+
+def test_server_inside_zellij_requires_current_session_name(monkeypatch, capsys):
     backend = MagicMock()
     backend.load_items.return_value = ([], {})
     monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)

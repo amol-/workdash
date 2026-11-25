@@ -2358,6 +2358,42 @@ def test_server_log_records_autoclose_decisions(monkeypatch, tmp_path):
     assert autoclose.level == level
 
 
+def test_server_log_records_background_dispatch_failure_without_raw_details(monkeypatch, tmp_path):
+    from workdash.control import WorkdashControlServer
+
+    log = tmp_path / "workdash.log"
+    monkeypatch.setattr("workdash.control.server_address", lambda: ("127.0.0.1", 0))
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="project",
+    )
+
+    def fail_dispatch(**_kwargs):
+        raise RuntimeError("Failed to gather work state") from subprocess.CalledProcessError(
+            4, ["gh", "api", "graphql"], stderr="gh: Not Found (HTTP 404) token=ghp_secret"
+        )
+
+    monkeypatch.setattr(session, "dispatch_once", fail_dispatch)
+    server = WorkdashControlServer(session)
+    server.start()
+    try:
+        started = session.start_autodispatch(scope="owner/repo")
+        wait_for(
+            lambda: session.autodispatch_status(started["id"])["session"]["status"] == "failed"
+        )
+    finally:
+        server.stop()
+    text = log.read_text()
+    assert "failed during dispatch" in text
+    assert re.search(r"RuntimeError at fail_dispatch:\d+", text)
+    assert "exit 4" in text
+    assert "HTTP 404" in text
+    assert "ghp_secret" not in text
+
+
 def test_server_log_records_request_failures(monkeypatch, tmp_path):
     import logging
 

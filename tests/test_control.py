@@ -12,7 +12,7 @@ from importlib.metadata import version
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 from webob import Request
@@ -30,6 +30,7 @@ from gh_work_state_fake import (
     thread,
     todo_body,
 )
+from workdash.analysis_cache import AnalysisCache
 from workdash.backend import IncludeResult, WorkdashBackend
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import (
@@ -39,6 +40,7 @@ from workdash.control import (
     probe_dashboard_session,
 )
 from workdash.github_client import GitHubClient
+from workdash.included_items import IncludedItemsStore
 from workdash.models import WorkItem, WorkItemKind, WorkItemType, accepted_worktree_numbers
 from workdash.work_instruction import render_work_instruction
 
@@ -586,19 +588,44 @@ def test_todo_notifies_the_live_tui_after_capturing(body, monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("body_fields", "expected_status"),
+    ("fields", "expected_status", "message"),
     [
-        ({}, 200),
-        ({"body": None}, 200),
-        ({"body": "  Details\n\n  "}, 200),
-        ({"body": ""}, 400),
-        ({"body": 123}, 400),
-        ({"body": ["details"]}, 400),
+        ({}, 200, None),
+        ({"body": None}, 200, None),
+        ({"body": "  Details\n\n  "}, 200, None),
+        ({"body": ""}, 400, "Optional field 'body' must be a non-empty string."),
+        ({"body": 123}, 400, "Optional field 'body' must be a non-empty string."),
+        ({"body": ["details"]}, 400, "Optional field 'body' must be a non-empty string."),
+        pytest.param({"target": "owner/repo"}, 200, None, id="github-target"),
+        pytest.param(
+            {"target": "https://gitlab.com/owner/repo.git"}, 200, None, id="gitlab-target"
+        ),
+        pytest.param(
+            {"target": "https://codeberg.org/owner/repo.git"}, 200, None, id="codeberg-target"
+        ),
+        pytest.param(
+            {
+                "target": "owner/repo",
+                "body": (
+                    "  Detailed context\n\n" * 16
+                    + '```json\n{"workdash_todo_version": 1, "target": "wrong/repository"}\n```\n  '
+                ),
+            },
+            200,
+            None,
+            id="long-details",
+        ),
+        pytest.param(
+            {"target": "not-a-repo"},
+            400,
+            "must be a GitHub owner/repo or a supported git URL",
+            id="invalid-target",
+        ),
     ],
 )
-def test_todo_api_validates_optional_body_without_reformatting(
-    body_fields, expected_status, monkeypatch
-) -> None:
+def test_todo_api_validates_input_and_captures_the_issue(
+    fields, expected_status, message, monkeypatch
+):
     recorded: list[list[str]] = []
     monkeypatch.setattr(subprocess, "run", fake_gh_todo_run(recorded))
     session = WorkdashSession(
@@ -612,35 +639,45 @@ def test_todo_api_validates_optional_body_without_reformatting(
         "/api/v0/todo",
         method="POST",
         content_type="application/json",
-        body=json.dumps({"text": "Short title", **body_fields}).encode(),
+        body=json.dumps({"text": "Short title", **fields}).encode(),
     )
 
     response = request.get_response(control_module._make_turbogears_app(session))
 
     assert response.status_int == expected_status
-    payload = json.loads(response.text)
+    payload = response.json
     if expected_status == 400:
+        assert payload["ok"] is False
         assert payload["error"]["code"] == "bad_request"
-        assert "Optional field 'body' must be a non-empty string." in payload["error"]["message"]
+        assert message in payload["error"]["message"]
         assert recorded == []
         assert session.work_items == []
-    else:
-        command = recorded[-1]
-        metadata = '```json\n{\n  "workdash_todo_version": 1\n}\n```\n'
-        body = body_fields.get("body")
-        assert command[command.index("--body") + 1] == (
-            metadata if body is None else metadata + "\n" + body
-        )
-        assert payload == {
-            "ok": True,
-            "result": {
-                "item_id": "testuser/todos#ISSUE-110",
-                "todo_repository": "testuser/todos",
-                "target": None,
-                "number": 110,
-                "url": "https://github.com/testuser/todos/issues/110",
-            },
-        }
+        return
+
+    command = recorded[-1]
+    assert command[:3] == ["gh", "issue", "create"]
+    assert command[command.index("--repo") + 1] == "testuser/todos"
+    assert command[command.index("--title") + 1] == "Short title"
+    target = fields.get("target")
+    metadata = {"workdash_todo_version": 1}
+    if target is not None:
+        metadata["target"] = target
+    expected_body = f"```json\n{json.dumps(metadata, indent=2)}\n```\n"
+    if fields.get("body") is not None:
+        expected_body += "\n" + fields["body"]
+    assert command[command.index("--body") + 1] == expected_body
+    item_id = "owner/repo#ISSUE-WT110" if target else "testuser/todos#ISSUE-110"
+    assert payload == {
+        "ok": True,
+        "result": {
+            "item_id": item_id,
+            "todo_repository": "testuser/todos",
+            "target": target,
+            "number": 110,
+            "url": "https://github.com/testuser/todos/issues/110",
+        },
+    }
+    assert [format_work_item_id(item) for item in session.work_items] == [item_id]
 
 
 def _ready_session(tmp_path, *, repositories: tuple[str, ...] = ()) -> WorkdashSession:
@@ -1634,6 +1671,326 @@ def test_code_api_rejects_a_non_boolean_flag(field, value) -> None:
     session.code.assert_not_called()
 
 
+def _post_item_action(session, action, target, **fields):
+    request = Request.blank(
+        f"/api/v0/{action}",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps({"target": target, **fields}).encode(),
+    )
+    return request.get_response(control_module._make_turbogears_app(session))
+
+
+@pytest.mark.parametrize(
+    ("fields", "agent", "group"),
+    [
+        pytest.param({"agent": "codex"}, "codex", "repo", id="selected-agent"),
+        pytest.param({}, "pi", "repo", id="first-agent"),
+        pytest.param({"group": "epic"}, "pi", "epic", id="requested-tab"),
+    ],
+)
+def test_analyze_api_runs_the_configured_agent(monkeypatch, tmp_path, fields, agent, group):
+    item = _work_item(number=1, title="Issue")
+    analysis = tmp_path / "analysis.md"
+    analysis.write_bytes(b"analysis body\n")
+    worktree = str(tmp_path / "owner_repo_1")
+    monkeypatch.setattr(control_module, "analysis_worktree", lambda *a, **k: nullcontext(worktree))
+    analyze_item = MagicMock(side_effect=[None, str(analysis)])
+    session = WorkdashSession(
+        config=WorkdashConfig(
+            agents={
+                "pi": AgentConfig(analyze="pi"),
+                "claude": AgentConfig(analyze="claude -p"),
+                "codex": AgentConfig(analyze="codex exec"),
+            }
+        ),
+        backend=SimpleNamespace(analyze_item=analyze_item, github_client=MagicMock()),
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+
+    response = _post_item_action(session, "analyze", "owner/repo#ISSUE-1", **fields)
+
+    assert response.status_int == 200
+    url = "http://localhost:80/api/items/owner/repo%23ISSUE-1/analysis"
+    assert response.json == {
+        "ok": True,
+        "result": {
+            "item_id": "owner/repo#ISSUE-1",
+            "agent": agent,
+            "path": str(analysis),
+            "url": url,
+            "markdown_url": url,
+            "html_url": url + "/html",
+            "cache_used": False,
+            "status": "generated",
+            "content_type": "text/markdown",
+            "file_name": "analysis.md",
+            "file_content": base64.b64encode(b"analysis body\n").decode(),
+        },
+    }
+    assert analyze_item.call_args_list == [
+        call(item, tool="cached"),
+        call(item, tool=agent, cwd=worktree, zellij_session="workdash-main", group=group),
+    ]
+
+
+def test_code_api_launches_the_selected_agent(monkeypatch, tmp_path):
+    session, worktree, _, launch_agent = _coding_session(monkeypatch, tmp_path, [])
+
+    response = _post_item_action(session, "code", "owner/repo#ISSUE-1", agent="pi")
+
+    assert response.status_int == 200
+    assert response.json == {
+        "ok": True,
+        "result": {
+            "status": "launched",
+            "item_id": "owner/repo#ISSUE-1",
+            "session": "workdash-main",
+            "agent": "pi",
+            "cwd": str(worktree),
+            "pane_title": "code_owner_repo_1",
+            "pane_id": "terminal_30",
+            "tab_name": None,
+        },
+    }
+    launch_agent.assert_called_once_with(
+        str(worktree), "PROMPT", agent_command_tokens=["pi"], zellij_session="workdash-main"
+    )
+
+
+@pytest.mark.parametrize(
+    ("action", "target", "repo", "number", "item_type", "item_id", "worktree_name"),
+    [
+        pytest.param(
+            "analyze",
+            "other/tool#7",
+            "other/tool",
+            7,
+            WorkItemType.ISSUE,
+            "other/tool#ISSUE-7",
+            "other_tool_7",
+            id="analyze-issue",
+        ),
+        pytest.param(
+            "code",
+            "owner/repo#ISSUE-99",
+            "owner/repo",
+            99,
+            WorkItemType.ISSUE,
+            "owner/repo#ISSUE-99",
+            "owner_repo_99",
+            id="code-issue",
+        ),
+        pytest.param(
+            "terminal",
+            "https://github.com/owner/repo/issues/42",
+            "owner/repo",
+            42,
+            WorkItemType.ISSUE,
+            "owner/repo#ISSUE-42",
+            "owner_repo_42",
+            id="terminal-issue",
+        ),
+        pytest.param(
+            "code",
+            "owner/repo#REVIEW-5",
+            "owner/repo",
+            5,
+            WorkItemType.PR,
+            "owner/repo#CHECK-5",
+            "owner_repo_5",
+            id="code-pr-id",
+        ),
+        pytest.param(
+            "code",
+            "https://github.com/owner/repo/pull/5",
+            "owner/repo",
+            5,
+            WorkItemType.PR,
+            "owner/repo#CHECK-5",
+            "owner_repo_5",
+            id="code-pr-url",
+        ),
+    ],
+)
+def test_actions_use_items_outside_the_dashboard_without_including_them(
+    monkeypatch, tmp_path, action, target, repo, number, item_type, item_id, worktree_name
+):
+    visible_item = _work_item(number=1, title="Visible issue")
+    item = replace(
+        _work_item(number=5, title="Other work", item_type=item_type), repo=repo, number=number
+    )
+    config = WorkdashConfig(
+        workdir=str(tmp_path),
+        agents={"pi": AgentConfig(launch="pi"), "codex": AgentConfig(analyze="codex exec")},
+    )
+    github = MagicMock()
+    github.fetch_item.return_value = item
+    backend = WorkdashBackend(
+        config=config,
+        github_client=github,
+        cache_root=tmp_path / "cache",
+        included_items_store=IncludedItemsStore(tmp_path / "included-items.json"),
+    )
+    worktree = str(tmp_path / worktree_name)
+    prepare = MagicMock(return_value=worktree)
+    monkeypatch.setattr(control_module, "ensure_worktree", prepare)
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *a, **k: None)
+    monkeypatch.setattr(control_module, "get_merge_base", lambda *a, **k: None)
+    monkeypatch.setattr(control_module, "prepare_launch_agent_prompt", lambda *a, **k: "PROMPT")
+    monkeypatch.setattr(
+        control_module, "analysis_worktree", lambda *a, **k: nullcontext(prepare(*a, **k))
+    )
+    analysis = tmp_path / "analysis.md"
+    analysis.write_text("# Analysis\n")
+    analyze = MagicMock(side_effect=[None, str(analysis)])
+    monkeypatch.setattr(backend, "analyze_item", analyze)
+    terminal = MagicMock(
+        return_value=SimpleNamespace(
+            session="workdash-main",
+            cwd=worktree,
+            pane_title=f"terminal_{worktree_name}",
+            pane_id="terminal_23",
+        )
+    )
+    monkeypatch.setattr(control_module, "launch_terminal_context", terminal)
+    panes = []
+
+    def launch(cwd, *_args, **_kwargs):
+        title = f"code_{worktree_name}"
+        panes.append({"id": 30, "title": title, "pane_cwd": cwd})
+        return SimpleNamespace(pane_id="terminal_30", pane_title=title, cwd=cwd, session=None)
+
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: panes)
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch)
+    session = WorkdashSession(
+        config=config,
+        backend=backend,
+        work_items=[visible_item],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+
+    fields = {"analyze": {"agent": "codex"}, "code": {"agent": "pi"}}
+    response = _post_item_action(session, action, target, **fields.get(action, {}))
+
+    assert response.status_int == 200, response.text
+    assert response.json["ok"] is True
+    result = response.json["result"]
+    assert result["item_id"] == item_id
+    if action == "analyze":
+        analyze.assert_called_with(
+            item, tool="codex", cwd=worktree, zellij_session="workdash-main", group="tool"
+        )
+    elif action == "code":
+        assert result["status"] == "launched"
+        assert [pane["pane_cwd"] for pane in panes] == [worktree]
+    else:
+        terminal.assert_called_once_with(worktree, zellij_session="workdash-main")
+    github.fetch_item.assert_called_once_with(
+        repo, number, github_username=config.github_username, todo_repository=config.todo_repository
+    )
+    assert prepare.call_count == 1
+    assert prepare.call_args.args == (str(tmp_path), item)
+    assert [row["id"] for row in session.list_items()["items"]] == ["owner/repo#ISSUE-1"]
+    assert backend.included_items_store.load() == []
+
+
+@pytest.mark.parametrize(
+    ("target", "hidden"),
+    [
+        pytest.param("owner/repo#42", False, id="issue-number"),
+        pytest.param("owner/repo#ISSUE-42", False, id="issue-id"),
+        pytest.param("owner/repo#42", True, id="hidden-by-closing-pr"),
+    ],
+)
+def test_terminal_resolves_issue_references(monkeypatch, tmp_path, target, hidden):
+    item = replace(
+        _work_item(number=1, title="Issue"),
+        number=42,
+        url="https://github.com/owner/repo/issues/42",
+    )
+    pull_request = replace(
+        _work_item(number=5, title="Fix it", item_type=WorkItemType.PR),
+        kind=WorkItemKind.AUTHORED_PR,
+        closing_issue_numbers=(42,),
+    )
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = item
+    session = WorkdashSession(
+        config=WorkdashConfig(workdir=str(tmp_path)),
+        backend=backend,
+        work_items=[pull_request] if hidden else [],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+    worktree = str(tmp_path / "owner_repo_42")
+    prepare = MagicMock(return_value=worktree)
+    launch = MagicMock(
+        return_value=SimpleNamespace(
+            session="workdash-main",
+            cwd=worktree,
+            pane_title="terminal_owner_repo_42",
+            pane_id="terminal_23",
+        )
+    )
+    monkeypatch.setattr(control_module, "ensure_worktree", prepare)
+    monkeypatch.setattr(control_module, "launch_terminal_context", launch)
+
+    response = _post_item_action(session, "terminal", target)
+
+    assert response.status_int == 200, response.text
+    assert response.json["ok"] is True
+    assert response.json["result"]["item_id"] == "owner/repo#ISSUE-42"
+    assert backend.github_client.fetch_item.call_args.args == ("owner/repo", 42)
+    assert prepare.call_args.args == (str(tmp_path), item)
+    assert prepare.call_count == 1
+    launch.assert_called_once_with(worktree, zellij_session="workdash-main")
+
+
+@pytest.mark.parametrize(
+    ("target", "github_item", "error", "status"),
+    [
+        ("owner/repo#banana", _work_item(number=1, title="Issue"), "invalid_target", 400),
+        ("owner/repo#404", None, "unknown_item", 404),
+        (
+            "owner/repo#5",
+            _work_item(number=5, title="PR", item_type=WorkItemType.PR),
+            "unsupported_item_type",
+            400,
+        ),
+        ("owner/repo#ISSUE-77", RuntimeError("GitHub unavailable"), "github_error", 502),
+    ],
+    ids=["malformed", "missing", "wrong-kind", "outage"],
+)
+def test_terminal_api_rejects_unusable_targets_before_preparing_a_worktree(
+    monkeypatch, target, github_item, error, status
+):
+    backend = MagicMock()
+    if isinstance(github_item, RuntimeError):
+        backend.github_client.fetch_item.side_effect = github_item
+    else:
+        backend.github_client.fetch_item.return_value = github_item
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=backend,
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+    prepare = MagicMock()
+    monkeypatch.setattr(control_module, "ensure_worktree", prepare)
+
+    response = _post_item_action(session, "terminal", target)
+
+    assert response.status_int == status
+    assert response.json["ok"] is False
+    assert response.json["error"]["code"] == error
+    prepare.assert_not_called()
+
+
 def test_analyze_uses_the_cached_analysis_of_an_item_fetched_from_github(tmp_path) -> None:
     analysis_path = tmp_path / "analysis.md"
     analysis_path.write_text("# Cached\n")
@@ -1768,17 +2125,23 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
     server = control_module.WorkdashControlServer(
         session,
         listeners=(
-            (hosts[0], ("127.0.0.5",)),
+            (hosts[0], ("127.0.0.18",)),
             (hosts[1], ("127.0.0.0/29",)),
-            (hosts[2], (hosts[1],)),
+            (hosts[2], ("127.0.0.21",)),
         ),
     )
     server.start()
     httpds, threads = list(server._httpds), list(server._threads)
     try:
-        # Both explicit sources can use every listener, including the default.
         for host in hosts:
-            for source in (*hosts[1:], "127.0.0.5", "127.0.0.6"):
+            for source, status in (
+                (hosts[1], 200),
+                (hosts[2], 200),
+                ("127.0.0.18", 200),
+                ("127.0.0.21", 200),
+                ("127.0.0.6", 200),
+                ("127.0.0.9", 403),
+            ):
                 connection = HTTPConnection(host, port, timeout=2, source_address=(source, 0))
                 try:
                     connection.request(
@@ -1788,10 +2151,14 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
                         {"Content-Type": "application/json", "X-Workdash": version("workdash")},
                     )
                     response = connection.getresponse()
-                    assert response.status == 200
-                    assert (
-                        json.loads(response.read())["result"]["items"][0]["title"] == "Shared item"
-                    )
+                    assert response.status == status
+                    envelope = json.loads(response.read())
+                    if status == 200:
+                        assert envelope["ok"] is True
+                        [item] = envelope["result"]["items"]
+                        assert (item["id"], item["title"]) == ("owner/repo#ISSUE-1", "Shared item")
+                    else:
+                        assert envelope["error"]["code"] == "forbidden"
                 finally:
                     connection.close()
             denied = HTTPConnection(host, port, timeout=2, source_address=("127.0.0.9", 0))
@@ -1802,6 +2169,7 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
                     '{"text":"not allowed"}',
                     {
                         "Content-Type": "application/json",
+                        "X-Workdash": version("workdash"),
                         "X-Forwarded-For": "127.0.0.1",
                         "Forwarded": "for=127.0.0.1",
                     },
@@ -2090,10 +2458,28 @@ def test_probe_refuses_a_server_that_is_not_a_dashboard(monkeypatch) -> None:
         thread.join()
 
 
-def test_environment_selects_real_server_and_cli(monkeypatch, capsys):
-    import socket
+def test_show_config_payload_reports_environment_server_address(monkeypatch):
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:18765")
+    assert control_module.show_config_payload(WorkdashConfig())["server"] == {
+        "host": "127.0.0.1",
+        "port": 18765,
+    }
 
-    import workdash.workdash as cli
+
+def test_control_server_checks_loopback_alias_sources(monkeypatch):
+    import errno
+    import socket
+    from http.client import HTTPConnection
+
+    sources = (("127.0.0.2", 200), ("127.0.0.3", 403))
+    for source, _ in sources:
+        with socket.socket() as probe:
+            try:
+                probe.bind((source, 0))
+            except OSError as error:
+                if error.errno != errno.EADDRNOTAVAIL:
+                    raise
+                pytest.skip(f"loopback alias {source} is not available")
 
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -2107,15 +2493,27 @@ def test_environment_selects_real_server_and_cli(monkeypatch, capsys):
         suggestion_markers={},
         zellij_session=None,
     )
-    server = control_module.WorkdashControlServer(session, listeners=((host, ("127.0.0.2",)),))
+    listeners = ((host, ("127.0.0.2",)),)
+    server = control_module.WorkdashControlServer(session, listeners=listeners)
     server.start()
     try:
-        assert cli.main(["list", "--json"]) == 0
-        assert json.loads(capsys.readouterr().out)["items"][0]["title"] == "Isolated"
-        assert control_module.show_config_payload(WorkdashConfig())["server"] == {
-            "host": host,
-            "port": port,
-        }
+        for source, status in sources:
+            connection = HTTPConnection(host, port, timeout=2, source_address=(source, 0))
+            try:
+                connection.request(
+                    "POST",
+                    "/api/v0/list",
+                    "{}",
+                    {"Content-Type": "application/json", "X-Workdash": version("workdash")},
+                )
+                response = connection.getresponse()
+                assert response.status == status
+                if status == 200:
+                    assert json.loads(response.read())["result"]["items"][0]["id"] == (
+                        "owner/repo#ISSUE-1"
+                    )
+            finally:
+                connection.close()
     finally:
         server.stop()
 
@@ -2226,6 +2624,55 @@ def test_local_non_loopback_primary_accepts_default_client(monkeypatch, host_onl
     try:
         result = control_module.WorkdashControlClient().request("list")
         assert result["items"][0]["title"] == "Local network"
+    finally:
+        server.stop()
+
+
+def test_selected_primary_accepts_itself_but_not_an_unlisted_peer(monkeypatch):
+    import errno
+    import socket
+    from http.client import HTTPConnection
+
+    host = "127.0.0.2"
+    unlisted = "127.0.0.3"
+    for peer in (unlisted, host):
+        with socket.socket() as probe:
+            try:
+                probe.bind((peer, 0))
+            except OSError as error:
+                if error.errno != errno.EADDRNOTAVAIL:
+                    raise
+                pytest.skip(f"loopback alias {peer} is unavailable")
+            port = probe.getsockname()[1]
+    monkeypatch.setenv("WORKDASH_HOST", f"{host}:{port}")
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="Work")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    server = control_module.WorkdashControlServer(session)
+    server.start()
+    try:
+        for peer, status in ((host, 200), (unlisted, 403)):
+            connection = HTTPConnection(host, port, timeout=2, source_address=(peer, 0))
+            try:
+                connection.request(
+                    "POST",
+                    "/api/v0/list",
+                    "{}",
+                    {"Content-Type": "application/json", "X-Workdash": version("workdash")},
+                )
+                response = connection.getresponse()
+                assert response.status == status
+                envelope = json.loads(response.read())
+                if status == 200:
+                    assert envelope["result"]["items"][0]["id"] == "owner/repo#ISSUE-1"
+                else:
+                    assert envelope["error"]["code"] == "forbidden"
+            finally:
+                connection.close()
     finally:
         server.stop()
 
@@ -2409,6 +2856,9 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
     (artifacts / "escape-dir").symlink_to(worktree)
     (artifacts / "root-alias").symlink_to(".")
     (artifacts / "alias").symlink_to(artifacts / "review.md")
+    (artifacts / "alias.md").symlink_to("review.md")
+    (artifacts / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\xff")
+    (artifacts / "data.unknownworkdash").write_bytes(b"\x00\xff")
     (artifacts / "nested-alias").symlink_to("nested")
     (artifacts / "nested" / "relative-alias").symlink_to("../review.md")
     (artifacts / "chain").symlink_to("nested/relative-alias")
@@ -2435,8 +2885,9 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
         control_module._make_turbogears_app(session)
     )
 
-    def get(path, method="GET", peer="127.0.0.1"):
-        request = Request.blank(path, method=method, headers={"X-Workdash": version("workdash")})
+    def get(path, method="GET", peer="127.0.0.1", header=version("workdash")):
+        headers = {"X-Workdash": header} if header is not None else {}
+        request = Request.blank(path, method=method, headers=headers)
         request.environ["REMOTE_ADDR"] = peer
         return request.get_response(app)
 
@@ -2445,11 +2896,27 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
     assert response.status_int == 200 and response.text == "real review", response.text
     assert response.content_type == "text/markdown"
     assert get(base + ".workdash/nested/review.md").text == "nested review"
+    for name, body, media_type in (
+        ("alias.md", b"real review", "text/markdown"),
+        ("image.png", b"\x89PNG\r\n\x1a\n\x00\xff", "image/png"),
+        ("data.unknownworkdash", b"\x00\xff", "application/octet-stream"),
+    ):
+        response = get(base + ".workdash/" + name)
+        assert response.status_int == 200
+        assert response.body == body
+        assert response.content_type == media_type
+    for header in (None, "wrong"):
+        response = get(base + ".workdash/review.md", header=header)
+        assert response.status_int == 200
+        assert response.body == b"real review"
     assert get(base + ".workdash/alias").text == "real review"
     assert get(base + ".workdash/nested-alias/relative-alias").text == "real review"
     assert get(base).json["result"]["entries"] == [
         "alias",
+        "alias.md",
         "chain",
+        "data.unknownworkdash",
+        "image.png",
         "nested",
         "nested-alias",
         "review.md",
@@ -2483,6 +2950,9 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
     (artifacts / "escape-dir").unlink()
     (artifacts / "root-alias").unlink()
     (artifacts / "alias").unlink()
+    (artifacts / "alias.md").unlink()
+    (artifacts / "image.png").unlink()
+    (artifacts / "data.unknownworkdash").unlink()
     (artifacts / "nested-alias").unlink()
     (artifacts / "chain").unlink()
     (artifacts / "chain-escape").unlink()
@@ -2722,6 +3192,38 @@ def test_item_files_listing_rejects_directory_substitution(tmp_path, monkeypatch
     response = request.get_response(app)
     assert replaced
     assert "alias" not in response.json["result"]["entries"]
+
+
+def test_item_files_list_and_read_from_issue_worktree(tmp_path):
+    checkout = tmp_path / "owner_repo_1"
+    subprocess.run(["git", "init", "-q", "-b", "issue-1", str(checkout)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/repo.git"],
+        cwd=checkout,
+        check=True,
+    )
+    artifacts = checkout / ".workdash"
+    artifacts.mkdir()
+    (artifacts / "review.md").write_text("Review contents")
+    session = WorkdashSession(
+        config=WorkdashConfig(workdir=str(tmp_path)),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="Issue")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    base = "/api/items/owner/repo%23ISSUE-1/files/"
+    listing = Request.blank(base, environ={"REMOTE_ADDR": "127.0.0.1"}).get_response(app)
+    assert listing.status_int == 200
+    assert listing.json["result"]["entries"] == ["review.md"]
+    artifact = Request.blank(
+        base + ".workdash/review.md", environ={"REMOTE_ADDR": "127.0.0.1"}
+    ).get_response(app)
+    assert artifact.status_int == 200
+    assert artifact.text == "Review contents"
 
 
 @pytest.mark.parametrize("symlinked_worktree", [False, True])
@@ -4360,7 +4862,7 @@ def test_session_uses_its_git_to_identify_worktrees_for_ready_and_panes(monkeypa
     assert session.info()["panes"][0]["item"] == "owner/repo#ISSUE-1"
 
 
-def test_terminal_prepares_worktree_with_session_git(monkeypatch, tmp_path) -> None:
+def test_terminal_api_prepares_worktree_with_session_git(monkeypatch, tmp_path) -> None:
     item = _work_item(number=1, title="Issue")
     session = WorkdashSession(
         config=WorkdashConfig(workdir=str(tmp_path)),
@@ -4372,19 +4874,32 @@ def test_terminal_prepares_worktree_with_session_git(monkeypatch, tmp_path) -> N
     git = MagicMock()
     git.find_worktree_for_branch.return_value = None
     session.git = git
-    monkeypatch.setattr(
-        control_module,
-        "launch_terminal_context",
-        lambda path, **kwargs: SimpleNamespace(
-            session=kwargs["zellij_session"], cwd=path, pane_title="terminal", pane_id="1"
-        ),
+    launch = MagicMock(
+        side_effect=lambda path, *, zellij_session: SimpleNamespace(
+            session=zellij_session,
+            cwd=path,
+            pane_title="terminal_owner_repo_1",
+            pane_id="terminal_23",
+        )
     )
+    monkeypatch.setattr(control_module, "launch_terminal_context", launch)
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("real subprocess"))
 
-    result = session.terminal(target="owner/repo#ISSUE-1")
+    response = _post_item_action(session, "terminal", "owner/repo#ISSUE-1")
 
     worktree = tmp_path / "owner_repo_1"
-    assert result["cwd"] == str(worktree)
+    assert response.status_int == 200
+    assert response.json == {
+        "ok": True,
+        "result": {
+            "item_id": "owner/repo#ISSUE-1",
+            "session": "workdash-main",
+            "cwd": str(worktree),
+            "pane_title": "terminal_owner_repo_1",
+            "pane_id": "terminal_23",
+        },
+    }
+    launch.assert_called_once_with(str(worktree), zellij_session="workdash-main")
     git.create_worktree.assert_called_once_with(
         tmp_path / "owner_repo", worktree, "issue-1", "origin/HEAD"
     )
@@ -4704,6 +5219,7 @@ def test_terminal_pane_lookup_returns_nothing_without_a_zellij_session(monkeypat
 def test_control_boundary_requires_header_except_analysis_documents():
     session = MagicMock()
     session.show_config.return_value = {"ok": "yes"}
+    session.list_items.return_value = {"items": []}
     session.backend.analysis_cache.load_analysis.return_value = (
         "![diagram](https://example.com/image.png)"
     )
@@ -4714,14 +5230,19 @@ def test_control_boundary_requires_header_except_analysis_documents():
     def call(path, method="GET", headers=None, peer="127.0.0.1"):
         req = Request.blank(path, method=method, headers=headers or {})
         req.environ["REMOTE_ADDR"] = peer
+        if path == "/api/v0/list" and method == "POST":
+            req.content_type = "application/json"
+            req.body = b"{}"
         return req.get_response(app)
 
     control = "/api/v0/show-config"
+    list_api = "/api/v0/list"
     artifact = "/api/items/owner/repo%23ISSUE-1/files/"
     analysis = "/api/items/owner/repo%23ISSUE-1/analysis"
     short_item = "/api/items"
     for path, method in (
         (control, "POST"),
+        (list_api, "POST"),
         (artifact, "POST"),
         (analysis, "POST"),
         (short_item, "GET"),
@@ -4734,7 +5255,17 @@ def test_control_boundary_requires_header_except_analysis_documents():
     assert form.status_int == 403
     assert "Access-Control-Allow-Origin" not in form.headers
     session.show_config.assert_not_called()
+    session.list_items.assert_not_called()
     assert call(control, "POST", {"X-Workdash": version("workdash")}).status_int == 200
+    response = call(list_api, "POST", {"X-Workdash": version("workdash")})
+    assert response.status_int == 200
+    assert response.json["ok"] is True
+    list_preflight = call(
+        list_api,
+        "OPTIONS",
+        {"Origin": "https://example.com", "Access-Control-Request-Method": "POST"},
+    )
+    assert list_preflight.status_int == 403
     for path in (analysis, analysis + "/html"):
         assert call(path).status_int == 200
         assert call(path, peer="192.0.2.1").status_int == 403
@@ -4750,6 +5281,40 @@ def test_control_boundary_requires_header_except_analysis_documents():
     assert preflight.status_int == 403
     assert "Access-Control-Allow-Origin" not in preflight.headers
     assert "Access-Control-Allow-Headers" not in preflight.headers
+
+
+@pytest.mark.parametrize("cached", [True, False], ids=["cached", "missing"])
+def test_analysis_documents_serve_cached_content_without_header(tmp_path, cached):
+    item = _work_item(number=1, title="Work")
+    cache = AnalysisCache(tmp_path / "analysis-cache")
+    markdown = "# Cached analysis\n\nRecommended next step.\n"
+    if cached:
+        cache.save(item, markdown)
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=SimpleNamespace(analysis_cache=cache),
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    path = "/api/items/owner/repo%23ISSUE-1/analysis"
+    response = Request.blank(path, environ={"REMOTE_ADDR": "127.0.0.1"}).get_response(app)
+    if not cached:
+        assert response.status_int == 404
+        assert response.json["ok"] is False
+        assert response.json["error"]["code"] == "not_found"
+        return
+    assert response.status_int == 200
+    assert response.content_type == "text/markdown"
+    assert response.body == markdown.encode()
+    html = Request.blank(path + "/html", environ={"REMOTE_ADDR": "127.0.0.1"}).get_response(app)
+    assert html.status_int == 200
+    assert html.content_type == "text/html"
+    assert "<h1>Cached analysis</h1>" in html.text
+    assert "<p>Recommended next step.</p>" in html.text
 
 
 def test_control_boundary_allows_trailing_slash_analysis_documents():
@@ -5452,7 +6017,15 @@ def test_dispatch_api_does_not_expose_blocked_scope_metadata(monkeypatch, tmp_pa
 def test_info_api_filters_unrelated_panes_unless_all_requested(monkeypatch, tmp_path):
     worktree = tmp_path / "owner_repo_1"
     panes = [
-        {"id": 1, "title": "code_owner_repo_1", "pane_cwd": str(worktree)},
+        {
+            "id": 1,
+            "title": "code_owner_repo_1",
+            "pane_cwd": str(worktree),
+            "tab_id": 7,
+            "tab_name": "work",
+            "pane_command": "codex",
+            "state": "Running",
+        },
         {"id": 2, "title": "shell", "pane_cwd": str(worktree), "pane_command": "bash"},
     ]
     monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: panes)
@@ -5480,17 +6053,132 @@ def test_info_api_filters_unrelated_panes_unless_all_requested(monkeypatch, tmp_
         request.environ["REMOTE_ADDR"] = "127.0.0.1"
         response = request.get_response(app)
         assert response.status_int == 200
+        assert response.json["result"]["session"] == "project"
         result = response.json["result"]["panes"]
         assert [pane["pane_id"] for pane in result] == (
             ["terminal_1", "terminal_2"] if payload.get("panes") == "all" else ["terminal_1"]
         )
+        assert result[0]["session"] == "project"
+        assert result[0]["tab_id"] == 7
+        assert result[0]["tab_name"] == "work"
+        assert result[0]["title"] == "code_owner_repo_1"
+        assert result[0]["cwd"] == str(worktree)
+        assert result[0]["command"] == "codex"
         assert result[0]["kind"] == "agent"
+        assert result[0]["state"] == "Running"
         assert result[0]["item"] == "owner/repo#ISSUE-1"
         assert result[0]["item_url"] == "https://github.com/owner/repo/issues/1"
         if payload.get("panes") == "all":
             assert result[1]["kind"] == "unknown"
             assert result[1]["item"] == "unknown"
             assert result[1]["command"] == "bash"
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload", "zellij_action", "args", "options", "output", "result"),
+    [
+        pytest.param(
+            "content",
+            {},
+            "dump_zellij_pane",
+            (),
+            {"full": False},
+            "visible output",
+            {"content": "visible output", "full": False},
+            id="viewport",
+        ),
+        pytest.param(
+            "content",
+            {"full": True},
+            "dump_zellij_pane",
+            (),
+            {"full": True},
+            "full output",
+            {"content": "full output", "full": True},
+            id="scrollback",
+        ),
+        pytest.param(
+            "send",
+            {"data": "pwd"},
+            "send_zellij_pane_input",
+            ("pwd",),
+            {"raw": False},
+            None,
+            {"accepted": True, "raw": False},
+            id="send-with-enter",
+        ),
+        pytest.param(
+            "send",
+            {"data": "pwd", "raw": True},
+            "send_zellij_pane_input",
+            ("pwd",),
+            {"raw": True},
+            None,
+            {"accepted": True, "raw": True},
+            id="send-raw",
+        ),
+        pytest.param(
+            "close",
+            {},
+            "close_zellij_pane",
+            (),
+            {},
+            None,
+            {"accepted": True},
+            id="close",
+        ),
+    ],
+)
+def test_pane_api_calls_zellij_and_reports_result(
+    monkeypatch, endpoint, payload, zellij_action, args, options, output, result
+):
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="project",
+    )
+    action = MagicMock(return_value=output)
+    monkeypatch.setattr(launcher_module.zellij, zellij_action, action)
+    response = Request.blank(
+        f"/api/v0/pane/{endpoint}",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps({"pane_id": "terminal_23", **payload}).encode(),
+    ).get_response(control_module._make_turbogears_app(session))
+    assert response.status_int == 200
+    assert response.json == {"ok": True, "result": {"pane_id": "terminal_23", **result}}
+    action.assert_called_once_with("project", "terminal_23", *args, **options)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "zellij_action"), [("content", "dump_zellij_pane"), ("close", "close_zellij_pane")]
+)
+def test_pane_api_reports_zellij_failure(monkeypatch, endpoint, zellij_action):
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="project",
+    )
+    monkeypatch.setattr(
+        launcher_module.zellij,
+        zellij_action,
+        MagicMock(side_effect=RuntimeError("Zellij rejected terminal_404")),
+    )
+    response = Request.blank(
+        f"/api/v0/pane/{endpoint}",
+        method="POST",
+        content_type="application/json",
+        body=b'{"pane_id":"terminal_404"}',
+    ).get_response(control_module._make_turbogears_app(session))
+    assert response.status_int == 500
+    assert response.json == {
+        "ok": False,
+        "error": {"code": "server_error", "message": "Zellij rejected terminal_404"},
+    }
 
 
 def test_info_without_panes_identifies_dashboard_without_listing(monkeypatch):

@@ -461,7 +461,6 @@ class FakeApiBackend:
         self, item: WorkItem, tool: str = "codex", *, cwd=None, zellij_session=None, group=None
     ) -> str | None:
         self._state.setdefault("analyze_calls", []).append((format_work_item_id(item), tool))
-        self._state["analysis_group"] = group
         if tool == "cached":
             return None
         if "analysis_path" not in self._state:

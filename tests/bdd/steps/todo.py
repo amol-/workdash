@@ -355,7 +355,6 @@ def _system_asks_for_text_and_optional_target(scenario_state: dict[str, Any]) ->
 
 @then("submitting text with an empty target creates an open issue in the todo repository")
 @then("the system creates the issue in the todo repository")
-@then("the server creates the todo issue in the configured todo repository")
 def _creates_issue_in_todo_repository(scenario_state: dict[str, Any]) -> None:
     command = _created_issue_command(scenario_state)
     assert _flag_value(command, "--repo") == TODO_REPOSITORY, command
@@ -448,7 +447,6 @@ def _system_reports_target_form(scenario_state: dict[str, Any]) -> None:
 
 
 @then("no issue is created")
-@then("the server does not create a GitHub issue")
 def _no_issue_is_created(scenario_state: dict[str, Any]) -> None:
     assert _gh_commands(scenario_state) == []
 
@@ -752,70 +750,6 @@ def _system_reports_created_item_id_and_url(scenario_state: dict[str, Any]) -> N
     assert TODO_ISSUE_URL in stdout, stdout
 
 
-# ----- F-API-JSON-CONTROL-S015/S016 -----
-
-
-@when(parsers.parse("a client requests a todo with text `{text}` and target `{target}`"))
-def _client_requests_todo(
-    text: str,
-    target: str,
-    scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    body: str | None = None,
-) -> None:
-    _install_gh_todo_fake(scenario_state, monkeypatch)
-    scenario_state["requested_target"] = target
-    payload = {"text": text, "target": target}
-    if body is not None:
-        payload["body"] = body
-    _call_api(scenario_state, work_items, tmp_path, "todo", payload)
-
-
-@when("a client requests a todo with an invalid target")
-def _client_requests_todo_with_invalid_target(
-    scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install_gh_todo_fake(scenario_state, monkeypatch)
-    _call_api(
-        scenario_state, work_items, tmp_path, "todo", {"text": TODO_TEXT, "target": "not-a-repo"}
-    )
-
-
-@then("the new todo becomes part of the shared dashboard state")
-def _new_todo_becomes_shared_state(scenario_state: dict[str, Any]) -> None:
-    session = scenario_state["api_session"]
-    assert format_work_item_id(session.work_items[-1]) == (
-        f"owner/repo#ISSUE-WT{TODO_ISSUE_NUMBER}"
-    )
-
-
-@then("the API returns the Workdash item ID, todo repository, target, issue number, and issue URL")
-def _api_returns_todo_result(scenario_state: dict[str, Any]) -> None:
-    assert _api_result(scenario_state) == {
-        "item_id": f"owner/repo#ISSUE-WT{TODO_ISSUE_NUMBER}",
-        "todo_repository": TODO_REPOSITORY,
-        "target": scenario_state["requested_target"],
-        "number": TODO_ISSUE_NUMBER,
-        "url": TODO_ISSUE_URL,
-    }
-
-
-@then(
-    "the API returns an error saying the target must be a GitHub `owner/repo` or a supported git URL"
-)
-def _api_returns_invalid_target_error(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["api_status"] == 400, scenario_state["api_payload"]
-    payload = scenario_state["api_payload"]
-    assert payload["ok"] is False
-    assert payload["error"]["code"] == "bad_request"
-    assert "must be a GitHub owner/repo or a supported git URL" in payload["error"]["message"]
-
-
 @given("the user has a multiline todo body longer than 256 characters")
 def _long_todo_body(scenario_state: dict[str, Any]) -> None:
     scenario_state["todo_body"] = (
@@ -842,24 +776,6 @@ def _run_todo_cli_with_body(
         tmp_path,
         monkeypatch,
         capsys,
-        body=scenario_state["todo_body"],
-    )
-
-
-@when("a client requests a short todo title with that body and target `owner/repo`")
-def _request_todo_with_body(
-    scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _client_requests_todo(
-        TODO_TEXT,
-        "owner/repo",
-        scenario_state,
-        work_items,
-        tmp_path,
-        monkeypatch,
         body=scenario_state["todo_body"],
     )
 

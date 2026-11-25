@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -16,6 +17,7 @@ from typing import Any
 
 import pytest
 from pytest_bdd import given, parsers, then, when
+from textual.widgets import DataTable
 
 import workdash.control as control_module
 import workdash.github_client as github_client_module
@@ -25,6 +27,8 @@ from workdash.config import AgentConfig, WorkdashConfig, load_config, save_confi
 from workdash.control import probe_dashboard_session
 from workdash.dashboard_record import DashboardRecord, DashboardRecords
 from zellij_pane_launch import mark_pane_started, pane_launch
+
+from .common import make_work_item
 
 
 @given("the GitHub CLI is not installed on PATH")
@@ -220,7 +224,7 @@ def _install_direct_start_fakes(
         def load_items(self, progress_callback=None):
             if progress_callback is not None:
                 progress_callback("loading...")
-            return [], {}
+            return scenario_state.get("startup_items", []), {}
 
         def analyze_item(self, _item, tool="codex"):
             return None
@@ -258,7 +262,22 @@ def _install_direct_start_fakes(
         ),
     )
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
-    monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
+    if "startup_items" in scenario_state:
+
+        def run_dashboard(app, *, mouse):
+            async def read_initial_table():
+                async with app.run_test() as pilot:
+                    table = app.query_one("#work-items", DataTable)
+                    scenario_state["startup_titles"] = [
+                        str(table.get_row_at(i)[2]) for i in range(table.row_count)
+                    ]
+                    await pilot.press("q")
+
+            asyncio.run(read_initial_table())
+
+        monkeypatch.setattr(workdash_module.WorkdashApp, "run", run_dashboard)
+    else:
+        monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
     from unittest.mock import MagicMock
 
     monkeypatch.setattr(workdash_module, "WorkdashControlServer", MagicMock())
@@ -392,6 +411,11 @@ def _reports_invalid_config_json(scenario_state: dict[str, Any], config_path: Pa
     lines = scenario_state["output"].splitlines()
     assert len(lines) == 1
     assert lines[0].startswith(f"Error: Configuration at {config_path} is not valid JSON:")
+
+
+@given(parsers.parse('the user has a tracked issue titled "{title}"'))
+def _tracked_issue_at_startup(title, scenario_state):
+    scenario_state["startup_items"] = [make_work_item(title=title)]
 
 
 @when("the user starts the interactive dashboard")
@@ -548,10 +572,11 @@ def _session_shows_status_bar_at_bottom(scenario_state: dict[str, Any]) -> None:
     assert layout.index("children") < layout.index("zellij:status-bar")
 
 
-@then("the system starts the dashboard directly")
-def _starts_dashboard_directly(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("exec_calls") == []
-    assert scenario_state.get("dashboard_started") is True
+@then(parsers.parse('the dashboard opens in the current pane and shows "{title}"'))
+def _dashboard_opens_showing_the_issue(title, scenario_state):
+    assert scenario_state["exec_calls"] == []
+    assert scenario_state["exit_code"] == 0
+    assert scenario_state["startup_titles"] == [title]
 
 
 @then("the system does not replace itself with Zellij")

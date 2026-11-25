@@ -37,6 +37,7 @@ from .common import (
     make_work_item,
     modal_screen_names,
     run_app,
+    seed_dashboard_item,
 )
 
 
@@ -1230,6 +1231,30 @@ def _list_work_items(
         workdash_module, "WorkdashControlClient", lambda _host: MagicMock(request=request_list)
     )
     assert workdash_module.main(command.split()) == 0
+    scenario_state["print_output"] = capsys.readouterr().out
+
+
+@given("the dashboard is running on the custom address set in `WORKDASH_HOST`")
+def _dashboard_on_custom_address(scenario_state, work_items, tmp_path, monkeypatch, request):
+    import socket
+
+    from workdash.control import WorkdashControlServer
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setenv("WORKDASH_HOST", f"127.0.0.1:{port}")
+    seed_dashboard_item(work_items, scenario_state)
+    server = WorkdashControlServer(ensure_api_session(scenario_state, work_items, tmp_path))
+    server.start()
+    request.addfinalizer(server.stop)
+
+
+@when("the user runs `workdash list` from another terminal")
+def _list_work_from_custom_address(scenario_state, capsys):
+    from workdash.workdash import main
+
+    assert main(["list"]) == 0
     scenario_state["print_output"] = capsys.readouterr().out
 
 
