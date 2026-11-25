@@ -15,12 +15,12 @@ Feature: CLI orchestration commands
     - CLI commands that return information support `--json`.
     - `workdash info` reports live pane state from the server-backed Workdash session.
     - Live Zellij pane state is authoritative; pane identifiers are discovered on demand, not persisted.
-    - Pane item mappings are based on `pane_cwd`, not pane title.
-    - A pane whose cwd is a known worktree or a descendant of one maps to that Workdash item; the most specific matching worktree wins.
+    - An agent pane maps to its launch worktree's item even after changing directory. If the launch title does not identify one known worktree and item, the mapping is unknown.
+    - A terminal pane whose cwd is a known worktree or a descendant of one maps to that Workdash item; the most specific matching worktree wins.
     - Planned worktree path names are not known worktrees by name alone; local git metadata must prove the repository relationship.
     - Known worktrees are discovered from Workdash-style per-item directory candidates, then local git metadata must prove the candidate is the repository root and has the expected repository relationship.
     - Scanned PR worktree candidates with a same-name origin under another owner are not known worktrees.
-    - An authored pull request that shares the worktree of the issue it closes maps that worktree to the pull request, so its agent pane is reported against the pull request and not as an unknown item.
+    - An authored pull request can be identified by its agent pane in an issue-numbered worktree when it is the only known item for that worktree.
     - A fork or renamed fork directory must have local upstream metadata matching the base repository before it maps to that repository's item.
     - Manually renamed worktrees outside Workdash-style per-item candidates are unknown; Workdash may prepare its own worktree later.
     - `workdash info` reports only live panes whose titles prove Workdash launched them: `code_` agent panes and `terminal_` terminal panes.
@@ -81,7 +81,7 @@ Feature: CLI orchestration commands
   @id:F-CLI-ORCHESTRATION-S006
   Scenario: Info keeps unmapped live panes visible
     Given a server-backed Workdash session is running
-    And that session has a Workdash-named pane whose cwd does not match a known worktree
+    And that session has an agent pane in a known worktree with an unmatched launch title
     When the user runs `workdash info --json`
     Then the system reports the raw pane information
     And the pane item mapping is marked unknown

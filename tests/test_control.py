@@ -5380,16 +5380,19 @@ def test_dispatch_api_does_not_expose_blocked_scope_metadata(monkeypatch, tmp_pa
 
 
 def test_info_api_filters_unrelated_panes_unless_all_requested(monkeypatch, tmp_path):
+    worktree = tmp_path / "owner_repo_1"
     panes = [
-        {"id": 1, "title": "code_owner_repo_1", "pane_cwd": str(tmp_path)},
-        {"id": 2, "title": "shell", "pane_cwd": str(tmp_path), "pane_command": "bash"},
+        {"id": 1, "title": "code_owner_repo_1", "pane_cwd": str(worktree)},
+        {"id": 2, "title": "shell", "pane_cwd": str(worktree), "pane_command": "bash"},
     ]
     monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: panes)
-    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args, **kwargs: worktree)
+    item = _work_item(number=1, title="Work")
+    item.url = "https://github.com/owner/repo/issues/1"
     session = WorkdashSession(
         config=WorkdashConfig(workdir=str(tmp_path)),
         backend=MagicMock(),
-        work_items=[_work_item(number=1, title="Work")],
+        work_items=[item],
         suggestion_markers={},
         zellij_session="project",
     )
@@ -5413,6 +5416,7 @@ def test_info_api_filters_unrelated_panes_unless_all_requested(monkeypatch, tmp_
         )
         assert result[0]["kind"] == "agent"
         assert result[0]["item"] == "owner/repo#ISSUE-1"
+        assert result[0]["item_url"] == "https://github.com/owner/repo/issues/1"
         if payload.get("panes") == "all":
             assert result[1]["kind"] == "unknown"
             assert result[1]["item"] == "unknown"

@@ -252,6 +252,26 @@ class FakeGitHub:
         }
         return {"repository": {"issue": node}}
 
+    def _ProjectIssue(self, query: str) -> dict:
+        fields = query.split("fragment ProjectIssueDetails on Issue", 1)[1]
+        data = {"viewer": {"login": "testuser"}}
+        for alias, owner, repo, number in re.findall(
+            r'(i\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) '
+            r"\{ issue\(number: (\d+)\)",
+            query,
+        ):
+            node = self._issue_node(f"{owner}/{repo}#{number}")
+            if not re.search(r"issueDependenciesSummary\s*\{\s*blockedBy\s*\}", fields):
+                node.pop("issueDependenciesSummary")
+            connection = node["closedByPullRequestsReferences"]
+            nodes = connection["nodes"]
+            if "includeClosedPrs: true" not in query:
+                nodes = [node for node in nodes if node["state"] != "CLOSED"]
+            connection["nodes"] = nodes[: self.page_size]
+            connection["pageInfo"] = {"hasNextPage": len(nodes) > self.page_size}
+            data[alias] = {"issue": node}
+        return data
+
     def _IssueBlockers(self, query: str) -> dict:
         ref = f"{_queried_repository(query)}#{re.search(r'issue\(number: (\d+)\)', query)[1]}"
         nodes = [self._issue_node(blocker) for blocker in self.issues[ref]["blocked_by"]]
@@ -440,6 +460,7 @@ class FakeGitHub:
             "baseRef": {"target": {"oid": pr["base_sha"]}},
             "mergeable": answers[min(pr["lookups"], len(answers)) - 1],
             "reviewDecision": pr["review_decision"],
+            "isDraft": pr.get("is_draft", False),
             "closingIssuesReferences": {
                 "nodes": [
                     _identity(self._issue_node(issue)) | {"body": self.issues[issue]["body"]}

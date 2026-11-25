@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import subprocess
 
+from gh_work_state_fake import FakeGitHub
+
 ISSUE_URL = "https://github.com/owner/repo/issues/12"
 
 
@@ -66,6 +68,7 @@ def fake_gh_view_run(
     recorded: list[list[str]] | None = None,
     fails: bool = False,
     rollup_state: str | None = None,
+    project: FakeGitHub | None = None,
 ):
     """Return a ``subprocess.run`` replacement answering ``gh`` by command shape.
 
@@ -84,6 +87,16 @@ def fake_gh_view_run(
         if fails:
             raise subprocess.CalledProcessError(1, command, stderr="no such issue")
         key = " ".join(command[1:])
+        if key.startswith(
+            ("api graphql -f query=query ProjectIssue", "api graphql -f query=query IssueBlockers")
+        ):
+            if project is not None:
+                return project.run(command, **_kwargs)
+            raise subprocess.CalledProcessError(1, command, stderr="HTTP 403")
+        if project is not None and (
+            key.startswith("api graphql -f query=query Ready") or "/branches/" in key
+        ):
+            return project.run(command, **_kwargs)
         if key.startswith("api graphql") and "statusCheckRollup" in key:
             pull = routes["pr view 12 --repo owner/repo"]
             checks = pull.get("statusCheckRollup") or []

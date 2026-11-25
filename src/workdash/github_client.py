@@ -12,7 +12,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -473,6 +473,7 @@ def _run_gh_command_with_retry(
     retry_label: str | None = None,
     tolerate_partial_response: bool = False,
     retry_delay_seconds: float | None = None,
+    deadline: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a ``gh`` subprocess with bounded retry on transient failures.
 
@@ -489,11 +490,19 @@ def _run_gh_command_with_retry(
     :param float | None retry_delay_seconds: Replace the delay chosen for the
         failure shape. Waiting out a rate limit is too slow for a read that
         holds the session lock.
+    :param float | None deadline: Monotonic time limit for an optional read; do not retry.
     """
 
     for attempt in range(_TRANSIENT_RETRIES + 1):
+        timeout = None if deadline is None else deadline - time.monotonic()
+        if timeout is not None and timeout <= 0:
+            raise RuntimeError(f"{failure_message_prefix}: timed out")
         try:
-            return subprocess.run(command, check=True, capture_output=True, text=True)
+            return subprocess.run(
+                command, check=True, capture_output=True, text=True, timeout=timeout
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(f"{failure_message_prefix}: timed out") from error
         except FileNotFoundError as error:
             # Missing gh is treated as transient: the user can install it and
             # refresh. Raising a TransientFetchError (itself a RuntimeError)
@@ -533,7 +542,7 @@ def _run_gh_command_with_retry(
                             return subprocess.CompletedProcess(
                                 command, error.returncode, stdout=error.stdout, stderr=stderr
                             )
-            if attempt < _TRANSIENT_RETRIES and transient:
+            if deadline is None and attempt < _TRANSIENT_RETRIES and transient:
                 if retry_delay_seconds is not None:
                     delay = retry_delay_seconds
                 elif _is_rate_limit_error(stderr):
@@ -792,8 +801,26 @@ def merge_normalized_work_items(
     return merged_items
 
 
+@dataclass(frozen=True)
+class ProjectIssueDetails:
+    blocker_count: int | None
+    blockers: list[str] | None
+    linked_pulls: dict[tuple[str, int], str] | None
+    links_complete: bool
+
+
+@dataclass(frozen=True)
+class ProjectPullDetails:
+    work: PullRequestWorkState
+    draft: bool
+    review_requested: bool
+
+
 class GitHubClient:
     """All GitHub interactions must go through this object."""
+
+    def __init__(self, *, work_state_deadline: float | None = None) -> None:
+        self._work_state_deadline = work_state_deadline
 
     def close_todo(self, *, todo_repository: str, number: int) -> None:
         """Close an issue in the todo repository."""
@@ -1133,6 +1160,87 @@ class GitHubClient:
             select_ready_work(issues, states, github_username, include_shared_pr_issues),
             scope_issue,
         )
+
+    @staticmethod
+    def project_issue_details(
+        issues: Sequence[tuple[str, int]], *, github_username: str = ""
+    ) -> tuple[
+        str, dict[tuple[str, int], ProjectIssueDetails], dict[tuple[str, int], ProjectPullDetails]
+    ]:
+        """Read GitHub evidence for issues already discovered by the viewer."""
+        client = GitHubClient(work_state_deadline=time.monotonic() + 5)
+
+        def query(source: str) -> dict:
+            with suppress(RuntimeError, OSError):
+                return client._graphql(source, "project details")
+            return {}
+
+        details, open_pulls = {}, {}
+        for start in range(0, len(issues), 10):
+            batch = issues[start : start + 10]
+            aliases = " ".join(
+                f"i{i}: repository(owner: {json.dumps(repo.split('/')[0])}, "
+                f"name: {json.dumps(repo.split('/')[1])}) {{ issue(number: {number}) {{ ...ProjectIssueDetails }} }}"
+                for i, (repo, number) in enumerate(batch)
+            )
+            data = query(
+                f"query ProjectIssue {{ viewer {{ login }} {aliases} }} "
+                "fragment ProjectIssueDetails on Issue { issueDependenciesSummary { blockedBy } "
+                "closedByPullRequestsReferences(first: 10, includeClosedPrs: true) "
+                "{ nodes { number state repository { nameWithOwner } } pageInfo { hasNextPage } } }",
+            )
+            github_username = github_username or (data.get("viewer") or {}).get("login") or ""
+            for i, ref in enumerate(batch):
+                node = (data.get(f"i{i}") or {}).get("issue") or {}
+                count = (node.get("issueDependenciesSummary") or {}).get("blockedBy")
+                links, complete = None, False
+                with suppress(RuntimeError), _github_payload(str(ref)):
+                    connection = node["closedByPullRequestsReferences"]
+                    nodes = connection["nodes"]
+                    links = {
+                        (pr["repository"]["nameWithOwner"], pr["number"]): pr["state"]
+                        for pr in nodes
+                        if pr is not None
+                    }
+                    complete = not connection["pageInfo"]["hasNextPage"] and all(nodes)
+                    for (repo, number), state in links.items():
+                        if state == "OPEN":
+                            open_pulls[repo.lower(), number] = repo, number
+                details[ref] = ProjectIssueDetails(
+                    count, [] if count == 0 else None, links, complete
+                )
+
+        for ref, issue in details.items():
+            if issue.blocker_count:
+                with suppress(RuntimeError, OSError):
+                    details[ref] = replace(issue, blockers=client.open_issue_blockers(*ref))
+
+        # Complex review mechanisms are out of scope for this summary. Classify
+        # the normal response; leave incomplete evidence unknown rather than recovering it.
+        pulls = {}
+        refs = list(open_pulls.values())
+        for start in range(0, len(refs), _PULL_REQUESTS_PER_QUERY):
+            batch = refs[start : start + _PULL_REQUESTS_PER_QUERY]
+            aliases = _pull_request_aliases(batch, "...ReadyPullRequest isDraft")
+            data = query(f"query ReadyPullRequests {{ {aliases} }} {_PULL_REQUEST_FRAGMENT}")
+            for i, (repo, number) in enumerate(batch):
+                node = (data.get(f"p{i}") or {}).get("pullRequest")
+                if node:
+                    subject = f"{repo}#{number}"
+                    with suppress(RuntimeError), _github_payload(subject):
+                        pulls[repo.lower(), number] = ProjectPullDetails(
+                            client._pull_request_state(
+                                node,
+                                {},
+                                github_username,
+                                "",
+                                subject=subject,
+                                observed_checks_only=True,
+                            ),
+                            node["isDraft"],
+                            bool(node["reviewRequests"]["nodes"]),
+                        )
+        return github_username, details, pulls
 
     def resolve_issue_scope(
         self,
@@ -2337,6 +2445,7 @@ class GitHubClient:
         todo_repository: str,
         *,
         subject: str,
+        observed_checks_only: bool = False,
     ) -> PullRequestWorkState:
         with _github_payload(subject):
             repo = node["repository"]["nameWithOwner"]
@@ -2348,12 +2457,19 @@ class GitHubClient:
             head_sha = node["headRefOid"]
             head_repository = node["headRepository"]
             commit = node["commits"]["nodes"][0]["commit"]
-            base_key = (repo, node["baseRefName"])
-            if base_key not in required_checks:
-                required_checks[base_key] = self._required_checks(*base_key)
-            ci_status, failing_checks = self._ci_status(
-                repo, commit, head_sha, required_checks[base_key]
-            )
+            if observed_checks_only:
+                rollup = commit["statusCheckRollup"]
+                if rollup and rollup["contexts"]["pageInfo"]["hasNextPage"]:
+                    ci_status, failing_checks = "unknown", ()
+                else:
+                    ci_status, failing_checks = self._ci_status(repo, commit, head_sha, frozenset())
+            else:
+                base_key = (repo, node["baseRefName"])
+                if base_key not in required_checks:
+                    required_checks[base_key] = self._required_checks(*base_key)
+                ci_status, failing_checks = self._ci_status(
+                    repo, commit, head_sha, required_checks[base_key]
+                )
             return PullRequestWorkState(
                 item=WorkItem(
                     kind=WorkItemKind.AUTHORED_PR
@@ -2544,6 +2660,7 @@ class GitHubClient:
             not_found_message="Failed to run gh work state lookup: "
             "gh CLI is not installed or not on PATH.",
             failure_message_prefix=f"Failed to look up {subject} via gh",
+            deadline=self._work_state_deadline,
         )
         try:
             payload = json.loads(completed.stdout)
@@ -2552,6 +2669,8 @@ class GitHubClient:
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, dict):
             raise RuntimeError(f"Invalid gh payload for {subject}: missing data.")
+        if self._work_state_deadline is not None and payload.get("errors"):
+            raise RuntimeError(f"GitHub could not provide {subject}.")
         return data
 
     def _fetch_item_context(

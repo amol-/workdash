@@ -511,16 +511,16 @@ def _session_has_ordinary_live_exited_held_and_plugin_panes(
     )
 
 
-@given("that session has a Workdash-named pane whose cwd does not match a known worktree")
+@given("that session has an agent pane in a known worktree with an unmatched launch title")
 def _session_has_unmapped_pane(
     scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
 ) -> None:
-    _seed_info_item(scenario_state, work_items, tmp_path)
+    _, cwd = _seed_info_item(scenario_state, work_items, tmp_path)
     scenario_state["panes"] = [
         {
             "id": 5,
-            "title": "code_owner_repo_1",
-            "pane_cwd": str(tmp_path / "unmapped"),
+            "title": "code_unknown",
+            "pane_cwd": cwd,
             "pane_command": "pi",
             "tab_id": 9,
             "tab_name": "scratch",
@@ -1007,8 +1007,8 @@ def _reports_raw_pane_information(scenario_state: dict[str, Any]) -> None:
     scenario_state["json_payload"] = payload
     pane = payload["panes"][0]
     assert pane["pane_id"] == "terminal_5"
-    assert pane["title"] == "code_owner_repo_1"
-    assert pane["cwd"].endswith("unmapped")
+    assert pane["title"] == "code_unknown"
+    assert pane["cwd"] == scenario_state["panes"][0]["pane_cwd"]
     assert pane["command"] == "pi"
     assert pane["state"] == "Running"
 

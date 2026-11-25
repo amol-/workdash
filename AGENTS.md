@@ -40,4 +40,5 @@ each variant more than once before concluding.
 - Feature files describe only the user experience and externally observable behavior, never how the software works internally.
 - Implementation details, corner cases, and internal mechanisms go in normal unit/integration tests.
 - Keep changes minimal and focused.
+- If GitHub can't provide issue or PR data, treat it as unavailable rather than adding complex heuristics to reconstruct it.
 - Match existing style; see `pyproject.toml` for lint/format config and run `ruff check` and `ruff format`.
