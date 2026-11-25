@@ -952,6 +952,11 @@ def _reports_clone_conflict(scenario_state):
     assert "belongs to a different repository" in str(scenario_state["terminal_error"])
 
 
+@then("no terminal is opened")
+def _no_terminal_opened(scenario_state):
+    assert scenario_state["terminal_calls"] == []
+
+
 @then("the existing clone and its worktrees remain untouched")
 def _conflicting_clone_untouched(scenario_state):
     assert (scenario_state["conflicting_clone"] / "work.txt").read_text() == "local changes"

@@ -1,4 +1,6 @@
 import asyncio
+import shutil
+import subprocess
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -11,10 +13,11 @@ pytest.importorskip("textual")
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Input, Static
 
+import workdash.control as control_module
 import workdash.launcher as launcher_module
 from workdash.backend import IncludeResult
 from workdash.config import AgentConfig, WorkdashConfig
-from workdash.control import WorkdashSession
+from workdash.control import WorkdashSession, format_work_item_id
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import (
     AnalyzeDialog,
@@ -1486,6 +1489,92 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
             await pilot.press("q")
 
     asyncio.run(run_smoke())
+
+
+@pytest.mark.parametrize(
+    ("failure", "detail"),
+    [
+        ("worktree", "worktree failed"),
+        ("launch", "Failed to launch terminal in zellij: terminal launch failed"),
+        ("timeout", "Failed to launch terminal in zellij: command timed out"),
+    ],
+)
+def test_terminal_failure_reports_details_and_clears_progress(
+    monkeypatch, tmp_path, failure, detail
+):
+    item = _search_work_items()[0]
+    session = _dashboard_session()
+    session.work_items = [item]
+    session.config = replace(session.config, workdir=str(tmp_path))
+    session.git = MagicMock()
+    session.git.find_worktree_for_branch.return_value = None
+    if failure == "worktree":
+        session.git.create_worktree.side_effect = RuntimeError("worktree failed")
+    else:
+        session.git.create_worktree.side_effect = lambda _main, path, *_: path.mkdir()
+
+    def fail_launch(command, *, timeout, **_kwargs):
+        assert "new-pane" in command
+        if failure == "worktree":
+            pytest.fail("Zellij must not launch a terminal after worktree preparation fails")
+        if failure == "timeout":
+            assert timeout is not None
+            raise subprocess.TimeoutExpired(command, timeout)
+        raise subprocess.CalledProcessError(1, command, stderr="terminal launch failed")
+
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/zellij" if name == "zellij" else None
+    )
+    monkeypatch.setattr(subprocess, "run", fail_launch)
+    app = WorkdashApp(
+        session=session,
+        terminal_callback=lambda item: session.terminal(target=format_work_item_id(item)),
+    )
+
+    async def exercise():
+        async with app.run_test():
+            await app.action_open_terminal(item)
+            footer = app.query_one("#status-footer", Static)
+            assert footer.render().plain.startswith(f"Terminal failed: {detail}")
+            _assert_no_modal_screens(app)
+
+    asyncio.run(exercise())
+
+
+def test_terminal_opens_when_zellij_cannot_list_existing_panes(monkeypatch, tmp_path):
+    item = _search_work_items()[0]
+    worktree = tmp_path / "owner_repo_11"
+    worktree.mkdir()
+    session = _dashboard_session()
+    session.work_items = [item]
+    session.config = replace(session.config, workdir=str(tmp_path))
+    session.git = MagicMock()
+    list_panes = MagicMock(side_effect=RuntimeError("Zellij session not found"))
+    monkeypatch.setattr(launcher_module.zellij, "load_zellij_panes", list_panes)
+    launch = MagicMock(
+        return_value=launcher_module.ZellijPaneLaunch(
+            session="workdash",
+            pane_id="terminal_22",
+            pane_title="terminal_owner_repo_11",
+            cwd=str(worktree),
+        )
+    )
+    monkeypatch.setattr(control_module, "launch_terminal_context", launch)
+    app = WorkdashApp(
+        session=session,
+        terminal_callback=lambda item: session.terminal(target=format_work_item_id(item)),
+    )
+
+    async def exercise():
+        async with app.run_test():
+            await app.action_open_terminal(item)
+            footer = app.query_one("#status-footer", Static)
+            assert footer.render().plain == "Opened terminal for issue owner/repo#11."
+
+    asyncio.run(exercise())
+    list_panes.assert_called_once_with("workdash")
+    launch.assert_called_once_with(str(worktree), zellij_session="workdash")
 
 
 def test_workdash_app_code_reports_a_failed_focus_of_the_running_agent_pane() -> None:

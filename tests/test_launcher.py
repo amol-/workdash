@@ -737,12 +737,14 @@ def test_launch_agent_context_uses_new_zellij_pane_when_in_zellij(
     monkeypatch.setattr(
         shutil, "which", lambda name: "/usr/bin/zellij" if name == "zellij" else None
     )
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    run = MagicMock(side_effect=fake_run)
+    monkeypatch.setattr(subprocess, "run", run)
 
     launch = executor.launch(
         "/tmp/amol-_repoze.who_52", "review this change", agent_command_tokens=["codex"]
     )
 
+    run.assert_called_once()
     assert launch.session is None
     assert launch.pane_id == "terminal_31"
     assert launch.pane_title == "code_amol-_repoze.who_52"
@@ -879,10 +881,12 @@ def test_launch_terminal_context_uses_new_zellij_pane_when_in_zellij(
     monkeypatch.setattr(
         shutil, "which", lambda name: "/usr/bin/zellij" if name == "zellij" else None
     )
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    run = MagicMock(side_effect=fake_run)
+    monkeypatch.setattr(subprocess, "run", run)
 
     launch_terminal_context("/tmp/amol-_repoze.who_52")
 
+    run.assert_called_once()
     assert pane_launch(captured["command"]) == (
         [
             "/usr/bin/zellij",

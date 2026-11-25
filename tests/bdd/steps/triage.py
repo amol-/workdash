@@ -1382,10 +1382,6 @@ def _user_presses_key(
         from . import coding
 
         coding.run_code_dialog_scenario(scenario_state, work_items, monkeypatch, tmp_path)
-    elif key == "t":
-        from . import terminal as terminal_mod
-
-        terminal_mod.run_terminal_scenario(scenario_state, work_items, monkeypatch, tmp_path)
     elif key == "/":
         _run_search_clear_scenario(scenario_state, work_items)
     elif key == "d":

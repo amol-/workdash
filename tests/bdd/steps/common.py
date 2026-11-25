@@ -291,18 +291,11 @@ def _no_dialog_or_progress_overlay_remains(scenario_state: dict[str, Any]) -> No
 def _reports_worktree_error_details(scenario_state: dict[str, Any]) -> None:
     status = (
         scenario_state.get("coding_status")
-        or scenario_state.get("terminal_status")
         or scenario_state.get("analyze_status")
         or scenario_state.get("branchdiff_status")
     )
     assert status is not None, scenario_state
-    # Coding and terminal actions prepare their worktree inside the shared session path.
-    if "coding_status" in scenario_state:
-        prefix = "Launch failed"
-    elif "terminal_status" in scenario_state:
-        prefix = "Terminal failed"
-    else:
-        prefix = "Worktree setup failed"
+    prefix = "Launch failed" if "coding_status" in scenario_state else "Worktree setup failed"
     assert f"{prefix}: worktree failed" in status
 
 
