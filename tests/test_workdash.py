@@ -8,18 +8,22 @@ import threading
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from webob import Request
 
 import workdash.config as config_module
 import workdash.control as control_module
 import workdash.github_client as github_client_module
 import workdash.workdash as workdash_module
+from gh_work_state_fake import install_fake_github
 from workdash.config import AgentConfig, WorkdashConfig, load_config, save_config
 from workdash.control import WorkdashSession, probe_dashboard_session
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
+from workdash.repo_worktree import worktree_path
 from workdash.workdash import _print_work_items, _print_work_items_result
 from zellij_pane_launch import mark_pane_started, pane_launch
 
@@ -1593,6 +1597,73 @@ def test_main_code_json_outputs_server_response(
     )
 
     assert json.loads(capsys.readouterr().out) == response
+
+
+@pytest.mark.parametrize("flags", [[], ["--autostart"]], ids=["plan-first", "autostart"])
+def test_main_code_reuses_the_linked_pr_pane_when_both_checkouts_exist(
+    monkeypatch, tmp_path, capsys, flags
+):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_pull_request("owner/repo#51", closes=("owner/repo#1",))
+    config = replace(_VALID_CONFIG, workdir=str(tmp_path))
+    issue_checkout = worktree_path(config.workdir, "owner/repo", 1)
+    pr_checkout = worktree_path(config.workdir, "owner/repo", 51)
+    checkouts = {1: issue_checkout, 51: pr_checkout}
+    for path in checkouts.values():
+        path.mkdir()
+    issue = _issue()
+    session = WorkdashSession(
+        config=config,
+        backend=SimpleNamespace(github_client=github_client_module.GitHubClient()),
+        work_items=[issue],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+    monkeypatch.setattr(
+        session.git, "worktree_proves_item", lambda path, item: path == checkouts[item.number]
+    )
+    monkeypatch.setattr(
+        session.backend.github_client, "fetch_worktree_head", lambda item: ("pr-branch", item.repo)
+    )
+    panes = [{"id": 7, "title": f"code_{pr_checkout.name}", "pane_cwd": str(pr_checkout)}]
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: list(panes))
+    monkeypatch.setattr(
+        control_module, "ensure_worktree", lambda _, item, **kwargs: str(checkouts[item.number])
+    )
+    monkeypatch.setattr(control_module, "get_merge_base", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        control_module, "prepare_launch_agent_prompt", lambda *a, **kw: "Plan first"
+    )
+
+    def launch(cwd, prompt, **kwargs):
+        title = f"code_{Path(cwd).name}"
+        panes.append({"id": 8, "title": title, "pane_cwd": cwd})
+        return SimpleNamespace(session=None, pane_id="terminal_8", pane_title=title, cwd=cwd)
+
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch)
+    app = control_module._make_turbogears_app(session)
+
+    def urlopen(request, timeout=None):
+        response = Request.blank(
+            request.full_url,
+            method=request.method,
+            headers=dict(request.headers),
+            body=request.data,
+        ).get_response(app)
+        assert response.status_int == 200, response.text
+        return BytesIO(response.body)
+
+    monkeypatch.setattr(control_module.urllib.request, "urlopen", urlopen)
+
+    assert workdash_module.main(["code", "owner/repo#ISSUE-1", "--json", *flags]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert (result["status"], result["pane_id"], result["cwd"]) == (
+        "already_running",
+        "terminal_7",
+        str(pr_checkout),
+    )
+    assert [pane["id"] for pane in panes] == [7]
 
 
 def test_main_code_reports_server_error_before_local_worktree(

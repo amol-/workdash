@@ -787,10 +787,9 @@ class WorkdashSession:
         git = self.git
         # Without Zellij no agent pane can exist, and VSCode needs none to launch.
         no_zellij_vscode = self.zellij_session is None and selected_agent == "vscode"
-        if autostart or item.kind == WorkItemKind.AUTHORED_PR:
-            # A live agent answers without reading GitHub, so an outage cannot hide it. Only
-            # a worktree known locally is checked here; the briefing may redirect the work to
-            # another item, whose claim is checked below.
+        if item.kind not in REVIEW_KINDS:
+            # Honor a local claim before resolving linked work on GitHub. A linked PR's
+            # checkout, if different, is checked below.
             with self._lock:
                 repo_path = existing_worktree_path(self.config.workdir, item, git=git)
                 if repo_path is not None:
@@ -821,11 +820,7 @@ class WorkdashSession:
                     f"GitHub lookup for {target!r} failed: {error}",
                     status=HTTPStatus.BAD_GATEWAY,
                 ) from error
-        if (
-            not autostart
-            and item.item_type == WorkItemType.ISSUE
-            and existing_worktree_path(self.config.workdir, item, git=git) is None
-        ):
+        if not autostart and item.item_type == WorkItemType.ISSUE:
             try:
                 state = self.backend.github_client.work_pull_request(
                     item,

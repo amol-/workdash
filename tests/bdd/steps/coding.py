@@ -352,9 +352,11 @@ def run_code_dialog_scenario(
             return GitHubClient().fetch_launch_context(item)
 
     selected = work_items[0]
+    github = install_fake_github(monkeypatch)
     if selected.kind == WorkItemKind.AUTHORED_PR:
-        github = install_fake_github(monkeypatch)
         github.add_pull_request(f"{selected.repo}#{selected.number}")
+    elif selected.item_type == WorkItemType.ISSUE:
+        github.add_issue(f"{selected.repo}#{selected.number}")
 
     github_client = GitHubClient()
     monkeypatch.setattr(github_client, "fetch_launch_context", fake_collect)

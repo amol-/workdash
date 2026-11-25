@@ -1013,6 +1013,7 @@ def test_vscode_is_not_opened_while_an_agent_pane_is_live(monkeypatch, tmp_path)
 
 
 def test_vscode_opens_without_a_zellij_session(monkeypatch, tmp_path) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     session, worktree, _ensure, _launch = _coding_session(
         monkeypatch, tmp_path, [], zellij_session=None
     )
@@ -1028,6 +1029,7 @@ def test_vscode_opens_without_a_zellij_session(monkeypatch, tmp_path) -> None:
 def test_an_unconfirmed_launch_whose_pane_shows_up_later_is_reported_as_running(
     monkeypatch, tmp_path
 ) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     panes: list[dict[str, object]] = []
     session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
     side_effect = launch_agent.side_effect
@@ -1055,6 +1057,7 @@ def test_an_unconfirmed_launch_whose_pane_shows_up_later_is_reported_as_running(
 def test_an_agent_that_exits_right_after_launch_fails_without_blocking_a_retry(
     monkeypatch, tmp_path
 ) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     # An earlier agent pane for this worktree that exited long ago.
     panes = [{"id": 1, "title": "code_owner_repo_1", "exited": True}]
     session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
@@ -1129,16 +1132,17 @@ def test_code_reports_and_supervises_only_the_winning_retry(
 
 
 def test_code_waits_for_a_launched_agent_pane_that_zellij_lists_late(monkeypatch, tmp_path) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
     launch_agent.side_effect = None
     late_pane = {"id": 8, "title": "code_owner_repo_1", "pane_cwd": str(worktree)}
     launch_agent.return_value.pane_id = "terminal_8"
     launch_agent.return_value.pane_title = "code_owner_repo_1"
-    # Listings: before launch, first check after launch, second check after launch.
+    visibility_checks = iter([[], [late_pane]])
     monkeypatch.setattr(
         control_module.launcher.zellij,
         "load_zellij_panes",
-        MagicMock(side_effect=[[], [], [late_pane]]),
+        lambda _: next(visibility_checks) if launch_agent.called else [],
     )
 
     result = session.code(target="owner/repo#ISSUE-1", agent="pi")
@@ -1148,6 +1152,7 @@ def test_code_waits_for_a_launched_agent_pane_that_zellij_lists_late(monkeypatch
 
 
 def test_an_expired_unconfirmed_launch_no_longer_blocks_the_worktree(monkeypatch, tmp_path) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     panes: list[dict[str, object]] = []
     session, _worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
     side_effect = launch_agent.side_effect
@@ -1210,7 +1215,7 @@ def test_code_without_autostart_launches_the_unchanged_briefing(monkeypatch, tmp
     session.code(target="owner/repo#ISSUE-1", agent="pi")
 
     assert _launched_prompt(launch_agent) == "PROMPT"
-    assert github.operations == []
+    assert github.operations == ["ReadyIssueTree"]
 
 
 def test_code_with_autostart_adds_the_implementation_appendix_once(monkeypatch, tmp_path) -> None:
@@ -1258,15 +1263,16 @@ def test_autostart_full_briefing_publishes(monkeypatch, tmp_path, conflict):
         assert "force-push unless the repository's explicit policy authorizes it" not in prompt
 
 
+@pytest.mark.parametrize("autostart", [False, True])
 def test_code_on_a_live_agent_sends_nothing_and_reads_no_github_state_even_when_it_is_down(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, autostart
 ) -> None:
     github = install_fake_github(monkeypatch)
     github.failures["ReadyIssueTree"] = failure("HTTP 502: Bad Gateway")
     panes = [{"id": 5, "title": "code_owner_repo_1", "pane_cwd": str(tmp_path / "owner_repo_1")}]
     session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
 
-    result = session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+    result = session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=autostart)
 
     assert result == {
         "status": "already_running",
@@ -2266,6 +2272,7 @@ def test_review_api_forwards_group_and_rejects_invalid_group():
 
 
 def test_grouped_code_forwards_group_and_reports_live_tab(monkeypatch, tmp_path):
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     panes = []
     session, _, _, launch = _coding_session(monkeypatch, tmp_path, panes)
     launch.side_effect = lambda repo, prompt, **kwargs: (
@@ -3797,7 +3804,8 @@ def test_plan_first_authored_pr_and_issue_use_same_context_and_worktree(monkeypa
         )
     assert results[0] == results[1]
     assert results[0][1] is results[0][2][0]
-    assert results[0][1].item_type == WorkItemType.ISSUE
+    assert (results[0][1].item_type, results[0][1].number) == (WorkItemType.PR, 51)
+    assert "%23ISSUE-1/analysis" in results[0][3]["analysis_path"]
 
 
 @pytest.mark.parametrize(
@@ -4368,6 +4376,7 @@ def test_terminal_prepares_worktree_with_session_git(monkeypatch, tmp_path) -> N
 def test_session_analyzes_and_launches_coding_agent_with_real_executor(
     monkeypatch, tmp_path
 ) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     worktree = tmp_path / "owner_repo_1"
     worktree.mkdir()
     item = _work_item(number=1, title="Implement the issue")
@@ -4460,6 +4469,7 @@ def test_session_analyzes_and_launches_coding_agent_with_real_executor(
 def test_shared_agent_execution_can_simulate_analysis_and_coding(monkeypatch, tmp_path) -> None:
     from workdash.analyzer import Analyzer
 
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     panes = []
     session, worktree, _, _ = _coding_session(monkeypatch, tmp_path, panes)
     item = session.work_items[0]
