@@ -864,19 +864,36 @@ class WorkdashSession:
 
         with self._lock:
             panes = [] if no_zellij_vscode else self._live_panes()
-            # Reuse a live agent and verify its checkout before any pull.
-            repo_path = existing_worktree_path(self.config.workdir, item, git=git)
-            if (
-                selected_head is not None
-                and analysis_item is not None
-                and analysis_item.todo_target
-            ):
-                todo_path = existing_worktree_path(self.config.workdir, analysis_item, git=git)
-                if todo_path is not None:
-                    repo_path = todo_path
-            if repo_path is None and selected_head is not None:
-                branch, repo = selected_head
-                repo_path = existing_worktree_for_branch(self.config.workdir, repo, branch, git=git)
+            # An idle issue checkout is plan-first's fallback, not a place to
+            # prepare a different branch. Only consider PR checkouts already tracking its head.
+            issue_path = None
+            if not autostart and selected_head is not None and analysis_item is not None:
+                issue_path = existing_worktree_path(self.config.workdir, analysis_item, git=git)
+            if issue_path is not None:
+                repo_path = existing_worktree_path(
+                    self.config.workdir, item, git=git, pr_head=selected_head
+                )
+                if (
+                    repo_path is None or analysis_item.todo_target
+                ) and git.branch_tracks_repository(issue_path, *selected_head):
+                    repo_path = issue_path
+                if repo_path is None:
+                    repo_path, item, selected_head = issue_path, analysis_item, None
+            else:
+                repo_path = existing_worktree_path(self.config.workdir, item, git=git)
+                if (
+                    selected_head is not None
+                    and analysis_item is not None
+                    and analysis_item.todo_target
+                ):
+                    todo_path = existing_worktree_path(self.config.workdir, analysis_item, git=git)
+                    if todo_path is not None:
+                        repo_path = todo_path
+                if repo_path is None and selected_head is not None:
+                    branch, repo = selected_head
+                    repo_path = existing_worktree_for_branch(
+                        self.config.workdir, repo, branch, git=git
+                    )
             if repo_path is not None:
                 claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
                 if claimed is not None:
@@ -889,6 +906,7 @@ class WorkdashSession:
                 git=git,
                 github_client=self.backend.github_client,
                 todo_repository=self.config.todo_repository,
+                existing=repo_path if issue_path is not None else None,
             )
             claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
             if claimed is not None:

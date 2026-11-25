@@ -46,8 +46,12 @@ def existing_worktree_path(
     *,
     pinned: contextlib.ExitStack | None = None,
     git: GitHelper | None = None,
+    pr_head: tuple[str, str] | None = None,
 ) -> Path | tuple[Path, int] | None:
-    """Find a locally proven worktree without creating, fetching, or querying GitHub."""
+    """Find a locally proven worktree without creating, fetching, or querying GitHub.
+
+    :param pr_head: If given, require tracking this (branch, repository) pair.
+    """
     base = Path(workdir).expanduser()
     if not base.is_dir():
         return None
@@ -66,6 +70,14 @@ def existing_worktree_path(
         directory = Path(f"/dev/fd/{fd}")
         if git.worktree_proves_item(candidate, item, directory=directory):
             matches.append((candidate, fd))
+    if pr_head is not None:
+        matches = [
+            (candidate, fd)
+            for candidate, fd in matches
+            if git.branch_tracks_repository(
+                candidate if fd is None else Path(f"/dev/fd/{fd}"), *pr_head
+            )
+        ]
     # A checkout named after the item's own number is beyond doubt this item's,
     # so it wins over any closing issue's directory when several exist. Anything
     # still ambiguous after every accepted number is somebody's guess, not an answer.
@@ -117,6 +129,7 @@ def ensure_worktree(
     git: GitHelper | None = None,
     github_client=None,
     todo_repository: str = "",
+    existing: Path | None = None,
 ) -> str:
     """Ensure a worktree exists for the given work item and return its path.
 
@@ -125,10 +138,12 @@ def ensure_worktree(
 
     :param str workdir: Base working directory (may use ~ for home).
     :param WorkItem item: The work item to prepare a worktree for.
+    :param Path existing: An already resolved worktree to reuse without selecting again.
     """
     git = git if git is not None else GitHelper()
     github = github_client if github_client is not None else GitHubClient()
-    existing = existing_worktree_path(workdir, item, git=git)
+    if existing is None:
+        existing = existing_worktree_path(workdir, item, git=git)
     if existing is not None:
         # Local divergence or missing upstream shouldn't block the user.
         with contextlib.suppress(subprocess.CalledProcessError, OSError):

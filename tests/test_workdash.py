@@ -1599,9 +1599,18 @@ def test_main_code_json_outputs_server_response(
     assert json.loads(capsys.readouterr().out) == response
 
 
-@pytest.mark.parametrize("flags", [[], ["--autostart"]], ids=["plan-first", "autostart"])
-def test_main_code_reuses_the_linked_pr_pane_when_both_checkouts_exist(
-    monkeypatch, tmp_path, capsys, flags
+@pytest.mark.parametrize(
+    ("flags", "pr_checkout_branch", "pr_pane_running"),
+    [
+        pytest.param([], None, False, id="issue-only"),
+        pytest.param([], "other-branch", True, id="unverified-pr-pane"),
+        pytest.param([], "local-pr", False, id="verified-idle-pr"),
+        pytest.param([], "local-pr", True, id="plan-first-pr-pane"),
+        pytest.param(["--autostart"], "local-pr", True, id="autostart-pr-pane"),
+    ],
+)
+def test_main_code_selects_checkout_for_issue_with_linked_pr(
+    monkeypatch, tmp_path, capsys, flags, pr_checkout_branch, pr_pane_running
 ):
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
@@ -1609,9 +1618,32 @@ def test_main_code_reuses_the_linked_pr_pane_when_both_checkouts_exist(
     config = replace(_VALID_CONFIG, workdir=str(tmp_path))
     issue_checkout = worktree_path(config.workdir, "owner/repo", 1)
     pr_checkout = worktree_path(config.workdir, "owner/repo", 51)
-    checkouts = {1: issue_checkout, 51: pr_checkout}
-    for path in checkouts.values():
-        path.mkdir()
+    main = tmp_path / "owner_repo"
+    main.mkdir()
+
+    def git(*args, cwd=main):
+        return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
+
+    git("init", "-q", "-b", "main")
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "initial",
+    )
+    git("remote", "add", "origin", "https://github.com/owner/repo.git")
+    git("update-ref", "refs/remotes/origin/pr-branch", "HEAD")
+    git("worktree", "add", "-qb", "issue-1", str(issue_checkout))
+    (issue_checkout / "draft.txt").write_text("keep this")
+    if pr_checkout_branch is not None:
+        git("worktree", "add", "-qb", pr_checkout_branch, str(pr_checkout))
+        if pr_checkout_branch == "local-pr":
+            git("branch", "--set-upstream-to=origin/pr-branch", cwd=pr_checkout)
+    worktrees_before = git("worktree", "list", "--porcelain")
     issue = _issue()
     session = WorkdashSession(
         config=config,
@@ -1621,22 +1653,18 @@ def test_main_code_reuses_the_linked_pr_pane_when_both_checkouts_exist(
         zellij_session="workdash-main",
     )
     monkeypatch.setattr(
-        session.git, "worktree_proves_item", lambda path, item: path == checkouts[item.number]
-    )
-    monkeypatch.setattr(
         session.backend.github_client, "fetch_worktree_head", lambda item: ("pr-branch", item.repo)
     )
-    panes = [{"id": 7, "title": f"code_{pr_checkout.name}", "pane_cwd": str(pr_checkout)}]
+    monkeypatch.setattr(session.backend.github_client, "fetch_launch_context", lambda item: {})
+    monkeypatch.setattr(session.git, "pull_ff_only", lambda path: None)
+    panes = []
+    if pr_pane_running:
+        panes.append({"id": 7, "title": f"code_{pr_checkout.name}", "pane_cwd": str(pr_checkout)})
     monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: list(panes))
-    monkeypatch.setattr(
-        control_module, "ensure_worktree", lambda _, item, **kwargs: str(checkouts[item.number])
-    )
-    monkeypatch.setattr(control_module, "get_merge_base", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        control_module, "prepare_launch_agent_prompt", lambda *a, **kw: "Plan first"
-    )
+    launched_prompts = []
 
     def launch(cwd, prompt, **kwargs):
+        launched_prompts.append(prompt)
         title = f"code_{Path(cwd).name}"
         panes.append({"id": 8, "title": title, "pane_cwd": cwd})
         return SimpleNamespace(session=None, pane_id="terminal_8", pane_title=title, cwd=cwd)
@@ -1658,12 +1686,25 @@ def test_main_code_reuses_the_linked_pr_pane_when_both_checkouts_exist(
 
     assert workdash_module.main(["code", "owner/repo#ISSUE-1", "--json", *flags]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert (result["status"], result["pane_id"], result["cwd"]) == (
-        "already_running",
-        "terminal_7",
-        str(pr_checkout),
-    )
-    assert [pane["id"] for pane in panes] == [7]
+    actual = (result["status"], result["pane_id"], result["cwd"])
+    if pr_checkout_branch == "local-pr" and pr_pane_running:
+        assert actual == ("already_running", "terminal_7", str(pr_checkout))
+        assert [pane["id"] for pane in panes] == [7]
+        assert not launched_prompts
+    else:
+        (prompt,) = launched_prompts
+        assert "Propose a concrete implementation plan" in prompt
+        assert "Do not start implementing code yet." in prompt
+        if pr_checkout_branch == "local-pr":
+            assert actual == ("launched", "terminal_8", str(pr_checkout))
+            assert "open pull request of yours (https://github.com/owner/repo/pull/51)" in prompt
+            assert "build on them instead of starting the work over" in prompt
+        else:
+            assert actual == ("launched", "terminal_8", str(issue_checkout))
+            assert f"- url: {issue.url}" in prompt
+            assert "WORK ALREADY IN PROGRESS" not in prompt
+    assert (issue_checkout / "draft.txt").read_text() == "keep this"
+    assert git("worktree", "list", "--porcelain") == worktrees_before
 
 
 def test_main_code_reports_server_error_before_local_worktree(

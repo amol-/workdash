@@ -37,7 +37,7 @@ Feature: CLI orchestration commands
     - A configured agent that lacks the command for the requested action is reported as unable to do that action, not as unconfigured.
     - Without `--agent`, `workdash analyze` and `workdash code` use the first configured agent for that action, in configuration order.
     - `workdash analyze`, `workdash code`, and `workdash terminal` accept any explicit target the JSON API accepts, including items `workdash list` does not show; the server resolves it.
-    - `workdash code` reports status `launched` with the created Zellij pane ID, or status `already_running` with the live agent pane already working in the item's worktree; pane IDs come from live session state and are never persisted. Coding an issue with an open pull request of your own uses its pull request checkout even if an idle issue checkout still exists, whether or not you pass `--autostart`.
+    - `workdash code` reports status `launched` with the created Zellij pane ID, or status `already_running` with the live agent pane already working in the item's worktree; pane IDs come from live session state and are never persisted.
     - There is no claim command: the live agent pane started by `workdash code` is the claim.
     - `workdash terminal` opens a plain terminal in the item's worktree and reports the created Zellij pane ID.
     - `workdash terminal` does not accept an agent parameter.
