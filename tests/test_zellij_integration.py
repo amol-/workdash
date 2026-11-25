@@ -73,12 +73,14 @@ def _kill_and_verify_owned_processes(owned):
     deadline = time.monotonic() + 1
     signaled = False
     remaining = 1
+    survivors = {}
     while True:
         try:
             live = _live_processes(timeout=min(0.5, remaining))
         except subprocess.TimeoutExpired as error:
-            failure = error
+            timeout = error
         else:
+            timeout = None
             survivors = {
                 pid: f"{name}: PID {pid} ({live[pid][2]})"
                 for (pid, started), name in owned.items()
@@ -91,15 +93,16 @@ def _kill_and_verify_owned_processes(owned):
                     with suppress(ProcessLookupError, PermissionError):
                         os.kill(pid, signal.SIGKILL)
                 signaled = True
-            failure = AssertionError(
-                "Zellij cleanup left live processes: " + "; ".join(survivors.values())
-            )
         remaining = deadline - time.monotonic()
         if remaining > 0:
             time.sleep(min(0.05, remaining))
             remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise failure
+            if survivors:
+                raise AssertionError(
+                    "Zellij cleanup left live processes: " + "; ".join(survivors.values())
+                ) from timeout
+            raise timeout
 
 
 def _session_processes(zellij, env, sessions):
@@ -255,7 +258,7 @@ def test_zellij_cleanup_does_not_signal_pid_from_multiline_args(tmp_path, monkey
     kill.assert_not_called()
 
 
-@pytest.mark.parametrize("timeout_at", ["discovery", "kill", "persistent"])
+@pytest.mark.parametrize("timeout_at", ["discovery", "kill", "persistent", "survivor"])
 def test_zellij_cleanup_kills_and_verifies_recorded_pids_after_ps_timeout(
     tmp_path, monkeypatch, timeout_at
 ):
@@ -278,7 +281,11 @@ def test_zellij_cleanup_kills_and_verifies_recorded_pids_after_ps_timeout(
             deleted = True
         elif deleted and (
             (timeout_at == "discovery" and not timeouts)
-            or (discovered and (timeout_at == "persistent" or not timeouts))
+            or (
+                discovered
+                and (timeout_at == "persistent" or (timeout_at == "kill" and not timeouts))
+            )
+            or (timeout_at == "survivor" and killed)
         ):
             timeout = subprocess.TimeoutExpired(command, kwargs["timeout"])
             timeouts.append(timeout)
@@ -289,7 +296,7 @@ def test_zellij_cleanup_kills_and_verifies_recorded_pids_after_ps_timeout(
             if killed:
                 verified = True
             else:
-                matched = deleted and bool(timeouts)
+                matched = deleted and (discovered or bool(timeouts))
                 stdout += f"{pid} 1 S Mon Jan  1 00:00:00 2024 pane\n"
         elif deleted:
             discovered = True
@@ -306,7 +313,12 @@ def test_zellij_cleanup_kills_and_verifies_recorded_pids_after_ps_timeout(
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(os, "kill", kill)
     fd = os.open(os.devnull, os.O_RDONLY)
-    expected = nullcontext() if timeout_at == "kill" else pytest.raises(subprocess.TimeoutExpired)
+    if timeout_at == "kill":
+        expected = nullcontext()
+    elif timeout_at == "survivor":
+        expected = pytest.raises(AssertionError, match=rf"{session}: PID {pid} \(pane\)")
+    else:
+        expected = pytest.raises(subprocess.TimeoutExpired)
     with expected as error:
         _cleanup_sessions(
             "zellij",
@@ -314,6 +326,10 @@ def test_zellij_cleanup_kills_and_verifies_recorded_pids_after_ps_timeout(
             [(session, os.getpid(), fd)],
             previously_owned={(pid, started): session, (reused_pid, started): session},
         )
+    if timeout_at == "survivor":
+        assert error.value.__cause__ is timeouts[-1]
+        assert killed and elapsed == pytest.approx(1)
+        return
     if error is not None:
         assert error.value is timeouts[-1]
     if timeout_at == "persistent":
