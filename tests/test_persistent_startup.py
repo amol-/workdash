@@ -9,7 +9,7 @@ import pytest
 from workdash import launcher
 from workdash.control import WorkdashControlError
 from workdash.dashboard_record import DashboardRecord, DashboardRecords
-from zellij_pane_launch import mark_pane_started
+from zellij_pane_launch import mark_pane_started, pane_launch
 
 
 def test_exited_session_recovery_failure_does_not_create_a_new_session(monkeypatch):
@@ -40,13 +40,20 @@ def test_exited_session_recovery_failure_does_not_create_a_new_session(monkeypat
     ]
 
 
-def test_existing_session_restarts_dashboard_in_its_tab(monkeypatch):
+@pytest.mark.parametrize("exited", [False, True], ids=["stopped-dashboard", "exited-session"])
+def test_existing_session_restarts_dashboard_in_its_tab(monkeypatch, exited):
     calls = []
+    attaches = []
     monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/zellij")
-    monkeypatch.setattr(
-        launcher.Zellij,
-        "load_zellij_panes",
-        lambda session: [
+    monkeypatch.setattr(sys, "argv", ["workdash"])
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:9432")
+
+    def load_panes(session):
+        assert session == "custom"
+        if exited:
+            assert calls[-1][-3:] == ["attach", "-b", session]
+            assert "-f" not in calls[-1]
+        return [
             {"id": 4, "title": "workdash tui", "is_plugin": True},
             {
                 "id": 4,
@@ -56,25 +63,47 @@ def test_existing_session_restarts_dashboard_in_its_tab(monkeypatch):
                 "is_plugin": False,
                 "pane_command": "/bin/bash",
             },
-        ],
-    )
+            {"id": 5, "title": "work", "tab_name": "project", "tab_id": 4},
+        ]
 
     def run(command, **kwargs):
         calls.append(command)
-        mark_pane_started(command, "4")
-        return subprocess.CompletedProcess(command, 0, stdout="workdash [Created now]\n", stderr="")
+        mark_pane_started(command, "24")
+        listing = "custom [Created now]" + (" (EXITED - attach to resurrect)" if exited else "")
+        return subprocess.CompletedProcess(command, 0, stdout=f"{listing}\n", stderr="")
 
+    def attach(file, command):
+        attaches.append((file, command))
+        raise SystemExit(0)
+
+    monkeypatch.setattr(launcher.Zellij, "load_zellij_panes", load_panes)
     monkeypatch.setattr(launcher.subprocess, "run", run)
-    monkeypatch.setattr(launcher.os, "execvp", lambda *args: (_ for _ in ()).throw(SystemExit()))
+    monkeypatch.setattr(launcher.os, "execvp", attach)
     with pytest.raises(SystemExit):
-        launcher.zellij.exec_zellij_wrapped_workdash(["--refresh"])
-    assert not any("rename-pane" in command for command in calls)
+        launcher.zellij.exec_zellij_wrapped_workdash(["--session", "custom", "--refresh"])
+    assert not any(
+        {"rename-pane", "close-pane", "terminal_5"}.intersection(command) for command in calls
+    )
     launch = next(command for command in calls if "new-pane" in command)
-    assert "--refresh" in launch and "--tab-id" in launch and "3" in launch
+    assert launch[1:3] == ["--session", "custom"]
+    assert launch[launch.index("--tab-id") + 1] == "3"
+    assert launch[launch.index("--name") + 1] == "workdash tui"
+    _, launched = pane_launch(launch)
+    assert launched == [
+        "env",
+        "WORKDASH_HOST=127.0.0.1:9432",
+        "workdash",
+        "--persistent-pane",
+        "--session",
+        "custom",
+        "--refresh",
+    ]
+    assert attaches == [("/zellij", ["/zellij", "attach", "custom"])]
 
 
 def test_recorded_dashboard_for_the_session_attaches_without_starting_another(monkeypatch, capsys):
     calls = []
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:8765")
     DashboardRecords().save(
         DashboardRecord(session="custom", pid=os.getpid(), address="127.0.0.1:9999")
     )
@@ -88,11 +117,12 @@ def test_recorded_dashboard_for_the_session_attaches_without_starting_another(mo
         "workdash.control.probe_dashboard_session",
         lambda address: {"127.0.0.1:9999": "custom"}[address],
     )
-    monkeypatch.setattr(
-        launcher.subprocess,
-        "run",
-        lambda command, **kw: subprocess.CompletedProcess(command, 0, "custom [Created now]\n", ""),
-    )
+
+    def run(command, **kwargs):
+        assert command == ["/zellij", "list-sessions", "--no-formatting"]
+        return subprocess.CompletedProcess(command, 0, "custom [Created now]\n", "")
+
+    monkeypatch.setattr(launcher.subprocess, "run", run)
     monkeypatch.setattr(launcher.time, "sleep", lambda seconds: calls.append(("sleep", seconds)))
     monkeypatch.setattr(
         launcher.os,
@@ -123,7 +153,10 @@ def test_dashboard_serving_the_session_at_the_start_address_is_attached(monkeypa
     )
     monkeypatch.setattr("workdash.control.probe_dashboard_session", lambda address: "custom")
     with pytest.raises(SystemExit):
-        launcher.zellij.exec_zellij_wrapped_workdash(["--session", "custom"])
+        launcher.zellij.exec_zellij_wrapped_workdash(
+            ["--session", "custom", "--refresh"],
+            preflight=lambda: pytest.fail("attachment must not require GitHub authentication"),
+        )
     assert calls == [("sleep", 1), ("/zellij", ["/zellij", "attach", "custom"])]
     assert "options are ignored" in capsys.readouterr().out
 
@@ -250,7 +283,11 @@ def test_a_pane_named_like_a_dashboard_does_not_count_as_a_running_one(monkeypat
 def test_missing_dashboard_tab_is_created_with_new_options(monkeypatch):
     calls = []
     monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/zellij")
-    monkeypatch.setattr(launcher.Zellij, "load_zellij_panes", lambda session: [])
+    monkeypatch.setattr(
+        launcher.Zellij,
+        "load_zellij_panes",
+        lambda session: [{"id": 5, "tab_name": "keep", "tab_id": 3}],
+    )
 
     def run(command, **kwargs):
         calls.append(command)
@@ -263,6 +300,7 @@ def test_missing_dashboard_tab_is_created_with_new_options(monkeypatch):
     with pytest.raises(SystemExit):
         launcher.zellij.exec_zellij_wrapped_workdash(["--session=custom", "--refresh"])
     assert any("new-tab" in command and "dashboard" in command for command in calls)
+    assert not any("close-tab" in command or "close-pane" in command for command in calls)
     launch = next(command for command in calls if "new-pane" in command)
     assert launch[launch.index("--tab-id") + 1] == "17"
     assert "--refresh" in launch

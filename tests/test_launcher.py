@@ -1166,8 +1166,22 @@ def test_exec_zellij_wrapped_workdash_replaces_process_with_layout(
     assert "disable_session_metadata false" in layout
     assert "show_startup_tips false" in layout
     assert "attach_to_session false" in layout
-    assert 'tab name="dashboard"' in layout
-    assert 'pane name="workdash tui" command="/usr/local/bin/workdash"' in layout
+    assert (
+        next(line.strip() for line in layout.splitlines() if line.strip().startswith("tab name="))
+        == 'tab name="dashboard" {'
+    )
+    assert (
+        layout.index("zellij:tab-bar")
+        < layout.index("children")
+        < layout.index("zellij:status-bar")
+    )
+    assert (
+        layout.index('pane split_direction="horizontal"')
+        < layout.index(
+            'pane name="workdash tui" command="/usr/local/bin/workdash" size="75%" close_on_exit=true'
+        )
+        < layout.index('pane size="25%"')
+    )
     assert 'args "--persistent-pane" "--refresh"' in layout
     assert "kill-session" not in layout
     assert "trap " not in layout

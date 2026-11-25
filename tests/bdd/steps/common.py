@@ -303,21 +303,8 @@ def _server_without_zellij_session(scenario_state: dict[str, Any]) -> None:
 
 
 @given("the system is running inside a Zellij session")
-def _system_running_inside_zellij(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def _system_running_inside_zellij(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ZELLIJ", "0")
-    scenario_state["outside_zellij"] = False
-
-
-@given("the system is not running inside a Zellij session")
-def _system_not_running_inside_zellij(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("ZELLIJ", raising=False)
-    scenario_state["outside_zellij"] = True
 
 
 @given("no server-backed Workdash session is running")
@@ -356,11 +343,6 @@ def _local_workdash_server_reachable(
             raise AssertionError(f"Unexpected control endpoint: {endpoint}")
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
-
-
-@given("the client process cannot find GitHub CLI on PATH")
-def _client_process_cannot_find_github_cli(scenario_state: dict[str, Any]) -> None:
-    scenario_state["client_missing_gh"] = True
 
 
 # -- Shared server-backed session setup --------------------------------------
@@ -654,17 +636,6 @@ def _reports_server_must_be_running(scenario_state: dict[str, Any]) -> None:
     assert (
         "No Workdash server is reachable at 127.0.0.1:8765. Start one with `workdash`."
     ) in scenario_state["stderr"]
-
-
-@then("the command sends the request to the local Workdash server")
-@then("the command connects to the local Workdash server")
-def _command_sends_request_to_local_server(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("control_requests"), scenario_state
-
-
-@then("the command does not report a local GitHub CLI preflight error")
-def _command_does_not_report_local_gh_preflight_error(scenario_state: dict[str, Any]) -> None:
-    assert "gh CLI" not in scenario_state.get("output", "")
 
 
 @then("the command exits with a non-zero status")
