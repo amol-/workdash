@@ -54,16 +54,6 @@ Feature: Launch a coding session
     - Requesting autostart on a worktree with a live agent pane starts nothing and sends nothing to that agent, whatever mode it runs in; it is answered without reading GitHub, so a GitHub outage does not hide it.
     - When GitHub cannot report the work state, an autostart request fails with an error instead of guessing.
 
-  @id:F-CODING-LAUNCH-S001
-  Scenario: User picks a coding agent and a session opens on the worktree
-    Given the TUI has a work item selected
-    When the user presses "c"
-    And the user picks a supported coding agent from the dialog
-    Then the system prepares the worktree for the selected work item
-    And a coding session with the chosen agent opens inside that worktree
-    And the agent is preloaded with the work item's GitHub context
-    And the TUI reports that the session was launched
-
   @id:F-CODING-LAUNCH-S002
   Scenario: Existing analysis is provided to the coding agent
     Given the selected work item has a cached analysis

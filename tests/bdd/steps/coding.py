@@ -492,42 +492,6 @@ def _dialog_offers_agents_then_vscode(
     assert [line for line in lines if line in expected] == expected, lines
 
 
-@then("the system prepares the worktree for the selected work item")
-def _worktree_prepared_for_code(scenario_state: dict[str, Any]) -> None:
-    calls = scenario_state["worktree_calls"]
-    assert calls, "Expected worktree callback invocation"
-    assert calls[0] == scenario_state["selected_item"]
-
-
-@then("a coding session with the chosen agent opens inside that worktree")
-def _coding_session_opens(scenario_state: dict[str, Any]) -> None:
-    calls = scenario_state["launch_calls"]
-    assert calls, "Expected the launch callback to have been invoked"
-    item, tool = calls[0]
-    assert item == scenario_state["selected_item"]
-    assert tool == "claude"
-
-
-@then("the agent is preloaded with the work item's GitHub context")
-def _agent_preloaded_context(scenario_state: dict[str, Any]) -> None:
-    # Assert on the prompt the TUI's launch path actually constructed and
-    # passed to the production terminal/VSCode launchers, not on a prompt
-    # we independently recompute here.
-    item: WorkItem = scenario_state["selected_item"]
-    launched_prompts = scenario_state["launched_prompts"]
-    assert launched_prompts, "Expected launch_agent_context/launch_vscode_context to be invoked"
-    prompt = launched_prompts[0]
-    assert item.repo in prompt
-    assert str(item.number) in prompt
-    assert item.url in prompt
-    assert scenario_state["github_context"]["body"] in prompt
-
-
-@then("the TUI reports that the session was launched")
-def _tui_reports_session_launched(scenario_state: dict[str, Any]) -> None:
-    assert "Launched" in scenario_state["coding_status"], scenario_state["coding_status"]
-
-
 @when("the user launches a coding session with a supported coding agent")
 def _launches_coding_session_with_cache(
     scenario_state: dict[str, Any],

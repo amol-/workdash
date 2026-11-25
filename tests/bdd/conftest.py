@@ -111,6 +111,7 @@ for _step_module in (
             "blocking_state",
             "dashboard_dispatch",
             "config_path",
+            "worktree_remote",
         }:
             globals()[_name] = getattr(_step_module, _name)
 
