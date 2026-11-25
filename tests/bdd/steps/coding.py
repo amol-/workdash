@@ -373,7 +373,9 @@ def run_code_dialog_scenario(
         ),
     )
     monkeypatch.setattr(
-        control_module, "existing_worktree_path", lambda _workdir, _item, **kwargs: worktree_path
+        control_module,
+        "existing_worktree_path",
+        lambda *_args, **_kwargs: worktree_path if scenario_state.get("panes") else None,
     )
     monkeypatch.setattr(control_module, "get_merge_base", lambda _path, **kwargs: None)
     monkeypatch.setattr(

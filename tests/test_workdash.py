@@ -8,22 +8,18 @@ import threading
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
-from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from webob import Request
 
 import workdash.config as config_module
 import workdash.control as control_module
 import workdash.github_client as github_client_module
 import workdash.workdash as workdash_module
-from gh_work_state_fake import failure, install_fake_github
 from workdash.config import AgentConfig, WorkdashConfig, load_config, save_config
 from workdash.control import WorkdashSession, probe_dashboard_session
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
-from workdash.repo_worktree import worktree_path
 from workdash.workdash import _print_work_items, _print_work_items_result
 from zellij_pane_launch import mark_pane_started, pane_launch
 
@@ -1597,117 +1593,6 @@ def test_main_code_json_outputs_server_response(
     )
 
     assert json.loads(capsys.readouterr().out) == response
-
-
-@pytest.mark.parametrize(
-    ("flags", "pr_checkout_branch", "pr_pane_running", "readiness_unavailable"),
-    [
-        pytest.param([], None, False, False, id="issue-only"),
-        pytest.param([], None, False, True, id="issue-only-without-readiness"),
-        pytest.param([], "other-branch", True, False, id="unverified-pr-pane"),
-        pytest.param([], "local-pr", False, False, id="verified-idle-pr"),
-        pytest.param([], "local-pr", True, False, id="plan-first-pr-pane"),
-        pytest.param(["--autostart"], "local-pr", True, False, id="autostart-pr-pane"),
-    ],
-)
-def test_main_code_selects_checkout_for_issue_with_linked_pr(
-    monkeypatch, tmp_path, capsys, flags, pr_checkout_branch, pr_pane_running, readiness_unavailable
-):
-    github = install_fake_github(monkeypatch)
-    github.add_issue("owner/repo#1")
-    github.add_pull_request("owner/repo#51", closes=("owner/repo#1",))
-    if readiness_unavailable:
-        github.failures["ReadyIssueTree"] = failure("gh: subIssuesSummary unavailable")
-    config = replace(_VALID_CONFIG, workdir=str(tmp_path))
-    issue_checkout = worktree_path(config.workdir, "owner/repo", 1)
-    pr_checkout = worktree_path(config.workdir, "owner/repo", 51)
-    main = tmp_path / "owner_repo"
-    main.mkdir()
-
-    def git(*args, cwd=main):
-        return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
-
-    git("init", "-q", "-b", "main")
-    git(
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=test@example.com",
-        "commit",
-        "--allow-empty",
-        "-qm",
-        "initial",
-    )
-    git("remote", "add", "origin", "https://github.com/owner/repo.git")
-    git("update-ref", "refs/remotes/origin/pr-branch", "HEAD")
-    git("worktree", "add", "-qb", "issue-1", str(issue_checkout))
-    (issue_checkout / "draft.txt").write_text("keep this")
-    if pr_checkout_branch is not None:
-        git("worktree", "add", "-qb", pr_checkout_branch, str(pr_checkout))
-        if pr_checkout_branch == "local-pr":
-            git("branch", "--set-upstream-to=origin/pr-branch", cwd=pr_checkout)
-    worktrees_before = git("worktree", "list", "--porcelain")
-    issue = _issue()
-    session = WorkdashSession(
-        config=config,
-        backend=SimpleNamespace(github_client=github_client_module.GitHubClient()),
-        work_items=[issue],
-        suggestion_markers={},
-        zellij_session="workdash-main",
-    )
-    monkeypatch.setattr(
-        session.backend.github_client, "fetch_worktree_head", lambda item: ("pr-branch", item.repo)
-    )
-    monkeypatch.setattr(session.backend.github_client, "fetch_launch_context", lambda item: {})
-    monkeypatch.setattr(session.git, "pull_ff_only", lambda path: None)
-    panes = []
-    if pr_pane_running:
-        panes.append({"id": 7, "title": f"code_{pr_checkout.name}", "pane_cwd": str(pr_checkout)})
-    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: list(panes))
-    launched_prompts = []
-
-    def launch(cwd, prompt, **kwargs):
-        launched_prompts.append(prompt)
-        title = f"code_{Path(cwd).name}"
-        panes.append({"id": 8, "title": title, "pane_cwd": cwd})
-        return SimpleNamespace(session=None, pane_id="terminal_8", pane_title=title, cwd=cwd)
-
-    monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch)
-    app = control_module._make_turbogears_app(session)
-
-    def urlopen(request, timeout=None):
-        response = Request.blank(
-            request.full_url,
-            method=request.method,
-            headers=dict(request.headers),
-            body=request.data,
-        ).get_response(app)
-        assert response.status_int == 200, response.text
-        return BytesIO(response.body)
-
-    monkeypatch.setattr(control_module.urllib.request, "urlopen", urlopen)
-
-    assert workdash_module.main(["code", "owner/repo#ISSUE-1", "--json", *flags]) == 0
-    result = json.loads(capsys.readouterr().out)
-    actual = (result["status"], result["pane_id"], result["cwd"])
-    if pr_checkout_branch == "local-pr" and pr_pane_running:
-        assert actual == ("already_running", "terminal_7", str(pr_checkout))
-        assert [pane["id"] for pane in panes] == [7]
-        assert not launched_prompts
-    else:
-        (prompt,) = launched_prompts
-        assert "Propose a concrete implementation plan" in prompt
-        assert "Do not start implementing code yet." in prompt
-        if pr_checkout_branch == "local-pr":
-            assert actual == ("launched", "terminal_8", str(pr_checkout))
-            assert "open pull request of yours (https://github.com/owner/repo/pull/51)" in prompt
-            assert "build on them instead of starting the work over" in prompt
-        else:
-            assert actual == ("launched", "terminal_8", str(issue_checkout))
-            assert f"- url: {issue.url}" in prompt
-            assert "WORK ALREADY IN PROGRESS" not in prompt
-    assert (issue_checkout / "draft.txt").read_text() == "keep this"
-    assert git("worktree", "list", "--porcelain") == worktrees_before
 
 
 def test_main_code_reports_server_error_before_local_worktree(

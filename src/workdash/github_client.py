@@ -1386,43 +1386,56 @@ class GitHubClient:
 
     def linked_open_pull_request(self, item: WorkItem) -> tuple[str, int] | None:
         """Find an issue's linked open pull request without evaluating readiness."""
-        with _github_payload(f"{item.repo}#{item.number}"):
-            for node in self._linked_open_pull_requests(item):
-                return node["repository"]["nameWithOwner"], node["number"]
-        return None
-
-    def linked_authored_open_pull_request(
-        self, item: WorkItem, *, github_username: str
-    ) -> WorkItem | None:
-        """Find the user's open implementation PR for plan-first coding, without readiness."""
+        owner, name = item.repo.split("/", 1)
         subject = f"{item.repo}#{item.number}"
-        fields = (
-            "title url createdAt updatedAt author { login } "
-            "closingIssuesReferences(first: 10) { nodes { number repository { nameWithOwner } } }"
-        )
+        after = "null"
+        while True:
+            query = (
+                f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+                f"{{ issue(number: {item.number}) {{ closedByPullRequestsReferences(first: 100, after: {after}) "
+                "{ nodes { number state repository { nameWithOwner } } "
+                "pageInfo { hasNextPage endCursor } } } } }"
+            )
+            data = self._graphql(query, subject)
+            with _github_payload(subject):
+                connection = data["repository"]["issue"]["closedByPullRequestsReferences"]
+                for node in connection["nodes"]:
+                    if node["state"] == "OPEN":
+                        return node["repository"]["nameWithOwner"], node["number"]
+                if not connection["pageInfo"]["hasNextPage"]:
+                    return None
+                after = json.dumps(connection["pageInfo"]["endCursor"])
+
+    def linked_authored_open_pull_request_url(
+        self, item: WorkItem, *, github_username: str
+    ) -> str | None:
+        """Return the URL of the user's newest open PR that closes the issue."""
+        owner, name = item.repo.split("/", 1)
+        subject = f"{item.repo}#{item.number}"
+        newest = None
+        after = "null"
         with _github_payload(subject):
-            for node in self._linked_open_pull_requests(item, fields=fields):
-                kind = _pull_request_kind(node, github_username)
-                if kind is not WorkItemKind.AUTHORED_PR:
-                    continue
-                repo = node["repository"]["nameWithOwner"]
-                closing_issues = _linked_closing_issues(node, subject)
-                return WorkItem(
-                    kind=kind,
-                    item_type=WorkItemType.PR,
-                    repo=repo,
-                    number=node["number"],
-                    title=node["title"],
-                    created_at=parse_github_datetime(node["createdAt"]),
-                    updated_at=parse_github_datetime(node["updatedAt"]),
-                    url=node["url"],
-                    closing_issue_numbers=tuple(
-                        sorted(
-                            number for issue_repo, number in closing_issues if issue_repo == repo
-                        )
-                    ),
+            while True:
+                data = self._graphql(
+                    f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+                    f"{{ issue(number: {item.number}) {{ closedByPullRequestsReferences(first: 100, after: {after}) "
+                    "{ nodes { url state createdAt author { login } } "
+                    "pageInfo { hasNextPage endCursor } } } } }",
+                    subject,
                 )
-        return None
+                connection = data["repository"]["issue"]["closedByPullRequestsReferences"]
+                for node in connection["nodes"]:
+                    if (
+                        node["state"] == "OPEN"
+                        and _pull_request_kind(node, github_username) is WorkItemKind.AUTHORED_PR
+                    ):
+                        created = parse_github_datetime(node["createdAt"])
+                        if newest is None or created > newest[0]:
+                            newest = (created, node["url"])
+                if not connection["pageInfo"]["hasNextPage"]:
+                    break
+                after = json.dumps(connection["pageInfo"]["endCursor"])
+        return newest[1] if newest is not None else None
 
     def work_pull_request(
         self,
@@ -2670,27 +2683,6 @@ class GitHubClient:
                 if not connection["pageInfo"]["hasNextPage"]:
                     return nodes
                 after = json.dumps(connection["pageInfo"]["endCursor"])
-
-    def _linked_open_pull_requests(self, item: WorkItem, *, fields: str = "") -> Iterator[dict]:
-        owner, name = item.repo.split("/", 1)
-        subject = f"{item.repo}#{item.number}"
-        after = "null"
-        while True:
-            query = (
-                f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
-                f"{{ issue(number: {item.number}) {{ closedByPullRequestsReferences(first: 100, after: {after}) "
-                f"{{ nodes {{ number state repository {{ nameWithOwner }} {fields} }} "
-                "pageInfo { hasNextPage endCursor } } } } }"
-            )
-            connection = self._graphql(query, subject)["repository"]["issue"][
-                "closedByPullRequestsReferences"
-            ]
-            for node in connection["nodes"]:
-                if node["state"] == "OPEN":
-                    yield node
-            if not connection["pageInfo"]["hasNextPage"]:
-                return
-            after = json.dumps(connection["pageInfo"]["endCursor"])
 
     def _graphql(self, query: str, subject: str) -> dict:
         # gh exits non-zero on any GraphQL error, so a partial answer fails the lookup.

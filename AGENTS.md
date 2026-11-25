@@ -11,6 +11,11 @@ Before starting any work, read these files in order:
 - Use the repository's current name. Users only interact with the new name after a rename; do not add rename-specific handling.
 - Assume Workdash operates only in worktrees it creates and names. Do not add support for hand-made or manually renamed worktrees.
 
+## Issue and pull request assumptions
+
+- Coding an authored PR that closes an issue is the same as coding the issue. A PR with no linked issue uses its own worktree. If an issue is later linked, plan-first coding uses the issue worktree and leaves the old PR worktree alone.
+- For plan-first coding, if the issue has no worktree, mention only the most recently created open PR you authored that closes it in the briefing. The issue chooses the checkout.
+
 ## Zellij session assumptions
 
 - Workdash runs inside a Zellij session. Its actions operate only in that same session; cross-session capabilities are out of scope.
@@ -40,5 +45,6 @@ each variant more than once before concluding.
 - Feature files describe only the user experience and externally observable behavior, never how the software works internally.
 - Implementation details, corner cases, and internal mechanisms go in normal unit/integration tests.
 - Keep changes minimal and focused.
+- For rare or obscure cases outside the expected flow, fail gracefully with a clear error instead of adding complex recovery heuristics.
 - If GitHub can't provide issue or PR data, treat it as unavailable rather than adding complex heuristics to reconstruct it.
 - Match existing style; see `pyproject.toml` for lint/format config and run `ruff check` and `ruff format`.

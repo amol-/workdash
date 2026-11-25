@@ -97,7 +97,7 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
         "control.get_merge_base = lambda *_args, **_kwargs: None\n"
         f"control.SERVER_LOG_PATH = Path({str(tmp_path / 'workdash.log')!r})\n"
         "from workdash.github_client import GitHubClient\n"
-        "GitHubClient.linked_authored_open_pull_request = lambda *_args, **_kwargs: None\n"
+        "GitHubClient.linked_authored_open_pull_request_url = lambda *_args, **_kwargs: None\n"
         "control.prepare_launch_agent_prompt = lambda *_args, **_kwargs: 'test prompt'\n"
         "cli.GitHubClient.check_authentication = lambda self: None\n"
         "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "

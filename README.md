@@ -303,17 +303,10 @@ disturbing other in-progress work. When an existing local branch is checked out
 into a new worktree, Workdash preserves its commits. Issue branches keep their
 upstream configuration; pull request branches track the pull request head.
 
-A pull request you authored that closes an issue in the same repository is the
-implementation of that issue, so it shares the issue's worktree directory (named
-after the issue number) while staying checked out on the pull request's own
-branch. That shared checkout is only reused while it holds the pull request's
-branch; a checkout sitting on another branch belongs to other work, so it is left
-alone and the pull request gets its own pull-request-numbered worktree instead.
-Worktree directories created before this behavior existed are still named
-after the pull request number; they are not migrated and keep working, so the
-pull request stays in the checkout it already has and only a pull request with no
-checkout yet gets an issue-numbered one. The link between a pull request and the issue it closes is resolved when the
-dashboard refreshes or the pull request is added by URL.
+An authored pull request that closes an issue is treated as a request to code the
+issue. A pull request with no linked issue has its own worktree. If an issue is
+linked later, plan-first coding uses the issue worktree and leaves the old pull
+request checkout alone.
 
 ## Local control server
 
@@ -625,14 +618,11 @@ review-only session. The HTTP `POST /api/v0/code` takes optional boolean
 `autostart` and `autoclose`, both
 false when omitted. `already_running` injects nothing into the running agent.
 
-In plan-first mode, naming an authored pull request checks out its branch and
-briefs the agent on that pull request. If it closes an issue, Workdash reports
-the issue's identity and uses its cached analysis when available. Another pull
-request closing the same issue or an idle checkout on a different branch does
-not replace the named pull request. Naming the issue instead can reuse an idle
-issue checkout. With `--autostart` (including `--autoclose`), naming an authored
-pull request with a linked issue is treated as a request for that issue.
-An authored pull request without a linked issue remains the target.
+Naming an authored pull request that closes an issue is the same as naming the
+issue, with or without `--autostart`. Plan-first mode uses the issue checkout
+and briefing. When creating that checkout, the briefing includes the newest open
+pull request you authored that closes the issue, if there is one. The pull
+request does not choose the checkout.
 Reviewing somebody else's pull request uses its cached pull request analysis
 instead; linked issues are background, not instructions to implement. An open
 parent whose descendants are closed is briefed to verify its goal and, if

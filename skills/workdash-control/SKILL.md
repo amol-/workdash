@@ -209,11 +209,13 @@ classification `ready` reports:
 - A pull request of somebody else stays a review: the agent starts reviewing
   without asking for confirmation and never edits, commits, or pushes.
 
-An authored pull request linked to an issue is normalized to that issue for
-implementation, using its cached issue analysis when available and continuing
-the existing branch. An authored pull request without a linked issue remains the
-target. A review of somebody else's pull request uses cached pull request
-analysis instead; linked issues are background, not implementation tasks.
+Coding a linked authored pull request is the same as coding its issue. A pull
+request with no linked issue uses its own checkout. If an issue is linked later,
+plan-first coding uses the issue checkout and leaves the old checkout alone.
+When creating an issue checkout, the plan-first briefing mentions the newest
+open closing pull request you authored, if any. Implementation briefings use
+cached issue analysis when available; review briefings use the
+pull request's cached analysis.
 
 Successful work leaves the pull request open for a human to review and merge.
 The agent may report completion only when the current head's CI is `passing` or

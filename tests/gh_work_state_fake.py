@@ -200,24 +200,13 @@ class FakeGitHub:
                 nodes = self._issue_node(ref)["closedByPullRequestsReferences"]["nodes"]
                 if "author { login }" in query:
                     for node in nodes:
-                        repo, number = node["repository"]["nameWithOwner"], node["number"]
-                        pr_ref = f"{repo}#{number}"
-                        pr = self.pull_requests[pr_ref]
+                        pr = self.pull_requests[
+                            f"{node['repository']['nameWithOwner']}#{node['number']}"
+                        ]
                         node.update(
-                            title=f"Pull request {pr_ref}",
-                            url=f"https://github.com/{repo}/pull/{number}",
                             createdAt=pr["created"],
-                            updatedAt=pr["updated"] or pr["created"],
                             author={"login": pr["author"]},
-                            closingIssuesReferences={
-                                "nodes": [
-                                    {
-                                        "number": issue_no,
-                                        "repository": {"nameWithOwner": issue_repo},
-                                    }
-                                    for issue_repo, issue_no in map(_split, pr["closes"])
-                                ]
-                            },
+                            url=f"https://github.com/{node['repository']['nameWithOwner']}/pull/{node['number']}",
                         )
                 data = {
                     "repository": {
@@ -227,8 +216,25 @@ class FakeGitHub:
                 return subprocess.CompletedProcess(
                     command, 0, stdout=json.dumps({"data": data}), stderr=""
                 )
-            return self._item_lookup(command, query)
-        data = getattr(self, f"_{name}")(query)
+            if "closingIssuesReferences" not in query or "issueOrPullRequest" in query:
+                return self._item_lookup(command, query)
+            data = {
+                alias: {
+                    "pullRequest": {
+                        "closingIssuesReferences": {
+                            "nodes": [
+                                {"number": n, "repository": {"nameWithOwner": repo}}
+                                for repo, n in map(
+                                    _split, self.pull_requests[f"{owner}/{name}#{number}"]["closes"]
+                                )
+                            ]
+                        }
+                    }
+                }
+                for alias, owner, name, number in _queried_pull_requests(query)
+            }
+        else:
+            data = getattr(self, f"_{name}")(query)
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"data": data}), stderr="")
 
     # -- GraphQL operations --------------------------------------------------

@@ -333,18 +333,15 @@ Feature: CLI orchestration commands
     And the command asks for neither autostart nor autoclose
 
   @id:F-CLI-ORCHESTRATION-S047
-  Scenario Outline: Code continues the named pull request when another closes the same issue
+  Scenario: Coding a pull request follows its newly linked issue
     Given a server-backed Workdash session has loaded dashboard items
-    And two authored pull requests #50 and #51 close issue `owner/repo#1`
-    And issue #1 has <checkout>
-    When the user runs `workdash code https://github.com/owner/repo/pull/51`
-    Then the command reports a launched coding session
-    And the agent starts on pull request #51's branch with a plan-first briefing for #51 and context from issue #1
-
-    Examples:
-      | checkout         |
-      | no checkout      |
-      | an idle checkout |
+    And authored pull request `owner/repo#50` has a branch but no linked issue
+    When the user runs `workdash code https://github.com/owner/repo/pull/50`
+    Then code opens in the checkout for `owner_repo_50`
+    When the author links pull request `owner/repo#50` to issue `owner/repo#1`
+    And the user runs `workdash code https://github.com/owner/repo/pull/50`
+    Then code opens in the checkout for `owner_repo_1`
+    And the original pull request checkout is left untouched
 
   @id:F-CLI-ORCHESTRATION-S041
   Scenario: Code with autostart launches an autonomous coding session

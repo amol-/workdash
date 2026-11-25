@@ -19,6 +19,7 @@ import urllib.request
 from collections.abc import Callable, Collection, Iterator, Sequence
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager, suppress
+from dataclasses import replace
 from datetime import UTC, datetime
 from http import HTTPStatus
 from importlib.metadata import version
@@ -756,8 +757,9 @@ class WorkdashSession:
     ) -> dict[str, object]:
         """Launch a coding agent for an explicit target unless one already works in its worktree.
 
-        The live agent pane in a worktree is the claim on it, so instead of starting
-        a second agent there this reports that pane with status ``already_running``.
+        In plan-first coding, an authored PR with a linked issue resolves to that issue
+        before choosing a checkout. A live agent claims the checkout: return ``already_running``
+        without pulling. Otherwise, ``ensure_worktree`` prepares the checkout before launch.
 
         :param bool autostart: Brief a newly launched agent to work autonomously from the
             current GitHub state of the work, instead of proposing a plan first.
@@ -774,7 +776,6 @@ class WorkdashSession:
             )
         item = self._require_item(target)
         item_id = format_work_item_id(item)
-        keep_named_pr = not autostart and item.kind == WorkItemKind.AUTHORED_PR
         agents = self.config.configured_code_agents()
         if agent is not None and agent not in agents and not (allow_vscode and agent == "vscode"):
             raise self._unusable_agent_error(agent, "code", "launch")
@@ -788,54 +789,56 @@ class WorkdashSession:
         git = self.git
         # Without Zellij no agent pane can exist, and VSCode needs none to launch.
         no_zellij_vscode = self.zellij_session is None and selected_agent == "vscode"
-        if item.kind not in REVIEW_KINDS:
-            # A shared issue directory cannot claim a named PR until its head is verified.
+
+        def existing_claim(item: WorkItem, item_id: str) -> dict[str, object] | None:
             with self._lock:
                 repo_path = existing_worktree_path(self.config.workdir, item, git=git)
-                if repo_path is not None and (
-                    not keep_named_pr or repo_path.name.endswith(f"_{item.number}")
-                ):
-                    panes = [] if no_zellij_vscode else self._live_panes()
-                    claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
-                    if claimed is not None:
-                        return claimed
+                if repo_path is None:
+                    return None
+                panes = [] if no_zellij_vscode else self._live_panes()
+                return self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
+
+        if autostart and (claimed := existing_claim(item, item_id)) is not None:
+            return claimed
         analysis_item = (
             item if item.item_type == WorkItemType.ISSUE or item.kind in REVIEW_KINDS else None
         )
         if item.kind == WorkItemKind.AUTHORED_PR:
             try:
-                state = self.backend.github_client.work_pull_request(
-                    item,
-                    github_username=self.config.github_username,
-                    todo_repository=self.config.todo_repository,
-                )
-                if state and state.linked_issues:
-                    linked = min(
-                        state.linked_issues, key=lambda issue: (issue.repo.lower(), issue.number)
+                if autostart:
+                    state = self.backend.github_client.work_pull_request(
+                        item,
+                        github_username=self.config.github_username,
+                        todo_repository=self.config.todo_repository,
                     )
-                    analysis_item = self._require_item(f"{linked.repo}#ISSUE-{linked.number}")
-                    item_id = format_work_item_id(analysis_item)
-                    if not keep_named_pr:
-                        item = analysis_item
+                    linked = (
+                        [(issue.repo, issue.number) for issue in state.linked_issues]
+                        if state
+                        else []
+                    )
+                else:
+                    linked = self.backend.github_client.fetch_linked_issues_for_pull_request(
+                        item.repo, item.number
+                    )
+                if linked:
+                    repo, number = min(linked, key=lambda issue: (issue[0].lower(), issue[1]))
+                    item = self._require_item(f"{repo}#ISSUE-{number}")
+                    analysis_item = item
+                    item_id = format_work_item_id(item)
+                elif not autostart and item.closing_issue_numbers:
+                    item = replace(item, closing_issue_numbers=())
             except RuntimeError as error:
                 raise WorkdashControlError(
                     "github_error",
                     f"GitHub lookup for {target!r} failed: {error}",
                     status=HTTPStatus.BAD_GATEWAY,
                 ) from error
-        if not autostart and item.item_type == WorkItemType.ISSUE:
-            try:
-                pull_request = self.backend.github_client.linked_authored_open_pull_request(
-                    item, github_username=self.config.github_username
-                )
-            except RuntimeError as error:
-                raise WorkdashControlError(
-                    "github_error",
-                    f"GitHub lookup for {target!r} failed: {error}",
-                    status=HTTPStatus.BAD_GATEWAY,
-                ) from error
-            if pull_request is not None:
-                item = pull_request
+        if (
+            not autostart
+            and item.kind == WorkItemKind.AUTHORED_PR
+            and (claimed := existing_claim(item, item_id)) is not None
+        ):
+            return claimed
         if autostart:
             try:
                 item, autostart_text, launch_reason = autostart_briefing(
@@ -863,38 +866,35 @@ class WorkdashSession:
                         "Verify the checkout and configure its upstream to the PR head branch."
                     )
 
+        linked_pr_url = None
+        if (
+            not autostart
+            and item.item_type == WorkItemType.ISSUE
+            and existing_worktree_path(self.config.workdir, item, git=git) is None
+        ):
+            try:
+                linked_pr_url = self.backend.github_client.linked_authored_open_pull_request_url(
+                    item, github_username=self.config.github_username
+                )
+            except RuntimeError as error:
+                raise WorkdashControlError(
+                    "github_error",
+                    f"GitHub lookup for {target!r} failed: {error}",
+                    status=HTTPStatus.BAD_GATEWAY,
+                ) from error
+
         with self._lock:
             panes = [] if no_zellij_vscode else self._live_panes()
-            # An idle issue checkout is plan-first's fallback, not a place to
-            # prepare a different branch. Only consider PR checkouts already tracking its head.
-            issue_path = None
-            if not autostart and selected_head is not None and analysis_item is not None:
-                issue_path = existing_worktree_path(self.config.workdir, analysis_item, git=git)
-            if issue_path is not None:
-                repo_path = existing_worktree_path(
-                    self.config.workdir, item, git=git, pr_head=selected_head
-                )
-                if (
-                    repo_path is None or analysis_item.todo_target
-                ) and git.branch_tracks_repository(issue_path, *selected_head):
-                    repo_path = issue_path
-                if repo_path is None and not keep_named_pr:
-                    repo_path, item, selected_head = issue_path, analysis_item, None
-            else:
-                repo_path = existing_worktree_path(
-                    self.config.workdir,
-                    item,
-                    git=git,
-                    pr_head=selected_head if keep_named_pr else None,
-                )
-                if (
-                    selected_head is not None
-                    and analysis_item is not None
-                    and analysis_item.todo_target
-                ):
-                    todo_path = existing_worktree_path(self.config.workdir, analysis_item, git=git)
-                    if todo_path is not None:
-                        repo_path = todo_path
+            # Reuse a live agent and verify its checkout before any pull.
+            repo_path = existing_worktree_path(self.config.workdir, item, git=git)
+            if (
+                selected_head is not None
+                and analysis_item is not None
+                and analysis_item.todo_target
+            ):
+                todo_path = existing_worktree_path(self.config.workdir, analysis_item, git=git)
+                if todo_path is not None:
+                    repo_path = todo_path
             if repo_path is None and selected_head is not None:
                 branch, repo = selected_head
                 repo_path = existing_worktree_for_branch(self.config.workdir, repo, branch, git=git)
@@ -904,14 +904,13 @@ class WorkdashSession:
                     return claimed
             if repo_path is not None:
                 verify_selected_head(repo_path)
+                linked_pr_url = None
             repo_path = ensure_worktree(
                 self.config.workdir,
                 item,
                 git=git,
                 github_client=self.backend.github_client,
                 todo_repository=self.config.todo_repository,
-                existing=repo_path if issue_path is not None or keep_named_pr else None,
-                pr_head=selected_head if keep_named_pr else None,
             )
             claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
             if claimed is not None:
@@ -943,6 +942,8 @@ class WorkdashSession:
                     "\n\nThis work originates from a todo; never disclose or reference the todo "
                     "in the pull request."
                 )
+            if linked_pr_url is not None:
+                prompt += f"\n\nOpen pull request linked to this issue: {linked_pr_url}"
             if autostart:
                 prompt = f"{prompt.rstrip()}\n\n{autostart_text}"
             if selected_agent == "vscode":
