@@ -51,18 +51,18 @@ def _cleanup_sessions(zellij, env, sessions, *, previously_owned=None):
     # Defer Ctrl+C in pytest; run cleanup commands outside its foreground group.
     previous_handler = signal.signal(signal.SIGINT, defer_interrupt)
     try:
-        # Record descendants before Zellij can hang them up and orphan them.
         try:
-            current = _session_processes(zellij, env, by_name, pane_groups=pane_groups)
-        except subprocess.TimeoutExpired:
-            current = _session_processes(zellij, env, by_name, pane_groups=pane_groups)
-        owned.update(current)
-        # Stop startup/attach clients so they cannot launch a server during deletion.
-        for (pid, _), name in current.items():
-            if pid in by_name[name]:
-                with suppress(ProcessLookupError, PermissionError):
-                    os.kill(pid, signal.SIGKILL)
-        try:
+            # Record descendants before Zellij can hang them up and orphan them.
+            try:
+                current = _session_processes(zellij, env, by_name, pane_groups=pane_groups)
+            except subprocess.TimeoutExpired:
+                current = _session_processes(zellij, env, by_name, pane_groups=pane_groups)
+            owned.update(current)
+            # Stop startup/attach clients so they cannot launch a server during deletion.
+            for (pid, _), name in current.items():
+                if pid in by_name[name]:
+                    with suppress(ProcessLookupError, PermissionError):
+                        os.kill(pid, signal.SIGKILL)
             owned.update(_session_processes(zellij, env, by_name, pane_groups=pane_groups))
             for name in by_name:
                 with suppress(subprocess.TimeoutExpired):
@@ -300,7 +300,9 @@ def test_zellij_cleanup_does_not_signal_pid_from_multiline_args(tmp_path, monkey
     kill.assert_not_called()
 
 
-@pytest.mark.parametrize("timeout_at", ["discovery", "kill", "persistent", "survivor"])
+@pytest.mark.parametrize(
+    "timeout_at", ["initial-discovery", "discovery", "kill", "persistent", "survivor"]
+)
 def test_zellij_cleanup_kills_and_verifies_recorded_pids_after_ps_timeout(
     tmp_path, monkeypatch, timeout_at
 ):
@@ -321,13 +323,16 @@ def test_zellij_cleanup_kills_and_verifies_recorded_pids_after_ps_timeout(
         if command[0] == "zellij":
             assert command[1:] == ["delete-session", "--force", session]
             deleted = True
-        elif deleted and (
-            (timeout_at == "discovery" and not timeouts)
-            or (
-                discovered
-                and (timeout_at == "persistent" or (timeout_at == "kill" and not timeouts))
+        elif (timeout_at == "initial-discovery" and len(timeouts) < 2) or (
+            deleted
+            and (
+                (timeout_at == "discovery" and not timeouts)
+                or (
+                    discovered
+                    and (timeout_at == "persistent" or (timeout_at == "kill" and not timeouts))
+                )
+                or (timeout_at == "survivor" and killed)
             )
-            or (timeout_at == "survivor" and killed)
         ):
             timeout = subprocess.TimeoutExpired(command, kwargs["timeout"])
             timeouts.append(timeout)
@@ -338,7 +343,9 @@ def test_zellij_cleanup_kills_and_verifies_recorded_pids_after_ps_timeout(
             if killed:
                 verified = True
             else:
-                matched = deleted and (discovered or bool(timeouts))
+                matched = timeout_at == "initial-discovery" or (
+                    deleted and (discovered or bool(timeouts))
+                )
                 stdout += f"{pid} 1 1 S Mon Jan  1 00:00:00 2024 pane\n"
         elif deleted:
             discovered = True
@@ -379,7 +386,7 @@ def test_zellij_cleanup_kills_and_verifies_recorded_pids_after_ps_timeout(
         assert elapsed == pytest.approx(1)
         assert not killed and not verified
     else:
-        assert len(timeouts) == 1
+        assert len(timeouts) == (2 if timeout_at == "initial-discovery" else 1)
         assert killed and verified
         if timeout_at == "kill":
             assert elapsed < 1
