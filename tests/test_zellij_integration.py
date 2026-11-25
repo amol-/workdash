@@ -42,7 +42,10 @@ def _cleanup_sessions(zellij, env, sessions, *, previously_owned=None):
     owned = dict(previously_owned or {})
     try:
         # Record descendants before Zellij can hang them up and orphan them.
-        current = _session_processes(zellij, env, by_name)
+        try:
+            current = _session_processes(zellij, env, by_name)
+        except subprocess.TimeoutExpired:
+            current = _session_processes(zellij, env, by_name)
         owned.update(current)
         # Stop startup/attach clients so they cannot launch a server during deletion.
         for (pid, _), name in current.items():
@@ -352,6 +355,7 @@ def test_zellij_cleanup_kills_and_verifies_recorded_pids_after_ps_timeout(
         "ctrl-c",
         "ctrl-c-delete",
         "ctrl-c-scan",
+        "first-ps-timeout",
         "survivor",
         "renamed-binary",
         "long-tmpdir",
@@ -386,8 +390,10 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
     interrupt_cleanup = case in {"ctrl-c-delete", "ctrl-c-scan"}
     scans = 0
     interrupt = None
+    timed_out = deleted = False
     ready = tmp_path / "pane-pids"
     owned = {}
+    fallback = {}
     kill = os.kill
     run = subprocess.run
     previous_socket_dir = os.environ.get("ZELLIJ_SOCKET_DIR")
@@ -396,20 +402,25 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
         if (pid, sig) != (pane_pid, signal.SIGKILL):
             kill(pid, sig)
 
-    def interrupt_teardown(command, **kwargs):
-        nonlocal scans, interrupt
+    def run_during_teardown(command, **kwargs):
+        nonlocal scans, interrupt, timed_out, deleted
+        if case == "first-ps-timeout" and command[0] == "ps" and not timed_out:
+            timed_out = True
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        delete = command == [zellij, "delete-session", "--force", name]
         scan = command[0] == "ps" and "-U" in command and "args=" in command
         if scan:
             scans += 1
-        if (case == "ctrl-c-scan" and scan and scans == 2) or (
-            case == "ctrl-c-delete" and command == [zellij, "delete-session", "--force", name]
-        ):
+        if (case == "ctrl-c-scan" and scan and scans == 2) or (case == "ctrl-c-delete" and delete):
             try:
                 signal.raise_signal(signal.SIGINT)
             except KeyboardInterrupt as error:
                 interrupt = error
                 raise
-        return run(command, **kwargs)
+        result = run(command, **kwargs)
+        if delete:
+            deleted = result.returncode == 0
+        return result
 
     if interrupt_cleanup:
         expected = pytest.raises(KeyboardInterrupt)
@@ -457,10 +468,15 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
                 assert time.monotonic() < deadline, "pane did not start"
                 time.sleep(0.05)
             pane_pid, child_pid = map(int, ready.read_text().split())
+            live = _live_processes()
+            # Zellij starts the pane directly; discovery must not supply the expected server PID.
+            server_pid = live[pane_pid][0]
+            assert server_pid > 1
+            server_started = live[server_pid][1]
+            fallback = {(pid, live[pid][1]): name for pid in (server_pid, pane_pid, child_pid)}
             owned = _session_processes(zellij, os.environ, {name: set()})
-            assert {pane_pid, child_pid} < {pid for pid, _ in owned}
-            if interrupt_cleanup:
-                fault.setattr(subprocess, "run", interrupt_teardown)
+            if interrupt_cleanup or case == "first-ps-timeout":
+                fault.setattr(subprocess, "run", run_during_teardown)
             if leave_survivor:
                 fault.setattr(os, "kill", kill_except_pane)
             if body_error:
@@ -471,12 +487,19 @@ def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
             assert cleanup_error.value is interrupt
         if leave_survivor:
             assert f"{name}: PID {pane_pid} (" in str(cleanup_error.value)
+        if case == "first-ps-timeout":
+            assert timed_out and deleted
         live = _live_processes()
+        if case == "ctrl-c-delete":
+            assert server_pid not in live or live[server_pid][1] != server_started, (
+                f"cleanup left Zellij server PID {server_pid} alive"
+            )
+        assert {pane_pid, child_pid} < {pid for pid, _ in owned}
         survivors = {pid for pid, started in owned if pid in live and live[pid][1] == started}
         assert survivors == ({pane_pid} if leave_survivor else set())
     finally:
-        if owned:
-            _kill_and_verify_owned_processes(owned)
+        if owned or fallback:
+            _kill_and_verify_owned_processes(owned | fallback)
 
 
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
