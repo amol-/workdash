@@ -34,6 +34,7 @@ from .models import (
     display_repo,
     format_type_label,
 )
+from .repo_resolver import dashboard_items
 
 SuggestionMarkers = dict[tuple[WorkItemType, str, int], str]
 RefreshCallbackResult = Sequence[WorkItem] | tuple[Sequence[WorkItem], SuggestionMarkers]
@@ -600,6 +601,7 @@ class WorkdashApp(App[None]):
         self._todo_repository = session.config.todo_repository if session is not None else ""
         self._work_items = sorted(work_items or (), key=lambda item: item.updated_at, reverse=True)
         self._sorted_work_items: list[WorkItem] = []
+        self._listed_item_count = 0
         # Cleared whenever the loaded list changes so new items are never hidden.
         self._search_filter = ""
         self._suggestion_markers = dict(suggestion_markers or {})
@@ -655,11 +657,11 @@ class WorkdashApp(App[None]):
             self._autodispatch_sessions = sessions
             self._known_autodispatch.update(str(entry["id"]) for entry in sessions)
             self.refresh_from_session()
-            self._update_status(f"Loaded {len(self._work_items)} item(s).")
+            self._update_status(f"Loaded {self._listed_item_count} item(s).")
             self._update_autodispatch_progress(sessions)
         else:
             self._render_table()
-            self._update_status(f"Loaded {len(self._work_items)} item(s).")
+            self._update_status(f"Loaded {self._listed_item_count} item(s).")
 
     async def _sync_busy_screen(self) -> None:
         """Show the operation holding the session, and clear it when the session frees up.
@@ -1068,8 +1070,12 @@ class WorkdashApp(App[None]):
         # would silently move the selection to a different work item.
         if focus_item is None:
             focus_item = self._selected_item()
+        listed_items = self._work_items
+        if self._session is not None:
+            listed_items = dashboard_items(listed_items, self._session.config.excluded_repositories)
+        self._listed_item_count = len(listed_items)
         # Neither the suggestion marker nor the CI symbol is searchable.
-        matched_items = [item for item in self._work_items if self._matches_filter(item)]
+        matched_items = [item for item in listed_items if self._matches_filter(item)]
         table.clear(columns=True)
         self._row_keys.clear()
         type_width = max(
@@ -1195,7 +1201,7 @@ class WorkdashApp(App[None]):
         if self._search_filter:
             self._search_filter = ""
             self._render_table()
-            self._update_status(f"Search cleared; {len(self._work_items)} item(s) shown.")
+            self._update_status(f"Search cleared; {self._listed_item_count} item(s) shown.")
             return
 
         def _on_dialog_result(query: str | None) -> None:
@@ -1204,7 +1210,7 @@ class WorkdashApp(App[None]):
             self._search_filter = query
             self._render_table()
             self._update_status(
-                f"Search matched {len(self._sorted_work_items)} of {len(self._work_items)} item(s)."
+                f"Search matched {len(self._sorted_work_items)} of {self._listed_item_count} item(s)."
             )
 
         await self.push_screen(SearchDialog(), callback=_on_dialog_result)
@@ -1285,7 +1291,7 @@ class WorkdashApp(App[None]):
             self._update_status(f"Refresh failed: {error}")
             self.notify(f"Refresh failed: {error}", severity="error", timeout=10)
             return
-        self._update_status(f"Refreshed {len(self._work_items)} item(s).")
+        self._update_status(f"Refreshed {self._listed_item_count} item(s).")
 
     async def action_analyze_item(self) -> None:
         selected_item = self._selected_item()
@@ -1663,9 +1669,12 @@ class WorkdashApp(App[None]):
             existing.included = True
             self._search_filter = ""
             self._render_table(focus_item=existing)
+            outcome = (
+                "moved cursor" if self._selected_item() is existing else "repository is excluded"
+            )
             self._update_status(
                 f"Already tracking {existing.item_type.value} "
-                f"{existing.repo}#{existing.number}; moved cursor."
+                f"{existing.repo}#{existing.number}; {outcome}."
             )
             return
         fetched_item = result.fetched_item

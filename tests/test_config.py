@@ -145,6 +145,7 @@ def test_save_config_creates_parent_dirs_and_writes_json(tmp_path):
             "pi": {"analyze": "pi -p", "launch": "pi"},
         },
         "repositories": ["owner/repo"],
+        "excluded_repositories": [],
         "workdir": "~/src",
         "todo_repository": "octocat/todos",
         "listens": [],
@@ -1296,6 +1297,50 @@ def test_configure_preserves_existing_repositories(tmp_path):
     assert config.repositories == ("specific/repo",)
     assert config.workdir == "~/src"
     assert json.loads(config_path.read_text())["listens"] == ["10.0.0.50@10.0.0.213"]
+
+
+@pytest.mark.parametrize(
+    "exclusions",
+    [
+        {},
+        {"excluded_repositories": ["Team/Old", None, "Archive/*"]},
+        {"excluded_repositories": None},
+        {"excluded_repositories": {"archive/*": True}},
+    ],
+    ids=["absent", "mixed-list", "null", "object"],
+)
+def test_configure_round_trips_excluded_repositories_without_prompting(tmp_path, exclusions):
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "github_username": "octocat",
+                "open": "xdg-open",
+                "open_needs_pane": False,
+                "analysis_viewer": {
+                    "command": "workdash view",
+                    "format": "markdown",
+                    "needs_pane": True,
+                },
+                "agents": {"claude": {"analyze": "claude -p"}},
+                "repositories": ["team/*"],
+                "workdir": "~/src",
+                "todo_repository": "octocat/todos",
+                **exclusions,
+            }
+        )
+    )
+    expected = exclusions.get("excluded_repositories", [])
+    assert load_config(path).require_valid().excluded_repositories == expected
+
+    config = configure(
+        path,
+        input_fn=lambda prompt: pytest.fail(f"Unexpected prompt: {prompt}"),
+        which_fn=_on_path("zellij", "gh", "xdg-open"),
+    )
+
+    assert json.loads(path.read_text())["excluded_repositories"] == expected
+    assert load_config(path).require_valid() == config
 
 
 def test_configure_tells_where_to_edit_agents_even_when_agents_are_configured(tmp_path, capsys):

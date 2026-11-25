@@ -18,7 +18,7 @@ import workdash.control as control_module
 import workdash.github_client as github_client_module
 import workdash.workdash as workdash_module
 from workdash.config import AgentConfig, WorkdashConfig, load_config, save_config
-from workdash.control import probe_dashboard_session
+from workdash.control import WorkdashSession, probe_dashboard_session
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.workdash import _print_work_items, _print_work_items_result
 from zellij_pane_launch import mark_pane_started, pane_launch
@@ -670,6 +670,33 @@ def test_main_list_command_does_not_print_loading_message(
     assert exit_code == 0
     captured = capsys.readouterr()
     assert captured.out == "No work items found.\n"
+
+
+def test_main_list_json_hides_excluded_repositories_after_refresh(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    hidden = _issue("team/old")
+    visible = _issue("team/current", number=2)
+    markers = {(hidden.item_type, hidden.repo, hidden.number): "*"}
+    session = WorkdashSession(
+        config=WorkdashConfig(excluded_repositories=["Team/OLD"]),
+        backend=SimpleNamespace(load_items=lambda: ([hidden, visible], markers)),  # type: ignore[arg-type]
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    def request(endpoint: str, payload: dict[str, bool]) -> dict[str, object]:
+        assert endpoint == "list"
+        return session.list_items(refresh=payload["refresh"])
+
+    monkeypatch.setattr(
+        workdash_module, "WorkdashControlClient", lambda host: SimpleNamespace(request=request)
+    )
+
+    assert workdash_module.main(["list", "--json", "--refresh"]) == 0
+    rows = json.loads(capsys.readouterr().out)["items"]
+    assert [(row["id"], row["suggested"]) for row in rows] == [("team/current#ISSUE-2", False)]
 
 
 def test_print_server_backed_list_uses_display_type_without_changing_id(

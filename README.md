@@ -212,6 +212,19 @@ The `repositories` list in `config.json` accepts:
 - `owner/repo` — a specific repository.
 - `owner/*` — every repository accessible to you under that owner.
 
+To hide repositories from the dashboard, add selectors to `excluded_repositories`
+in `~/.config/workdash/config.json`, for example:
+
+```json
+"excluded_repositories": ["team/old-project", "archive/*"]
+```
+
+Exclusions are case-insensitive and apply to the TUI work table, `workdash list`
+(text and JSON), and `POST /api/v0/list`. If the suggested item is hidden, no
+replacement is suggested. Exclusions do not affect `workdash ready`, dispatch,
+or actions on explicit targets. `--configure` adds an empty list if this setting
+is absent and leaves existing values unchanged.
+
 ## TUI keybindings
 
 - `/` — search/filter the listed items by Type, Repo, or Title. Matching is
@@ -371,7 +384,7 @@ reports the selected default server address.
 ## List command
 
 `workdash list` requires a running `workdash` session and emits one row
-per server-known item, sorted by last update (most recent first):
+per non-excluded dashboard item, sorted by last update (most recent first):
 
 ```
 TYPE   repo#TYPE-N   YYYY-MM-DD   title

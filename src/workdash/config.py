@@ -114,6 +114,7 @@ class WorkdashConfig:
     workdir: str = ""
     todo_repository: str = ""
     listens: tuple[str, ...] = ()
+    excluded_repositories: object = field(default_factory=list)
 
     def listener_addresses(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
         """Parse configured listeners and their accepted source networks."""
@@ -209,6 +210,7 @@ def _config_to_json(config: WorkdashConfig) -> str:
                     for name, agent in config.agents.items()
                 },
                 "repositories": list(config.repositories),
+                "excluded_repositories": config.excluded_repositories,
                 "workdir": config.workdir,
                 "todo_repository": config.todo_repository,
                 "listens": list(config.listens),
@@ -321,6 +323,7 @@ def _config_from_json(raw: dict) -> WorkdashConfig:
         listens=tuple(raw["listens"])
         if isinstance(raw.get("listens"), list)
         else raw.get("listens", ()),
+        excluded_repositories=raw.get("excluded_repositories", []),
     )
 
 
@@ -792,10 +795,15 @@ def configure(
         workdir=workdir,
         todo_repository=todo_repository,
         listens=config.listens,
+        excluded_repositories=config.excluded_repositories,
     )
     save_config(new_config, path, create_only=create_only)
     print(
         f'Configuration saved to {path}. Add trusted LAN listeners to "listens", e.g. "10.0.0.50@10.0.0.213".'
+    )
+    print(
+        'Hide repositories from the dashboard by adding "owner/repo" or "owner/*" '
+        f'entries to "excluded_repositories" in {path}.'
     )
     return new_config
 
