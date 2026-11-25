@@ -466,7 +466,7 @@ def test_main_passes_configured_agent_choices_and_separate_viewers_to_tui(
                 "--close-on-exit",
             ],
             [
-                "sh",
+                "/bin/sh",
                 "-c",
                 '"$@" || { printf "\\nPress Enter to close this pane.\\n"; read -r _; }',
                 "workdash-view",
