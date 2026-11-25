@@ -7,10 +7,8 @@ a side-by-side diff viewer for git repositories.
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import subprocess
-from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 
@@ -18,774 +16,183 @@ import pytest
 from pytest_bdd import given, parsers, then, when
 
 import workdash.branchdiff as branchdiff_module
-from workdash.git import GitHelper
+import workdash.launcher as launcher
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.workdash import main as workdash_main
 from zellij_pane_launch import mark_pane_started, pane_launch
 
 from .common import make_work_item, modal_screen_names, run_app
 
-git = GitHelper()
 
-# -- Step Definitions -------------------------------------------------------
-
-
-@given("the current directory is a git repository")
-def _current_dir_is_git_repo(
-    scenario_state: dict[str, Any],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Set up a git repository in a temporary directory."""
-    repo_path = _create_git_repo(tmp_path)
-    scenario_state["repo_path"] = repo_path
-    monkeypatch.chdir(repo_path)
+@given("the default branch has the old renderer and my checkout has the new renderer")
+def _renderer_branch(scenario_state, tmp_path, monkeypatch):
+    repo = _create_git_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    renderer = repo / "renderer.txt"
+    renderer.write_text("old renderer\n")
+    subprocess.run(["git", "add", renderer.name], check=True)
+    subprocess.run(["git", "commit", "-qm", "Old renderer"], check=True)
+    subprocess.run(["git", "switch", "-qc", "feature"], check=True)
+    renderer.write_text("new renderer\n")
+    scenario_state["renderer"] = renderer
 
 
-@given("the repository has changes compared to the default branch")
-def _repo_has_changes(
-    scenario_state: dict[str, Any],
-) -> None:
-    """Create changes in the repository."""
-    repo_path = scenario_state["repo_path"]
-
-    # Ensure main branch exists as comparison baseline
-    try:
-        subprocess.run(
-            ["git", "checkout", "main"],
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-        )
-    except subprocess.CalledProcessError:
-        subprocess.run(
-            ["git", "branch", "-M", "main"],
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-        )
-
-    _create_branch_with_changes(
-        repo_path,
-        "feature",
-        "# Modified content\n\nThis is the feature branch.\n",
-    )
-
-    subprocess.run(
-        ["git", "checkout", "feature"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-    )
+@given("my work is based on the release branch, which has a different renderer")
+def _release_renderer(scenario_state):
+    renderer = scenario_state["renderer"]
+    subprocess.run(["git", "switch", "-qc", "release"], check=True)
+    renderer.write_text("release renderer\n")
+    subprocess.run(["git", "commit", "-qam", "Release renderer"], check=True)
+    subprocess.run(["git", "switch", "-qC", "feature"], check=True)
+    renderer.write_text("new renderer\n")
 
 
-@given("the current branch has been pushed and tracks its own remote branch")
-def _current_branch_tracks_its_own_remote_branch(
-    scenario_state: dict[str, Any],
-    tmp_path: Path,
-) -> None:
-    """Push a feature branch so its upstream is that same branch on the remote."""
-    repo_path = scenario_state["repo_path"]
-    remote_path = tmp_path / "remote.git"
-    subprocess.run(
-        ["git", "init", "--bare", "-b", "main", str(remote_path)],
-        check=True,
-        capture_output=True,
-    )
-    for command in (
-        ["git", "remote", "add", "origin", str(remote_path)],
-        ["git", "push", "-u", "origin", "main"],
-        ["git", "remote", "set-head", "origin", "main"],
-        ["git", "checkout", "-b", "feature"],
+@given("my shell is in a tiled Zellij pane")
+def _tiled_shell(scenario_state, monkeypatch):
+    pane = {"id": 3, "is_plugin": False, "is_fullscreen": False}
+    scenario_state["zellij_pane"] = pane
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
+    monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
+    monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/test/zellij")
+    real_run = subprocess.run
+
+    def run(command, *args, **kwargs):
+        if command[0] != "/test/zellij":
+            return real_run(command, *args, **kwargs)
+        if "list-panes" in command:
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps([pane]))
+        if "toggle-fullscreen" in command:
+            assert command[-2:] == ["-p", "3"]
+            pane["is_fullscreen"] = not pane["is_fullscreen"]
+            return subprocess.CompletedProcess(command, 0, stdout="")
+        pytest.fail(f"Unexpected Zellij command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+
+@when("I run `workdash branchdiff`")
+@when("I run `workdash branchdiff` and press q to return to the shell")
+@when(parsers.parse("I run `workdash branchdiff {target}`"))
+def _run_branchdiff(scenario_state, monkeypatch, target=None):
+    def run(app):
+        async def review():
+            async with app.run_test(size=(100, 20)) as pilot:
+                await pilot.pause()
+                scenario_state["opening_screen"] = _screen_text(app)
+                if pane := scenario_state.get("zellij_pane"):
+                    scenario_state["fullscreen_while_reviewing"] = pane["is_fullscreen"]
+                await pilot.press("q")
+                assert not app.is_running
+
+        asyncio.run(review())
+
+    monkeypatch.setattr(branchdiff_module.BranchDiffApp, "run", run)
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    assert workdash_main(["branchdiff", *([target] if target else [])]) == 0
+
+
+@then("the viewer opens on the renderer file with the old and new lines side by side")
+def _default_diff(scenario_state):
+    screen = scenario_state["opening_screen"]
+    assert "renderer.txt" in screen
+    assert any("old renderer" in row and "new renderer" in row for row in screen.splitlines())
+
+
+@then("the viewer compares the release renderer with my new renderer")
+def _release_diff(scenario_state):
+    screen = scenario_state["opening_screen"]
+    assert any("release renderer" in row and "new renderer" in row for row in screen.splitlines())
+    assert "old renderer" not in screen
+
+
+@then("the diff viewer fills the pane while I review")
+def _review_fullscreen(scenario_state):
+    assert "new renderer" in scenario_state["opening_screen"]
+    assert scenario_state["fullscreen_while_reviewing"] is True
+
+
+@then("my shell returns to its original tiled layout")
+def _restore_tiled_layout(scenario_state):
+    assert scenario_state["zellij_pane"]["is_fullscreen"] is False
+
+
+@given("the diff viewer is open on the first of two changed files")
+def _two_changed_files(scenario_state):
+    scenario_state["diffs"] = {
+        "a.txt": ("old renderer\n", "new renderer\n"),
+        "b.txt": ("old theme\n", "new theme\n"),
+    }
+
+
+@given("the diff viewer is open on a changed line whose end is off screen")
+def _wide_changed_line(scenario_state):
+    scenario_state["diffs"] = {"wide.txt": ("short\n", "BEGIN" + "." * 18 + "END\n")}
+
+
+@when("I press k, press j, and then click the second file")
+def _navigate_diff_files(scenario_state, monkeypatch, tmp_path):
+    async def navigate(app, pilot):
+        assert "new renderer" in _screen_text(app)
+        await pilot.press("k")
+        second = _screen_text(app)
+        await pilot.press("j")
+        first = _screen_text(app)
+        await pilot.click("#file-list", offset=(2, 2))
+        scenario_state["navigation_screens"] = (second, first, _screen_text(app))
+
+    _review_diff(scenario_state["diffs"], monkeypatch, tmp_path, (100, 20), navigate)
+
+
+@when("I press Right to read farther along the line and Left to return")
+def _scroll_wide_diff(scenario_state, monkeypatch, tmp_path):
+    async def scroll(app, pilot):
+        opening = _screen_text(app)
+        await pilot.press(*(["right"] * 12))
+        right = _screen_text(app)
+        await pilot.press(*(["left"] * 12))
+        scenario_state["scroll_screens"] = (opening, right, _screen_text(app))
+
+    _review_diff(scenario_state["diffs"], monkeypatch, tmp_path, (50, 20), scroll)
+
+
+@then(
+    "I see the second file's changes, the first file's changes, and the second file's changes again"
+)
+def _see_each_file_diff(scenario_state):
+    for screen, current, other in zip(
+        scenario_state["navigation_screens"],
+        ("new theme", "new renderer", "new theme"),
+        ("new renderer", "new theme", "new renderer"),
+        strict=True,
     ):
-        subprocess.run(command, cwd=repo_path, check=True, capture_output=True)
-
-    (repo_path / "README.md").write_text("# Changed on the feature branch\n")
-    for command in (
-        ["git", "commit", "-am", "Feature work"],
-        ["git", "push", "-u", "origin", "feature"],
-    ):
-        subprocess.run(command, cwd=repo_path, check=True, capture_output=True)
+        assert current in screen and other not in screen
 
 
-@given("the repository has modified files under a subdirectory")
-def _repo_has_modified_files_under_subdirectory(
-    scenario_state: dict[str, Any],
-) -> None:
-    repo_path = scenario_state["repo_path"]
-    nested_dir = repo_path / "pkg" / "module"
-    nested_dir.mkdir(parents=True)
-    changed_file = nested_dir / "command.py"
-    changed_file.write_text("base\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo_path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Add nested command"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
+@then("I see the end of the changed line before returning to its beginning")
+def _see_wide_line_end(scenario_state):
+    opening, right, left = scenario_state["scroll_screens"]
+    assert "BEGIN" in opening and "END" not in opening
+    assert "END" in right and "BEGIN" not in right
+    assert "BEGIN" in left and "END" not in left
+
+
+def _review_diff(diffs, monkeypatch, tmp_path, size, interact):
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    monkeypatch.setattr(
+        branchdiff_module.GitHelper, "get_file_diff", lambda self, file, *_: diffs[file]
     )
-    subprocess.run(
-        ["git", "checkout", "-b", "feature"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-    )
-    changed_file.write_text("base\nchanged\n", encoding="utf-8")
+    app = branchdiff_module.BranchDiffApp(list(diffs), tmp_path, "main")
 
-    scenario_state["branchdiff_subdir"] = nested_dir
-    scenario_state["branchdiff_expected_file"] = "pkg/module/command.py"
-    scenario_state["branchdiff_expected_diff"] = ("base\n", "base\nchanged\n")
-
-
-@given("there are committed changes, modified working-tree files, and untracked files")
-def _repo_has_committed_modified_and_untracked_changes(
-    scenario_state: dict[str, Any],
-) -> None:
-    """Create committed, modified, and untracked changes."""
-    repo_path = scenario_state["repo_path"]
-
-    # Make sure the feature branch has a main to be compared against
-    try:
-        subprocess.run(
-            ["git", "checkout", "main"],
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-        )
-    except subprocess.CalledProcessError:
-        subprocess.run(
-            ["git", "branch", "-M", "main"],
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-        )
-
-    _create_branch_with_changes(
-        repo_path,
-        "feature",
-        "# Modified content\n",
-    )
-    subprocess.run(
-        ["git", "checkout", "feature"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-    )
-
-    (repo_path / "file.txt").write_text("Working tree content\n")
-    (repo_path / "new_file.txt").write_text("Untracked content\n")
-
-
-@given("the repository has no changes compared to the default branch")
-def _repo_has_no_changes(
-    scenario_state: dict[str, Any],
-) -> None:
-    """Set up a repository with no changes compared to the default branch."""
-    repo_path = scenario_state["repo_path"]
-
-    # Staying on the default branch means there is nothing to compare
-    try:
-        subprocess.run(
-            ["git", "checkout", "main"],
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-        )
-    except subprocess.CalledProcessError:
-        subprocess.run(
-            ["git", "branch", "-M", "main"],
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-        )
-
-
-@when('the user runs "workdash branchdiff"')
-def _user_runs_branchdiff(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Run the branchdiff CLI without entering the interactive TUI."""
-    _run_branchdiff_command(scenario_state, [], monkeypatch)
-
-
-@when('the user runs "workdash branchdiff main"')
-def _user_runs_branchdiff_with_target(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Run the branchdiff CLI with a target branch."""
-    _run_branchdiff_command(scenario_state, ["main"], monkeypatch)
-
-
-@when('the user runs "workdash branchdiff" from that subdirectory')
-def _user_runs_branchdiff_from_subdirectory(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.chdir(scenario_state["branchdiff_subdir"])
-    _run_branchdiff_command(scenario_state, [], monkeypatch)
-
-
-@then("the file list shows all changed files")
-def _file_list_shows_all_changed_files(
-    scenario_state: dict[str, Any],
-) -> None:
-    """Verify that changed files are detected and stored."""
-    repo_path = scenario_state.get("repo_path")
-    assert repo_path is not None, "repo_path not set in scenario_state"
-
-    # Get the base branch
-    try:
-        base_branch = git.get_base_branch(repo_path)
-    except ValueError:
-        base_branch = "main"
-
-    # Get changed files
-    files = git.get_changed_files(base_branch, repo_path)
-
-    # Verify we got some files
-    assert len(files) > 0, "Expected to find changed files"
-
-    # Store for other steps to use
-    scenario_state["changed_files"] = files
-
-
-@then("the diff viewer displays changes for the first file")
-def _diff_viewer_displays_changes_for_first_file(
-    scenario_state: dict[str, Any],
-) -> None:
-    """Verify the diff viewer can display the first changed file."""
-    repo_path = scenario_state.get("repo_path")
-    assert repo_path is not None, "repo_path not set in scenario_state"
-
-    # Get the base branch
-    try:
-        base_branch = git.get_base_branch(repo_path)
-    except ValueError:
-        base_branch = "main"
-
-    # Get changed files
-    files = git.get_changed_files(base_branch, repo_path)
-    assert len(files) > 0, "Expected to find changed files"
-
-    # Get diff for the first file
-    first_file = files[0]
-    old_content, new_content = git.get_file_diff(first_file, base_branch, repo_path)
-
-    # Verify we got actual content (at least one side has content)
-    assert old_content != "" or new_content != "", (
-        f"Expected diff content for {first_file}, got empty on both sides"
-    )
-
-    # Store for other steps to use
-    scenario_state["changed_files"] = files
-    scenario_state["first_file"] = first_file
-    scenario_state["first_file_diff"] = (old_content, new_content)
-
-
-@then("the diff viewer compares against the modified working-tree content")
-def _diff_viewer_compares_against_modified_working_tree_content(
-    scenario_state: dict[str, Any],
-) -> None:
-    repo_path = scenario_state["repo_path"]
-    expected_file = scenario_state["branchdiff_expected_file"]
-
-    assert scenario_state["branchdiff_app_opened"] is True
-    assert scenario_state["branchdiff_app_repo_path"] == repo_path
-    assert scenario_state["branchdiff_app_files"] == [expected_file]
-    assert scenario_state["branchdiff_app_base_branch"] == "main"
-    assert (
-        git.get_file_diff(expected_file, "main", repo_path)
-        == scenario_state["branchdiff_expected_diff"]
-    )
-
-
-@then("the diff viewer displays a meaningful side-by-side diff")
-def _diff_viewer_displays_meaningful_diff(
-    scenario_state: dict[str, Any],
-) -> None:
-    """Verify the diff shows actual differences between old and new content."""
-    repo_path = scenario_state.get("repo_path")
-    files = scenario_state.get("changed_files", [])
-
-    # If we don't have changed files yet, detect them
-    if not files:
-        try:
-            base_branch = git.get_base_branch(repo_path) if repo_path else "main"
-        except ValueError:
-            base_branch = "main"
-        files = git.get_changed_files(base_branch, repo_path) if repo_path else []
-
-    assert repo_path is not None, "repo_path not set in scenario_state"
-    assert len(files) > 0, "No changed files found"
-
-    # Get the base branch
-    try:
-        base_branch = git.get_base_branch(repo_path)
-    except ValueError:
-        base_branch = "main"
-
-    # Find a file with actual changes
-    for filepath in files:
-        old, new = git.get_file_diff(filepath, base_branch, repo_path)
-        if old != new:
-            # Verify we can actually get diff content
-            assert isinstance(old, str), "Old content should be a string"
-            assert isinstance(new, str), "New content should be a string"
-            return
-    # If no files have changes, that's fine - test setup may not have differences
-
-
-@given("the diff viewer is open with multiple changed files")
-def _diff_viewer_open_with_multiple_files(
-    scenario_state: dict[str, Any],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Set up a repository with multiple changed files."""
-    repo_path = _create_git_repo(tmp_path)
-
-    # Set up baseline files for multi-file diff testing
-    (repo_path / "file1.txt").write_text("Content 1\n")
-    (repo_path / "file2.txt").write_text("Content 2\n")
-    (repo_path / "file3.txt").write_text("Content 3\n")
-    subprocess.run(["git", "add", "."], cwd=repo_path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Add multiple files"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-    )
-
-    _create_branch_with_changes(
-        repo_path,
-        "feature",
-        "# Modified\n",
-    )
-    subprocess.run(
-        ["git", "checkout", "feature"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-    )
-
-    # Apply changes to all baseline files to test multi-file diff
-    (repo_path / "file1.txt").write_text("Modified content 1\n")
-    (repo_path / "file2.txt").write_text("Modified content 2\n")
-    (repo_path / "file3.txt").write_text("Modified content 3\n")
-    subprocess.run(["git", "add", "."], cwd=repo_path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Modify all files"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-    )
-
-    scenario_state["repo_path"] = repo_path
-    monkeypatch.chdir(repo_path)
-
-
-@given("the diff viewer is open with wide changed lines")
-def _diff_viewer_open_with_wide_changed_lines(
-    scenario_state: dict[str, Any],
-    tmp_path: Path,
-) -> None:
-    scenario_state["repo_path"] = tmp_path
-    scenario_state["changed_files"] = ["wide.py"]
-    scenario_state["file_diff_contents"] = {
-        "wide.py": (
-            "old = 'short'\n",
-            f"new = '{'x' * 200}'\n",
-        ),
-    }
-
-
-@given("the diff viewer is open with long changed file names")
-def _diff_viewer_open_with_long_file_names(
-    scenario_state: dict[str, Any],
-    tmp_path: Path,
-) -> None:
-    long_files = [
-        "src/workdash/very/long/path/that/needs/horizontal/scroll/a.py",
-        "src/workdash/very/long/path/that/needs/horizontal/scroll/b.py",
-    ]
-    scenario_state["repo_path"] = tmp_path
-    scenario_state["changed_files"] = long_files
-    scenario_state["file_diff_contents"] = {
-        long_files[0]: ("old a\n", "new a\n"),
-        long_files[1]: ("old b\n", "new b\n"),
-    }
-
-
-@when("the user scrolls the file list horizontally")
-def _user_scrolls_file_list_horizontally(scenario_state: dict[str, Any]) -> None:
-    scenario_state["file_list_scroll_x"] = 12
-
-
-@when("the user clicks the next file")
-def _user_clicks_next_file(scenario_state: dict[str, Any]) -> None:
-    scenario_state["next_file_index"] = 1
-
-
-@when("the user navigates to the next file")
-def _user_navigates_to_next_file(
-    scenario_state: dict[str, Any],
-) -> None:
-    """Verify the data model supports navigation by checking multiple files exist."""
-    repo_path = scenario_state.get("repo_path")
-    files = scenario_state.get("changed_files", [])
-
-    assert repo_path is not None, "repo_path not set in scenario_state"
-
-    # Get the base branch
-    try:
-        base_branch = git.get_base_branch(repo_path)
-    except ValueError:
-        base_branch = "main"
-
-    # If we don't have changed files yet, get them
-    if not files:
-        files = git.get_changed_files(base_branch, repo_path)
-        scenario_state["changed_files"] = files
-
-    assert len(files) >= 2, "Need at least 2 files to test navigation"
-
-    # Store the next file index for verification
-    scenario_state["next_file_index"] = 1
-
-
-@then("the diff viewer displays that file's changes")
-def _diff_viewer_displays_file_changes(
-    scenario_state: dict[str, Any],
-) -> None:
-    """Verify different files have different diffs."""
-    repo_path = scenario_state.get("repo_path")
-    files = scenario_state.get("changed_files", [])
-
-    assert repo_path is not None, "repo_path not set in scenario_state"
-    assert len(files) >= 2, "Need at least 2 files to test pane update"
-
-    # Get the base branch
-    try:
-        base_branch = git.get_base_branch(repo_path)
-    except ValueError:
-        base_branch = "main"
-
-    # Get diffs for first two files
-    old_content_1, new_content_1 = git.get_file_diff(files[0], base_branch, repo_path)
-    old_content_2, new_content_2 = git.get_file_diff(files[1], base_branch, repo_path)
-
-    # Verify that the diffs are different (different files have different content)
-    # This proves the pane would update when switching files
-    assert (
-        old_content_1,
-        new_content_1,
-    ) != (
-        old_content_2,
-        new_content_2,
-    ), "Expected different diffs for different files"
-
-
-@when("the user scrolls the diff right")
-def _user_scrolls_diff_right(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    repo_path = scenario_state["repo_path"]
-    files = scenario_state["changed_files"]
-    contents = scenario_state["file_diff_contents"]
-
-    def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
-        return contents[filepath]
-
-    monkeypatch.setattr(GitHelper, "get_file_diff", lambda self, *args: get_file_diff(*args))
-    app = branchdiff_module.BranchDiffApp(files, repo_path, "main")
-
-    async def run_smoke() -> None:
-        async with app.run_test(size=(50, 20)) as pilot:
+    async def run():
+        async with app.run_test(size=size) as pilot:
             await pilot.pause()
-            diff_view = app.screen.query_one("#diff-view", branchdiff_module.DiffView)
-            scroll_container = diff_view.query("DiffScrollContainer").first()
-            scenario_state["diff_scroll_before_right"] = scroll_container.scroll_x
-            await pilot.press("right")
-            scenario_state["diff_scroll_after_right"] = scroll_container.scroll_x
+            await interact(app, pilot)
 
-    asyncio.run(run_smoke())
+    asyncio.run(run())
 
 
-@when("the user scrolls the diff left")
-def _user_scrolls_diff_left(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    repo_path = scenario_state["repo_path"]
-    files = scenario_state["changed_files"]
-    contents = scenario_state["file_diff_contents"]
-
-    def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
-        return contents[filepath]
-
-    monkeypatch.setattr(GitHelper, "get_file_diff", lambda self, *args: get_file_diff(*args))
-    app = branchdiff_module.BranchDiffApp(files, repo_path, "main")
-
-    async def run_smoke() -> None:
-        async with app.run_test(size=(50, 20)) as pilot:
-            await pilot.pause()
-            diff_view = app.screen.query_one("#diff-view", branchdiff_module.DiffView)
-            scroll_container = diff_view.query("DiffScrollContainer").first()
-            await pilot.press("right")
-            scenario_state["diff_scroll_before_left"] = scroll_container.scroll_x
-            await pilot.press("left")
-            scenario_state["diff_scroll_after_left"] = scroll_container.scroll_x
-
-    asyncio.run(run_smoke())
-
-
-@then("the diff view moves right")
-def _diff_view_moves_right(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["diff_scroll_before_right"] == 0
-    assert scenario_state["diff_scroll_after_right"] > 0
-
-
-@then("the diff view moves left")
-def _diff_view_moves_left(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["diff_scroll_before_left"] > 0
-    assert scenario_state["diff_scroll_after_left"] == 0
-
-
-@then("the footer advertises the selected-text copy shortcut")
-def _footer_advertises_copy_shortcut() -> None:
-    bindings = branchdiff_module.BranchDiffScreen.BINDINGS
-
-    assert any(
-        getattr(binding, "key", None) == "ctrl+c"
-        and getattr(binding, "action", None) == "screen.copy_text"
-        and getattr(binding, "description", None) == "Copy selected text"
-        and getattr(binding, "show", None) is True
-        for binding in bindings
-    )
-
-
-@then("the footer groups the diff scroll arrow bindings")
-def _footer_groups_diff_scroll_arrow_bindings() -> None:
-    bindings_by_action = {
-        binding.action: binding
-        for binding in branchdiff_module.BranchDiffScreen.BINDINGS
-        if hasattr(binding, "action")
-    }
-    scroll_bindings = [
-        bindings_by_action["scroll_diff_up"],
-        bindings_by_action["scroll_diff_down"],
-        bindings_by_action["scroll_diff_left"],
-        bindings_by_action["scroll_diff_right"],
-    ]
-
-    assert [binding.key_display for binding in scroll_bindings] == ["↑", "↓", "←", "→"]
-    assert {binding.description for binding in scroll_bindings} == {"Scroll diff"}
-    assert {binding.group.description for binding in scroll_bindings} == {"Scroll diff"}
-    assert {binding.group.compact for binding in scroll_bindings} == {True}
-
-
-@then("the file list keeps its horizontal scroll position and displays the clicked file")
-def _file_list_keeps_horizontal_scroll_position_and_displays_clicked_file(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    repo_path = scenario_state["repo_path"]
-    files = scenario_state["changed_files"]
-    contents = scenario_state["file_diff_contents"]
-    expected_scroll_x = scenario_state["file_list_scroll_x"]
-
-    def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
-        return contents[filepath]
-
-    monkeypatch.setattr(GitHelper, "get_file_diff", lambda self, *args: get_file_diff(*args))
-    app = branchdiff_module.BranchDiffApp(files, repo_path, "main")
-
-    async def run_smoke() -> None:
-        async with app.run_test(size=(50, 20)) as pilot:
-            await pilot.pause()
-            table = app.screen.query_one("#file-list", branchdiff_module.DataTable)
-            table.scroll_x = expected_scroll_x
-            await pilot.pause()
-
-            previous_scroll_x = table.scroll_x
-            assert previous_scroll_x == expected_scroll_x
-
-            await pilot.click("#file-list", offset=(2, 2))
-            await pilot.pause()
-
-            assert table.cursor_row == scenario_state["next_file_index"]
-            assert table.scroll_x == previous_scroll_x
-            diff_view = app.screen.query_one("#diff-view", branchdiff_module.DiffView)
-            assert diff_view.code_modified == "new b\n"
-
-    asyncio.run(run_smoke())
-
-
-@then("the file list keeps its horizontal scroll position")
-def _file_list_keeps_horizontal_scroll_position(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    repo_path = scenario_state["repo_path"]
-    files = scenario_state["changed_files"]
-    contents = scenario_state["file_diff_contents"]
-    expected_scroll_x = scenario_state["file_list_scroll_x"]
-
-    def get_file_diff(filepath: str, base_branch: str, repo_path: Path) -> tuple[str, str]:
-        return contents[filepath]
-
-    monkeypatch.setattr(GitHelper, "get_file_diff", lambda self, *args: get_file_diff(*args))
-    app = branchdiff_module.BranchDiffApp(files, repo_path, "main")
-
-    async def run_smoke() -> None:
-        async with app.run_test(size=(50, 20)) as pilot:
-            await pilot.pause()
-            table = app.screen.query_one("#file-list", branchdiff_module.DataTable)
-            table.scroll_x = expected_scroll_x
-            await pilot.pause()
-
-            previous_scroll_x = table.scroll_x
-            assert previous_scroll_x == expected_scroll_x
-
-            await pilot.press("k")
-
-            assert table.cursor_row == scenario_state["next_file_index"]
-            assert table.scroll_x == previous_scroll_x
-
-    asyncio.run(run_smoke())
-
-
-@given("the current directory is not a git repository")
-def _current_dir_not_git_repo(
-    scenario_state: dict[str, Any],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Set up a non-git directory."""
-    non_git_dir = tmp_path / "non_git_dir"
-    non_git_dir.mkdir(parents=True, exist_ok=True)
-    scenario_state["repo_path"] = non_git_dir
-    monkeypatch.chdir(non_git_dir)
-
-
-@then("the command reports an error")
-@then("the command exits with an error")
-def _command_reports_error(
-    scenario_state: dict[str, Any],
-) -> None:
-    """Verify the command reports an error."""
-    result = scenario_state.get("branchdiff_result")
-    assert result is not None, "branchdiff command was not run"
-    assert result.returncode != 0 or "Error" in result.stderr or "Error" in result.stdout
-
-
-@then("the command reports no changes found")
-def _command_reports_no_changes_found(
-    scenario_state: dict[str, Any],
-) -> None:
-    """Verify the command reports no changes found."""
-    result = scenario_state.get("branchdiff_result")
-    assert result is not None, "branchdiff command was not run"
-    # Check for no changes message in output
-    output = result.stdout + result.stderr
-    assert "no changes" in output.lower() or "nothing to" in output.lower(), (
-        f"Expected 'no changes' message, got stdout: {result.stdout}, stderr: {result.stderr}"
-    )
-
-
-@then("exits with non-zero status")
-@then("the command exits with a non-zero status")
-def _exits_nonzero(
-    scenario_state: dict[str, Any],
-) -> None:
-    """Verify the command exits with non-zero status."""
-    exit_code = scenario_state.get("exit_code")
-    assert exit_code is not None, "exit_code not set in scenario_state"
-    assert exit_code != 0, f"Expected non-zero exit code, got {exit_code}"
-
-
-@then("exits with zero status")
-def _exits_with_zero_status(
-    scenario_state: dict[str, Any],
-) -> None:
-    """Verify the command exits with zero status."""
-    exit_code = scenario_state.get("exit_code")
-    assert exit_code is not None, "exit_code not set in scenario_state"
-    assert exit_code == 0, f"Expected zero exit code, got {exit_code}"
-
-
-@given("the diff viewer runs inside a zellij pane that is not fullscreen")
-def _diff_viewer_runs_in_tiled_zellij_pane(scenario_state: dict[str, Any]) -> None:
-    scenario_state["zellij_pane"] = "tiled"
-
-
-@given("the diff viewer runs inside a fullscreen zellij pane")
-def _diff_viewer_runs_in_fullscreen_zellij_pane(scenario_state: dict[str, Any]) -> None:
-    scenario_state["zellij_pane"] = "fullscreen"
-
-
-@given("the diff viewer does not run inside a zellij pane")
-def _diff_viewer_runs_outside_zellij(scenario_state: dict[str, Any]) -> None:
-    scenario_state["zellij_pane"] = "outside"
-
-
-@given("the diff viewer runs inside a zellij pane that the user un-fullscreens while it is open")
-def _diff_viewer_runs_in_zellij_pane_the_user_unfullscreens(
-    scenario_state: dict[str, Any],
-) -> None:
-    scenario_state["zellij_pane"] = "tiled"
-    scenario_state["zellij_pane_user_unfullscreens"] = True
-
-
-@when('the user runs "workdash branchdiff" and quits the diff viewer')
-def _user_runs_and_quits_branchdiff(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Run the branchdiff CLI through the whole lifetime of the diff viewer."""
-    _run_branchdiff_command(scenario_state, [], monkeypatch)
-
-
-@then("the zellij pane became fullscreen while the diff viewer was open")
-def _zellij_pane_became_fullscreen(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["branchdiff_pane_fullscreen_while_open"] is True
-    assert _zellij_fullscreen_toggles(scenario_state) >= 1
-
-
-@then("the zellij pane is restored to its original size after quitting")
-def _zellij_pane_restored_after_quitting(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["branchdiff_pane_fullscreen_after_quit"] is False
-    assert _zellij_fullscreen_toggles(scenario_state) == 2
-
-
-@then("the diff viewer does not change the zellij pane size")
-def _diff_viewer_leaves_zellij_pane_size_alone(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["branchdiff_pane_fullscreen_while_open"] is True
-    assert _zellij_fullscreen_toggles(scenario_state) == 0
-
-
-@then("the zellij pane is still fullscreen")
-def _zellij_pane_still_fullscreen(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["branchdiff_pane_fullscreen_after_quit"] is True
-
-
-@then("the diff viewer leaves the zellij pane tiled")
-def _diff_viewer_leaves_zellij_pane_tiled(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["branchdiff_pane_fullscreen_after_quit"] is False
-    assert _zellij_fullscreen_toggles(scenario_state) == 1
-
-
-@then("the diff viewer does not change any zellij pane size")
-def _diff_viewer_changes_no_zellij_pane_size(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["branchdiff_zellij_commands"] == []
-
-
-def _zellij_fullscreen_toggles(scenario_state: dict[str, Any]) -> int:
-    commands = scenario_state["branchdiff_zellij_commands"]
-    return len([command for command in commands if "toggle-fullscreen" in command])
+def _screen_text(app):
+    return "\n".join(strip.text for strip in app.screen._compositor.render_strips())
 
 
 @given("a git repository with a known upstream branch")
@@ -1023,72 +430,6 @@ def scenario_state() -> dict[str, Any]:
 # -- Git repository helpers -------------------------------------------------
 
 
-def _run_branchdiff_command(
-    scenario_state: dict[str, Any],
-    args: list[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Run the CLI path while replacing the blocking Textual run loop."""
-    import workdash.launcher as launcher_module
-
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-    zellij_binary = "/usr/bin/zellij"
-    pane = {"is_fullscreen": scenario_state.get("zellij_pane") == "fullscreen"}
-    zellij_commands: list[list[str]] = []
-    real_subprocess_run = subprocess.run
-
-    def fake_which(name: str) -> str | None:
-        return zellij_binary if name == "zellij" else None
-
-    def fake_run(*call_args, **call_kwargs):
-        command = call_args[0]
-        if command[0] != zellij_binary:
-            return real_subprocess_run(*call_args, **call_kwargs)
-        zellij_commands.append(list(command))
-        if "list-panes" in command:
-            panes = [{"id": 3, "is_plugin": False, "is_fullscreen": pane["is_fullscreen"]}]
-            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(panes), stderr="")
-        pane["is_fullscreen"] = not pane["is_fullscreen"]
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    def fake_run_app(self) -> None:
-        scenario_state["branchdiff_app_opened"] = True
-        scenario_state["branchdiff_app_files"] = self._files
-        scenario_state["branchdiff_app_repo_path"] = self._repo_path
-        scenario_state["branchdiff_app_base_branch"] = self._base_branch
-        if scenario_state.get("zellij_pane_user_unfullscreens"):
-            pane["is_fullscreen"] = False
-        scenario_state["branchdiff_pane_fullscreen_while_open"] = pane["is_fullscreen"]
-
-    if scenario_state.get("zellij_pane") in {"tiled", "fullscreen"}:
-        monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
-        monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
-    else:
-        monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
-        monkeypatch.delenv("ZELLIJ_PANE_ID", raising=False)
-
-    monkeypatch.setattr(launcher_module.shutil, "which", fake_which)
-    monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
-    monkeypatch.setattr(branchdiff_module.BranchDiffApp, "run", fake_run_app)
-    with redirect_stdout(stdout), redirect_stderr(stderr):
-        exit_code = workdash_main(["branchdiff", *args])
-
-    scenario_state["branchdiff_zellij_commands"] = zellij_commands
-    scenario_state["branchdiff_pane_fullscreen_after_quit"] = pane["is_fullscreen"]
-    command = ["workdash", "branchdiff", *args]
-    result = subprocess.CompletedProcess(
-        args=command,
-        returncode=exit_code,
-        stdout=stdout.getvalue(),
-        stderr=stderr.getvalue(),
-    )
-    scenario_state["branchdiff_result"] = result
-    scenario_state["exit_code"] = result.returncode
-    scenario_state["stdout"] = result.stdout
-    scenario_state["stderr"] = result.stderr
-
-
 def _create_git_repo(tmp_path: Path, initial_commit: bool = True) -> Path:
     """Create a git repository at the given path."""
     repo_path = tmp_path / "test_repo"
@@ -1121,27 +462,3 @@ def _create_git_repo(tmp_path: Path, initial_commit: bool = True) -> Path:
         )
 
     return repo_path
-
-
-def _create_branch_with_changes(repo_path: Path, branch_name: str, file_content: str) -> None:
-    """Create a new branch with changes and push to upstream."""
-    # Create feature branch for testing diff scenarios
-    subprocess.run(
-        ["git", "checkout", "-b", branch_name],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-    )
-
-    # Commit modified content to establish branch history
-    (repo_path / "README.md").write_text(file_content)
-    subprocess.run(["git", "add", "README.md"], cwd=repo_path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", f"Changes in {branch_name}"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-    )
-
-    # Return to main branch to set up comparison baseline
-    subprocess.run(["git", "checkout", "main"], cwd=repo_path, check=True, capture_output=True)

@@ -11,6 +11,7 @@ import pytest
 from workdash import branchinfo
 from workdash.github_client import GitHubClient
 from workdash.models import ci_status_symbol
+from workdash.workdash import main as workdash_main
 
 
 def test_ci_status_symbol_gives_independent_ci_and_review_symbols() -> None:
@@ -109,8 +110,10 @@ def test_fetch_pull_request_raises_on_a_genuine_gh_failure(
         GitHubClient().branch_pull_request("owner/repo", "feature")
 
 
+@pytest.mark.parametrize("review_requests", [None, 1])
 def test_fetch_ci_and_closing_issues_combines_both_selections_in_one_gh_call(
     monkeypatch: pytest.MonkeyPatch,
+    review_requests: int | None,
 ) -> None:
     calls: list[list[str]] = []
 
@@ -131,6 +134,10 @@ def test_fetch_ci_and_closing_issues_combines_both_selections_in_one_gh_call(
                 }
             }
         }
+        if review_requests is not None:
+            payload["data"]["repository"]["pullRequest"]["reviewRequests"] = {
+                "totalCount": review_requests
+            }
         return subprocess.CompletedProcess(
             command, returncode=0, stdout=json.dumps(payload), stderr=""
         )
@@ -144,7 +151,7 @@ def test_fetch_ci_and_closing_issues_combines_both_selections_in_one_gh_call(
     assert len(calls) == 1
     assert ci_state == "SUCCESS"
     assert review_decision == "APPROVED"
-    assert review_requested is False
+    assert review_requested is bool(review_requests)
     assert closing_issues == [("owner/repo", 3)]
 
 
@@ -211,19 +218,6 @@ def test_fetch_ci_and_closing_issues_guards_against_malformed_closing_issues_ref
         GitHubClient().branch_ci_and_closing_issues("owner/repo", 5)
 
 
-def test_linked_issues_keeps_every_same_repo_issue_lowest_number_first() -> None:
-    closing_issues = [("owner/other", 1), ("owner/repo", 9), ("owner/repo", 4)]
-
-    assert branchinfo._linked_issues("owner/repo", closing_issues) == [
-        ("owner/repo", 4),
-        ("owner/repo", 9),
-    ]
-
-
-def test_linked_issues_is_empty_without_a_same_repo_closing_issue() -> None:
-    assert branchinfo._linked_issues("owner/repo", [("owner/other", 1)]) == []
-
-
 def test_fetch_issue_reads_title_url_and_state(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         assert command == [
@@ -252,3 +246,114 @@ def test_fetch_issue_reads_title_url_and_state(monkeypatch: pytest.MonkeyPatch) 
     assert issue.title == "Bug"
     assert issue.url == "https://github.com/owner/repo/issues/4"
     assert issue.state == "CLOSED"
+
+
+def test_branchinfo_rejects_non_git_directory(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+
+    assert workdash_main(["branchinfo"]) != 0
+    assert capsys.readouterr().err == "Error: Not a git repository.\n"
+
+
+def test_branchinfo_reports_unknown_pr_and_issue_on_ordinary_branch(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init", "-q", "-b", "main"], check=True)
+    subprocess.run(["git", "config", "user.email", "dev@example.com"], check=True)
+    subprocess.run(["git", "config", "user.name", "Dev"], check=True)
+    subprocess.run(["git", "commit", "-qm", "Initial commit", "--allow-empty"], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/repo.git"], check=True
+    )
+
+    real_run = subprocess.run
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[0] != "gh":
+            return real_run(command, **kwargs)
+        assert command[:6] == ["gh", "pr", "view", "main", "--repo", "owner/repo"]
+        raise subprocess.CalledProcessError(
+            1, command, stderr='no pull requests found for branch "main"'
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert workdash_main(["branchinfo"]) == 0
+    assert capsys.readouterr() == ("PR: unknown\nISSUE: unknown\n", "")
+
+
+@pytest.mark.parametrize(
+    ("closing_issues", "expected_issues"),
+    [
+        ([("owner/other", 9)], ["ISSUE: unknown"]),
+        (
+            [("owner/repo", 42), ("owner/other", 9), ("owner/repo", 7)],
+            [
+                "ISSUE: Fix theme https://github.com/owner/repo/issues/7 [CLOSED]",
+                "ISSUE: Fix renderer https://github.com/owner/repo/issues/42",
+            ],
+        ),
+    ],
+    ids=["other-repository-only", "mixed-repositories"],
+)
+def test_branchinfo_reports_pending_review_and_same_repo_issues(
+    tmp_path, monkeypatch, capsys, closing_issues, expected_issues
+) -> None:
+    monkeypatch.setattr(branchinfo.GitHelper, "get_repo_root", lambda self: tmp_path)
+    monkeypatch.setattr(branchinfo.GitHelper, "get_current_branch", lambda self, repo: "feature")
+    monkeypatch.setattr(
+        branchinfo.GitHelper,
+        "remote_url",
+        lambda self, path, remote: "https://github.com/owner/repo",
+    )
+    issues = {
+        "42": {
+            "title": "Fix renderer",
+            "url": "https://github.com/owner/repo/issues/42",
+            "state": "OPEN",
+        },
+        "7": {
+            "title": "Fix theme",
+            "url": "https://github.com/owner/repo/issues/7",
+            "state": "CLOSED",
+        },
+    }
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[:4] == ["gh", "pr", "view", "feature"]:
+            payload = {
+                "number": 5,
+                "title": "Implement renderer",
+                "url": "https://github.com/owner/repo/pull/5",
+                "state": "OPEN",
+            }
+        elif command[:3] == ["gh", "api", "graphql"]:
+            pull_request = {
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]},
+                "reviewDecision": None,
+                "reviewRequests": {"totalCount": 1},
+                "closingIssuesReferences": {
+                    "nodes": [
+                        {"number": number, "repository": {"nameWithOwner": repo}}
+                        for repo, number in closing_issues
+                    ]
+                },
+            }
+            payload = {"data": {"repository": {"pullRequest": pull_request}}}
+        elif command[:3] == ["gh", "issue", "view"]:
+            assert command[4:6] == ["--repo", "owner/repo"]
+            payload = issues[command[3]]
+        else:
+            pytest.fail(f"Unexpected command: {command}")
+        return subprocess.CompletedProcess(
+            command, returncode=0, stdout=json.dumps(payload), stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert workdash_main(["branchinfo"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "PR: Implement renderer https://github.com/owner/repo/pull/5 ✓?",
+        *expected_issues,
+    ]
