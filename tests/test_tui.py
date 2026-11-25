@@ -3860,39 +3860,6 @@ def test_view_menu_offers_view_and_open_for_the_selected_item() -> None:
     asyncio.run(run_smoke())
 
 
-def test_view_menu_reports_a_failing_viewer() -> None:
-    def failing_view_callback(_: WorkItem) -> None:
-        raise RuntimeError("zellij pane failed")
-
-    app = WorkdashApp(
-        work_items=[
-            WorkItem(
-                kind=WorkItemKind.TRACKED_ISSUE,
-                item_type=WorkItemType.ISSUE,
-                repo="owner/repo",
-                number=11,
-                title="Fix parser",
-                created_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
-                updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
-                url="https://example.com/issues/11",
-            )
-        ],
-        view_callback=failing_view_callback,
-        now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
-    )
-
-    async def run_smoke() -> None:
-        async with app.run_test() as pilot:
-            footer = app.query_one("#status-footer", Static)
-            await pilot.press("v")
-            await pilot.press("v")
-            await _wait_for_footer(footer, "View failed: zellij pane failed", pilot)
-            _assert_no_modal_screens(app)
-            await pilot.press("q")
-
-    asyncio.run(run_smoke())
-
-
 def test_progress_arrows_reach_empty_sessions_on_short_screen():
     session = MagicMock()
     session.config = _DEFAULT_TUI_CONFIG

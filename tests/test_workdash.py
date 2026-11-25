@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import errno
 import json
@@ -15,11 +16,14 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from textual.widgets import Static
 
+import workdash.backend as backend_module
 import workdash.config as config_module
 import workdash.control as control_module
 import workdash.github_client as github_client_module
 import workdash.workdash as workdash_module
+from view_fake import ISSUE_URL, fake_gh_view_run
 from workdash.backend import compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig, load_config, save_config
 from workdash.control import probe_dashboard_session
@@ -478,6 +482,140 @@ def test_main_passes_configured_agent_choices_and_separate_viewers_to_tui(
             ],
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("key", "browser_needs_pane", "failure", "status"),
+    [
+        pytest.param("v", False, None, "Opened viewer for issue owner/repo#12.", id="document"),
+        pytest.param("o", False, None, "Opened issue owner/repo#12.", id="direct-browser"),
+        pytest.param("o", True, None, "Opened issue owner/repo#12.", id="terminal-browser"),
+        pytest.param("v", False, "zellij exploded", "View failed:", id="document-error"),
+        pytest.param("o", False, "cannot open display", "Open failed:", id="browser-error"),
+        pytest.param("o", False, "timeout", "Open failed:", id="browser-timeout"),
+    ],
+)
+def test_main_view_menu_reaches_the_launcher(
+    key, browser_needs_pane, failure, status, monkeypatch, tmp_path
+):
+    browser = 'term-copy --label "two words"'
+    url = f"{ISSUE_URL}?a=one&b=two"
+    needs_pane = key == "v" or browser_needs_pane
+    tools = {"gh": "/usr/bin/gh", "workdash": "/usr/bin/workdash"}
+    if needs_pane:
+        tools["zellij"] = "/usr/bin/zellij"
+    monkeypatch.setattr(github_client_module.shutil, "which", tools.get)
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-selected")
+    monkeypatch.setattr(backend_module, "_DEFAULT_INCLUDED_STORE_PATH", tmp_path / "included.json")
+    config = replace(_VALID_CONFIG, open_command=browser, open_needs_pane=browser_needs_pane)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
+
+    selected_issue = {
+        "__typename": "Issue",
+        "id": "ISSUE-12",
+        "number": 12,
+        "title": "Crash on startup",
+        "url": url,
+        "createdAt": "2026-02-20T00:00:00Z",
+        "updatedAt": "2026-02-25T10:00:00Z",
+        "state": "OPEN",
+        "repository": {"nameWithOwner": "owner/repo"},
+        "subIssuesSummary": {"total": 0},
+    }
+    first_issue = {
+        **selected_issue,
+        "id": "ISSUE-11",
+        "number": 11,
+        "title": "Update the docs",
+        "url": "https://github.com/owner/repo/issues/11",
+        "updatedAt": "2026-02-26T10:00:00Z",
+    }
+    gh_run = fake_gh_view_run(
+        {
+            "auth status": {},
+            "search prs": [],
+            "api graphql -f query={ assigned:": {"data": {"assigned": {"nodes": []}}},
+            "api graphql -f query={ tracked:": {
+                "data": {"tracked": {"nodes": [first_issue, selected_issue]}}
+            },
+            "api graphql -f query={ repository(": {
+                "data": {"repository": {"issues": {"nodes": []}}}
+            },
+        }
+    )
+    launches = []
+
+    def run_subprocess(command, **kwargs):
+        if Path(command[0]).name == "gh":
+            return gh_run(command, **kwargs)
+        launches.append(command)
+        if not needs_pane:
+            assert kwargs["timeout"] == 4
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        if failure:
+            raise subprocess.CalledProcessError(1, command, output="", stderr=failure)
+        mark_pane_started(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    expected_status = status
+    if failure:
+        details = failure
+        if failure == "timeout":
+            details = (
+                "command did not finish within 4 seconds. "
+                "Opening a browser may not be supported from this session."
+            )
+        command_name = "workdash view" if key == "v" else browser
+        expected_status = f"{status} Failed to open URL via {command_name}: {details}"
+
+    def run_dashboard(app, *, mouse):
+        async def drive_menu():
+            async with app.run_test() as pilot:
+                dashboard = app.screen
+                footer = dashboard.query_one("#status-footer", Static)
+                await pilot.press("down", "v")
+                labels = [widget.render().plain for widget in app.screen.query(Static)]
+                assert "(v) view" in labels and "(o) open" in labels
+                await pilot.press("escape")
+                assert list(app.screen_stack) == [dashboard]
+                assert not launches
+                await pilot.press("v", key)
+                for _ in range(60):
+                    if footer.render().plain == expected_status:
+                        break
+                    await asyncio.sleep(0.05)
+                assert footer.render().plain == expected_status
+                assert list(app.screen_stack) == [dashboard]
+
+        asyncio.run(drive_menu())
+
+    monkeypatch.setattr(subprocess, "run", run_subprocess)
+    monkeypatch.setattr(workdash_module.WorkdashApp, "run", run_dashboard)
+    assert workdash_module.main([]) == 0
+
+    (launch,) = launches
+    browser_argv = ["term-copy", "--label", "two words", url]
+    if needs_pane:
+        pane_args, viewer_argv = pane_launch(launch)
+        assert pane_args == [
+            tools["zellij"],
+            "--session",
+            "workdash-selected",
+            "action",
+            "new-pane",
+            *"-f -x 0 -y 0 --width 100% --height 100%".split(),
+            "--name",
+            "sh" if key == "v" else "term-copy",
+            "--close-on-exit",
+        ]
+        if key == "v":
+            assert viewer_argv[-3:] == [tools["workdash"], "view", url]
+        else:
+            assert viewer_argv == browser_argv
+    else:
+        assert launch == browser_argv
 
 
 def test_main_tui_analyze_callback_uses_worktree_and_backend(

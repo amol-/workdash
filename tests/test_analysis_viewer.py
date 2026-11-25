@@ -339,27 +339,6 @@ def test_markdown_viewer_loads_plain_file_path(tmp_path, monkeypatch):
     assert "Local" in rendered[0] and "heading" in rendered[0] and "body" in rendered[0]
 
 
-def test_markdown_viewer_opens_relative_link_in_place(tmp_path, monkeypatch):
-    path = tmp_path / "analysis.md"
-    path.write_text("# Analysis\n\n[Source](linked.md)\n", encoding="utf-8")
-    (tmp_path / "linked.md").write_text("# Replacement", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    shown = []
-
-    async def exercise(pilot, app):
-        await pilot.click(Markdown, offset=(2, 4))
-        await _settle(pilot, lambda: "Replacement" in _viewer_source(app))
-        shown.append(_viewer_source(app))
-        assert "b" in app.screen.active_bindings
-        await pilot.press("b")
-        shown.append(_viewer_source(app))
-
-    _run_viewer(monkeypatch, exercise)
-    assert view.run_view(str(path)) == 0
-    assert "Replacement" in shown[0] and "Analysis" not in shown[0]
-    assert "Analysis" in shown[1] and "Replacement" not in shown[1]
-
-
 def test_analysis_viewer_navigates_to_issue_and_back_with_copy_available(tmp_path, monkeypatch):
     from html import unescape
 
@@ -398,6 +377,8 @@ def test_markdown_viewer_reports_a_link_it_cannot_load(tmp_path, monkeypatch):
     async def exercise(pilot, app):
         await pilot.click(Markdown, offset=(2, 4))
         await _settle(pilot, lambda: _viewer_status(app).startswith("Failed to read"))
+        assert app.is_running
+        assert _viewer_source(app).startswith("# Analysis\n")
         observed.append(_viewer_status(app))
         observed.append(_viewer_source(app))
         assert "b" not in app.screen.active_bindings
@@ -472,22 +453,30 @@ def test_external_link_honours_the_configured_pane_viewer(monkeypatch):
     assert statuses == ["Opened https://example.com with viewer"]
 
 
-def test_markdown_link_reports_immediate_command_failure(monkeypatch):
+@pytest.mark.parametrize("launch_fails", [False, True], ids=["nonzero-exit", "launch-error"])
+def test_markdown_link_reports_command_failure_and_keeps_document(monkeypatch, launch_fails):
     process = MagicMock()
     process.wait.return_value = 7
-    monkeypatch.setattr(launcher.subprocess, "Popen", MagicMock(return_value=process))
-    app = view._MarkdownApp(view.Document("# Document", "file:///document.md"), "viewer", False)
-    statuses = []
+    launch = MagicMock(return_value=process)
+    if launch_fails:
+        launch.side_effect = OSError("cannot open display")
+    monkeypatch.setattr(launcher.subprocess, "Popen", launch)
+    document = view.Document(
+        "# Analysis\n\n[Source](https://example.com/source)", "file:///document.md"
+    )
+    app = view._MarkdownApp(document, "xdg-open", False)
 
     async def follow(pilot):
-        app.follow("https://example.com")
-        statuses.append(_viewer_status(app))
+        await pilot.click(Markdown, offset=(2, 4))
+        reason = "cannot open display" if launch_fails else "exit code 7"
+        assert _viewer_status(app) == (
+            "Failed to open https://example.com/source: Failed to open URL via xdg-open: " + reason
+        )
+        assert _viewer_source(app) == document.content
+        assert app.is_running
 
     _drive_viewer(monkeypatch, app, follow)
-
-    assert statuses == [
-        "Failed to open https://example.com: Failed to open URL via viewer: exit code 7"
-    ]
+    assert launch.call_args.args == (["xdg-open", "https://example.com/source"],)
 
 
 def test_markdown_viewer_resolves_relative_links_against_the_document_url(monkeypatch):

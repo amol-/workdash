@@ -32,9 +32,6 @@ from .steps import (
     branchinfo as _branchinfo,
 )
 from .steps import (
-    browse as _browse,
-)
-from .steps import (
     cli_orchestration as _cli_orchestration,
 )
 from .steps import (
@@ -72,6 +69,8 @@ from .steps import (
 from .steps import (
     view as _view,
 )
+from .steps import view_menu as _view_menu
+from .steps import viewer_links as _viewer_links
 from .steps import (
     worktrees as _worktrees,
 )
@@ -90,7 +89,6 @@ for _step_module in (
     _startup,
     _analysis,
     _coding,
-    _browse,
     _terminal,
     _show_config,
     _todo,
@@ -100,6 +98,8 @@ for _step_module in (
     _site,
     _dispatch,
     _view,
+    _view_menu,
+    _viewer_links,
 ):
     for _name in dir(_step_module):
         if _name.startswith("pytestbdd_stepdef_") or _name in {

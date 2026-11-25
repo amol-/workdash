@@ -85,11 +85,17 @@ def test_open_in_browser_uses_configured_command(monkeypatch: pytest.MonkeyPatch
     assert captured["command"] == ["term-copy", "--quiet", "https://example.com/issues/11"]
 
 
-@pytest.mark.parametrize("session", [None, "workdash-selected"])
-def test_viewer_opens_full_size_floating_pane_in_current_or_selected_session(monkeypatch, session):
+@pytest.mark.parametrize(
+    ("session", "item_document"),
+    [(None, False), ("workdash-selected", False), (None, True)],
+    ids=["current-session", "selected-session", "built-in-viewer"],
+)
+def test_viewer_opens_full_size_floating_pane_in_current_or_selected_session(
+    monkeypatch, session, item_document
+):
     commands = []
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-current")
-    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/zellij")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
 
     def run(command, **kwargs):
         commands.append(command)
@@ -98,7 +104,22 @@ def test_viewer_opens_full_size_floating_pane_in_current_or_selected_session(mon
 
     monkeypatch.setattr(subprocess, "run", run)
     url = "https://example.com/?q=$(touch nope);&literal=two words"
-    open_in_browser(url, 'viewer --label "two words"', needs_pane=True, zellij_session=session)
+    if item_document:
+        launcher_module.open_item_document(url, zellij_session=session)
+        pane_name = "sh"
+        viewer_args = [
+            "/bin/sh",
+            "-c",
+            '"$@" || { printf "\\nPress Enter to close this pane.\\n"; read -r _; }',
+            "workdash-view",
+            "/usr/bin/workdash",
+            "view",
+            url,
+        ]
+    else:
+        open_in_browser(url, 'viewer --label "two words"', needs_pane=True, zellij_session=session)
+        pane_name = "viewer"
+        viewer_args = ["viewer", "--label", "two words", url]
     prefix = ["/usr/bin/zellij", "--session", session or "workdash-current", "action"]
     assert [pane_launch(command) for command in commands] == [
         (
@@ -115,10 +136,10 @@ def test_viewer_opens_full_size_floating_pane_in_current_or_selected_session(mon
                 "--height",
                 "100%",
                 "--name",
-                "viewer",
+                pane_name,
                 "--close-on-exit",
             ],
-            ["viewer", "--label", "two words", url],
+            viewer_args,
         ),
     ]
 
@@ -210,17 +231,24 @@ def test_viewer_rejects_zero_exit_for_missing_session(monkeypatch):
     assert run.call_count == 1
 
 
-def test_viewer_pane_errors_include_command_and_details(monkeypatch):
-    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/zellij")
+@pytest.mark.parametrize("item_document", [False, True], ids=["external", "built-in"])
+def test_viewer_pane_errors_include_command_and_details(monkeypatch, item_document):
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
 
     def run(command, **kwargs):
-        raise subprocess.CalledProcessError(1, command, stderr="session operation failed")
+        raise subprocess.CalledProcessError(1, command, stderr="zellij exploded")
 
     monkeypatch.setattr(subprocess, "run", run)
-    with pytest.raises(RuntimeError, match="viewer --quiet.*session operation failed"):
-        open_in_browser(
-            "https://example.com", "viewer --quiet", needs_pane=True, zellij_session="workdash-live"
-        )
+    command = "workdash view" if item_document else "viewer --quiet"
+    with pytest.raises(RuntimeError, match=f"Failed to open URL via {command}: zellij exploded"):
+        if item_document:
+            launcher_module.open_item_document(
+                "https://example.com", zellij_session="workdash-live"
+            )
+        else:
+            open_in_browser(
+                "https://example.com", command, needs_pane=True, zellij_session="workdash-live"
+            )
 
 
 def test_open_in_browser_uses_open_when_xdg_open_is_unavailable(
@@ -288,8 +316,12 @@ def test_open_in_browser_times_out_when_browser_command_hangs(
         shutil, "which", lambda name: f"/usr/bin/{name}" if name == "xdg-open" else None
     )
 
-    with pytest.raises(RuntimeError, match="Opening a browser may not be supported"):
+    with pytest.raises(RuntimeError) as error:
         open_in_browser("https://example.com/issues/11")
+    assert str(error.value) == (
+        "Failed to open URL via xdg-open: command did not finish within 4 seconds. "
+        "Opening a browser may not be supported from this session."
+    )
 
 
 def test_open_markdown_uses_open_when_xdg_open_is_unavailable(

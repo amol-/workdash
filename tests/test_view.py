@@ -1,6 +1,7 @@
 import asyncio
 import http.client
 import json
+import os
 import subprocess
 import urllib.error
 import urllib.request
@@ -18,10 +19,18 @@ from gh_work_state_fake import (
     failure,
     todo_body,
 )
-from view_fake import fake_gh_view_run, issue, issue_routes, sub_issue
+from view_fake import (
+    ISSUE_URL,
+    fake_gh_view_run,
+    issue,
+    issue_routes,
+    pull_request_routes,
+    sub_issue,
+)
 from workdash import github_client, launcher, view
 from workdash.config import WorkdashConfig
 from workdash.control import WorkdashControlClient, WorkdashSession
+from workdash.git import GitHelper
 
 
 @pytest.fixture(autouse=True)
@@ -437,6 +446,35 @@ def test_view_nested_subissues_across_repositories(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("target", [ISSUE_URL, "owner/repo#12", "12", "#12"])
+def test_view_github_target_spellings_name_the_same_item(monkeypatch, target):
+    documents = _capture(monkeypatch)
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes()))
+    monkeypatch.setattr(GitHelper, "get_repo_root", lambda *args, **kwargs: "/repo")
+    monkeypatch.setattr(GitHelper, "remote_url", lambda *args: "git@github.com:owner/repo.git")
+
+    assert view.run_view(target) == 0
+    assert f"**Item:** [owner/repo#12]({ISSUE_URL})" in documents[0].content
+
+
+def test_issue_document_ends_with_generation_timestamp(monkeypatch):
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes()))
+
+    document = view.load_document(ISSUE_URL)
+
+    assert document.content.splitlines()[-1].startswith("*Generated from `gh` at ")
+    assert document.content.rstrip().endswith("UTC.*")
+
+
+def test_view_reports_a_failed_github_lookup(monkeypatch, capsys):
+    documents = _capture(monkeypatch)
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes(), fails=True))
+
+    assert view.run_view(ISSUE_URL) == 1
+    assert documents == []
+    assert "Failed to fetch GitHub data with gh: no such issue" in capsys.readouterr().err
+
+
 def test_view_reads_a_local_file_without_contacting_github(monkeypatch, tmp_path):
     documents = _capture(monkeypatch)
     commands = []
@@ -454,20 +492,24 @@ def test_view_reads_a_local_file_without_contacting_github(monkeypatch, tmp_path
 def test_view_reads_a_file_url(monkeypatch, tmp_path):
     documents = _capture(monkeypatch)
     path = tmp_path / "notes with spaces.md"
-    path.write_text("# Local notes", encoding="utf-8")
+    path.write_text("# Local notes\n\nlocal body\n", encoding="utf-8")
 
     assert view.run_view(path.as_uri()) == 0
 
-    assert documents[0].content == "# Local notes"
+    assert documents[0].content == "# Local notes\n\nlocal body\n"
     assert documents[0].source == path.resolve().as_uri()
 
 
 @pytest.mark.parametrize(
     ("target", "message"),
     [
-        ("missing.md", "Failed to read missing.md"),
+        ("a missing file.md", "Failed to read a missing file.md"),
         ("file://elsewhere/missing.md", "Unsupported file URL"),
-        ("ftp://example.test/document.md", "Unsupported target ftp://example.test/document.md"),
+        (
+            "ftp://example.test/doc.md",
+            "Unsupported target ftp://example.test/doc.md: expected a local path, a file URL, "
+            "an HTTP(S) URL, or a GitHub issue or pull request.",
+        ),
     ],
 )
 def test_view_reports_a_target_it_cannot_read(monkeypatch, capsys, tmp_path, target, message):
@@ -523,8 +565,6 @@ def _run_viewer(monkeypatch, exercise) -> None:
 
 
 def test_viewer_opens_a_github_item_link_without_launching_anything(monkeypatch):
-    from view_fake import ISSUE_URL
-
     monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes()))
     launched = []
     monkeypatch.setattr(launcher, "open_in_browser", lambda *args, **kwargs: launched.append(args))
@@ -551,6 +591,39 @@ def test_viewer_opens_a_github_item_link_without_launching_anything(monkeypatch)
     assert shown[1] == ""
     assert shown[2] is True
     assert launched == []
+
+
+@pytest.mark.parametrize("session", [None, "workdash-current"], ids=["standalone", "zellij"])
+def test_viewer_follows_a_pull_request_without_launching_or_replacing_a_process(
+    monkeypatch, session
+):
+    if session is not None:
+        monkeypatch.setenv("ZELLIJ_SESSION_NAME", session)
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(pull_request_routes()))
+    pane = MagicMock()
+    replace = MagicMock()
+    monkeypatch.setattr(launcher.zellij, "open_viewer", pane)
+    monkeypatch.setattr(os, "execvp", replace)
+    opener = MagicMock()
+    monkeypatch.setattr(launcher, "open_in_browser", opener)
+    app = view._MarkdownApp(view.Document("# Analysis", "file:///analysis.md"), "xdg-open", False)
+
+    async def exercise(pilot, app):
+        app.follow("https://github.com/owner/repo/pull/12")
+        async with asyncio.timeout(5):
+            while app.query_one("#status", Static).render().plain.startswith("Loading "):
+                await asyncio.sleep(0.03)
+        assert app.is_running
+        content = app.query_one(view._DocumentViewer).document.source
+        assert content.startswith("# Crash on startup\n")
+        assert "**Draft:** yes" in content
+
+    _run_viewer(monkeypatch, exercise)
+    app.run()
+
+    pane.assert_not_called()
+    replace.assert_not_called()
+    opener.assert_not_called()
 
 
 def test_project_cannot_confirm_parent_readiness_when_a_closed_childs_tree_is_unavailable(
