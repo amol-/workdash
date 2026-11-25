@@ -106,23 +106,6 @@ Feature: Local JSON control API
     Then the system reports that the Workdash server port is already in use
     And the second session exits with a non-zero status
 
-  @id:F-API-JSON-CONTROL-S004
-  Scenario: List API returns current dashboard items
-    Given a server-backed Workdash session has loaded dashboard items
-    When a client requests the list API without refresh
-    Then the API returns the current in-memory work items
-    And each item includes its Workdash item ID, API type, display type, kind, repository, number, title, URL, timestamps, and suggested status
-    And the API does not fetch GitHub before responding
-
-  @id:F-API-JSON-CONTROL-S005
-  Scenario: List API can refresh the shared dashboard state
-    Given a server-backed Workdash session is running
-    When a client requests the list API with refresh enabled
-    Then the server refreshes dashboard items from GitHub
-    And the API returns the refreshed work items
-    And the refreshed work items become the shared dashboard state
-    And the live TUI reflects the refreshed state when it can safely repaint
-
   @id:F-API-JSON-CONTROL-S006
   Scenario: Info API returns current pane state
     Given a server-backed Workdash session is running

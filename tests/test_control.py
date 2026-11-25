@@ -61,35 +61,105 @@ def _work_item(
     )
 
 
-def test_session_refresh_schedules_tui_repaint_through_callback() -> None:
-    initial_item = _work_item(number=1, title="Initial")
+def test_list_api_reads_cached_items_and_refreshes_shared_state(monkeypatch) -> None:
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:8765")
+    initial_item = replace(_work_item(number=1, title="Initial"), analysis="Cached analysis")
     refreshed_item = _work_item(number=2, title="Refreshed", item_type=WorkItemType.PR)
+    authored_pr = replace(
+        _work_item(number=3, title="Authored PR", item_type=WorkItemType.PR),
+        kind=WorkItemKind.AUTHORED_PR,
+    )
+    review_pr = replace(
+        _work_item(number=4, title="Requested review", item_type=WorkItemType.PR),
+        kind=WorkItemKind.REVIEW_REQUESTED_PR,
+    )
     marker = {(WorkItemType.PR, "owner/repo", 2): "*"}
+    backend = MagicMock()
+    backend.load_items.return_value = [refreshed_item], marker
     repainted_item_ids: list[list[str]] = []
-
-    class FakeBackend:
-        def load_items(self, progress_callback=None):
-            assert progress_callback is None
-            return [refreshed_item], marker
-
     session = WorkdashSession(
         config=WorkdashConfig(),
-        backend=FakeBackend(),  # type: ignore[arg-type]
-        work_items=[initial_item],
+        backend=backend,
+        work_items=[initial_item, authored_pr, review_pr],
         suggestion_markers={},
         zellij_session=None,
         items_changed_callback=lambda: repainted_item_ids.append(
             [format_work_item_id(item) for item in session.work_items]
         ),
     )
+    app = control_module._make_turbogears_app(session)
 
-    result = session.list_items(refresh=True)
+    def list_items(*, refresh: bool):
+        response = Request.blank(
+            "/api/v0/list",
+            method="POST",
+            content_type="application/json",
+            body=json.dumps({"refresh": refresh}).encode(),
+        ).get_response(app)
+        assert response.status_int == 200
+        return response.json["result"]["items"]
 
-    assert [item["id"] for item in result["items"]] == ["owner/repo#CHECK-2"]
-    assert [item["display_type"] for item in result["items"]] == ["CHECK"]
-    assert [format_work_item_id(item) for item in session.work_items] == ["owner/repo#CHECK-2"]
+    assert list_items(refresh=False) == [
+        {
+            "id": "owner/repo#REVIEW-4",
+            "type": "pr",
+            "display_type": "REVIEW",
+            "kind": "review_requested_pr",
+            "repo": "owner/repo",
+            "number": 4,
+            "title": "Requested review",
+            "url": "https://example.com/4",
+            "created_at": "2026-02-04T00:00:00+00:00",
+            "updated_at": "2026-02-04T00:00:00+00:00",
+            "suggested": False,
+            "analysis_available": False,
+            "analysis_url": None,
+        },
+        {
+            "id": "owner/repo#PR-3",
+            "type": "pr",
+            "display_type": "PR",
+            "kind": "authored_pr",
+            "repo": "owner/repo",
+            "number": 3,
+            "title": "Authored PR",
+            "url": "https://example.com/3",
+            "created_at": "2026-02-03T00:00:00+00:00",
+            "updated_at": "2026-02-03T00:00:00+00:00",
+            "suggested": False,
+            "analysis_available": False,
+            "analysis_url": None,
+        },
+        {
+            "id": "owner/repo#ISSUE-1",
+            "type": "issue",
+            "display_type": "ISSUE",
+            "kind": "tracked_issue",
+            "repo": "owner/repo",
+            "number": 1,
+            "title": "Initial",
+            "url": "https://example.com/1",
+            "created_at": "2026-02-01T00:00:00+00:00",
+            "updated_at": "2026-02-01T00:00:00+00:00",
+            "suggested": False,
+            "analysis_available": True,
+            "analysis_url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
+        },
+    ]
+    backend.load_items.assert_not_called()
+    assert repainted_item_ids == []
+
+    result = list_items(refresh=True)
+
+    assert [(item["id"], item["display_type"], item["suggested"]) for item in result] == [
+        ("owner/repo#CHECK-2", "CHECK", True)
+    ]
+    assert result[0]["analysis_available"] is False
+    assert result[0]["analysis_url"] is None
     assert session.suggestion_markers == marker
     assert repainted_item_ids == [["owner/repo#CHECK-2"]]
+    assert list_items(refresh=False) == result
+    backend.load_items.assert_called_once()
 
 
 def test_autodispatch_refresh_updates_issue_and_linked_pr() -> None:

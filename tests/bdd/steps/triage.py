@@ -28,17 +28,13 @@ from workdash.github_client import GitHubClient
 from workdash.included_items import IncludedItemsStore
 from workdash.models import WorkItem, WorkItemKind, WorkItemType, format_type_label
 from workdash.tui import IncludeDialog, SearchDialog
-from workdash.workdash import _print_work_items_result, format_work_item_id
+from workdash.workdash import _print_work_items_result
 
 from .common import (
     NOW_UTC,
-    FakeApiBackend,
     api_config,
     ensure_api_session,
-    install_config,
-    install_valid_env,
     make_work_item,
-    mock_backend,
     modal_screen_names,
     run_app,
 )
@@ -1191,362 +1187,56 @@ def _dashboard_has_work_items(scenario_state: dict[str, Any], work_items: list[W
     _dashboard_has_item_types(scenario_state, work_items)
 
 
-@given("a server-backed Workdash session has no open work items")
-def _server_session_has_no_items(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    work_items.clear()
-    scenario_state["work_items"] = []
-    backend = FakeApiBackend(scenario_state, tmp_path)
-    session = WorkdashSession(
-        config=api_config(tmp_path),
-        backend=backend,  # type: ignore[arg-type]
-        work_items=[],
-        suggestion_markers={},
-        zellij_session=scenario_state.get("zellij_session", "workdash-main"),
-    )
-    scenario_state["api_session"] = session
-    scenario_state["api_backend"] = backend
-
-
-@given("a server-backed Workdash session has issue, pull request, and review work items")
-def _server_session_has_item_types(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    work_items[:] = [
-        make_work_item(
-            item_type=WorkItemType.ISSUE,
-            kind=WorkItemKind.ASSIGNED_ISSUE,
-            number=1,
-            title="Issue",
-            created_at=NOW_UTC,
-            updated_at=NOW_UTC,
-        ),
-        make_work_item(
-            item_type=WorkItemType.PR,
-            kind=WorkItemKind.AUTHORED_PR,
-            number=2,
-            title="Pull request",
-            created_at=NOW_UTC,
-            updated_at=NOW_UTC,
-        ),
-        make_work_item(
-            item_type=WorkItemType.PR,
-            kind=WorkItemKind.REVIEW_REQUESTED_PR,
-            number=3,
-            title="Review",
-            created_at=NOW_UTC,
-            updated_at=NOW_UTC,
-        ),
-    ]
-    scenario_state["work_items"] = list(work_items)
-    ensure_api_session(scenario_state, work_items, tmp_path)
-
-
-@given("a server-backed Workdash session has a pull request the user neither authored nor reviewed")
-def _server_session_has_a_check_item(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    work_items[:] = [
-        make_work_item(
-            item_type=WorkItemType.PR,
-            kind=WorkItemKind.TRACKED_PR,
-            number=4,
-            title="Somebody else's pull request",
-            created_at=NOW_UTC,
-            updated_at=NOW_UTC,
-        )
-    ]
-    scenario_state["work_items"] = list(work_items)
-    ensure_api_session(scenario_state, work_items, tmp_path)
-
-
-@given("a server-backed Workdash session has work items")
-def _server_session_has_work_items(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    _server_session_has_item_types(scenario_state, work_items, tmp_path)
-
-
-@when(parsers.parse('the user runs the system with "{flag}"'))
-def _run_system_with_flag(
-    flag: str,
+@when('the user runs the system with "--configure"')
+def _run_configure(
     scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    valid_config: WorkdashConfig,
     tmp_path: Path,
 ) -> None:
-    if flag == "--configure":
-        # Delegate to the setup helper so wizard inputs and detection
-        # fakes run against real workdash.config.configure().
-        from . import setup as setup_mod
+    from . import setup as setup_mod
 
-        config_path = scenario_state.get("config_path") or (tmp_path / "config.json")
-        scenario_state["config_path"] = config_path
-        setup_mod._run_configure_with_fakes(scenario_state, config_path, monkeypatch, capsys)
-        return
-
-    _run_list_command([flag], scenario_state, work_items, monkeypatch, capsys, valid_config)
+    config_path = scenario_state.get("config_path") or (tmp_path / "config.json")
+    scenario_state["config_path"] = config_path
+    setup_mod._run_configure_with_fakes(scenario_state, config_path, monkeypatch, capsys)
 
 
-@when("the user runs `workdash list`")
-@when("the user lists work items with `workdash list`")
-def _list_work_items(
-    scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    valid_config: WorkdashConfig,
+@given(parsers.parse('a new issue titled "{title}" is available on GitHub'))
+def _new_github_issue(
+    title: str, scenario_state: dict[str, Any], work_items: list[WorkItem]
 ) -> None:
-    _run_list_command(["list"], scenario_state, work_items, monkeypatch, capsys, valid_config)
-
-
-@when("the user lists work items with `workdash list --json`")
-def _list_work_items_json(
-    scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    valid_config: WorkdashConfig,
-) -> None:
-    _run_list_command(
-        ["list", "--json"], scenario_state, work_items, monkeypatch, capsys, valid_config
-    )
-
-
-@when("the user runs `workdash list --refresh`")
-def _list_work_items_refresh(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    import workdash.workdash as workdash_module
-
-    scenario_state["github_fetches"] = 0
     scenario_state["refreshed_items"] = [
-        make_work_item(
-            item_type=WorkItemType.PR,
-            kind=WorkItemKind.TRACKED_PR,
-            number=2,
-            title="Fresh item",
-            created_at=NOW_UTC,
-            updated_at=NOW_UTC,
-        )
+        *work_items,
+        make_work_item(number=99, title=title, created_at=NOW_UTC, updated_at=NOW_UTC),
     ]
 
-    class FakeControlClient:
-        def __init__(self, host="127.0.0.1") -> None:
-            assert host == "127.0.0.1"
 
-        def request(self, endpoint: str, payload: dict[str, object] | None = None):
-            scenario_state.setdefault("client_requests", []).append((endpoint, payload or {}))
-            assert endpoint == "list"
-            return scenario_state["api_session"].list_items(
-                refresh=bool((payload or {}).get("refresh", False))
-            )
-
-    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
-    scenario_state["exit_code"] = workdash_module.main(["list", "--refresh"])
-    captured = capsys.readouterr()
-    scenario_state["print_output"] = captured.out
-    scenario_state["stdout"] = captured.out
-    scenario_state["stderr"] = captured.err
-
-
-def _run_list_command(
-    argv: list[str],
+@when(parsers.re(r"the user runs `workdash (?P<command>list(?: --refresh)?)`"))
+def _list_work_items(
+    command: str,
     scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    valid_config: WorkdashConfig,
 ) -> None:
     import workdash.workdash as workdash_module
 
-    install_valid_env(monkeypatch, which_succeeds=True)
-    install_config(monkeypatch, valid_config)
-    mock_backend(monkeypatch, items=list(work_items))
+    session = scenario_state["api_session"]
 
-    class UnreachableApp:
-        def __init__(self, **kwargs) -> None:  # pragma: no cover - sanity
-            raise AssertionError("TUI should not be constructed for list command")
+    def request_list(endpoint, payload):
+        assert endpoint == "list"
+        return session.list_items(refresh=payload["refresh"])
 
-        def run(self, *, mouse: bool) -> None:  # pragma: no cover - sanity
-            raise AssertionError("TUI should not run for list command")
-
-    monkeypatch.setattr(workdash_module, "WorkdashApp", UnreachableApp)
-
-    if scenario_state.get("api_session") is not None:
-
-        class FakeControlClient:
-            def __init__(self, host="127.0.0.1") -> None:
-                assert host == "127.0.0.1"
-
-            def request(
-                self, endpoint: str, payload: dict[str, object] | None = None
-            ) -> dict[str, object]:
-                payload = payload or {}
-                scenario_state.setdefault("control_requests", []).append(
-                    {"endpoint": endpoint, "payload": dict(payload)}
-                )
-                if endpoint == "list":
-                    return scenario_state["api_session"].list_items(
-                        refresh=bool(payload.get("refresh", False))
-                    )
-                raise AssertionError(f"Unexpected control endpoint: {endpoint}")
-
-        monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
-
-    scenario_state["exit_code"] = workdash_module.main(argv)
-    captured = capsys.readouterr()
-    scenario_state["print_output"] = captured.out
-    scenario_state["stdout"] = captured.out
-    scenario_state["stderr"] = captured.err
-
-
-@then("the command asks the local Workdash server to refresh dashboard items")
-def _command_requests_refresh(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("client_requests") == [("list", {"refresh": True})]
-    assert scenario_state.get("github_fetches") == 1
-
-
-@then("the system emits the refreshed work items")
-def _system_emits_refreshed_items(scenario_state: dict[str, Any]) -> None:
-    output = scenario_state["print_output"]
-    for item in scenario_state["refreshed_items"]:
-        assert format_work_item_id(item) in output
-        assert item.title in output
-
-
-@then("the refreshed work items become the shared dashboard state used by the TUI and API")
-def _refreshed_items_become_shared_tui_api_state(scenario_state: dict[str, Any]) -> None:
-    assert [format_work_item_id(item) for item in scenario_state["api_session"].work_items] == [
-        format_work_item_id(item) for item in scenario_state["refreshed_items"]
-    ]
-    assert scenario_state.get("tui_refresh_callbacks") == ["refresh_from_session"]
-    assert [format_work_item_id(item) for item in scenario_state["tui_work_items"]] == [
-        format_work_item_id(item) for item in scenario_state["refreshed_items"]
-    ]
-
-
-@then("the command requests the current item list from the local Workdash server")
-def _command_requests_current_items(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("control_requests") == [
-        {"endpoint": "list", "payload": {"refresh": False}}
-    ]
-
-
-@then("the system emits one line per work item to standard output")
-def _print_one_line_per_item(scenario_state: dict[str, Any]) -> None:
-    output_lines = [line for line in scenario_state["print_output"].splitlines() if line.strip()]
-    expected_items = scenario_state["api_session"].list_items(refresh=False)["items"]
-    assert len(output_lines) == len(expected_items), (
-        scenario_state["print_output"],
-        expected_items,
+    monkeypatch.setattr(
+        workdash_module, "WorkdashControlClient", lambda _host: MagicMock(request=request_list)
     )
-    assert "No work items found." not in scenario_state["print_output"]
-    for line, item in zip(output_lines, expected_items, strict=True):
-        assert item["id"] in line
-        assert item["title"] in line
-        assert str(item["updated_at"])[:10] in line
+    assert workdash_module.main(command.split()) == 0
+    scenario_state["print_output"] = capsys.readouterr().out
 
 
-@then("the TUI is not started")
-@then("the TUI is not started by the command")
-def _tui_not_started(scenario_state: dict[str, Any]) -> None:
-    # UnreachableApp raises if instantiated — reaching this step means no TUI.
-    assert "print_output" in scenario_state
-
-
-@then('the suggested item\'s line has its title prefixed with "* "')
-def _suggested_item_prefix(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
-    markers = compute_suggestion_markers(list(work_items))
-    assert markers, "Expected a suggestion marker for this scenario"
-    (_item_type, repo, number), _ = next(iter(markers.items()))
-    suggested_item = next(
-        item for item in work_items if item.repo == repo and item.number == number
-    )
-    marker_line = next(
-        line
-        for line in scenario_state["print_output"].splitlines()
-        if f"* {suggested_item.title}" in line
-    )
-    assert marker_line  # present
-
-
-@then("the system prints that no work items were found")
-def _system_prints_empty(scenario_state: dict[str, Any]) -> None:
-    assert "No work items found." in scenario_state["print_output"]
-
-
-@then("each row includes a Workdash item ID")
-def _each_row_has_workdash_id(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["exit_code"] == 0, scenario_state
-    lines = [line for line in scenario_state["print_output"].splitlines() if line.strip()]
-    assert len(lines) == len(scenario_state["work_items"])
-    for item in scenario_state["work_items"]:
-        assert any(format_work_item_id(item) in line for line in lines), lines
-
-
-@then("the issue row can be copied as `owner/repo#ISSUE-1`")
-def _issue_row_copy_id(scenario_state: dict[str, Any]) -> None:
-    assert "owner/repo#ISSUE-1" in scenario_state["print_output"]
-
-
-@then("the pull request row can be copied as `owner/repo#PR-2`")
-def _pr_row_copy_id(scenario_state: dict[str, Any]) -> None:
-    assert "owner/repo#PR-2" in scenario_state["print_output"]
-
-
-@then("the review row can be copied as `owner/repo#REVIEW-3`")
-def _review_row_copy_id(scenario_state: dict[str, Any]) -> None:
-    assert "owner/repo#REVIEW-3" in scenario_state["print_output"]
-
-
-@then("that row's item type reads `CHECK`")
-def _check_row_item_type(scenario_state: dict[str, Any]) -> None:
-    line = next(
-        line for line in scenario_state["print_output"].splitlines() if "owner/repo#CHECK-4" in line
-    )
-    assert line.startswith("CHECK   "), line
-
-
-@then("that row can be copied as `owner/repo#CHECK-4`")
-def _check_row_copy_id(scenario_state: dict[str, Any]) -> None:
-    assert "owner/repo#CHECK-4" in scenario_state["print_output"]
-
-
-@then("the system returns JSON work item records")
-def _returns_json_work_items(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["exit_code"] == 0, scenario_state
-    payload = json.loads(scenario_state["print_output"])
-    scenario_state["json_payload"] = payload
-    assert isinstance(payload.get("items"), list)
-    assert payload["items"]
-
-
-@then(
-    "each record includes the Workdash item ID, type, kind, repository, number, title, URL, "
-    "timestamps, and suggested status"
-)
-def _json_work_items_have_contract(scenario_state: dict[str, Any]) -> None:
-    required = {
-        "id",
-        "type",
-        "kind",
-        "repo",
-        "number",
-        "title",
-        "url",
-        "created_at",
-        "updated_at",
-        "suggested",
-    }
-    for record in scenario_state["json_payload"]["items"]:
-        assert required <= set(record), record
-        assert record["id"].startswith(f"{record['repo']}#"), record
+@then(parsers.parse('the printed list includes "{title}" with the ID `{item_id}`'))
+def _printed_list_includes(title: str, item_id: str, scenario_state: dict[str, Any]) -> None:
+    lines = scenario_state["print_output"].splitlines()
+    assert any(item_id in line.split() and line.endswith(title) for line in lines), lines
 
 
 # --------------------------------------------------------------------------
@@ -1621,7 +1311,7 @@ def _capture_rendered_row(work_items: list[WorkItem], target: WorkItem) -> list:
 
 
 @given("the TUI is open with a list of work items")
-def _tui_open_with_items(work_items: list[WorkItem], scenario_state: dict[str, Any]) -> None:
+def _tui_open_with_items(work_items: list[WorkItem]) -> None:
     if not work_items:
         work_items.extend(
             [
@@ -1645,12 +1335,6 @@ def _tui_open_with_items(work_items: list[WorkItem], scenario_state: dict[str, A
                 ),
             ]
         )
-    scenario_state["initial_items"] = list(work_items)
-
-
-@given("the next refresh will fail")
-def _refresh_will_fail(scenario_state: dict[str, Any]) -> None:
-    scenario_state["refresh_fails"] = True
 
 
 @when(parsers.parse('the user chooses "{key}" from the code menu'))
@@ -1664,7 +1348,7 @@ def _user_presses_key(
 ) -> None:
     # Dispatch on the key to the correct domain-specific handler.
     if key == "r":
-        _run_refresh_scenario(scenario_state, work_items)
+        _run_refresh_scenario(scenario_state, work_items, tmp_path)
     elif key == "a":
         from . import analysis
 
@@ -1692,99 +1376,52 @@ def _user_presses_key(
         raise AssertionError(f"Unhandled key press in BDD step: {key!r}")
 
 
-def _run_refresh_scenario(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
-    refresh_will_fail = scenario_state.get("refresh_fails", False)
-    refreshed_items = [
-        make_work_item(
-            number=99,
-            title="Newly refreshed",
-            updated_at=NOW_UTC - timedelta(hours=1),
-            created_at=NOW_UTC - timedelta(days=2),
-        )
-    ]
-
-    def refresh_callback():
-        if refresh_will_fail:
-            raise RuntimeError("simulated refresh failure")
-        return refreshed_items, compute_suggestion_markers(refreshed_items)
-
-    captured: dict[str, Any] = {}
-    busy_messages: list[str] = []
+def _run_refresh_scenario(
+    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
+) -> None:
+    session = ensure_api_session(scenario_state, work_items, tmp_path)
+    expected_status = f"Refreshed {len(scenario_state['refreshed_items'])} item(s)."
 
     async def interactions(app, pilot) -> None:
-        if scenario_state.get("search_query"):
-            await _apply_search_filter(app, pilot, scenario_state["search_query"])
+        footer = app.query_one("#status-footer", Static)
         await pilot.press("r")
         for _ in range(20):
-            await pilot.pause()
-            status = app.query_one("#status-footer", Static).render().plain
-            if status.startswith("Refreshed") or "failed" in status.lower():
+            if footer.render().plain == expected_status:
                 break
-        footer = app.query_one("#status-footer", Static)
+            await pilot.pause()
         table = app.query_one("#work-items", DataTable)
-        captured["status"] = footer.render().plain
-        captured["modal_screen_names"] = modal_screen_names(app)
-        captured["rows"] = [
-            [str(cell) for cell in table.get_row_at(i)] for i in range(table.row_count)
+        scenario_state["refresh_status"] = footer.render().plain
+        scenario_state["refresh_titles"] = [
+            str(table.get_row_at(i)[2]).removeprefix("* ") for i in range(table.row_count)
         ]
 
     run_app(
-        work_items=list(work_items),
-        refresh_callback=refresh_callback,
+        work_items=session.work_items,
+        session=session,
+        refresh_callback=lambda: (
+            session.list_items(refresh=True) and (session.work_items, session.suggestion_markers)
+        ),
         interactions=interactions,
-        busy_messages=busy_messages,
     )
-    scenario_state["refresh_status"] = captured["status"]
-    scenario_state["refresh_rows"] = captured["rows"]
-    scenario_state["initial_items"] = list(work_items)
-    scenario_state["refreshed_items"] = refreshed_items
-    scenario_state["busy_messages"] = busy_messages
-    scenario_state["modal_screen_names"] = captured["modal_screen_names"]
 
 
-@then("the system shows that a refresh is in progress")
-def _refresh_in_progress(scenario_state: dict[str, Any]) -> None:
-    # Prove the TUI pushed the busy screen with the refresh label while the
-    # callback was running, not just that a post-completion footer string
-    # happens to contain "Refresh".
-    busy_messages = scenario_state.get("busy_messages", [])
-    assert "Refreshing work items..." in busy_messages, busy_messages
-
-
-@then("the list updates to the latest state from GitHub")
-def _list_updated(scenario_state: dict[str, Any]) -> None:
-    rows = scenario_state["refresh_rows"]
-    refreshed = scenario_state["refreshed_items"]
-    assert len(rows) == len(refreshed)
-    titles = {row[2].lstrip("* ") for row in rows}
-    assert {item.title for item in refreshed} == titles
+@then(parsers.parse('the dashboard lists "{title}"'))
+def _dashboard_lists_refreshed_title(
+    title: str, scenario_state: dict[str, Any], work_items: list[WorkItem]
+) -> None:
+    assert sorted(scenario_state["refresh_titles"]) == sorted(
+        [title, *(item.title for item in work_items)]
+    )
 
 
 @then("the system reports how many work items are now shown")
-def _reports_count(scenario_state: dict[str, Any]) -> None:
-    status = scenario_state["refresh_status"]
-    assert status.startswith("Refreshed") and "item" in status, status
+def _reports_count(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
+    assert scenario_state["refresh_status"] == f"Refreshed {len(work_items) + 1} item(s)."
 
 
 @then("the system reports the failure to the user")
 def _reports_failure(scenario_state: dict[str, Any]) -> None:
-    # Shared across refresh and analysis failure scenarios; both record a
-    # status message from the TUI footer that starts with "X failed:".
-    status = scenario_state.get("refresh_status") or scenario_state.get("analyze_status")
-    assert status is not None, "Expected either refresh_status or analyze_status to be recorded"
-    assert "failed" in status.lower(), status
-    if "refresh_status" in scenario_state:
-        assert "simulated refresh failure" in status
-    if "analyze_status" in scenario_state:
-        assert "analysis failed" in status
-
-
-@then("the previously shown list remains visible")
-def _previous_list_visible(scenario_state: dict[str, Any]) -> None:
-    rows = scenario_state["refresh_rows"]
-    initial_titles = {item.title for item in scenario_state["initial_items"]}
-    rendered_titles = {row[2].lstrip("* ") for row in rows}
-    assert rendered_titles == initial_titles, (rendered_titles, initial_titles)
+    assert "analysis failed" in scenario_state["analyze_status"]
 
 
 # --------------------------------------------------------------------------
@@ -2641,7 +2278,7 @@ def _tui_open_with_two_repositories(
 def _tui_open_with_active_search_filter(
     work_items: list[WorkItem], scenario_state: dict[str, Any]
 ) -> None:
-    _tui_open_with_items(work_items, scenario_state)
+    _tui_open_with_items(work_items)
     scenario_state["search_query"] = _SEARCH_TITLE_FRAGMENT
 
 
@@ -2772,12 +2409,6 @@ def _all_loaded_items_listed_again(
     expected = sorted([item.title for item in work_items] + scenario_state.get("added_titles", []))
     assert len(expected) > 1, "fixture cannot prove the filter was cleared"
     assert _listed_titles(scenario_state) == expected
-
-
-@then("all refreshed work items are listed")
-def _all_refreshed_items_listed(scenario_state: dict[str, Any]) -> None:
-    listed = sorted(row[2].lstrip("* ") for row in scenario_state["refresh_rows"])
-    assert listed == sorted(item.title for item in scenario_state["refreshed_items"])
 
 
 @then("the included work item is listed")

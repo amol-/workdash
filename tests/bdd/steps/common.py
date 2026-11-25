@@ -26,7 +26,7 @@ from textual.screen import ModalScreen
 import workdash.control as control_module
 import workdash.github_client as github_client_module
 from pane_launch_fake import install_pane_launch
-from workdash.backend import IncludeResult, compute_suggestion_markers
+from workdash.backend import compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession, format_work_item_id
 from workdash.github_client import GitHubClient
@@ -440,26 +440,6 @@ def ensure_api_session(
     return session
 
 
-class FakeLiveTui:
-    def __init__(self, session: WorkdashSession, scenario_state: dict[str, Any]) -> None:
-        self._session = session
-        self._state = scenario_state
-        self._inside_call_from_thread = False
-
-    def call_from_thread(self, callback):
-        self._state.setdefault("tui_refresh_callbacks", []).append(callback.__name__)
-        self._inside_call_from_thread = True
-        try:
-            callback()
-        finally:
-            self._inside_call_from_thread = False
-
-    def refresh_from_session(self) -> None:
-        assert self._inside_call_from_thread
-        self._state["tui_work_items"] = list(self._session.work_items)
-        self._state["tui_suggestion_markers"] = dict(self._session.suggestion_markers)
-
-
 class FakeApiBackend:
     def __init__(self, scenario_state: dict[str, Any], tmp_path: Path) -> None:
         self._state = scenario_state
@@ -472,7 +452,6 @@ class FakeApiBackend:
         )
 
     def load_items(self, progress_callback=None):
-        self._state["github_fetches"] = self._state.get("github_fetches", 0) + 1
         assert progress_callback is None
         items = list(self._state.get("refreshed_items", self._state.get("work_items", [])))
         self._state["work_items"] = items
@@ -663,35 +642,6 @@ def _server_session_running(
     scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
 ) -> None:
     seed_dashboard_item(work_items, scenario_state)
-    session = ensure_api_session(scenario_state, work_items, tmp_path)
-    tui = FakeLiveTui(session, scenario_state)
-    session.items_changed_callback = lambda: tui.call_from_thread(tui.refresh_from_session)
-
-
-@given("a server-backed Workdash session has open work items and a suggested item exists")
-def _server_session_has_items_with_suggestion(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    work_items.extend(
-        [
-            make_work_item(
-                item_type=WorkItemType.ISSUE,
-                kind=WorkItemKind.TRACKED_ISSUE,
-                number=77,
-                title="Oldest suggestion target",
-                created_at=NOW_UTC - timedelta(days=30),
-                updated_at=NOW_UTC - timedelta(days=1),
-            ),
-            make_work_item(
-                item_type=WorkItemType.PR,
-                kind=WorkItemKind.TRACKED_PR,
-                number=78,
-                title="Fresh PR",
-                created_at=NOW_UTC - timedelta(days=2),
-                updated_at=NOW_UTC,
-            ),
-        ]
-    )
     ensure_api_session(scenario_state, work_items, tmp_path)
 
 
@@ -738,49 +688,6 @@ def _command_exits_zero(scenario_state: dict[str, Any]) -> None:
 
 
 # -- Auxiliary helpers shared across domains --------------------------------
-
-
-def install_valid_env(monkeypatch: pytest.MonkeyPatch, *, which_succeeds: bool = True) -> None:
-    """Patch the workdash module so preflight passes (or fails on gh)."""
-
-    monkeypatch.setattr(
-        github_client_module.shutil,
-        "which",
-        lambda cmd: "/usr/bin/gh" if which_succeeds and cmd == "gh" else None,
-    )
-    if which_succeeds:
-        monkeypatch.setattr(github_client_module.subprocess, "run", lambda *args, **kwargs: None)
-
-
-def mock_backend(monkeypatch: pytest.MonkeyPatch, *, items: list[WorkItem]) -> None:
-    """Swap ``WorkdashBackend`` with a fake that returns ``items``."""
-
-    import workdash.workdash as workdash_module
-
-    markers = compute_suggestion_markers(items)
-
-    class FakeBackend:
-        def __init__(self, config=None, **kwargs) -> None:
-            self.config = config
-
-        def load_items(self, progress_callback=None):
-            if progress_callback is not None:
-                progress_callback("loading...")
-            return list(items), dict(markers)
-
-        def analyze_item(self, _item, tool="codex"):
-            return None
-
-        def include_item_by_url(self, _url, _existing_identities):
-            return IncludeResult(invalid=True)
-
-    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
-
-
-def install_config(monkeypatch: pytest.MonkeyPatch, config: WorkdashConfig) -> None:
-    import workdash.workdash as workdash_module
-
-    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
 
 
 def ensure_workdir(tmp_path: Path) -> Path:

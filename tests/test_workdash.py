@@ -646,8 +646,51 @@ def test_main_tui_review_callback_waits_for_the_review_to_finish(
     ]
 
 
-def test_main_list_command_does_not_print_loading_message(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    ("items", "expected_stdout"),
+    [
+        pytest.param([], "No work items found.\n", id="empty"),
+        pytest.param(
+            [
+                {
+                    "id": "owner/repo#ISSUE-2",
+                    "display_type": "ISSUE",
+                    "updated_at": "2026-02-02T00:00:00+00:00",
+                    "title": "Fix parser",
+                    "suggested": True,
+                },
+                {
+                    "id": "owner/repo#PR-1",
+                    "display_type": "PR",
+                    "updated_at": "2026-02-01T00:00:00+00:00",
+                    "title": "Add logs",
+                },
+                {
+                    "id": "owner/repo#REVIEW-3",
+                    "display_type": "REVIEW",
+                    "updated_at": "2026-01-31T00:00:00+00:00",
+                    "title": "Review docs",
+                },
+                {
+                    "id": "owner/repo#CHECK-4",
+                    "display_type": "CHECK",
+                    "updated_at": "2026-01-30T00:00:00+00:00",
+                    "title": "Update README",
+                },
+            ],
+            "ISSUE   owner/repo#ISSUE-2       2026-02-02 * Fix parser\n"
+            "PR      owner/repo#PR-1          2026-02-01 Add logs\n"
+            "REVIEW  owner/repo#REVIEW-3      2026-01-31 Review docs\n"
+            "CHECK   owner/repo#CHECK-4       2026-01-30 Update README\n",
+            id="multiple-rows",
+        ),
+    ],
+)
+def test_main_list_command_prints_only_the_listing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    items: list[dict[str, str | bool]],
+    expected_stdout: str,
 ) -> None:
     class FakeControlClient:
         def __init__(self, host="127.0.0.1") -> None:
@@ -656,7 +699,7 @@ def test_main_list_command_does_not_print_loading_message(
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "list"
             assert payload == {"refresh": False}
-            return {"items": []}
+            return {"items": items}
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
     monkeypatch.setattr(
@@ -668,8 +711,7 @@ def test_main_list_command_does_not_print_loading_message(
     exit_code = workdash_module.main(["list"])
 
     assert exit_code == 0
-    captured = capsys.readouterr()
-    assert captured.out == "No work items found.\n"
+    assert capsys.readouterr().out == expected_stdout
 
 
 def test_print_server_backed_list_uses_display_type_without_changing_id(
@@ -986,6 +1028,7 @@ def test_main_exits_with_config_guidance_when_startup_config_command_is_malforme
     ("argv", "expected_endpoint", "expected_payload"),
     [
         (["list"], "list", {"refresh": False}),
+        (["list", "--json"], "list", {"refresh": False}),
         (["list", "--refresh"], "list", {"refresh": True}),
         (["info"], "info", {"panes": "work"}),
         (["ready", "any"], "ready", {"scope": "any"}),
@@ -1073,6 +1116,26 @@ def test_main_server_backed_commands_are_pure_http_clients(
         "issue_id": "owner/repo#ISSUE-42",
     }
 
+    list_result = {
+        "items": [
+            {
+                "id": "owner/repo#ISSUE-42",
+                "type": "issue",
+                "display_type": "ISSUE",
+                "kind": "tracked_issue",
+                "repo": "owner/repo",
+                "number": 42,
+                "title": "Fix parser",
+                "url": "https://github.com/owner/repo/issues/42",
+                "created_at": "2026-02-01T00:00:00+00:00",
+                "updated_at": "2026-02-02T00:00:00+00:00",
+                "suggested": True,
+                "analysis_available": False,
+                "analysis_url": None,
+            }
+        ]
+    }
+
     class FakeControlClient:
         def __init__(self, selected_host="127.0.0.1") -> None:
             assert selected_host == host
@@ -1080,7 +1143,7 @@ def test_main_server_backed_commands_are_pure_http_clients(
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             requests.append((endpoint, dict(payload or {})))
             if endpoint == "list":
-                return {"items": []}
+                return list_result if "--json" in argv else {"items": []}
             if endpoint == "info":
                 return {"session": "workdash", "panes": []}
             if endpoint == "ready":
@@ -1154,6 +1217,11 @@ def test_main_server_backed_commands_are_pure_http_clients(
         lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
     )
 
+    def unexpected_app(*args, **kwargs):
+        pytest.fail("Server-backed commands must not start the TUI")
+
+    monkeypatch.setattr(workdash_module, "WorkdashApp", unexpected_app)
+
     if environment_host is None:
         monkeypatch.delenv("WORKDASH_HOST", raising=False)
     else:
@@ -1171,6 +1239,8 @@ def test_main_server_backed_commands_are_pure_http_clients(
         )
         assert analysis_url == "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis"
     assert requests == [(expected_endpoint, expected_payload)]
+    if expected_endpoint == "list" and "--json" in argv:
+        assert json.loads(output) == list_result
     if expected_endpoint == "ready" and "--json" in argv:
         assert json.loads(output)["items"] == [ready_item]
     elif expected_endpoint == "ready":
@@ -1203,23 +1273,16 @@ def test_main_server_backed_commands_are_pure_http_clients(
 def test_main_server_backed_command_reports_unreachable_server(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
 ) -> None:
-    class FakeControlClient:
-        def __init__(self, host="127.0.0.1") -> None:
-            assert host == "127.0.0.1"
+    def refuse_connection(_request, *, timeout):
+        raise ConnectionRefusedError
 
-        def request(self, endpoint: str, payload: dict[str, object] | None = None):
-            raise workdash_module.WorkdashControlError(
-                "server_unreachable",
-                "No Workdash server is reachable at 127.0.0.1:8765. Start one with `workdash`.",
-            )
-
-    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+    monkeypatch.setattr("urllib.request.urlopen", refuse_connection)
 
     assert workdash_module.main(argv) == 1
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "workdash" in captured.err
+    assert "Start one with `workdash`." in captured.err
 
 
 def test_unreachable_server_reports_startup_guidance():

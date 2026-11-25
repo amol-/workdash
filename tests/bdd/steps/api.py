@@ -264,31 +264,6 @@ def _user_starts_workdash_with_server(
     scenario_state["output"] = captured.out + captured.err
 
 
-@when("a client requests the list API without refresh")
-def _client_requests_list_without_refresh(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    scenario_state["github_fetches"] = 0
-    _call_api(scenario_state, work_items, tmp_path, "list", {"refresh": False})
-
-
-@when("a client requests the list API with refresh enabled")
-def _client_requests_list_with_refresh(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    scenario_state["refreshed_items"] = [
-        make_work_item(
-            item_type=WorkItemType.PR,
-            kind=WorkItemKind.TRACKED_PR,
-            number=2,
-            title="Fresh item",
-            created_at=NOW_UTC,
-            updated_at=NOW_UTC,
-        )
-    ]
-    _call_api(scenario_state, work_items, tmp_path, "list", {"refresh": True})
-
-
 @when("a client requests the info API")
 def _client_requests_info_api(
     scenario_state: dict[str, Any],
@@ -690,64 +665,6 @@ def _api_returns_current_in_memory_items(scenario_state: dict[str, Any]) -> None
     assert [item["id"] for item in result["items"]] == [
         format_work_item_id(item) for item in scenario_state["work_items"]
     ]
-
-
-@then(
-    "each item includes its Workdash item ID, API type, display type, kind, repository, "
-    "number, title, URL, timestamps, and suggested status"
-)
-def _api_items_include_contract_fields(scenario_state: dict[str, Any]) -> None:
-    required = {
-        "id",
-        "type",
-        "display_type",
-        "kind",
-        "repo",
-        "number",
-        "title",
-        "url",
-        "created_at",
-        "updated_at",
-        "suggested",
-    }
-    for item in _api_result(scenario_state)["items"]:
-        assert required <= set(item), item
-
-
-@then("the API does not fetch GitHub before responding")
-def _api_does_not_fetch_github(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("github_fetches", 0) == 0
-
-
-@then("the server refreshes dashboard items from GitHub")
-def _server_refreshes_dashboard_items(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("github_fetches", 0) == 1
-
-
-@then("the API returns the refreshed work items")
-def _api_returns_refreshed_work_items(scenario_state: dict[str, Any]) -> None:
-    result = _api_result(scenario_state)
-    assert [item["id"] for item in result["items"]] == [
-        format_work_item_id(item) for item in scenario_state["refreshed_items"]
-    ]
-
-
-@then("the refreshed work items become the shared dashboard state")
-def _refreshed_items_become_shared_state(scenario_state: dict[str, Any]) -> None:
-    assert [format_work_item_id(item) for item in scenario_state["api_session"].work_items] == [
-        format_work_item_id(item) for item in scenario_state["refreshed_items"]
-    ]
-
-
-@then("the live TUI reflects the refreshed state when it can safely repaint")
-def _live_tui_reflects_refreshed_state_when_safe(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("tui_refresh_callbacks") == ["refresh_from_session"]
-    assert [format_work_item_id(item) for item in scenario_state["tui_work_items"]] == [
-        format_work_item_id(item) for item in scenario_state["refreshed_items"]
-    ]
-    assert scenario_state["tui_suggestion_markers"] == compute_suggestion_markers(
-        scenario_state["refreshed_items"]
-    )
 
 
 @then("the API returns pane records from the live Zellij session")

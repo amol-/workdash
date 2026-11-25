@@ -546,7 +546,7 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
     asyncio.run(run_smoke())
 
 
-def test_workdash_app_refresh_keybinding_invokes_callback_and_reloads_rows() -> None:
+def test_workdash_app_refresh_keybinding_clears_active_filter() -> None:
     now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
     initial_item = WorkItem(
         kind=WorkItemKind.TRACKED_ISSUE,
@@ -568,26 +568,32 @@ def test_workdash_app_refresh_keybinding_invokes_callback_and_reloads_rows() -> 
         updated_at=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
         url="https://example.com/pull/33",
     )
+    other_item = replace(initial_item, number=12, title="Update docs")
     refresh_calls: list[str] = []
 
     def refresh_callback() -> tuple[list[WorkItem], dict[tuple[WorkItemType, str, int], str]]:
         refresh_calls.append("called")
-        return [refreshed_item], {(WorkItemType.PR, "owner/repo", 33): "*"}
+        return [other_item, refreshed_item], {(WorkItemType.PR, "owner/repo", 33): "*"}
 
     app = WorkdashApp(
-        work_items=[initial_item],
+        work_items=[initial_item, other_item],
         refresh_callback=refresh_callback,
         now_utc=now_utc,
     )
 
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
+            await _submit_search(app, pilot, "parser")
+            assert _listed_titles(app) == ["Fix parser"]
+
             await pilot.press("r")
-            await pilot.press("q")
+            await _wait_for_footer(
+                app.query_one("#status-footer", Static), "Refreshed 2 item(s).", pilot
+            )
 
             table = app.query_one("#work-items", DataTable)
             assert refresh_calls == ["called"]
-            assert table.row_count == 1
+            assert _listed_titles(app) == ["* Ship refresh", "Update docs"]
             assert [str(c) for c in table.get_row_at(0)] == [
                 "  VR 33",
                 "owner/repo",
@@ -1459,6 +1465,7 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
             await pilot.press("r")
             await _wait_for_footer(footer, "Refresh failed: gh refresh failed", pilot)
             _assert_no_modal_screens(app)
+            assert _listed_titles(app) == [work_item.title]
 
             # Press "a" to open AnalyzeDialog, then "1" to choose Claude
             await pilot.press("a")

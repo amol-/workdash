@@ -46,12 +46,6 @@ Feature: Search work items
     Then no search box is shown
     And all loaded work items are listed again
 
-  @id:F-TRIAGE-SEARCH-S005
-  Scenario: Refreshing clears the active filter
-    Given the TUI is open with an active search filter
-    When the user presses "r"
-    Then all refreshed work items are listed
-
   @id:F-TRIAGE-SEARCH-S008
   Scenario: Including an item clears the active filter
     Given the TUI is open with an active search filter
