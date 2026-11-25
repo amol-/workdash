@@ -1837,8 +1837,17 @@ class WorkdashControlClient:
         selected_host, port = server_address(host)
         self._address = f"{selected_host}:{port}"
 
-    def request(self, endpoint: str, payload: dict[str, object] | None = None) -> dict[str, object]:
-        return _dashboard_api_result(self._address, endpoint, payload)
+    def request(
+        self,
+        endpoint: str,
+        payload: dict[str, object] | None = None,
+        *,
+        timeout: float | None = None,
+        direct: bool = False,
+    ) -> dict[str, object]:
+        return _dashboard_api_result(
+            self._address, endpoint, payload, timeout=timeout, direct=direct
+        )
 
 
 def probe_dashboard_session(address: str) -> str | None:
@@ -1880,6 +1889,7 @@ def _dashboard_api_result(
     payload: dict[str, object] | None = None,
     *,
     timeout: float | None = None,
+    direct: bool = False,
 ) -> dict[str, object]:
     """POST to a dashboard endpoint and return its envelope result.
 
@@ -1897,8 +1907,17 @@ def _dashboard_api_result(
         },
         method="POST",
     )
+    open_url = (
+        urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+        if direct
+        else urllib.request.urlopen
+    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with open_url(request, timeout=timeout) as response:
+            if direct and response.geturl() != request.full_url:
+                raise WorkdashControlError(
+                    "invalid_response", "Workdash server redirected the request."
+                )
             raw = response.read().decode("utf-8")
     except urllib.error.HTTPError as error:
         api_error = _client_error_from_body(error)
@@ -2041,17 +2060,27 @@ def _pane_info_payload(
     include_all_panes: bool = False,
 ) -> dict[str, object]:
     item_by_cwd = {}
+    checkouts_by_title = {}
     if workdir is not None:
         for item in work_items:
             item_path = existing_worktree_path(workdir, item, git=git)
             if item_path is not None:
-                item_by_cwd[_normalized_path(item_path)] = format_work_item_id(item)
+                root, item_id = _normalized_path(item_path), format_work_item_id(item)
+                item_by_cwd[root] = item_id
+                title = _zellij_pane_name_for_work_action("code", os.fspath(item_path))
+                checkouts_by_title.setdefault(title, set()).add((root, item_id, item.url))
     panes = []
     for pane in launcher.zellij.list_workdash_panes(session):
         if _is_workdash_work_pane(pane):
-            panes.append(
-                _pane_payload(selected_session=session, pane=pane, item_by_cwd=item_by_cwd)
-            )
+            title = str(pane["title"])
+            agent = title.startswith("code_")
+            payload = _pane_payload(session, pane, {} if agent else item_by_cwd)
+            if agent and isinstance(pane.get("id"), int):
+                # An agent can change directory into an unrelated checkout.
+                matches = checkouts_by_title.get(title, ())
+                if len(matches) == 1:
+                    ((_, payload["item"], payload["item_url"]),) = matches
+            panes.append(payload)
         elif include_all_panes and is_live_zellij_pane(pane):
             panes.append(
                 _pane_payload(

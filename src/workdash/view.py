@@ -20,6 +20,7 @@ import threading
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
@@ -31,7 +32,14 @@ from textual.widgets import Footer, MarkdownViewer, Static
 from . import launcher
 from .config import load_config
 from .git import GitHelper
-from .github_client import parse_github_item_url
+from .github_client import (
+    GitHubClient,
+    ProjectIssueDetails,
+    ProjectPullDetails,
+    parse_github_item_url,
+)
+from .models import WorkItemType
+from .work_state import select_actionable_pull_request
 
 _ITEM_REFERENCE_RE = re.compile(r"^(?P<repo>[\w.-]+/[\w.-]+)#(?P<number>\d+)$")
 _BARE_NUMBER_RE = re.compile(r"^#?(?P<number>\d+)$")
@@ -331,7 +339,7 @@ def _document(repo: str, number: int, issue: dict, pull: dict | None) -> str:
         "",
         issue.get("body") or "*No description.*",
         "",
-        *_sub_issues_section(repo, number),
+        *_sub_issues_section(repo, number, issue, project=pull is None),
     ]
     if pull is not None:
         lines += _checks_section(repo, pull["headRefOid"]) + _reviews_section(pull)
@@ -374,32 +382,236 @@ def _labels_line(issue: dict) -> str:
     )
 
 
-def _sub_issues_section(repo: str, number: int) -> list[str]:
-    rows = _sub_issue_rows(repo, number, depth=1)
-    if not rows:
-        return []
-    return [
-        f"## Sub-issues ({len(rows)})",
-        "",
-        "| Item | State | Title |",
-        "| --- | --- | --- |",
-        *rows,
-        "",
-    ]
-
-
-def _sub_issue_rows(repo: str, number: int, depth: int) -> list[str]:
+def _sub_issues_section(repo: str, number: int, issue: dict, *, project: bool) -> list[str]:
+    root = _IssueRow(repo, number, issue, depth=0)
     rows = []
-    url = f"repos/{repo}/issues/{number}/sub_issues?per_page=100"
-    for sub_issue in _gh_json(["gh", "api", url, "--paginate"]):
-        target = parse_github_item_url(sub_issue["html_url"])
-        child_repo = target.repo if target else repo
-        reference = f"{child_repo}#{sub_issue['number']}"
-        item = f"{'└─ ' * depth}{_link(reference, sub_issue['html_url'])}"
-        rows.append(f"| {item} | {sub_issue['state']} | {_cell(sub_issue['title'])} |")
-        if (sub_issue.get("sub_issues_summary") or {}).get("total"):
-            rows += _sub_issue_rows(child_repo, sub_issue["number"], depth + 1)
-    return rows
+    _load_sub_issues(root, rows, project=project)
+    if not rows and not root.incomplete:
+        return []
+    lines = [f"## Sub-issues ({len(rows)})", ""]
+    if root.incomplete:
+        lines += ["*Some sub-issues are unavailable.*", ""]
+    if not project:
+        return lines + [
+            "| Item | State | Title |",
+            "| --- | --- | --- |",
+            *(row.render() for row in rows),
+            "",
+        ]
+
+    username = ""
+    with contextlib.suppress(RuntimeError, OSError, ValueError):
+        configured = load_config().github_username
+        if isinstance(configured, str):
+            username = configured.strip()
+    username, details, pulls = GitHubClient.project_issue_details(
+        [root.ref, *(row.ref for row in rows)], github_username=username
+    )
+    coding, uncertain = _project_coding_activity()
+    if parent := _project_status(root, details[root.ref], pulls, username, coding):
+        lines += [f"**Parent status:** {parent}", ""]
+    if rows:
+        lines += ["| Item | State | Title | Status |", "| --- | --- | --- | --- |"]
+        lines += [
+            row.render(_project_status(row, details[row.ref], pulls, username, coding) or "—")
+            for row in rows
+        ]
+        lines.append("")
+    if uncertain:
+        lines += ["*Couldn’t check whether Workdash is working on some project items.*", ""]
+    return lines
+
+
+@dataclass
+class _IssueRow:
+    repo: str
+    number: int
+    issue: dict
+    depth: int
+    open_descendants: bool = False
+    incomplete: bool = False
+
+    @property
+    def ref(self) -> tuple[str, int]:
+        return self.repo, self.number
+
+    def render(self, status: str | None = None) -> str:
+        item = _link(f"{self.repo}#{self.number}", self.issue["html_url"])
+        extra = f" {_cell(status)} |" if status is not None else ""
+        return f"| {'└─ ' * self.depth}{item} | {self.issue['state']} | {_cell(self.issue['title'])} |{extra}"
+
+
+def _load_sub_issues(row: _IssueRow, rows: list[_IssueRow], *, project: bool) -> None:
+    expected = (row.issue.get("sub_issues_summary") or {}).get("total")
+    if row.depth and (expected == 0 or (not project and not expected)):
+        return
+    url = f"repos/{row.repo}/issues/{row.number}/sub_issues?per_page=100"
+    try:
+        children = _gh_json(["gh", "api", url, "--paginate"])
+    except (RuntimeError, OSError):
+        if not project:
+            raise
+        row.incomplete = True
+        return
+    row.incomplete = project and len(children) < (expected or 0)
+    for issue in children:
+        target = parse_github_item_url(issue["html_url"])
+        child = _IssueRow(
+            target.repo if target else row.repo, issue["number"], issue, row.depth + 1
+        )
+        rows.append(child)
+        _load_sub_issues(child, rows, project=project)
+        row.open_descendants |= issue["state"] == "open" or child.open_descendants
+        row.incomplete |= child.incomplete
+
+
+def _project_coding_activity() -> tuple[set[tuple[WorkItemType, str, int]], bool]:
+    from .control import WorkdashControlClient, server_address
+
+    session = os.getenv("ZELLIJ_SESSION_NAME")
+    address = None
+    try:
+        if session:
+            host, port = server_address()
+            # Zellij session names alone cannot identify a local dashboard.
+            if not IPv4Address(host).is_loopback:
+                return set(), True
+            address = f"{host}:{port}"
+        info = WorkdashControlClient(address).request("info", timeout=2, direct=bool(session))
+    except (RuntimeError, ValueError, OSError, http.client.HTTPException):
+        return set(), True
+    if session and info.get("session") != session:
+        return set(), True
+    panes = info.get("panes")
+    if not isinstance(panes, list):
+        return set(), True
+    items, uncertain = set(), False
+    for pane in panes:
+        if not isinstance(pane, dict):
+            uncertain = True
+            continue
+        if pane.get("kind") != "agent" or pane.get("state") == "exited" or pane.get("exited"):
+            continue
+        if item := parse_github_item_url(pane.get("item_url")):
+            items.add((item.item_type, item.repo.lower(), item.number))
+        else:
+            uncertain = True
+    return items, uncertain
+
+
+def _project_status(
+    row: _IssueRow,
+    github: ProjectIssueDetails,
+    pulls: dict[tuple[str, int], ProjectPullDetails],
+    username: str,
+    coding: set[tuple[WorkItemType, str, int]],
+) -> str:
+    activity = "Workdash coding pane mapped here"
+    coding_issue = (WorkItemType.ISSUE, row.repo.lower(), row.number) in coding
+    status = [activity] if coding_issue else []
+    is_open = row.issue["state"] == "open"
+    if row.open_descendants and is_open:
+        status.append("Blocked by open sub-issues")
+    if is_open and github.blocker_count:
+        names = ", ".join(
+            _link(ref, f"https://github.com/{ref.replace('#', '/issues/')}")
+            for ref in github.blockers or []
+        )
+        status.append(f"Blocked by {names}" if names else "Blocked")
+    if is_open and github.blockers is None:
+        status.append("Blockers unavailable")
+    elif is_open and len(github.blockers) < github.blocker_count:
+        status.append("Blockers incomplete")
+    if not is_open and row.depth and (reason := row.issue.get("state_reason")):
+        status.append(reason.replace("_", " ").capitalize())
+
+    if github.linked_pulls is None:
+        status.append("Linked PRs unavailable")
+    elif not github.links_complete:
+        status.append("Linked PRs incomplete")
+    repairs, links = [], []
+    for (repo, number), state in (github.linked_pulls or {}).items():
+        pull = pulls.get((repo.lower(), number))
+        state = pull.work.state if pull else state
+        if state == "OPEN":
+            repairs.append(pull.work if pull else None)
+        label = _project_pull_status(state, pull)
+        if (WorkItemType.PR, repo.lower(), number) in coding:
+            label += f"; {activity}"
+        links.append(
+            f"{_link(f'PR {repo}#{number}', f'https://github.com/{repo}/pull/{number}')}: {label}"
+        )
+
+    if is_open and not (row.open_descendants or github.blocker_count or coding_issue):
+        if (
+            row.incomplete
+            or github.blocker_count is None
+            or not github.links_complete
+            or any(
+                pr is None
+                or not pr.review_threads_complete
+                or pr.ci_status == "unknown"
+                or pr.mergeability == "unknown"
+                for pr in repairs
+            )
+            or (repairs and not username)
+        ):
+            status.append("Readiness unavailable")
+        elif not repairs:
+            status.append("Ready on GitHub")
+        elif repair := select_actionable_pull_request(repairs, username):
+            claimed_issue = next(
+                (
+                    issue
+                    for issue in repair.linked_issues
+                    if (WorkItemType.ISSUE, issue.repo.lower(), issue.number) in coding
+                ),
+                None,
+            )
+            if claimed_issue:
+                link = _link(f"{claimed_issue.repo}#{claimed_issue.number}", claimed_issue.url)
+                status.append(f"Workdash coding pane holds repair through {link}")
+            elif (WorkItemType.PR, repair.item.repo.lower(), repair.item.number) not in coding:
+                status.append("Ready on GitHub")
+        else:
+            status.append("Not ready on GitHub")
+    return " · ".join(status + links)
+
+
+def _project_pull_status(state: str, pull: ProjectPullDetails | None) -> str:
+    if state != "OPEN":
+        return "Closed without merging" if state == "CLOSED" else state.capitalize()
+    if pull is None:
+        return "Review and checks unavailable"
+    work = pull.work
+    status = ["Draft"] if pull.draft else []
+    decision = {
+        "APPROVED": "Review approved",
+        "REVIEW_REQUIRED": "Awaiting review",
+        "CHANGES_REQUESTED": "Changes requested",
+    }.get(work.review_decision)
+    if decision:
+        status.append(decision)
+    if pull.review_requested:
+        status.append("Review requested")
+    if not work.review_threads_complete:
+        status.append("Review feedback unavailable")
+    elif work.feedback and work.review_decision != "CHANGES_REQUESTED":
+        status.append("Review feedback needs changes")
+    elif not (decision or pull.review_requested):
+        status.append("No review decision reported")
+    status.append(
+        {
+            "unknown": "Checks unavailable",
+            "no_checks": "No checks reported",
+            "passing": "Reported checks passing",
+        }.get(work.ci_status, f"Checks {work.ci_status}")
+    )
+    if work.mergeability == "conflicting":
+        status.append("Merge conflicts")
+    elif work.mergeability == "unknown":
+        status.append("Mergeability unavailable")
+    return "; ".join(status)
 
 
 def _checks_section(repo: str, head: str) -> list[str]:

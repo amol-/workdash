@@ -495,11 +495,12 @@ its `group` is null when no override was configured.
 
 `workdash info [--json]` requires a running `workdash` session and
 reports live Workdash-owned Zellij panes for terminal-backed work actions,
-including pane title, cwd, command, tab, state, and mapped Workdash item. It maps
-each live pane's current working directory to the matching Workdash item ID when
-the pane is inside a known worktree, or reports `unknown` when no mapping is
-known. Add `--all` to include other live non-plugin panes from the server-backed
-Workdash session as `kind=unknown` with unknown item mapping.
+including pane title, cwd, command, tab, state, and mapped Workdash item.
+Agent panes map to the item for their launch worktree, even after changing
+directory. Terminal panes map by current working directory. When a mapping
+cannot be established, the item is `unknown`. Add `--all` to include other live
+non-plugin panes from the server-backed Workdash session as `kind=unknown` with
+unknown item mapping.
 
 ## Analyze command
 
@@ -720,7 +721,10 @@ mergeable, merge state and review decision, plus CI, reviews and review threads
 (capped at 50 threads, 100 comments per thread and 20 failing checks, with a
 truncation note). The description preserves its original Markdown; bare issue
 and pull request references are not converted to links. Sub-issues are listed as
-a table at every nesting level.
+a table at every nesting level. A parent issue shows readiness, blockers, and
+linked pull request reviews and checks beside the tree. The viewer shows coding
+panes Workdash can match to the work and labels unavailable details. The parent
+keeps its GitHub state even if there is no ready work or a descendant remains open.
 
 Inside the viewer, activating a link to a Markdown document opens it in the same
 viewer, and activating a link to a GitHub issue or pull request shows that item

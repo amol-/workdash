@@ -4,14 +4,33 @@ import json
 import subprocess
 import urllib.error
 import urllib.request
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from textual.app import App
 from textual.widgets import Static
 
-from view_fake import fake_gh_view_run, issue, issue_routes
-from workdash import launcher, view
+from gh_work_state_fake import (
+    HEAD_SHA,
+    FakeGitHub,
+    check_run,
+    failure,
+    todo_body,
+)
+from view_fake import fake_gh_view_run, issue, issue_routes, sub_issue
+from workdash import github_client, launcher, view
+from workdash.config import WorkdashConfig
+from workdash.control import WorkdashControlClient, WorkdashSession
+
+
+@pytest.fixture(autouse=True)
+def _no_workdash_server(monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise ConnectionRefusedError
+
+    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+    monkeypatch.setattr(urllib.request, "urlopen", unavailable)
 
 
 def _capture(monkeypatch) -> list[view.Document]:
@@ -95,6 +114,9 @@ def test_view_pull_request_document_reports_ci_reviews_and_threads(monkeypatch):
     assert "**Mergeable:** MERGEABLE" in document
     assert "**Merge state:** CLEAN" in document
     assert "**Review:** APPROVED" in document
+    assert "## Sub-issues (2)\n\n" in document
+    assert "└─ └─ [owner/repo#14]" in document
+    assert "**Parent status:**" not in document
     assert "## CI — failure" in document
     assert "1 of 3 checks passing." in document
     assert "- [unit tests](https://ci/unit) — FAILURE" in document
@@ -214,6 +236,7 @@ def test_view_loads_all_pages_of_subissues_and_comments(monkeypatch):
                             "title": "Later child",
                             "state": "open",
                             "html_url": "https://github.com/owner/repo/issues/99",
+                            "sub_issues_summary": {"total": 0},
                         }
                     ]
                 )
@@ -398,6 +421,7 @@ def test_view_nested_subissues_across_repositories(monkeypatch):
             "title": "Nested child",
             "state": "closed",
             "html_url": "https://github.com/other/project/issues/14",
+            "sub_issues_summary": {"total": 0},
         }
     ]
     monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes))
@@ -511,7 +535,10 @@ def test_viewer_opens_a_github_item_link_without_launching_anything(monkeypatch)
         app.follow(ISSUE_URL)
         for _ in range(200):
             await pilot.pause()
-            if app.query_one(view._DocumentViewer).document.source.startswith("# Crash"):
+            if (
+                app.query_one(view._DocumentViewer).document.source.startswith("# Crash")
+                and app.query_one("#status", Static).render().plain == ""
+            ):
                 break
         shown.append(app.query_one(view._DocumentViewer).document.source)
         shown.append(app.query_one("#status", Static).render().plain)
@@ -524,3 +551,340 @@ def test_viewer_opens_a_github_item_link_without_launching_anything(monkeypatch)
     assert shown[1] == ""
     assert shown[2] is True
     assert launched == []
+
+
+def test_project_cannot_confirm_parent_readiness_when_a_closed_childs_tree_is_unavailable(
+    monkeypatch,
+):
+    routes = issue_routes()
+    routes["api repos/owner/repo/issues/12/sub_issues"] = [
+        sub_issue(13, children=1, state="closed")
+    ]
+    project = FakeGitHub(subprocess.run)
+    project.add_issue("owner/repo#12")
+    project.add_issue("owner/repo#13", state="CLOSED", parent="owner/repo#12")
+    gh_run = fake_gh_view_run(routes, project=project)
+
+    def run(command, **kwargs):
+        if "repos/owner/repo/issues/13/sub_issues?per_page=100" in command:
+            raise failure("HTTP 403")
+        return gh_run(command, **kwargs)
+
+    monkeypatch.setattr(view.subprocess, "run", run)
+
+    document = view.load_document("owner/repo#12").content
+
+    assert document.startswith("# Crash on startup\n")
+    assert "## Description" in document and "## Comments (1)" in document
+    assert "[owner/repo#13](https://github.com/owner/repo/issues/13) | closed |" in document
+    assert "Some sub-issues are unavailable" in document
+    assert "**Parent status:** Readiness unavailable" in document
+    assert "Ready on GitHub" not in document
+
+
+def test_project_keeps_document_and_pr_link_when_pr_details_lookup_fails(monkeypatch):
+    monkeypatch.setattr(view, "load_config", lambda: WorkdashConfig(github_username="testuser"))
+    routes = issue_routes()
+    routes["api repos/owner/repo/issues/14/sub_issues"] = []
+    routes["api repos/owner/repo/issues/13/sub_issues"] = [sub_issue(14, children=0)]
+    project = FakeGitHub(subprocess.run)
+    project.add_issue("owner/repo#12")
+    project.add_issue("owner/repo#13", parent="owner/repo#12")
+    project.add_issue("owner/repo#14", parent="owner/repo#13")
+    project.add_pull_request("owner/repo#20", closes=("owner/repo#14",))
+    project.failures["ReadyPullRequests"] = failure("HTTP 403")
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes, project=project))
+
+    document = view.load_document("owner/repo#12").content
+
+    row = next(line for line in document.splitlines() if line.startswith("| └─ └─"))
+    assert "[PR owner/repo#20](https://github.com/owner/repo/pull/20)" in row
+    assert "Review and checks unavailable" in row
+    assert "Readiness unavailable" in row
+    assert "Linked PRs incomplete" not in row
+    assert "Ready on GitHub" not in row
+    assert document.startswith("# Crash on startup\n")
+    assert "## Description" in document and "## Comments (1)" in document
+
+
+@pytest.fixture
+def two_child_project():
+    routes = issue_routes()
+    routes["api repos/owner/repo/issues/12/sub_issues"] = [
+        sub_issue(number, children=0) for number in (13, 14)
+    ]
+    project = FakeGitHub(subprocess.run)
+    project.add_issue("owner/repo#12")
+    for number in (13, 14):
+        project.add_issue(f"owner/repo#{number}", parent="owner/repo#12")
+    return routes, project
+
+
+@pytest.mark.parametrize(
+    "viewer_session, targeted_todo",
+    [("workdash-test", False), ("workdash-test", True), ("workdash-other", False)],
+)
+def test_project_reports_launch_work_in_the_viewers_session(
+    monkeypatch, tmp_path, two_child_project, viewer_session, targeted_todo
+):
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", viewer_session)
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1")
+    routes, project = two_child_project
+    repo = "owner/todos" if targeted_todo else "owner/repo"
+    if targeted_todo:
+        project.add_issue(f"{repo}#13", parent="owner/repo#12", body=todo_body("owner/repo"))
+        routes["api repos/owner/repo/issues/12/sub_issues"][0]["html_url"] = (
+            f"https://github.com/{repo}/issues/13"
+        )
+    client = github_client.GitHubClient()
+    config = WorkdashConfig(workdir=str(tmp_path), github_username="testuser")
+    monkeypatch.setattr(view, "load_config", lambda: config)
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes, project=project))
+    worktrees = {n: tmp_path / f"owner_repo_{n}" for n in (13, 14)}
+    for worktree in worktrees.values():
+        worktree.mkdir()
+    session = WorkdashSession(
+        config=config,
+        backend=SimpleNamespace(github_client=client),
+        work_items=[
+            client.resolve_issue_scope(item_repo, n, todo_repository="owner/todos")[0].item
+            for item_repo, n in ((repo, 13), ("owner/repo", 14))
+        ],
+        suggestion_markers={},
+        zellij_session="workdash-test",
+    )
+    session.git = MagicMock()
+    session.git.worktree_proves_item.side_effect = lambda path, item: path == worktrees[item.number]
+    monkeypatch.setattr(
+        launcher.zellij,
+        "load_zellij_panes",
+        lambda _: [
+            {"id": 1, "title": "code_owner_repo_13", "pane_cwd": str(worktrees[14])},
+            {"id": 2, "title": "code_unknown", "pane_cwd": str(tmp_path / "unknown")},
+            {"id": 3, "title": "terminal_owner_repo_14", "pane_cwd": str(worktrees[14])},
+            {"id": 4, "title": "code_owner_repo_14", "exited": True},
+        ],
+    )
+    info = session.info()
+    assert info["panes"][0]["item"] == (
+        "owner/repo#ISSUE-WT13" if targeted_todo else "owner/repo#ISSUE-13"
+    )
+    assert info["panes"][0]["cwd"] == str(worktrees[14])
+    monkeypatch.setattr(WorkdashControlClient, "request", lambda *args, **kwargs: info)
+
+    document = view.load_document("owner/repo#12").content
+    active = next(row for row in document.splitlines() if f"[{repo}#13]" in row)
+    other = next(row for row in document.splitlines() if "[owner/repo#14]" in row)
+    if viewer_session == "workdash-test":
+        assert "Workdash coding pane" in active and "Ready on GitHub" not in active
+    else:
+        assert "Workdash coding pane" not in active and "Ready on GitHub" in active
+    assert "Workdash coding pane" not in other and "Ready on GitHub" in other
+    assert "Couldn’t check whether Workdash is working on" in document
+
+
+def test_project_does_not_attribute_remote_panes_from_the_same_named_session(
+    monkeypatch, two_child_project
+):
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
+    monkeypatch.setenv("WORKDASH_HOST", "192.168.5.6:8765")
+    routes, project = two_child_project
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes, project=project))
+    open_http = MagicMock(side_effect=urllib.error.URLError(ConnectionRefusedError()))
+    monkeypatch.setattr(urllib.request.AbstractHTTPHandler, "do_open", open_http)
+
+    document = view.load_document("owner/repo#12").content
+
+    open_http.assert_not_called()
+    row = next(line for line in document.splitlines() if "[owner/repo#13]" in line)
+    assert "Ready on GitHub" in row and "Workdash coding pane" not in row
+    assert "Couldn’t check whether Workdash is working on" in document
+
+
+@pytest.mark.parametrize("local_reply", [False, True], ids=["proxy-only", "direct-reply"])
+def test_project_only_attributes_direct_panes_to_the_local_session(
+    monkeypatch, two_child_project, local_reply
+):
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:8765")
+    monkeypatch.setenv("http_proxy", "http://proxy.example:8888")
+    monkeypatch.setenv("no_proxy", "")
+    monkeypatch.setattr(urllib.request, "urlopen", urllib.request.build_opener().open)
+    routes, project = two_child_project
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes, project=project))
+
+    response = MagicMock(code=200)
+    response.__enter__.return_value = response
+    response.read.return_value = json.dumps(
+        {
+            "ok": True,
+            "result": {
+                "session": "workdash-test",
+                "panes": [{"kind": "agent", "item_url": "https://github.com/owner/repo/issues/13"}],
+            },
+        }
+    ).encode()
+
+    def open_http(_handler, _connection, request):
+        if request.has_proxy() or local_reply:
+            response.geturl.return_value = request.full_url
+            return response
+        raise urllib.error.URLError(ConnectionRefusedError())
+
+    monkeypatch.setattr(urllib.request.AbstractHTTPHandler, "do_open", open_http)
+    document = view.load_document("owner/repo#12").content
+
+    target = next(line for line in document.splitlines() if "[owner/repo#13]" in line)
+    other = next(line for line in document.splitlines() if "[owner/repo#14]" in line)
+    assert ("Workdash coding pane" in target) is local_reply
+    assert ("Ready on GitHub" in target) is not local_reply
+    assert "Ready on GitHub" in other and "Workdash coding pane" not in other
+    assert ("Couldn’t check whether Workdash is working on" in document) is not local_reply
+
+
+@pytest.mark.parametrize("pane_pr, ready", [(20, False), (21, True)])
+def test_project_only_counts_the_selected_repair_pane_against_readiness(
+    monkeypatch, two_child_project, pane_pr, ready
+):
+    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+    monkeypatch.setattr(view, "load_config", lambda: WorkdashConfig(github_username="testuser"))
+    routes, project = two_child_project
+    project.add_pull_request(
+        "owner/repo#20",
+        closes=("owner/repo#13",),
+        checks={HEAD_SHA: [check_run("unit tests", "FAILURE")]},
+    )
+    project.add_pull_request(
+        "owner/repo#21", closes=("owner/repo#13",), review_decision="REVIEW_REQUIRED"
+    )
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes, project=project))
+    monkeypatch.setattr(
+        WorkdashControlClient,
+        "request",
+        lambda *args, **kwargs: {
+            "panes": [
+                {"kind": "agent", "item_url": f"https://github.com/owner/repo/pull/{pane_pr}"}
+            ]
+        },
+    )
+
+    document = view.load_document("owner/repo#12").content
+
+    row = next(line for line in document.splitlines() if "[owner/repo#13]" in line)
+    assert ("Ready on GitHub" in row) is ready
+    pull = row.split(f"[PR owner/repo#{pane_pr}]", 1)[1].split(" · ", 1)[0]
+    assert "Workdash coding pane mapped here" in pull
+
+
+def test_project_reports_shared_repair_underway_through_linked_issue(
+    monkeypatch, two_child_project
+):
+    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+    monkeypatch.setattr(view, "load_config", lambda: WorkdashConfig(github_username="testuser"))
+    routes, project = two_child_project
+    project.add_pull_request(
+        "owner/repo#20",
+        closes=("owner/repo#13", "owner/repo#14"),
+        checks={HEAD_SHA: [check_run("unit tests", "FAILURE")]},
+    )
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes, project=project))
+
+    def other_issue_row():
+        document = view.load_document("owner/repo#12").content
+        return next(line for line in document.splitlines() if "[owner/repo#14]" in line)
+
+    assert "Ready on GitHub" in other_issue_row()
+    monkeypatch.setattr(
+        WorkdashControlClient,
+        "request",
+        lambda *args, **kwargs: {
+            "panes": [{"kind": "agent", "item_url": "https://github.com/owner/repo/issues/13"}]
+        },
+    )
+
+    row = other_issue_row()
+    assert "Ready on GitHub" not in row
+    assert "Workdash coding pane holds repair through" in row
+    assert "[owner/repo#13](https://github.com/owner/repo/issues/13)" in row
+    assert "Checks failing" in row
+
+
+def test_project_keeps_explicit_review_decision_and_request(monkeypatch, two_child_project):
+    routes, project = two_child_project
+    project.add_pull_request(
+        "owner/repo#20",
+        closes=("owner/repo#13",),
+        review_decision="APPROVED",
+        review_requests=["human"],
+        checks={HEAD_SHA: [check_run("unit tests")]},
+    )
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes, project=project))
+
+    document = view.load_document("owner/repo#12").content
+
+    row = next(line for line in document.splitlines() if "[owner/repo#13]" in line)
+    assert "Review approved; Review requested; Reported checks passing" in row
+    assert "Ready on GitHub" not in row
+
+
+@pytest.mark.parametrize(
+    "state, label", [("CLOSED", "Closed without merging"), ("MERGED", "Merged")]
+)
+def test_project_shows_ready_issue_with_coding_pane_on_its_inactive_pr(
+    monkeypatch, two_child_project, state, label
+):
+    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+    routes, project = two_child_project
+    project.add_pull_request("owner/repo#20", closes=("owner/repo#13",), state=state)
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes, project=project))
+    monkeypatch.setattr(
+        WorkdashControlClient,
+        "request",
+        lambda *args, **kwargs: {
+            "panes": [
+                {
+                    "kind": "agent",
+                    "item": "owner/repo#PR-20",
+                    "item_url": "https://github.com/owner/repo/pull/20",
+                }
+            ]
+        },
+    )
+
+    document = view.load_document("owner/repo#12").content
+
+    row = next(line for line in document.splitlines() if "[owner/repo#13]" in line)
+    issue, pull = row.split("[PR owner/repo#20]", 1)
+    assert "Ready on GitHub" in issue and "Workdash coding pane" not in issue
+    assert f"{label}; Workdash coding pane" in pull
+
+
+def test_project_supplemental_reads_stop_at_a_deadline(monkeypatch):
+    routes = issue_routes()
+    routes["api repos/owner/repo/issues/12/sub_issues"] = [
+        sub_issue(number, children=0) for number in range(13, 23)
+    ]
+    run = fake_gh_view_run(routes)
+    issue_batches = []
+    clock = 0.0
+
+    def slow_lookup(command, **kwargs):
+        nonlocal clock
+        if command[-1].startswith("query=query ProjectIssue"):
+            issue_batches.append(command[-1])
+            timeout = kwargs["timeout"]
+            clock += timeout
+            raise subprocess.TimeoutExpired(command, timeout)
+        return run(command, **kwargs)
+
+    monkeypatch.setattr(github_client.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(view.subprocess, "run", slow_lookup)
+
+    document = view.load_document("owner/repo#12").content
+
+    assert len(issue_batches) == 1 and "issue(number: 22)" not in issue_batches[0]
+    assert "## Sub-issues (10)" in document
+    for number in (13, 22):
+        row = next(line for line in document.splitlines() if f"[owner/repo#{number}]" in line)
+        assert "Linked PRs unavailable" in row and "Readiness unavailable" in row
+    assert "Ready on GitHub" not in document

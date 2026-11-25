@@ -3,6 +3,7 @@ Feature: View a document
 
   The user can read a GitHub issue or pull request, a local Markdown file,
   or a remote document in the terminal, without leaving the current session.
+  A parent issue shows known project status even when some details are unavailable.
 
   Rules:
     - `workdash view TARGET` shows the target as one document in the built-in viewer.
@@ -13,6 +14,8 @@ Feature: View a document
     - The description preserves the original Markdown body; bare issue references are not converted to links.
     - The view command can use the GitHub CLI installed locally by Workdash.
     - Sub-issues are listed as a table at every nesting level, each level marked with a `└─ ` prefix.
+    - Project status shows a known Workdash coding pane against its launch work, even if the pane's current directory changed. A targeted todo shows coding activity on the original issue, not on an issue in the target repository. Inside Zellij, only a direct reply from the local Workdash server for the current session can establish coding activity; other replies do not change GitHub readiness.
+    - When a Workdash coding pane on one linked issue already holds a shared pull request repair, the other issue shows where the repair is underway rather than marking it ready. A coding pane mapped to a different linked pull request remains visible without hiding the ready repair.
     - Every comment is a section naming its author and date, and an item without comments says so.
     - A pull request document also reports draft, mergeable, merge state and review decision, plus CI, reviews and review threads.
     - CI reports GitHub's overall state, counts all checks and links failing checks, including GitHub error statuses, even when there are more than 100 checks; passing checks are only counted.
@@ -28,6 +31,33 @@ Feature: View a document
     When the user views it with `workdash view`
     Then the document shows the issue metadata, description, sub-issues and comments
     And the document ends with the generation timestamp
+
+  @id:F-VIEW-ITEM-S011
+  Scenario: See what remains in an open project without a Workdash server
+    Given an open project with a ready child, a blocked child, and a closed child
+    And the ready child has the user's writable pull request with failing checks
+    And the blocked child has a linked pull request with review feedback and failing checks
+    And the Workdash server is unavailable
+    When the user views it with `workdash view`
+    Then the document shows the open parent as blocked by its open sub-issues
+    And it shows the ready child as ready on GitHub with failing PR checks and the closed child as completed
+    And the blocked child's status links its blocker and shows its pull request's review and checks
+    And the document says it couldn't check whether Workdash is working on this
+
+  @id:F-VIEW-ITEM-S012
+  Scenario: See work already underway beneath a closed parent
+    Given a closed project with an open child
+    And Workdash is coding on the child's linked pull request, whose checks are failing
+    When the user views it with `workdash view`
+    Then the document keeps the parent closed and the child open
+    And the child's linked pull request shows failing checks and the coding pane Workdash maps to it
+
+  @id:F-VIEW-ITEM-S014
+  Scenario: See why an open project has no work ready to pick up
+    Given an open project whose only child has a clean linked pull request with a pending review request
+    When the user views it with `workdash view`
+    Then the parent and child remain open without any work marked ready
+    And the child's linked pull request shows that it is awaiting review and its reported checks are passing
 
   @id:F-VIEW-ITEM-S002
   Scenario: View a pull request

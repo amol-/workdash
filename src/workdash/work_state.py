@@ -139,20 +139,8 @@ def select_ready_work(
         linked = [states[(repo.lower(), number)] for repo, number in entry.open_pull_requests]
         if not linked:
             ready.append(ReadyWork(item=entry.item))
-        elif all(
-            state.author and state.author.lower() == github_username.lower() for state in linked
-        ):
-            actionable = [state for state in linked if state.ready]
-            if actionable:
-                state = min(
-                    actionable,
-                    key=lambda state: (
-                        state.item.created_at,
-                        state.item.repo.lower(),
-                        state.item.number,
-                    ),
-                )
-                ready.append(ReadyWork(item=entry.item, pull_request=state))
+        elif state := select_actionable_pull_request(linked, github_username):
+            ready.append(ReadyWork(item=entry.item, pull_request=state))
     ready = sorted(
         ready,
         key=lambda work: (
@@ -176,6 +164,19 @@ def select_ready_work(
             seen_pull_requests.add(key)
         unique.append(work)
     return unique
+
+
+def select_actionable_pull_request(
+    linked: list[PullRequestWorkState], github_username: str
+) -> PullRequestWorkState | None:
+    """Choose the oldest actionable repair when the user authored all linked open PRs."""
+    if not all(pr.author and pr.author.lower() == github_username.lower() for pr in linked):
+        return None
+    return min(
+        (pr for pr in linked if pr.ready),
+        key=lambda pr: (pr.item.created_at, pr.item.repo.lower(), pr.item.number),
+        default=None,
+    )
 
 
 def parse_github_datetime(timestamp: str) -> datetime:
