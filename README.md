@@ -102,9 +102,9 @@ For a missing or invalid `open_needs_pane`, the wizard asks
 Explicit boolean choices are preserved. Legacy configurations without this flag
 continue to open directly. Direct viewers do not require Zellij and must finish
 within four seconds. Set the flag to `true` for a terminal viewer: Workdash launches
-it in a full-size floating pane in the current/selected active Zellij session,
+it in a full-size floating pane in the current Zellij session,
 without creating a session or worktree. Launch failures report the configured
-command; viewer child errors stay visible in the pane.
+command. The pane closes when the viewer exits.
 
 Re-running `--configure` otherwise only prompts for empty fields, except for
 Zellij and GitHub CLI: the wizard always checks for global binaries first and
@@ -188,7 +188,6 @@ running dashboard at the selected address even if local configuration is
 unreadable. Pressing `q` exits the dashboard but keeps the
 session and its panes; Ctrl+Q quits the entire session. Inside Zellij, Workdash
 runs in the current pane and uses the current session regardless of `--session`.
-
 
 ## What gets shown
 
@@ -579,8 +578,8 @@ sharing that worktree, wherever its cwd has moved, `code` starts nothing and rep
 pane. Otherwise it reports `launched` once the new pane is visible. If Zellij
 cannot list its panes, or a launched pane does not show up, `code` starts nothing
 and reports an error; a retry within a minute of an unconfirmed launch fails too.
-An agent that exits right after launch is reported as an error and does not block
-a retry.
+Command panes close when their command exits. If an agent exits before
+Workdash can see the new pane, the launch may be reported as unconfirmed.
 Terminal panes do not count. VSCode Copilot, offered only by the TUI, holds no
 claim and is not opened while an agent pane is live. In the TUI, `c` opens the
 code menu; choosing a numbered agent focuses any live agent pane for the worktree.

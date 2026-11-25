@@ -9,6 +9,7 @@ import pytest
 from workdash import launcher
 from workdash.control import WorkdashControlError
 from workdash.dashboard_record import DashboardRecord, DashboardRecords
+from zellij_pane_launch import mark_pane_started
 
 
 def test_exited_session_recovery_failure_does_not_create_a_new_session(monkeypatch):
@@ -60,6 +61,7 @@ def test_existing_session_restarts_dashboard_in_its_tab(monkeypatch):
 
     def run(command, **kwargs):
         calls.append(command)
+        mark_pane_started(command, "4")
         return subprocess.CompletedProcess(command, 0, stdout="workdash [Created now]\n", stderr="")
 
     monkeypatch.setattr(launcher.subprocess, "run", run)
@@ -146,6 +148,7 @@ def test_a_record_that_no_longer_matches_reality_is_discarded(
 
     def run(command, **kwargs):
         calls.append(command)
+        mark_pane_started(command, "17")
         output = "custom [Created now]\n" if "list-sessions" in command else "17\n"
         return subprocess.CompletedProcess(command, 0, output, "")
 
@@ -231,6 +234,7 @@ def test_a_pane_named_like_a_dashboard_does_not_count_as_a_running_one(monkeypat
 
     def run(command, **kwargs):
         calls.append(command)
+        mark_pane_started(command, "3")
         output = "custom [Created now]\n" if "list-sessions" in command else "3\n"
         return subprocess.CompletedProcess(command, 0, output, "")
 
@@ -250,6 +254,7 @@ def test_missing_dashboard_tab_is_created_with_new_options(monkeypatch):
 
     def run(command, **kwargs):
         calls.append(command)
+        mark_pane_started(command, "17")
         output = "custom [Created now]\n" if "list-sessions" in command else "17\n"
         return subprocess.CompletedProcess(command, 0, output, "")
 
@@ -274,6 +279,7 @@ def test_existing_plugin_only_dashboard_tab_is_reused(monkeypatch):
 
     def run(command, **kwargs):
         calls.append(command)
+        mark_pane_started(command, "4")
         return subprocess.CompletedProcess(command, 0, "workdash [Created now]\n", "")
 
     monkeypatch.setattr(launcher.subprocess, "run", run)
@@ -291,3 +297,31 @@ def test_inside_start_names_only_the_dashboard_own_pane(monkeypatch):
     monkeypatch.setattr(launcher.subprocess, "run", lambda command, **kwargs: calls.append(command))
     launcher.zellij.name_dashboard_pane("project", "3")
     assert [command[-3:] for command in calls] == [["-p", "terminal_3", "workdash tui"]]
+
+
+def test_a_dashboard_launch_that_never_starts_reports_the_failure(monkeypatch):
+    calls = []
+    monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/zellij")
+    monkeypatch.setattr(launcher, "_ZELLIJ_PANE_MARKER_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(
+        launcher.Zellij,
+        "load_zellij_panes",
+        lambda session: [{"id": 4, "is_plugin": True, "tab_name": "dashboard", "tab_id": 3}],
+    )
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "workdash [Created now]\n", "")
+
+    monkeypatch.setattr(launcher.subprocess, "run", run)
+    monkeypatch.setattr(
+        launcher.os,
+        "execvp",
+        lambda *args: pytest.fail("attached to a dashboard that never started"),
+    )
+
+    with pytest.raises(
+        RuntimeError, match="Failed to start dashboard in Zellij: the pane never ran"
+    ):
+        launcher.zellij.exec_zellij_wrapped_workdash([])
+    assert any("new-pane" in command for command in calls)

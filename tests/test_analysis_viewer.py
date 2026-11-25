@@ -466,7 +466,9 @@ def test_external_link_honours_the_configured_pane_viewer(monkeypatch):
 
     _drive_viewer(monkeypatch, app, follow)
 
-    opened.assert_called_once_with("session", ["viewer", "https://example.com"])
+    opened.assert_called_once_with(
+        "session", ["viewer", "https://example.com"], executable="viewer"
+    )
     assert statuses == ["Opened https://example.com with viewer"]
 
 

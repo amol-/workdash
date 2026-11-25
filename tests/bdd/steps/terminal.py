@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,15 +17,55 @@ from textual.widgets import Static
 
 from workdash.agent_execution import executor
 from workdash.control import WorkdashSession, format_work_item_id
-from workdash.launcher import _zellij_pane_name_for_work_action, launch_terminal_context
+from workdash.launcher import (
+    _zellij_pane_name_for_work_action,
+    find_zellij_pane,
+    is_live_zellij_pane,
+    launch_terminal_context,
+    zellij,
+)
 from workdash.models import WorkItem
+from zellij_pane_launch import mark_pane_started
 
 from .common import make_valid_config, make_work_item, modal_screen_names, run_app
+
+
+@given("a Workdash terminal is open in a worktree", target_fixture="terminal_pane")
+def _open_terminal_in_worktree(tmp_path, monkeypatch):
+    from test_zellij_integration import live_zellij_session
+
+    with live_zellij_session(monkeypatch) as session:
+        launch = launch_terminal_context(str(tmp_path), zellij_session=session)
+        pane = find_zellij_pane(zellij.load_zellij_panes(session), launch.pane_id)
+        assert pane is not None and is_live_zellij_pane(pane)
+        yield session, launch.pane_id
+
+
+@when("the user exits the shell")
+def _exit_terminal_shell(terminal_pane):
+    session, pane_id = terminal_pane
+    zellij.send_zellij_pane_input(session, pane_id, "exit 0")
+
+
+@then("that terminal pane closes")
+def _terminal_closes(terminal_pane):
+    session, pane_id = terminal_pane
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if find_zellij_pane(zellij.load_zellij_panes(session), pane_id) is None:
+            return
+        time.sleep(0.1)
+    pytest.fail(f"terminal pane {pane_id} stayed open after exit")
 
 
 @given("the next terminal launch will fail")
 def _next_terminal_launch_will_fail(scenario_state: dict[str, Any]) -> None:
     scenario_state["terminal_launch_fails"] = True
+
+
+@given("Zellij stalls without opening the requested terminal")
+def _terminal_launch_stalls(scenario_state: dict[str, Any]) -> None:
+    scenario_state["terminal_launch_stalls"] = True
 
 
 @given(parsers.parse('the selected work item uses the worktree directory "{worktree_dir}"'))
@@ -57,6 +98,7 @@ def _launch_named_terminal_backed_work_action(
 
     def fake_run(*args, **kwargs):
         commands.append(args[0])
+        mark_pane_started(args[0], "21")
         return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
 
     monkeypatch.setenv("SHELL", "/bin/bash")
@@ -106,8 +148,7 @@ def _work_action_opens_current_zellij_session(scenario_state: dict[str, Any]) ->
     command = commands[0]
     assert Path(command[0]).name == "zellij"
     assert command[1:3] == ["action", "new-pane"]
-    cwd_index = command.index("--cwd")
-    assert command[cwd_index : cwd_index + 3] == ["--cwd", scenario_state["worktree_path"], "--"]
+    assert command[command.index("--cwd") + 1] == scenario_state["worktree_path"]
 
 
 @then("the system does not target the shared `workdash` Zellij session")
@@ -211,6 +252,17 @@ def run_terminal_scenario(
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir(exist_ok=True)
     panes = _scenario_panes(scenario_state, worktree_path, tmp_path)
+    if scenario_state.get("open_viewer"):
+        panes.insert(
+            0,
+            {
+                "id": 3,
+                "title": "view",
+                "pane_command": '/bin/sh -c claim="$ZELLIJ_PANE_ID"; ... '
+                "workdash-pane /tmp/workdash-pane-test/launch/pane workdash view analysis.md",
+                "pane_cwd": str(worktree_path),
+            },
+        )
     # A transient failure: only the advisory check for an existing terminal fails.
     lookup_failures = 1 if scenario_state.get("terminal_lookup_fails") else 0
 
@@ -231,7 +283,10 @@ def run_terminal_scenario(
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps(panes), stderr="")
         if scenario_state.get("terminal_launch_fails"):
             raise subprocess.CalledProcessError(1, command, stderr="terminal launch failed")
+        if scenario_state.get("terminal_launch_stalls") and kwargs.get("timeout") is not None:
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
         terminal_commands.append(command)
+        mark_pane_started(command, "22")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(control_module, "ensure_worktree", ensure_worktree)
@@ -319,9 +374,22 @@ def _reports_terminal_launch_error_details(scenario_state: dict[str, Any]) -> No
     assert "terminal launch failed" in status
 
 
+@then("the TUI reports that launching the terminal in Zellij timed out")
+def _reports_terminal_launch_timeout(scenario_state: dict[str, Any]) -> None:
+    status = scenario_state["terminal_status"]
+    assert status.startswith("Terminal failed:")
+    assert "Failed to launch terminal in zellij" in status
+    assert "timed out" in status
+
+
 @then("no terminal is opened")
 def _no_terminal_opened(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["terminal_calls"] == []
+
+
+@given("a viewer is open in that worktree")
+def _viewer_open(scenario_state):
+    scenario_state["open_viewer"] = True
 
 
 @given("a plain shell is already open in that worktree alongside a coding agent")

@@ -16,6 +16,7 @@ import termios
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 
 import pytest
 
@@ -268,14 +269,14 @@ def test_launch_pane_and_wait_blocks_until_the_pane_command_exits_in_its_group_t
         _cleanup_sessions(zellij, env, [(name, pid, fd)])
 
 
-@pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
-@pytest.mark.parametrize("tab_name", ["epic", "-foo"])
-def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, tab_name):
-    from workdash.agent_execution import executor
+@contextmanager
+def live_zellij_session(monkeypatch):
     from workdash.launcher import zellij as zellij_client
 
     zellij = shutil.which("zellij")
-    name = f"workdash-group-test-{uuid.uuid4().hex}"
+    if zellij is None:
+        pytest.skip("Zellij is not installed")
+    name = f"workdash-pane-test-{uuid.uuid4().hex}"
     env = os.environ.copy()
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
         env.pop(key, None)
@@ -296,6 +297,17 @@ def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, 
             time.sleep(0.1)
         else:
             pytest.fail("Zellij did not start")
+        yield name
+    finally:
+        _cleanup_sessions(zellij, env, [(name, pid, fd)])
+
+
+@pytest.mark.parametrize("tab_name", ["epic", "-foo"])
+def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, tab_name):
+    from workdash.agent_execution import executor
+    from workdash.launcher import zellij as zellij_client
+
+    with live_zellij_session(monkeypatch) as name:
         for repo, group in [("first", tab_name), ("second", tab_name), ("third", None)]:
             path = tmp_path / repo
             path.mkdir()
@@ -314,8 +326,6 @@ def test_grouped_agent_launches_in_new_and_existing_tabs(tmp_path, monkeypatch, 
             else:
                 assert pane["tab_name"] != tab_name
         assert len({p["tab_id"] for p in panes if p.get("tab_name") == tab_name}) == 1
-    finally:
-        _cleanup_sessions(zellij, env, [(name, pid, fd)])
 
 
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
@@ -481,6 +491,12 @@ def test_persistent_dashboard_quit_and_restart_in_real_zellij(tmp_path, repeat):
             p for p in panes if "--debug" in str(p.get("pane_command")) and not p["is_plugin"]
         )
         assert restarted["tab_name"] == "dashboard"
+        assert action("write-chars", "--pane-id", pane_id, "exit 23").returncode == 0
+        assert action("send-keys", "--pane-id", pane_id, "Enter").returncode == 0
+        panes = wait_for(
+            lambda panes: not any(p["id"] == dashboard["id"] and not p["is_plugin"] for p in panes)
+        )
+        assert any(p["id"] == shell["id"] and not p["is_plugin"] for p in panes)
         assert action("new-tab", "--name", "keep").returncode == 0
         assert action("close-tab", "--tab-id", str(restarted["tab_id"])).returncode == 0
         start("--refresh")
@@ -632,6 +648,7 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
         )
         viewer = next(p for p in panes if not p["is_plugin"] and p["id"] not in initial_ids)
         original = next(p for p in initial if not p["is_plugin"])
+        assert launcher.is_zellij_shell_pane(original)
         for field in ("pane_x", "pane_y", "pane_columns", "pane_rows"):
             assert viewer[field] == original[field], (field, viewer, original)
         pane_id = f"terminal_{viewer['id']}"
@@ -653,6 +670,9 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
             assert text in screen
         assert "# Analysis heading" not in screen
         assert "```" not in screen
+        running = json.loads(action("list-panes", "--json", "--all").stdout)
+        viewer = next(p for p in running if not p["is_plugin"] and p["id"] == viewer["id"])
+        assert not launcher.is_zellij_shell_pane(viewer), viewer["pane_command"]
         assert action("send-keys", "End").returncode == 0
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:

@@ -11,7 +11,7 @@ Feature: TUI spawns branchdiff viewer
     - For pull request work items, Workdash asks GitHub for the PR base branch at launch time and passes the Workdash-managed base remote target to branchdiff.
     - Same-repo pull requests compare against `origin/<base branch>`; fork pull requests compare against `upstream/<base branch>`.
     - For non-PR work items, Workdash launches branchdiff without a target branch.
-    - If spawning fails, workdash reports the error to the user.
+    - If spawning fails, including when the configured shell is unavailable in the pane, Workdash reports the error instead of reporting that the diff viewer opened.
 
   @id:F-TUI-BRANCHDIFF-SPAWN-S001
   Scenario: Workdash TUI spawns branchdiff for a pull request against its GitHub base branch

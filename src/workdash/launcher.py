@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -38,6 +38,13 @@ _WORKDASH_LOCAL_BIN = LOCAL_BIN_PATH
 _ZELLIJ_PANE_READ_ATTEMPTS = 3
 _ZELLIJ_PANE_READ_RETRY_SECONDS = 2.0
 _ZELLIJ_COMMAND_TIMEOUT_SECONDS = 10.0
+# A pane launch proves itself only once the pane writes its own ID, so a launch is
+# retried up to three times, waiting up to five seconds per attempt for that proof.
+_ZELLIJ_PANE_LAUNCH_ATTEMPTS = 3
+_ZELLIJ_PANE_MARKER_POLL_SECONDS = 0.2
+_ZELLIJ_PANE_MARKER_TIMEOUT_SECONDS = 5.0
+_PANE_WRAPPER_NAME = "workdash-pane"
+_ITEM_VIEW_WRAPPER_NAME = "workdash-view"
 # Terminal control sequences in text captured from a pane or an error message.
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
 # Concurrent launches for one group must not each create their own tab.
@@ -74,7 +81,6 @@ def _run_browser_open(
     kind: str,
     needs_pane: bool = False,
     zellij_session: str | None = None,
-    close_on_exit: bool = False,
     direct_nonblocking: bool = False,
     focus: bool = False,
 ) -> str:
@@ -98,18 +104,16 @@ def _run_browser_open(
                 executable = shutil.which(command_tokens[0])
                 if executable:
                     command_tokens[0] = os.path.abspath(executable)
+            executable = command_tokens[0]
             if command == " ".join(_ITEM_DOCUMENT_COMMAND):
                 command_tokens = [
-                    "sh",
+                    "/bin/sh",
                     "-c",
                     '"$@" || { printf "\\nPress Enter to close this pane.\\n"; read -r _; }',
-                    "workdash-view",
+                    _ITEM_VIEW_WRAPPER_NAME,
                     *command_tokens,
                 ]
-            if close_on_exit:
-                pane_id = zellij.open_viewer(session, [*command_tokens, target], close_on_exit=True)
-            else:
-                pane_id = zellij.open_viewer(session, [*command_tokens, target])
+            pane_id = zellij.open_viewer(session, [*command_tokens, target], executable=executable)
             if focus:
                 zellij.focus_zellij_pane(session, pane_id)
         except subprocess.CalledProcessError as error:
@@ -191,7 +195,6 @@ def open_item_document(url: str, *, zellij_session: str | None) -> str:
         kind="URL",
         needs_pane=True,
         zellij_session=zellij_session,
-        close_on_exit=True,
     )
 
 
@@ -252,7 +255,6 @@ def open_markdown(
         html_path.resolve().as_uri(),
         command=command,
         kind="file",
-        close_on_exit=True,
         direct_nonblocking=True,
         focus=focus,
         needs_pane=needs_pane,
@@ -260,14 +262,19 @@ def open_markdown(
     )
 
 
-def _run_launch_command(command: list[str], *, context: str) -> None:
+def _run_launch_command(
+    command: list[str], *, context: str = "", timeout: float | None = None
+) -> subprocess.CompletedProcess:
+    prefix = f"{context}: " if context else ""
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
+        return subprocess.run(command, check=True, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"{prefix}command timed out after {error.timeout:g}s") from error
     except FileNotFoundError as error:
-        raise RuntimeError(f"{context}: required command '{command[0]}' is not on PATH.") from error
+        raise RuntimeError(f"{prefix}required command '{command[0]}' is not on PATH.") from error
     except subprocess.CalledProcessError as error:
         message = error.stderr.strip() or error.stdout.strip() or str(error)
-        raise RuntimeError(f"{context}: {message}") from error
+        raise RuntimeError(f"{prefix}{message}") from error
 
 
 def _path_with_workdash_local_bin(env_path: str | None = None) -> str:
@@ -305,6 +312,20 @@ def is_live_zellij_pane(pane: dict[str, object]) -> bool:
         and pane.get("exited") is not True
         and pane.get("is_held") is not True
     )
+
+
+def is_zellij_shell_pane(pane: dict[str, object]) -> bool:
+    """Whether Zellij lists a shell rather than a command launched through our wrapper."""
+    command = pane.get("pane_command")
+    if not isinstance(command, str) or not command.strip():
+        return False
+    if command.startswith("/bin/sh -c ") and any(
+        f" {wrapper} " in command for wrapper in (_PANE_WRAPPER_NAME, _ITEM_VIEW_WRAPPER_NAME)
+    ):
+        return False
+    shells = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh"}
+    shells.add(os.path.basename(os.environ.get("SHELL", "")))
+    return os.path.basename(command.split(maxsplit=1)[0]) in shells
 
 
 def dashboard_is_running(session: str, *, attach_only: bool = False) -> bool:
@@ -418,7 +439,7 @@ def _write_zellij_startup_layout(workdash_command: Sequence[str], *, session_nam
         "    }\n"
         '    tab name="dashboard" {\n'
         '        pane split_direction="horizontal" {\n'
-        f'            pane name="workdash tui" command={command} size="75%" {{\n'
+        f'            pane name="workdash tui" command={command} size="75%" close_on_exit=true {{\n'
         f"                args {args}\n"
         "            }\n"
         '            pane size="25%"\n'
@@ -437,43 +458,166 @@ def _write_zellij_startup_layout(workdash_command: Sequence[str], *, session_nam
         return layout_file.name
 
 
-def _build_zellij_new_pane_command(
-    zellij: str,
-    repo_path: str,
+def _launch_zellij_pane(
     command: list[str],
     *,
-    work_action: str,
+    context: str = "",
     zellij_session: str | None = None,
+    cwd: str | None = None,
+    name: str | None = None,
     tab_id: object = None,
+    floating: bool = False,
     blocking: bool = False,
-) -> list[str]:
+    pane_callback: Callable[[str | None], None] | None = None,
+    checked_executable: str | None = None,
+) -> str | None:
+    """Launch one Zellij pane and return its ID once the pane proves it started.
+
+    Zellij can accept a pane request, exit zero and never run the command, so the
+    pane writes its own ``$ZELLIJ_PANE_ID`` to a private marker before exec.
+    Workdash retries only while it has seen no marker, and returns ``None`` if
+    no pane proved it started.
+    """
+    zellij = _resolve_zellij_binary()
     session_args = ["--session", zellij_session] if zellij_session is not None else []
-    return [
-        zellij,
-        *session_args,
-        "action",
-        "new-pane",
-        *(["--tab-id", str(tab_id)] if tab_id is not None else []),
-        *_zellij_pane_name_argument(work_action, repo_path),
-        "--cwd",
-        repo_path,
-        # A blocking pane reports its command's exit status as zellij's own.
-        *(["--close-on-exit", "--block-until-exit"] if blocking else []),
-        "--",
-        *command,
-    ]
+    with tempfile.TemporaryDirectory(prefix="workdash-pane-") as directory:
+        claim_dir = Path(directory) / "launch"
+        claim_dir.mkdir()
+        # The pane may have a different PATH or cwd from the Zellij client.
+        preflight = ""
+        if checked_executable is not None:
+            preflight = "cmd=$2; "
+            if "/" not in checked_executable:
+                # Search files, not shell builtins; empty entries mean the pane cwd.
+                preflight = (
+                    'path=$PATH:; while [ -n "$path" ]; do '
+                    'dir=${path%%:*}; path=${path#*:}; cmd="${dir:-.}/$2"; '
+                    '[ -f "$cmd" ] && [ -x "$cmd" ] && break; done; '
+                )
+            preflight += '[ -f "$cmd" ] && [ -x "$cmd" ] || claim=missing; '
+        argv = [
+            zellij,
+            *session_args,
+            "action",
+            "new-pane",
+            *(
+                ["-f", "-x", "0", "-y", "0", "--width", "100%", "--height", "100%"]
+                if floating
+                else []
+            ),
+            *(["--tab-id", str(tab_id)] if tab_id is not None else []),
+            *(["--name", name] if name is not None else []),
+            *(["--cwd", cwd] if cwd is not None else []),
+            "--close-on-exit",
+            *(["--block-until-exit"] if blocking else []),
+            "--",
+            "/bin/sh",
+            "-c",
+            'claim="$ZELLIJ_PANE_ID"; '
+            + preflight
+            # Find ln even under a restricted PATH, without changing the command's PATH.
+            + '[ -n "$ZELLIJ_PANE_ID" ] && command -p ln -s "$claim" "$1" 2>/dev/null '
+            '&& [ "$claim" != missing ] || exit 1; shift 2; exec "$@"',
+            _PANE_WRAPPER_NAME,
+        ]
+        last_timeout = None
+        prefix = f"{context}: " if context else ""
+        try:
+            for attempt in range(_ZELLIJ_PANE_LAUNCH_ATTEMPTS):
+                marker = claim_dir / f"pane-{attempt}"
+                launch_argv = [*argv, str(marker), checked_executable or "", *command]
+                error = None
+                stderr = ""
+                with ExitStack() as clients:
+                    client = None
+                    try:
+                        if blocking:
+                            client = clients.enter_context(
+                                subprocess.Popen(
+                                    launch_argv,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
+                                    text=True,
+                                )
+                            )
+                            deadline = time.monotonic() + _ZELLIJ_PANE_MARKER_TIMEOUT_SECONDS
+                            while not marker.is_symlink():
+                                remaining = deadline - time.monotonic()
+                                try:
+                                    _, stderr = client.communicate(
+                                        timeout=max(
+                                            0, min(remaining, _ZELLIJ_PANE_MARKER_POLL_SECONDS)
+                                        )
+                                    )
+                                    break
+                                except subprocess.TimeoutExpired:
+                                    if remaining <= 0:
+                                        raise
+                        else:
+                            stderr = _run_launch_command(
+                                launch_argv,
+                                context=context,
+                                timeout=_ZELLIJ_COMMAND_TIMEOUT_SECONDS,
+                            ).stderr
+                            deadline = time.monotonic() + _ZELLIJ_PANE_MARKER_TIMEOUT_SECONDS
+                            while not marker.is_symlink() and time.monotonic() < deadline:
+                                time.sleep(_ZELLIJ_PANE_MARKER_POLL_SECONDS)
+                    except (RuntimeError, OSError, subprocess.TimeoutExpired) as launch_error:
+                        error = launch_error
+
+                    if pane_id := _cancel_or_find_pane(marker):
+                        if pane_id == "missing":
+                            raise RuntimeError(
+                                f"{prefix}Executable {checked_executable!r} is not available in the Zellij pane."
+                            )
+                        pane_id = _format_zellij_pane_id(pane_id)
+                        if client is not None:
+                            try:
+                                if pane_callback is not None:
+                                    pane_callback(pane_id)
+                                client.communicate()
+                            finally:
+                                if pane_callback is not None:
+                                    pane_callback(None)
+                        return pane_id
+                    if client is not None and client.returncode is None:
+                        client.kill()
+
+                if isinstance(error, subprocess.TimeoutExpired) or (
+                    error is not None and isinstance(error.__cause__, subprocess.TimeoutExpired)
+                ):
+                    last_timeout = error
+                elif isinstance(error, OSError):
+                    raise RuntimeError(f"{prefix}{error}") from error
+                elif error is not None:
+                    raise error
+                elif details := stderr.strip():
+                    # Zellij can exit zero even when it reports a launch error.
+                    raise RuntimeError(f"{prefix}{details}")
+
+            if isinstance(last_timeout, subprocess.TimeoutExpired):
+                raise RuntimeError(
+                    f"{prefix}the Zellij pane never ran (startup timed out)"
+                ) from last_timeout
+            if last_timeout is not None:
+                raise last_timeout
+            return None
+        finally:
+            # Remove the claim path atomically before cleanup unlinks its contents.
+            claim_dir.rename(Path(directory) / "finished")
 
 
-def _zellij_pane_name_argument(work_action: str, repo_path: str) -> list[str]:
-    return ["--name", _zellij_pane_name_for_work_action(work_action, repo_path)]
+def _cancel_or_find_pane(marker: Path) -> str:
+    # Cancellation and wrapper startup compete for the same atomic claim.
+    try:
+        marker.symlink_to("cancelled")
+    except FileExistsError:
+        return os.readlink(marker)
+    return ""
 
 
 def _zellij_pane_name_for_work_action(work_action: str, repo_path: str) -> str:
     return f"{work_action}_{Path(repo_path).name}"
-
-
-def _zellij_pane_identity(pane: dict[str, object]) -> tuple[bool, object]:
-    return (pane.get("is_plugin") is True, _format_zellij_pane_id(pane.get("id")))
 
 
 def _format_zellij_pane_id(pane_id: object) -> str | None:
@@ -702,36 +846,17 @@ def _read_zellij_panes(session: str) -> list[dict[str, object]]:
 class Zellij:
     """All Zellij interactions must go through this object."""
 
-    def open_viewer(self, session: str, command: list[str], *, close_on_exit: bool = False) -> str:
-        completed = subprocess.run(
-            [
-                _resolve_zellij_binary(),
-                "--session",
-                session,
-                "action",
-                "new-pane",
-                "-f",
-                "-x",
-                "0",
-                "-y",
-                "0",
-                "--width",
-                "100%",
-                "--height",
-                "100%",
-                *(["--close-on-exit"] if close_on_exit else []),
-                "--",
-                *command,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
+    def open_viewer(self, session: str, command: list[str], *, executable: str) -> str:
+        pane_id = _launch_zellij_pane(
+            command,
+            zellij_session=session,
+            name=Path(command[0]).name,
+            floating=True,
+            checked_executable=executable,
         )
-        if not completed.stdout.strip().startswith("terminal_"):
-            raise RuntimeError(
-                completed.stderr.strip() or "Zellij did not return the viewer pane ID."
-            )
-        return completed.stdout.strip()
+        if pane_id is None:
+            raise RuntimeError("Zellij did not return the viewer pane ID.")
+        return pane_id
 
     @staticmethod
     def exec_zellij_wrapped_workdash(
@@ -771,6 +896,7 @@ class Zellij:
                     f"Failed to list Zellij sessions: {details or error.returncode}"
                 ) from error
             sessions = {}
+
         if attach_only and sessions.get(session_name, True):
             return
         if dashboard_is_running(session_name, attach_only=attach_only):
@@ -820,15 +946,8 @@ class Zellij:
                         capture_output=True,
                         text=True,
                     ).stdout.strip()
-                subprocess.run(
+                pane_id = _launch_zellij_pane(
                     [
-                        *prefix,
-                        "new-pane",
-                        "--tab-id",
-                        str(tab),
-                        "--name",
-                        "workdash tui",
-                        "--",
                         "env",
                         *(
                             [f"WORKDASH_HOST={os.environ['WORKDASH_HOST']}"]
@@ -837,10 +956,13 @@ class Zellij:
                         ),
                         *workdash_command,
                     ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
+                    context="Failed to start dashboard in Zellij",
+                    zellij_session=session_name,
+                    tab_id=tab,
+                    name="workdash tui",
                 )
+                if pane_id is None:
+                    raise RuntimeError("Failed to start dashboard in Zellij: the pane never ran")
             except OSError as error:
                 raise RuntimeError(f"Failed to start dashboard in Zellij: {error}") from error
             except subprocess.CalledProcessError as error:
@@ -1051,41 +1173,20 @@ class Zellij:
                 f"{context}: terminal-backed work actions require an active Zellij session. "
                 "Start workdash normally, or run it inside Zellij."
             )
-        zellij = _resolve_zellij_binary()
         pane_title = _zellij_pane_name_for_work_action(work_action, repo_path)
-        before_panes = (
-            {_zellij_pane_identity(pane) for pane in self.list_workdash_panes(target_session)}
-            if target_session
-            else set()
-        )
-        _run_launch_command(
-            _build_zellij_new_pane_command(
-                zellij,
-                repo_path,
-                command,
-                work_action=work_action,
-                zellij_session=target_session or None,
-                tab_id=self._group_tab_id(zellij, target_session, group, context=context),
-            ),
+        pane_id = _launch_zellij_pane(
+            command,
             context=context,
+            zellij_session=target_session or None,
+            cwd=repo_path,
+            name=pane_title,
+            checked_executable=command[0] if work_action in {"terminal", "diff"} else None,
+            tab_id=self._group_tab_id(
+                _resolve_zellij_binary(), target_session, group, context=context
+            ),
         )
-        pane_id = None
-        if target_session:
-            new_panes = [
-                pane
-                for pane in self.list_workdash_panes(target_session)
-                if _zellij_pane_identity(pane) not in before_panes
-            ]
-            matching_panes = [
-                pane
-                for pane in new_panes
-                if pane.get("title") == pane_title
-                and isinstance(pane.get("pane_cwd"), str)
-                and os.path.realpath(str(pane.get("pane_cwd"))) == os.path.realpath(repo_path)
-            ]
-            candidates = matching_panes or new_panes
-            if len(candidates) == 1:
-                pane_id = _format_zellij_pane_id(candidates[0].get("id"))
+        if pane_id is None:
+            raise RuntimeError(f"{context}: the Zellij pane never ran")
         return ZellijPaneLaunch(
             session=target_session or None,
             pane_id=pane_id,
@@ -1108,55 +1209,20 @@ class Zellij:
         target_session = (zellij_session or "").strip()
         if not target_session:
             raise RuntimeError(f"{context}: running an agent in a pane requires a Zellij session.")
-        zellij = _resolve_zellij_binary()
-        with tempfile.TemporaryDirectory(prefix="workdash-pane-") as directory:
-            pane_file = Path(directory) / "pane"
-            if pane_callback:
-                command = [
-                    "/bin/sh",
-                    "-c",
-                    'printf "%s" "$ZELLIJ_PANE_ID" > "$1"; shift; exec "$@"',
-                    "workdash-pane",
-                    str(pane_file),
-                    *command,
-                ]
-            done = threading.Event()
-
-            def report_pane():
-                while not done.wait(0.05):
-                    if pane_file.exists():
-                        pane_id = pane_file.read_text().strip()
-                        if pane_id:
-                            pane_callback(_format_zellij_pane_id(pane_id))
-                            return
-
-            if pane_callback:
-                reporter = threading.Thread(target=report_pane, daemon=True)
-                reporter.start()
-            try:
-                completed = subprocess.run(
-                    _build_zellij_new_pane_command(
-                        zellij,
-                        repo_path,
-                        command,
-                        work_action=work_action,
-                        zellij_session=target_session,
-                        tab_id=self._group_tab_id(zellij, target_session, group, context=context),
-                        blocking=True,
-                    ),
-                    capture_output=True,
-                    text=True,
-                )
-            finally:
-                if pane_callback:
-                    done.set()
-                    reporter.join()
-                    pane_callback(None)
-        # Zellij reports its own failures on stderr while still exiting zero when it
-        # cannot find the session, so the status alone does not tell whether the
-        # command ran and the caller must check what the pane left behind.
-        if completed.stderr.strip():
-            raise RuntimeError(f"{context}: {completed.stderr.strip()}")
+        pane_id = _launch_zellij_pane(
+            command,
+            context=context,
+            zellij_session=target_session,
+            cwd=repo_path,
+            name=_zellij_pane_name_for_work_action(work_action, repo_path),
+            tab_id=self._group_tab_id(
+                _resolve_zellij_binary(), target_session, group, context=context
+            ),
+            blocking=True,
+            pane_callback=pane_callback,
+        )
+        if pane_id is None:
+            raise RuntimeError(f"{context}: the Zellij pane never ran")
 
     @staticmethod
     def focus_zellij_pane(session: str, pane_id: str) -> None:

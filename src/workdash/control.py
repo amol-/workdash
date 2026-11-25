@@ -39,6 +39,7 @@ from .github_client import parse_github_item_url
 from .launcher import (
     _zellij_pane_name_for_work_action,
     is_live_zellij_pane,
+    is_zellij_shell_pane,
     launch_terminal_context,
     prepare_launch_agent_prompt,
 )
@@ -953,18 +954,15 @@ class WorkdashSession:
                 if check:
                     time.sleep(_LAUNCH_VISIBILITY_INTERVAL_SECONDS)
                 listed = self._live_panes()
-                # No agent held the worktree before launching, so a live one now is ours.
-                running = _agent_panes_in_worktree(listed, repo_path)
-                if running:
-                    break
-                # Zellij holds the pane of an agent that exits at once, e.g. a missing binary.
                 pane = launcher.find_zellij_pane(listed, launch.pane_id)
                 if pane is not None and pane.get("title") == launch.pane_title:
+                    if launcher.is_live_zellij_pane(pane):
+                        break
                     del self._unconfirmed_launches[launch_key]
                     raise WorkdashControlError(
                         "agent_exited",
-                        f"The coding agent for {item_id} exited right after launch; see pane "
-                        f"{launch.pane_id} and check the agent command.",
+                        f"The coding agent for {item_id} exited right after launch in pane "
+                        f"{launch.pane_id}; check the agent command.",
                     )
             else:
                 raise WorkdashControlError(
@@ -974,7 +972,7 @@ class WorkdashSession:
                     status=HTTPStatus.CONFLICT,
                 )
             del self._unconfirmed_launches[launch_key]
-            pane_id = launcher._format_zellij_pane_id(running[0]["id"])
+            pane_id = launcher._format_zellij_pane_id(pane["id"])
             launched = {
                 "status": "launched",
                 "item_id": item_id,
@@ -983,7 +981,7 @@ class WorkdashSession:
                 "cwd": launch.cwd,
                 "pane_title": launch.pane_title,
                 "pane_id": pane_id,
-                "tab_name": running[0].get("tab_name"),
+                "tab_name": pane.get("tab_name"),
             }
             if autostart and include_launch_reason:
                 launched["launch_reason"] = launch_reason
@@ -992,7 +990,7 @@ class WorkdashSession:
                 self.autoclose.supervise(
                     session=launch.session or self.zellij_session,
                     pane_id=pane_id,
-                    pane_title=str(running[0].get("title") or ""),
+                    pane_title=str(pane.get("title") or ""),
                     item=item,
                     repo_path=repo_path,
                     launched_at=launched_at,
@@ -1699,8 +1697,6 @@ class WorkdashSession:
             worktree = existing_worktree_for_branch(self.config.workdir, repo, branch, git=self.git)
         if worktree is None or not self.zellij_session:
             return []
-        shells = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh"}
-        shells.add(os.path.basename(os.environ.get("SHELL", "")))
         item_id = format_work_item_id(item)
         item_by_cwd = {_normalized_path(worktree): item_id}
         terminal_title = _zellij_pane_name_for_work_action("terminal", str(worktree))
@@ -1710,17 +1706,9 @@ class WorkdashSession:
             if not is_live_zellij_pane(pane):
                 continue
             title = str(pane.get("title") or "")
-            command = pane.get("pane_command")
-            runs_shell = (
-                isinstance(command, str)
-                and command.strip()
-                and os.path.basename(command.split(maxsplit=1)[0]) in shells
-            )
             if title.startswith(("code_", "diff_")):
                 continue
-            # A shell is a terminal whatever its title; another program is only one
-            # when Workdash launched it in this worktree.
-            if title != terminal_title and not runs_shell:
+            if title != terminal_title and not is_zellij_shell_pane(pane):
                 continue
             payload = _pane_payload(self.zellij_session, pane, item_by_cwd, kind="terminal")
             # A Workdash terminal keeps its launch title when its shell changes

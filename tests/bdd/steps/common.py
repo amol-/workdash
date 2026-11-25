@@ -532,7 +532,10 @@ def install_zellij_agent_fakes(
                 {"id": pane_id, "title": pane_title, "pane_cwd": repo_path, "tab_name": group}
             )
         return SimpleNamespace(
-            session=zellij_session, pane_id=None, pane_title=pane_title, cwd=repo_path
+            session=zellij_session,
+            pane_id=f"terminal_{pane_id}",
+            pane_title=pane_title,
+            cwd=repo_path,
         )
 
     # A scenario that proves the real pane read fakes Zellij at its process boundary.

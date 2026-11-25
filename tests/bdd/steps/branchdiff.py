@@ -21,6 +21,7 @@ import workdash.branchdiff as branchdiff_module
 from workdash.git import GitHelper
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.workdash import main as workdash_main
+from zellij_pane_launch import mark_pane_started, pane_launch
 
 from .common import make_work_item, modal_screen_names, run_app
 
@@ -901,13 +902,13 @@ def _pane_runs_branchdiff_with_target_in_worktree(
 
 
 def _assert_branchdiff_pane_command(scenario_state: dict[str, Any], shell_text: str) -> None:
-    commands = scenario_state["branchdiff_zellij_commands"]
-    worktree_path = scenario_state["branchdiff_worktree_path"]
-    command = commands[0]
-    cwd_index = command.index("--cwd")
-    separator_index = command.index("--")
-    assert command[cwd_index : cwd_index + 2] == ["--cwd", worktree_path]
-    assert command[separator_index + 1 :] == ["/bin/bash", "-ic", shell_text]
+    zellij_arguments, pane_command = pane_launch(scenario_state["branchdiff_zellij_commands"][0])
+    cwd_index = zellij_arguments.index("--cwd")
+    assert zellij_arguments[cwd_index : cwd_index + 2] == [
+        "--cwd",
+        scenario_state["branchdiff_worktree_path"],
+    ]
+    assert pane_command == ["/bin/bash", "-ic", shell_text]
 
 
 @then("the diff viewer displays the PR changes")
@@ -969,6 +970,7 @@ def run_branchdiff_tui_scenario(
                 stderr="",
             )
         zellij_commands.append(command)
+        mark_pane_started(command, "23")
         return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
 
     def worktree_callback(item: WorkItem) -> str:

@@ -11,6 +11,11 @@ Before starting any work, read these files in order:
 - Use the repository's current name. Users only interact with the new name after a rename; do not add rename-specific handling.
 - Assume Workdash operates only in worktrees it creates and names. Do not add support for hand-made or manually renamed worktrees.
 
+## Zellij session assumptions
+
+- Workdash runs inside a Zellij session. Its actions operate only in that same session; cross-session capabilities are out of scope.
+- When Workdash quits, it no longer manages any remaining panes. On a later run, Workdash can discover panes it created in the current session and should generally reuse them rather than create duplicates.
+
 ## Verifying visual/TUI behavior
 
 To reproduce or verify a rendering bug, drive a real running app inside a real

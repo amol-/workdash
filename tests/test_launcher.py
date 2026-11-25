@@ -1,7 +1,9 @@
 import json
+import os
 import shutil
 import subprocess
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -18,6 +20,7 @@ from workdash.launcher import (
     prepare_launch_agent_prompt,
 )
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
+from zellij_pane_launch import mark_pane_started, pane_launch
 
 
 def make_work_item(
@@ -90,32 +93,88 @@ def test_viewer_opens_full_size_floating_pane_in_current_or_selected_session(mon
 
     def run(command, **kwargs):
         commands.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="terminal_23\n", stderr="")
+        mark_pane_started(command, "23")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", run)
     url = "https://example.com/?q=$(touch nope);&literal=two words"
     open_in_browser(url, 'viewer --label "two words"', needs_pane=True, zellij_session=session)
     prefix = ["/usr/bin/zellij", "--session", session or "workdash-current", "action"]
-    assert commands == [
-        [
-            *prefix,
-            "new-pane",
-            "-f",
-            "-x",
-            "0",
-            "-y",
-            "0",
-            "--width",
-            "100%",
-            "--height",
-            "100%",
-            "--",
-            "viewer",
-            "--label",
-            "two words",
-            url,
-        ],
+    assert [pane_launch(command) for command in commands] == [
+        (
+            [
+                *prefix,
+                "new-pane",
+                "-f",
+                "-x",
+                "0",
+                "-y",
+                "0",
+                "--width",
+                "100%",
+                "--height",
+                "100%",
+                "--name",
+                "viewer",
+                "--close-on-exit",
+            ],
+            ["viewer", "--label", "two words", url],
+        ),
     ]
+
+
+@pytest.mark.parametrize(
+    ("command", "pane_path", "executable_path"),
+    [
+        ("printf", "other:bin", "bin/printf"),
+        ("printf", "other:", "printf"),
+        ("./bin/test-viewer", "other", "bin/test-viewer"),
+        ("workdash view", "bin", "bin/workdash"),
+    ],
+)
+@pytest.mark.parametrize("availability", ["executable", "missing", "non-executable"])
+def test_terminal_viewer_checks_executable_in_pane_environment(
+    monkeypatch, tmp_path, command, pane_path, executable_path, availability
+):
+    pane_cwd = tmp_path / "worktree"
+    (pane_cwd / "bin").mkdir(parents=True)
+    (pane_cwd / "shutil.py").write_text("raise RuntimeError('not the standard library')\n")
+    viewer = pane_cwd / executable_path
+    wrapped = command == "workdash view"
+    exit_code = 0 if wrapped else 127
+    if availability != "missing":
+        viewer.write_text(f'#!/bin/sh\nprintf "viewer arg: %s\\n" "$@"\nexit {exit_code}\n')
+        viewer.chmod(0o755 if availability == "executable" else 0o644)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(launcher_module, "_resolve_zellij_binary", lambda: "zellij")
+    monkeypatch.setattr(launcher_module, "_ZELLIJ_PANE_MARKER_TIMEOUT_SECONDS", 0)
+    real_run = subprocess.run
+    pane_result = None
+
+    def run(argv, **kwargs):
+        nonlocal pane_result
+        pane_result = real_run(
+            argv[argv.index("--") + 1 :],
+            cwd=pane_cwd,
+            env={**os.environ, "PATH": pane_path, "ZELLIJ_PANE_ID": "23"},
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    url = "https://example.com"
+    if availability == "executable":
+        assert open_in_browser(url, command, needs_pane=True, zellij_session="test") == command
+        expected_args = ["view", url] if wrapped else [url]
+        assert pane_result.stdout.splitlines() == [f"viewer arg: {arg}" for arg in expected_args]
+        assert pane_result.returncode == exit_code
+    else:
+        with pytest.raises(RuntimeError, match="Failed to open URL via .*not available") as error:
+            open_in_browser(url, command, needs_pane=True, zellij_session="test")
+        assert f"Executable {command.split()[0]!r} is not available" in str(error.value)
 
 
 def test_direct_viewer_does_not_require_zellij(monkeypatch):
@@ -138,6 +197,7 @@ def test_direct_viewer_does_not_require_zellij(monkeypatch):
 
 def test_viewer_rejects_zero_exit_for_missing_session(monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/zellij")
+    monkeypatch.setattr(launcher_module, "_ZELLIJ_PANE_MARKER_TIMEOUT_SECONDS", 0)
     run = MagicMock(
         return_value=subprocess.CompletedProcess(
             [], 0, stdout="workdash-live [Created 1m ago]\n", stderr="Session not found\n"
@@ -669,6 +729,7 @@ def test_launch_agent_context_uses_new_zellij_pane_when_in_zellij(
         captured["check"] = kwargs.get("check")
         captured["capture_output"] = kwargs.get("capture_output")
         captured["text"] = kwargs.get("text")
+        mark_pane_started(args[0], "31")
         return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
 
     monkeypatch.setenv("ZELLIJ", "0")
@@ -683,22 +744,22 @@ def test_launch_agent_context_uses_new_zellij_pane_when_in_zellij(
     )
 
     assert launch.session is None
-    assert launch.pane_id is None
+    assert launch.pane_id == "terminal_31"
     assert launch.pane_title == "code_amol-_repoze.who_52"
     assert launch.cwd == "/tmp/amol-_repoze.who_52"
-    assert captured["command"] == [
-        "/usr/bin/zellij",
-        "action",
-        "new-pane",
-        "--name",
-        "code_amol-_repoze.who_52",
-        "--cwd",
-        "/tmp/amol-_repoze.who_52",
-        "--",
-        "/bin/bash",
-        "-ic",
-        "codex 'review this change'",
-    ]
+    assert pane_launch(captured["command"]) == (
+        [
+            "/usr/bin/zellij",
+            "action",
+            "new-pane",
+            "--name",
+            "code_amol-_repoze.who_52",
+            "--cwd",
+            "/tmp/amol-_repoze.who_52",
+            "--close-on-exit",
+        ],
+        ["/bin/bash", "-ic", "codex 'review this change'"],
+    )
     assert captured["check"] is True
     assert captured["capture_output"] is True
     assert captured["text"] is True
@@ -712,15 +773,7 @@ def test_launch_agent_context_targets_selected_zellij_session_without_current_en
     def fake_run(*args, **kwargs):
         command = args[0]
         captured.append(command)
-        if command[-5:] == ["--json", "--all", "--command", "--state", "--tab"]:
-            stdout = (
-                '[{"id": 1, "title": "workdash"}]'
-                if len(captured) == 1
-                else '[{"id": 1, "title": "workdash"}, '
-                '{"id": 23, "title": "code_amol-_repoze.who_52", '
-                '"pane_cwd": "/tmp/amol-_repoze.who_52"}]'
-            )
-            return subprocess.CompletedProcess(args=command, returncode=0, stdout=stdout, stderr="")
+        mark_pane_started(command, "23")
         return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
 
     monkeypatch.delenv("ZELLIJ", raising=False)
@@ -741,50 +794,26 @@ def test_launch_agent_context_targets_selected_zellij_session_without_current_en
     assert launch.pane_id == "terminal_23"
     assert launch.pane_title == "code_amol-_repoze.who_52"
     assert launch.cwd == "/tmp/amol-_repoze.who_52"
-    assert captured == [
-        [
-            "/usr/bin/zellij",
-            "--session",
-            "workdash-main",
-            "action",
-            "list-panes",
-            "--json",
-            "--all",
-            "--command",
-            "--state",
-            "--tab",
-        ],
-        [
-            "/usr/bin/zellij",
-            "--session",
-            "workdash-main",
-            "action",
-            "new-pane",
-            "--name",
-            "code_amol-_repoze.who_52",
-            "--cwd",
-            "/tmp/amol-_repoze.who_52",
-            "--",
-            "/bin/bash",
-            "-ic",
-            "codex 'review this change'",
-        ],
-        [
-            "/usr/bin/zellij",
-            "--session",
-            "workdash-main",
-            "action",
-            "list-panes",
-            "--json",
-            "--all",
-            "--command",
-            "--state",
-            "--tab",
-        ],
+    assert [pane_launch(command) for command in captured] == [
+        (
+            [
+                "/usr/bin/zellij",
+                "--session",
+                "workdash-main",
+                "action",
+                "new-pane",
+                "--name",
+                "code_amol-_repoze.who_52",
+                "--cwd",
+                "/tmp/amol-_repoze.who_52",
+                "--close-on-exit",
+            ],
+            ["/bin/bash", "-ic", "codex 'review this change'"],
+        ),
     ]
 
 
-def test_launch_agent_context_captures_terminal_pane_when_plugin_id_overlaps(
+def test_launch_agent_context_reports_the_pane_the_pane_itself_named(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: list[list[str]] = []
@@ -792,15 +821,7 @@ def test_launch_agent_context_captures_terminal_pane_when_plugin_id_overlaps(
     def fake_run(*args, **kwargs):
         command = args[0]
         captured.append(command)
-        if command[-5:] == ["--json", "--all", "--command", "--state", "--tab"]:
-            stdout = (
-                '[{"id": 1, "title": "status", "is_plugin": true}]'
-                if len(captured) == 1
-                else '[{"id": 1, "title": "status", "is_plugin": true}, '
-                '{"id": 1, "title": "code_amol-_repoze.who_52", '
-                '"pane_cwd": "/tmp/amol-_repoze.who_52", "is_plugin": false}]'
-            )
-            return subprocess.CompletedProcess(args=command, returncode=0, stdout=stdout, stderr="")
+        mark_pane_started(command, "1")
         return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
 
     monkeypatch.delenv("ZELLIJ", raising=False)
@@ -818,6 +839,7 @@ def test_launch_agent_context_captures_terminal_pane_when_plugin_id_overlaps(
     )
 
     assert launch.pane_id == "terminal_1"
+    assert len(captured) == 1
 
 
 def test_launch_agent_context_raises_clear_error_when_zellij_launch_fails(
@@ -849,6 +871,7 @@ def test_launch_terminal_context_uses_new_zellij_pane_when_in_zellij(
 
     def fake_run(*args, **kwargs):
         captured["command"] = args[0]
+        mark_pane_started(args[0], "7")
         return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
 
     monkeypatch.setenv("ZELLIJ", "0")
@@ -860,18 +883,49 @@ def test_launch_terminal_context_uses_new_zellij_pane_when_in_zellij(
 
     launch_terminal_context("/tmp/amol-_repoze.who_52")
 
-    assert captured["command"] == [
-        "/usr/bin/zellij",
-        "action",
-        "new-pane",
-        "--name",
-        "terminal_amol-_repoze.who_52",
-        "--cwd",
-        "/tmp/amol-_repoze.who_52",
-        "--",
-        "/bin/bash",
-        "-i",
-    ]
+    assert pane_launch(captured["command"]) == (
+        [
+            "/usr/bin/zellij",
+            "action",
+            "new-pane",
+            "--name",
+            "terminal_amol-_repoze.who_52",
+            "--cwd",
+            "/tmp/amol-_repoze.who_52",
+            "--close-on-exit",
+        ],
+        ["/bin/bash", "-i"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("launch", "action"),
+    [(launch_terminal_context, "terminal"), (launch_branchdiff_context, "branchdiff")],
+)
+def test_pane_launch_rejects_missing_configured_shell(tmp_path, monkeypatch, launch, action):
+    shell = tmp_path / "missing-shell"
+    monkeypatch.setenv("SHELL", str(shell))
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setattr(launcher_module, "_resolve_zellij_binary", lambda: "zellij")
+    real_run = subprocess.run
+
+    def run(argv, **kwargs):
+        pane = real_run(
+            argv[argv.index("--") + 1 :],
+            cwd=tmp_path,
+            env={**os.environ, "ZELLIJ_PANE_ID": "23"},
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert pane.returncode != 0
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(
+        RuntimeError, match=rf"Failed to launch {action}.*missing-shell.*not available"
+    ):
+        launch(str(tmp_path))
 
 
 def test_launch_branchdiff_context_targets_origin_for_same_repo_pr(
@@ -893,6 +947,7 @@ def test_launch_branchdiff_context_targets_origin_for_same_repo_pr(
                 ),
                 stderr="",
             )
+        mark_pane_started(command, "8")
         return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
 
     monkeypatch.setenv("ZELLIJ", "0")
@@ -939,6 +994,7 @@ def test_launch_branchdiff_context_targets_upstream_for_fork_pr(
                 ),
                 stderr="",
             )
+        mark_pane_started(command, "9")
         return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
 
     monkeypatch.setenv("ZELLIJ", "0")
@@ -950,19 +1006,19 @@ def test_launch_branchdiff_context_targets_upstream_for_fork_pr(
 
     launch_branchdiff_context("/tmp/amol-_repoze.who_52", make_work_item(WorkItemType.PR))
 
-    assert captured[-1] == [
-        "/usr/bin/zellij",
-        "action",
-        "new-pane",
-        "--name",
-        "diff_amol-_repoze.who_52",
-        "--cwd",
-        "/tmp/amol-_repoze.who_52",
-        "--",
-        "/bin/bash",
-        "-ic",
-        "workdash branchdiff upstream/main",
-    ]
+    assert pane_launch(captured[-1]) == (
+        [
+            "/usr/bin/zellij",
+            "action",
+            "new-pane",
+            "--name",
+            "diff_amol-_repoze.who_52",
+            "--cwd",
+            "/tmp/amol-_repoze.who_52",
+            "--close-on-exit",
+        ],
+        ["/bin/bash", "-ic", "workdash branchdiff upstream/main"],
+    )
 
 
 def test_launch_branchdiff_context_omits_target_for_non_pr(
@@ -974,6 +1030,7 @@ def test_launch_branchdiff_context_omits_target_for_non_pr(
         command = args[0]
         captured.append(command)
         assert command[0] not in {"gh", "git"}
+        mark_pane_started(command, "11")
         return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
 
     monkeypatch.setenv("ZELLIJ", "0")
@@ -985,20 +1042,20 @@ def test_launch_branchdiff_context_omits_target_for_non_pr(
 
     launch_branchdiff_context("/tmp/amol-_repoze.who_52", make_work_item(WorkItemType.ISSUE))
 
-    assert captured == [
-        [
-            "/usr/bin/zellij",
-            "action",
-            "new-pane",
-            "--name",
-            "diff_amol-_repoze.who_52",
-            "--cwd",
-            "/tmp/amol-_repoze.who_52",
-            "--",
-            "/bin/bash",
-            "-ic",
-            "workdash branchdiff",
-        ]
+    assert [pane_launch(command) for command in captured] == [
+        (
+            [
+                "/usr/bin/zellij",
+                "action",
+                "new-pane",
+                "--name",
+                "diff_amol-_repoze.who_52",
+                "--cwd",
+                "/tmp/amol-_repoze.who_52",
+                "--close-on-exit",
+            ],
+            ["/bin/bash", "-ic", "workdash branchdiff"],
+        )
     ]
 
 
@@ -1477,17 +1534,17 @@ def test_launch_vscode_context_rejects_empty_prompt() -> None:
 def test_independent_zellij_uses_its_own_operations(monkeypatch: pytest.MonkeyPatch) -> None:
     from unittest.mock import MagicMock
 
+    def fake_run(args, **kwargs):
+        mark_pane_started(args, "3")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
     instance = launcher_module.Zellij()
     instance.press_zellij_pane_enter = MagicMock()
     instance.load_zellij_panes = MagicMock(
-        side_effect=[[], [{"id": 1, "tab_name": "group", "tab_id": 2}], [{"id": 3}]]
+        side_effect=[[{"id": 1, "tab_name": "group", "tab_id": 2}]]
     )
     monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="terminal_3", stderr=""),
-    )
+    monkeypatch.setattr(subprocess, "run", fake_run)
 
     instance.send_zellij_pane_input("session", "terminal_3", "hello")
     instance.press_zellij_pane_enter.assert_called_once_with("session", "terminal_3")
@@ -1500,7 +1557,7 @@ def test_independent_zellij_uses_its_own_operations(monkeypatch: pytest.MonkeyPa
         zellij_session="session",
         group="group",
     )
-    assert instance.load_zellij_panes.call_count == 3
+    assert instance.load_zellij_panes.call_count == 1
     assert result.pane_id == "terminal_3"
 
 
@@ -1594,16 +1651,54 @@ def test_zellij_pane_read_gives_up_after_a_bounded_wait(monkeypatch):
     )
 
 
+@pytest.fixture
+def fake_blocking_zellij(monkeypatch):
+    real_popen = subprocess.Popen
+
+    def popen(argv, **kwargs):
+        if "new-pane" not in argv:
+            return real_popen(argv, **kwargs)
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.returncode = None
+        try:
+            completed = subprocess.run(
+                argv, timeout=launcher_module._ZELLIJ_COMMAND_TIMEOUT_SECONDS
+            )
+        except subprocess.TimeoutExpired:
+
+            def communicate(timeout=None):
+                if timeout is not None:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                client.returncode = 0
+                return "", ""
+
+            def exit_client(*_):
+                if client.returncode is None:
+                    client.kill.assert_called_once()
+
+            client.communicate.side_effect = communicate
+            client.__exit__.side_effect = exit_client
+        else:
+            client.returncode = completed.returncode
+            client.communicate.return_value = (completed.stdout, completed.stderr)
+        return client
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
+    monkeypatch.setattr(subprocess, "Popen", popen)
+
+
 def test_launch_pane_and_wait_blocks_on_the_pane_command(
     monkeypatch: pytest.MonkeyPatch,
+    fake_blocking_zellij,
 ) -> None:
     commands: list[list[str]] = []
 
     def fake_run(command, **kwargs):
         commands.append(command)
+        mark_pane_started(command, "5")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     launcher_module.Zellij().launch_pane_and_wait(
@@ -1615,29 +1710,29 @@ def test_launch_pane_and_wait_blocks_on_the_pane_command(
         group=None,
     )
 
-    assert commands == [
-        [
-            "/usr/bin/zellij",
-            "--session",
-            "workdash-main",
-            "action",
-            "new-pane",
-            "--name",
-            "analyse_owner_repo_52",
-            "--cwd",
-            "/tmp/owner_repo_52",
-            "--close-on-exit",
-            "--block-until-exit",
-            "--",
-            "/bin/bash",
-            "-ic",
-            "agent",
-        ]
+    assert [pane_launch(command) for command in commands] == [
+        (
+            [
+                "/usr/bin/zellij",
+                "--session",
+                "workdash-main",
+                "action",
+                "new-pane",
+                "--name",
+                "analyse_owner_repo_52",
+                "--cwd",
+                "/tmp/owner_repo_52",
+                "--close-on-exit",
+                "--block-until-exit",
+            ],
+            ["/bin/bash", "-ic", "agent"],
+        )
     ]
 
 
 def test_launch_pane_and_wait_opens_the_requested_group_tab(
     monkeypatch: pytest.MonkeyPatch,
+    fake_blocking_zellij,
 ) -> None:
     commands: list[list[str]] = []
 
@@ -1645,10 +1740,11 @@ def test_launch_pane_and_wait_opens_the_requested_group_tab(
         commands.append(command)
         if command[4:5] == ["list-panes"]:
             return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
-        stdout = "4\n" if command[4:5] == ["new-tab"] else ""
-        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+        if command[4:5] == ["new-tab"]:
+            return subprocess.CompletedProcess(command, 0, stdout="4\n", stderr="")
+        mark_pane_started(command, "6")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     launcher_module.Zellij().launch_pane_and_wait(
@@ -1666,6 +1762,7 @@ def test_launch_pane_and_wait_opens_the_requested_group_tab(
 
 def test_launch_pane_and_wait_reuses_an_existing_group_tab(
     monkeypatch: pytest.MonkeyPatch,
+    fake_blocking_zellij,
 ) -> None:
     commands: list[list[str]] = []
 
@@ -1675,9 +1772,9 @@ def test_launch_pane_and_wait_reuses_an_existing_group_tab(
             return subprocess.CompletedProcess(
                 command, 0, stdout=json.dumps([{"tab_name": "project", "tab_id": 2}]), stderr=""
             )
+        mark_pane_started(command, "6")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     launcher_module.Zellij().launch_pane_and_wait(
@@ -1695,8 +1792,8 @@ def test_launch_pane_and_wait_reuses_an_existing_group_tab(
 
 def test_launch_pane_and_wait_reports_zellij_failures(
     monkeypatch: pytest.MonkeyPatch,
+    fake_blocking_zellij,
 ) -> None:
-    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/zellij")
     monkeypatch.setattr(
         subprocess,
         "run",
@@ -1736,6 +1833,95 @@ def test_launch_pane_and_wait_requires_a_zellij_session(
             zellij_session=None,
             group=None,
         )
+
+
+@pytest.mark.parametrize("blocking", [False, True], ids=["nonblocking", "blocking"])
+@pytest.mark.parametrize(
+    ("outcome", "winner_id", "attempts"),
+    [
+        ("dropped-then-starts", 22, 2),
+        ("timeout-then-starts", 22, 2),
+        ("never-starts", None, 3),
+        ("always-times-out", None, 3),
+        ("wins-at-timeout", 21, 1),
+    ],
+)
+def test_launch_retries_without_running_queued_duplicates(
+    tmp_path, monkeypatch, fake_blocking_zellij, blocking, outcome, winner_id, attempts
+):
+    launches = []
+    panes = []
+    runs = tmp_path / "runs"
+
+    def run_pane(argv, pane_id):
+        with subprocess.Popen(
+            argv[argv.index("--") + 1 :],
+            env={**os.environ, "ZELLIJ_PANE_ID": str(pane_id), "PATH": str(tmp_path)},
+        ) as pane:
+            return pane.wait(timeout=5)
+
+    def start(argv, *, timeout, **kwargs):
+        launches.append(argv)
+        assert timeout == launcher_module._ZELLIJ_COMMAND_TIMEOUT_SECONDS
+        if len(launches) == 2:
+            # An earlier attempt cannot win while the retry is pending.
+            assert run_pane(launches[0], 21) != 0
+            if winner_id == 22:
+                assert run_pane(argv, 22) == 0
+                return subprocess.CompletedProcess(argv, 0, "", "warning")
+        if outcome in {"always-times-out", "timeout-then-starts", "wins-at-timeout"}:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", start)
+    monkeypatch.setattr(launcher_module, "_ZELLIJ_PANE_MARKER_TIMEOUT_SECONDS", 0)
+
+    if outcome == "wins-at-timeout":
+        symlink_to = Path.symlink_to
+
+        def race_cancellation(path, target):
+            if target == "cancelled":
+                assert run_pane(launches[0], 21) == 0
+            return symlink_to(path, target)
+
+        monkeypatch.setattr(Path, "symlink_to", race_cancellation)
+
+    def launch():
+        args = (
+            str(tmp_path),
+            ["/bin/sh", "-c", 'echo "$ZELLIJ_PANE_ID:$PATH" >> "$1"', "agent", str(runs)],
+        )
+        options = dict(context="Launch failed", work_action="code", zellij_session="test")
+        if blocking:
+            launcher_module.zellij.launch_pane_and_wait(
+                *args, **options, group=None, pane_callback=panes.append
+            )
+        else:
+            return launcher_module.zellij.launch_pane(*args, **options).pane_id
+
+    if winner_id is not None:
+        result = launch()
+        if blocking:
+            assert panes == [f"terminal_{winner_id}", None]
+        else:
+            assert result == f"terminal_{winner_id}"
+    else:
+        message = "the Zellij pane never ran"
+        if outcome == "always-times-out":
+            message = r"startup timed out" if blocking else "command timed out"
+        with pytest.raises(RuntimeError, match=f"Launch failed: .*{message}") as error:
+            launch()
+        if outcome == "always-times-out":
+            assert isinstance(error.value.__cause__, subprocess.TimeoutExpired)
+        assert not any(panes)
+    assert len(launches) == attempts
+
+    for i, argv in enumerate(launches):
+        assert run_pane(argv, 31 + i) != 0
+    if winner_id is not None:
+        assert runs.read_text().splitlines() == [f"{winner_id}:{tmp_path}"]
+    else:
+        assert not runs.exists()
 
 
 def test_workdash_pane_listing_and_lookup_ignore_plugins(monkeypatch):

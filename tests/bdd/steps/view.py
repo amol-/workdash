@@ -23,6 +23,7 @@ from workdash.config import WorkdashConfig
 from workdash.git import GitHelper
 from workdash.launcher import open_item_document
 from workdash.models import WorkItem
+from zellij_pane_launch import mark_pane_started, pane_launch
 
 from .common import modal_screen_names, run_app
 
@@ -507,7 +508,8 @@ def _activate_link(
         opened.append(list(command))
         if scenario_state.get("open_fails"):
             raise subprocess.CalledProcessError(1, command, stderr="cannot open display")
-        return subprocess.CompletedProcess(command, 0, stdout="terminal_19\n", stderr="")
+        mark_pane_started(command, "19")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     def fake_popen(command, **kwargs):
         opened.append(list(command))
@@ -692,7 +694,8 @@ def _choose_view(
             commands.append(list(command))
             if scenario_state.get("view_fails"):
                 raise subprocess.CalledProcessError(1, command, stderr="zellij exploded")
-            return subprocess.CompletedProcess(command, 0, stdout="terminal_19\n", stderr="")
+            mark_pane_started(command, "19")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         monkeypatch.setattr(
@@ -743,32 +746,37 @@ def _cancel_menu(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> 
 
 @then("the item is shown as a document in a full-size floating pane in the current session")
 def _item_shown_in_pane(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["view_commands"] == [
-        [
-            "/usr/bin/zellij",
-            "--session",
-            "workdash-current",
-            "action",
-            "new-pane",
-            "-f",
-            "-x",
-            "0",
-            "-y",
-            "0",
-            "--width",
-            "100%",
-            "--height",
-            "100%",
-            "--close-on-exit",
-            "--",
-            "sh",
-            "-c",
-            '"$@" || { printf "\\nPress Enter to close this pane.\\n"; read -r _; }',
-            "workdash-view",
-            "/usr/bin/workdash",
-            "view",
-            scenario_state["selected_item"].url,
-        ]
+    assert [pane_launch(command) for command in scenario_state["view_commands"]] == [
+        (
+            [
+                "/usr/bin/zellij",
+                "--session",
+                "workdash-current",
+                "action",
+                "new-pane",
+                "-f",
+                "-x",
+                "0",
+                "-y",
+                "0",
+                "--width",
+                "100%",
+                "--height",
+                "100%",
+                "--name",
+                "sh",
+                "--close-on-exit",
+            ],
+            [
+                "/bin/sh",
+                "-c",
+                '"$@" || { printf "\\nPress Enter to close this pane.\\n"; read -r _; }',
+                "workdash-view",
+                "/usr/bin/workdash",
+                "view",
+                scenario_state["selected_item"].url,
+            ],
+        )
     ]
 
 

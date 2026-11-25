@@ -24,6 +24,7 @@ import workdash.workdash as workdash_module
 from workdash.config import AgentConfig, WorkdashConfig, load_config, save_config
 from workdash.control import probe_dashboard_session
 from workdash.dashboard_record import DashboardRecord, DashboardRecords
+from zellij_pane_launch import mark_pane_started, pane_launch
 
 
 @given("the GitHub CLI is not installed on PATH")
@@ -308,6 +309,7 @@ def _start_interactive_dashboard(
 
     def run(command, **kwargs):
         scenario_state.setdefault("zellij_actions", []).append(command)
+        mark_pane_started(command, "24")
         output = "project [Created now]\n" if scenario_state.get("named_dashboard") else ""
         if scenario_state.get("named_dashboard") == "exited" and "list-sessions" in command:
             output = "project [Created now] (EXITED - attach to resurrect)\n"
@@ -765,7 +767,7 @@ def _restarted_dashboard_accepts_configured_clients(scenario_state, monkeypatch,
     monkeypatch.setenv("ZELLIJ", "1")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "project")
     command = next(c for c in scenario_state["zellij_actions"] if "new-pane" in c)
-    launched = command[command.index("--") + 1 :]
+    _, launched = pane_launch(command)
     assert launched[:2] == ["env", f"WORKDASH_HOST=127.0.0.1:{scenario_state['port']}"]
     monkeypatch.setenv(*launched[1].split("=", 1))
     assert launched[2:] == ["workdash", "--persistent-pane", "--session", "project"]

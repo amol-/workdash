@@ -139,7 +139,7 @@ class Supervision:
         self._create_agent_pane(repo_path)
         return SimpleNamespace(
             session=zellij_session,
-            pane_id=None,
+            pane_id="terminal_21",
             pane_title=f"code_{Path(repo_path).name}",
             cwd=repo_path,
         )
