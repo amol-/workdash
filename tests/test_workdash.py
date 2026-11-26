@@ -862,25 +862,35 @@ def test_main_list_command_prints_only_the_listing(
     assert capsys.readouterr().out == expected_stdout
 
 
-def test_print_server_backed_list_uses_display_type_without_changing_id(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _print_work_items_result(
-        {
-            "items": [
-                {
-                    "id": "owner/repo#PR-2",
-                    "display_type": "PR+",
-                    "updated_at": "2026-02-02T00:00:00+00:00",
-                    "title": "Included PR",
-                    "suggested": False,
-                }
-            ]
-        }
+@pytest.mark.parametrize(
+    ("kind", "item_type", "number", "included", "label", "item_id"),
+    [
+        (WorkItemKind.TRACKED_PR, WorkItemType.PR, 111, True, "CHECK+", "CHECK-111"),
+        (WorkItemKind.TRACKED_ISSUE, WorkItemType.ISSUE, 222, True, "ISSUE+", "ISSUE-222"),
+        (WorkItemKind.REVIEW_REQUESTED_PR, WorkItemType.PR, 333, True, "REVIEW+", "REVIEW-333"),
+        (WorkItemKind.AUTHORED_PR, WorkItemType.PR, 555, True, "PR+", "PR-555"),
+        (WorkItemKind.TRACKED_PR, WorkItemType.PR, 444, False, "CHECK", "CHECK-444"),
+    ],
+)
+def test_list_prints_included_suffix_by_item_id(
+    kind, item_type, number, included, label, item_id, capsys
+):
+    updated = datetime(2026, 4, 28, tzinfo=UTC)
+    item = WorkItem(
+        kind=kind,
+        item_type=item_type,
+        repo="owner/repo",
+        number=number,
+        title="Dashboard item",
+        url=f"https://github.com/owner/repo/{'pull' if item_type is WorkItemType.PR else 'issues'}/{number}",
+        created_at=updated,
+        updated_at=updated,
+        included=included,
     )
 
-    output_line = capsys.readouterr().out.strip()
-    assert output_line.startswith("PR+     owner/repo#PR-2")
+    _print_work_items_result(control_module._work_items_payload([item], {}))
+
+    assert capsys.readouterr().out.startswith(f"{label:7} owner/repo#{item_id} ")
 
 
 def test_main_exits_with_error_when_gh_is_not_installed(
@@ -2565,6 +2575,7 @@ def test_print_work_items_uses_review_label_for_review_requested_pr(
 
     output_line = capsys.readouterr().out.strip()
     assert output_line.startswith("REVIEW")
+    assert "owner/repo#REVIEW-9" in output_line
 
 
 @pytest.mark.parametrize(

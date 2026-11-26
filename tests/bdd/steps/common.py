@@ -1,9 +1,8 @@
 """Shared fixtures and step definitions used across multiple BDD domains.
 
 This module concentrates steps whose wording recurs across feature files
-(e.g. "When the user opens the dashboard", "Given the TUI has a work item
-selected") so there is exactly one binding per unique phrase, avoiding
-`pytest_bdd` duplicate-step errors.
+(e.g. "Given the TUI has a work item selected") so there is exactly one binding
+per unique phrase, avoiding `pytest_bdd` duplicate-step errors.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from pytest_bdd import given, parsers, then, when
+from pytest_bdd import given, parsers, then
 from textual.screen import ModalScreen
 
 import workdash.control as control_module
@@ -194,40 +193,6 @@ def run_app(
             await pilot.press("q")
 
     asyncio.run(_driver())
-
-
-# -- Generic dashboard open steps -------------------------------------------
-
-
-@when("the user opens the dashboard")
-def _open_dashboard(
-    scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Capture the items/markers the dashboard would see on startup.
-
-    Some scenarios (e.g. the review-request case) set ``_subprocess_patch`` +
-    ``_github_client`` so we actually run the real github_client. Include-store
-    scenarios wire an ``_open_dashboard_hook`` that drives the real
-    ``WorkdashBackend`` through a patched ``gh`` subprocess boundary. Others
-    simply compute suggestion markers over the pre-populated ``work_items``
-    list.
-    """
-
-    hook = scenario_state.get("_open_dashboard_hook")
-    if hook is not None:
-        hook(scenario_state, work_items, monkeypatch)
-        return
-    if "_subprocess_patch" in scenario_state:
-        import workdash.github_client as gc
-
-        monkeypatch.setattr(gc.subprocess, "run", scenario_state["_subprocess_patch"])
-        scenario_state["reviewed_prs"] = scenario_state[
-            "_github_client"
-        ].list_open_review_requested_prs("testuser")
-    scenario_state["work_items"] = list(work_items)
-    scenario_state["suggestion_markers"] = compute_suggestion_markers(list(work_items))
 
 
 # -- Generic selection state for TUI keybinding scenarios --------------------

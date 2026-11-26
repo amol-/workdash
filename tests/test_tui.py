@@ -10,6 +10,7 @@ import pytest
 
 pytest.importorskip("textual")
 
+from rich.text import Text
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Input, Static
 
@@ -27,6 +28,7 @@ from workdash.tui import (
     SearchDialog,
     ViewDialog,
     WorkdashApp,
+    _type_column,
 )
 
 _DEFAULT_TUI_CONFIG = WorkdashConfig(
@@ -182,7 +184,7 @@ def test_dashboard_initial_layout_and_shortcuts() -> None:
     session.autodispatch_sessions.return_value = []
     session.take_completed_autodispatch_items.return_value = []
     session.busy_message.return_value = None
-    app = WorkdashApp(work_items=items[:1], session=session)
+    app = WorkdashApp(work_items=items[:1], session=session, now_utc=_SEARCH_NOW_UTC)
 
     async def exercise() -> None:
         async with app.run_test(size=(80, 10)) as pilot:
@@ -197,7 +199,8 @@ def test_dashboard_initial_layout_and_shortcuts() -> None:
                 rows = [strip.text for strip in app.screen._compositor.render_strips()]
                 assert "Updated" in rows[0], rows
                 long_row = next(row for row in rows if "Long title" in row)
-                assert len([word for word in long_row.split() if word.endswith("d")]) >= 1, rows
+                assert "Long title " * 15 not in long_row, rows
+                assert long_row.split().count("6d") == 1, rows
             assert not table.show_horizontal_scrollbar
             await pilot.press("right", "right", "down")
             assert table.scroll_x == 0
@@ -209,14 +212,77 @@ def test_dashboard_initial_layout_and_shortcuts() -> None:
                     span.start <= index < span.end and str(span.style) == "bold"
                     for span in hint.spans
                 )
+            assert hint.plain.startswith("(/)search")
             assert not any(span.start <= 3 < span.end for span in hint.spans)
             await _submit_search(app, pilot, "docs")
             hint = command.render()
             assert any(
                 span.start == 0 and span.end == len(app.SEARCH_HINT_TEXT) for span in hint.spans
             )
+            assert all("bold" in str(span.style) for span in hint.spans)
+            assert hint.plain == (
+                "(/)search (v)iew (r)efresh (a)nalyze (c)ode (d)ispatch (i)nclude (w)todo (q)uit"
+            )
 
     asyncio.run(exercise())
+
+
+def test_scrolling_selects_visible_rows_above_the_action_bar_with_progress() -> None:
+    template = _search_work_items()[0]
+    work_items = [
+        replace(
+            template,
+            number=i,
+            title=f"Work item {i}",
+            url=f"https://github.com/owner/repo/issues/{i}",
+        )
+        for i in range(1, 41)
+    ]
+    visible = []
+    selected = []
+    opened = []
+    expected_opened = []
+    session = MagicMock()
+    session.work_items = work_items
+    session.suggestion_markers = {}
+    session.busy_message.return_value = None
+    session.autodispatch_sessions.return_value = [
+        {"id": "1", "status": "failed", "scope": "owner/repo", "error": "failed"}
+    ]
+
+    async def exercise() -> None:
+        async with app.run_test(size=(80, 24)) as pilot:
+            table = app.query_one("#work-items", DataTable)
+            footer = app.query_one("#command-footer", Static)
+            progress = app.query_one("#autodispatch-progress", Static)
+            assert progress.region.height > 0
+            assert "Failed: failed (owner/repo)" in progress.render().plain
+            initial_scroll_y = int(table.scroll_y)
+            first_scrolled_row = None
+            for index in range(table.row_count):
+                item = app._selected_item()
+                selected.append(item.number if item is not None else None)
+                if first_scrolled_row is None and int(table.scroll_y) > initial_scroll_y:
+                    first_scrolled_row = index
+                if index in (0, first_scrolled_row, table.row_count - 1):
+                    expected_opened.append(index + 1)
+                    await pilot.press("v")
+                    await pilot.press("o")
+                row_y = table.region.y + table._get_row_region(index).y - int(table.scroll_y)
+                rows = [strip.text for strip in app.screen._compositor.render_strips()]
+                visible.append(
+                    table.region.y <= row_y < footer.region.y
+                    and f"Work item {index + 1}  " in rows[row_y]
+                )
+                if index < table.row_count - 1:
+                    await pilot.press("down")
+
+    app = WorkdashApp(work_items=work_items, session=session, open_callback=opened.append)
+    asyncio.run(exercise())
+    assert all(visible)
+    assert selected == list(range(1, 41))
+    assert len(expected_opened) == 3
+    assert [item.number for item in opened] == expected_opened
 
 
 def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_columns() -> None:
@@ -260,7 +326,13 @@ def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_colum
                 "Updated",
             ]
             assert table.row_count == 2
-            assert table.get_row_at(0)[2].style == "bold"
+            assert all(
+                isinstance(cell, Text) and "bold" in str(cell.style) for cell in table.get_row_at(0)
+            )
+            assert all(
+                not isinstance(cell, Text) or "bold" not in str(cell.style)
+                for cell in table.get_row_at(1)
+            )
             # Sorted by updated_at descending; PR #22 (updated 2/25) before issue #11 (updated 2/20)
             # PR #22 is within 24h of now_utc so cells are bold Text objects
             assert [str(c) for c in table.get_row_at(0)] == [
@@ -317,30 +389,40 @@ def test_workdash_app_truncates_a_long_repo_column_on_the_left() -> None:
 
 
 @pytest.mark.parametrize(
-    ("ci_state", "review_decision", "review_requested", "expected_prefix", "expected_spans"),
+    (
+        "ci_state",
+        "review_decision",
+        "review_requested",
+        "comments",
+        "expected_prefix",
+        "expected_spans",
+    ),
     [
-        ("SUCCESS", None, False, "✓ ", [(0, 1, "green")]),
-        ("FAILURE", None, False, "✗ ", [(0, 1, "red")]),
-        ("ERROR", None, False, "✗ ", [(0, 1, "red")]),
-        ("PENDING", None, False, "● ", [(0, 1, "yellow")]),
-        ("EXPECTED", None, False, "● ", [(0, 1, "yellow")]),
+        ("SUCCESS", None, False, False, "✓ ", [(0, 1, "green")]),
+        ("FAILURE", None, False, False, "✗ ", [(0, 1, "red")]),
+        ("ERROR", None, False, False, "✗ ", [(0, 1, "red")]),
+        ("PENDING", None, False, False, "● ", [(0, 1, "yellow")]),
+        ("EXPECTED", None, False, False, "● ", [(0, 1, "yellow")]),
         # A pull request with no checks, and a state GitHub may add later, both
         # fall back to the blank CI symbol rather than inventing one.
-        (None, None, False, "  ", []),
-        ("SOMETHING_NEW", None, False, "  ", []),
+        (None, None, False, False, "  ", []),
+        ("SOMETHING_NEW", None, False, False, "  ", []),
         # The review symbol is independent of the CI symbol.
-        (None, "APPROVED", False, " ✓", [(1, 2, "green")]),
-        (None, "CHANGES_REQUESTED", False, " ✗", [(1, 2, "red")]),
-        (None, None, True, " ?", [(1, 2, "yellow")]),
+        (None, "APPROVED", False, False, " ✓", [(1, 2, "green")]),
+        (None, "CHANGES_REQUESTED", False, False, " ✗", [(1, 2, "red")]),
+        (None, None, True, False, " ?", [(1, 2, "yellow")]),
         # A pull request with no reviewer requested carries no review symbol.
-        (None, None, False, "  ", []),
-        ("SUCCESS", "APPROVED", False, "✓✓", [(0, 1, "green"), (1, 2, "green")]),
+        (None, None, False, False, "  ", []),
+        ("SUCCESS", "APPROVED", False, False, "✓✓", [(0, 1, "green"), (1, 2, "green")]),
+        ("SUCCESS", "CHANGES_REQUESTED", False, False, "✓✗", [(0, 1, "green"), (1, 2, "red")]),
+        (None, None, False, True, " ?", [(1, 2, "dodger_blue1")]),
     ],
 )
 def test_workdash_app_colors_the_ci_and_review_symbols_in_the_type_column(
     ci_state: str | None,
     review_decision: str | None,
     review_requested: bool,
+    comments: bool,
     expected_prefix: str,
     expected_spans: list[tuple[int, int, str]],
 ) -> None:
@@ -358,6 +440,7 @@ def test_workdash_app_colors_the_ci_and_review_symbols_in_the_type_column(
         ci_state=ci_state,
         review_decision=review_decision,
         review_requested=review_requested,
+        has_unresolved_comments=comments,
     )
     app = WorkdashApp(work_items=[work_item], now_utc=now_utc)
 
@@ -370,6 +453,30 @@ def test_workdash_app_colors_the_ci_and_review_symbols_in_the_type_column(
             assert [(s.start, s.end, s.style) for s in cell.spans] == expected_spans
 
     asyncio.run(run_smoke())
+
+
+@pytest.mark.parametrize(
+    ("kind", "item_type", "number", "expected"),
+    [
+        (WorkItemKind.TRACKED_PR, WorkItemType.PR, 111, "VR+ 111"),
+        (WorkItemKind.TRACKED_ISSUE, WorkItemType.ISSUE, 222, "IS+ 222"),
+        (WorkItemKind.REVIEW_REQUESTED_PR, WorkItemType.PR, 333, "RV+ 333"),
+    ],
+)
+def test_included_item_type_column(kind, item_type, number, expected):
+    now = datetime(2026, 4, 28, tzinfo=UTC)
+    item = WorkItem(
+        kind=kind,
+        item_type=item_type,
+        repo="owner/repo",
+        number=number,
+        title="Included work",
+        url=f"https://github.com/owner/repo/{'pull' if item_type is WorkItemType.PR else 'issues'}/{number}",
+        created_at=now,
+        updated_at=now,
+        included=True,
+    )
+    assert _type_column(item, bold=False).plain[2:] == expected
 
 
 def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label() -> None:
@@ -1759,6 +1866,7 @@ def test_workdash_app_include_updates_server_session_state() -> None:
             await pilot.pause()
             table = app.query_one("#work-items", DataTable)
             assert table.row_count == 2
+            assert str(table.get_row_at(table.cursor_row)[0]).endswith("IS+ 77")
             assert session.work_items == [existing_item, newly_fetched_item]
             assert session.suggestion_markers == {(WorkItemType.ISSUE, "owner/repo", 77): "*"}
             assert session.list_items()["items"][0]["id"] == "owner/repo#ISSUE-77"
@@ -1959,6 +2067,28 @@ def test_workdash_app_search_matches_the_owner_cut_from_the_repo_column() -> Non
     asyncio.run(run_smoke())
 
 
+@pytest.mark.parametrize(
+    ("query", "title", "repo"),
+    [
+        ("33", "Unrelated chore", "owner/repo"),
+        ("other", "Ship the docs", "owner/other"),
+    ],
+)
+def test_search_accepts_a_bare_number_or_repository_fragment(query, title, repo) -> None:
+    app = WorkdashApp(work_items=_search_work_items(), now_utc=_SEARCH_NOW_UTC)
+
+    async def exercise() -> None:
+        async with app.run_test() as pilot:
+            await _submit_search(app, pilot, query)
+            assert _listed_titles(app) == [title]
+            row = app.query_one("#work-items", DataTable).get_row_at(0)
+            assert str(row[1]) == repo
+            if query == "33":
+                assert str(row[0]).endswith("IS 33")
+
+    asyncio.run(exercise())
+
+
 def test_workdash_app_search_matches_rendered_columns_ignoring_case() -> None:
     work_items = _search_work_items()
     app = WorkdashApp(
@@ -1973,6 +2103,8 @@ def test_workdash_app_search_matches_rendered_columns_ignoring_case() -> None:
         async with app.run_test() as pilot:
             footer = app.query_one("#status-footer", Static)
             command_bar = app.query_one("#command-footer", Static)
+
+            assert _listed_titles(app) == ["Unrelated chore", "Ship the docs", "* Fix the parser"]
 
             # Case is ignored and internal spaces must match literally.
             await _submit_search(app, pilot, "fix the PARSER")
@@ -1991,8 +2123,8 @@ def test_workdash_app_search_matches_rendered_columns_ignoring_case() -> None:
             # The search action is emphasized only while a filter is active.
             assert not any(s.start == 0 and s.end == 9 for s in command_bar.render().spans)
 
-            await _submit_search(app, pilot, "OWNER/OTHER")
-            assert _listed_titles(app) == ["Ship the docs"]
+            await _submit_search(app, pilot, "OWNER/REPO")
+            assert _listed_titles(app) == ["Unrelated chore", "* Fix the parser"]
 
             await pilot.press("/")
             await _submit_search(app, pilot, "issue#33")
@@ -2114,6 +2246,32 @@ def test_workdash_app_capture_todo_clears_the_search_filter() -> None:
     asyncio.run(run_smoke())
 
 
+def test_including_new_work_restores_the_full_dashboard() -> None:
+    items = _search_work_items()
+    included = replace(
+        items[1],
+        number=111,
+        title="Newly included",
+        url="https://github.com/owner/other/pull/111",
+        included=True,
+    )
+    app = WorkdashApp(
+        work_items=items,
+        include_callback=lambda *_: IncludeResult(fetched_item=included),
+        now_utc=_SEARCH_NOW_UTC,
+    )
+
+    async def exercise() -> None:
+        async with app.run_test() as pilot:
+            await _submit_search(app, pilot, "parser")
+            assert _listed_titles(app) == ["Fix the parser"]
+            await app._perform_include(included.url)
+            titles = [title.removeprefix("* ") for title in _listed_titles(app)]
+            assert sorted(titles) == sorted([*_ALL_SEARCH_TITLES, "Newly included"])
+
+    asyncio.run(exercise())
+
+
 def test_workdash_app_include_of_an_already_tracked_item_clears_the_search_filter() -> None:
     work_items = _search_work_items()
     duplicate = work_items[1]
@@ -2139,27 +2297,49 @@ def test_workdash_app_include_of_an_already_tracked_item_clears_the_search_filte
     asyncio.run(run_smoke())
 
 
-def test_workdash_app_failed_include_keeps_the_search_filter_active() -> None:
+@pytest.mark.parametrize(
+    ("url", "error"),
+    [
+        ("https://example.com/not-github", "Invalid URL: https://example.com/not-github"),
+        (
+            "https://github.com/owner/repo/issues/44",
+            "GitHub unreachable — URL not saved. Try again later.",
+        ),
+    ],
+    ids=["invalid-url", "github-unavailable"],
+)
+def test_workdash_app_failed_include_keeps_the_search_filter_active(tmp_path, url, error) -> None:
+    from workdash.backend import WorkdashBackend
+    from workdash.github_client import TransientFetchError
+    from workdash.included_items import IncludedItemsStore
+
+    github = MagicMock()
+    github.fetch_item_by_url.side_effect = TransientFetchError("HTTP 503")
+    backend = WorkdashBackend(
+        github_client=github,
+        cache_root=tmp_path / "cache",
+        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+    )
     app = WorkdashApp(
         work_items=_search_work_items(),
-        include_callback=MagicMock(
-            side_effect=[IncludeResult(invalid=True), IncludeResult(transient_failure=True)]
-        ),
+        include_callback=backend.include_item_by_url,
         now_utc=_SEARCH_NOW_UTC,
     )
 
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
             command_bar = app.query_one("#command-footer", Static)
+            footer = app.query_one("#status-footer", Static)
             await _submit_search(app, pilot, "parser")
 
-            # A failed include leaves the loaded list unchanged, so the filter stays on.
-            for _ in range(2):
-                await app._perform_include("https://github.com/owner/repo/issues/44")
-                await pilot.pause()
-                assert _listed_titles(app) == ["Fix the parser"]
-                spans = command_bar.render().spans
-                assert (0, 9, "bold") in [(s.start, s.end, str(s.style)) for s in spans]
+            await pilot.press("i")
+            app.screen.query_one("#include-url", Input).value = url
+            await pilot.press("enter")
+            await _wait_for_footer(footer, error, pilot)
+            _assert_no_modal_screens(app)
+            assert _listed_titles(app) == ["Fix the parser"]
+            spans = command_bar.render().spans
+            assert (0, 9, "bold") in [(s.start, s.end, str(s.style)) for s in spans]
 
             # The filter is still live, so "/" clears it instead of reopening search.
             await pilot.press("/")
@@ -2327,9 +2507,9 @@ def test_refresh_renders_sub_issue_parents_from_github(monkeypatch, tmp_path) ->
     children = {("alpha", "one", "41"): ["CLOSED", "CLOSED"]}
     nodes = []
     for typename, repo, number, title in [
-        ("Issue", "alpha/one", 41, "Parent with closed children"),
-        ("Issue", "beta/two", 41, "Leaf"),
-        ("PullRequest", "alpha/one", 42, "Pull request"),
+        ("Issue", "alpha/one", 41, "Parent issue with closed children"),
+        ("Issue", "beta/two", 41, "Leaf issue"),
+        ("PullRequest", "alpha/one", 42, "Pull request for issue"),
     ]:
         nodes.append(
             {
@@ -2389,20 +2569,21 @@ def test_refresh_renders_sub_issue_parents_from_github(monkeypatch, tmp_path) ->
         async with app.run_test() as pilot:
             await app.action_refresh_items()
             await pilot.pause()
+            await _submit_search(app, pilot, "issue")
             table = app.query_one("#work-items", DataTable)
             parent = table.get_row("issue:alpha/one#41")
             leaf = table.get_row("issue:beta/two#41")
             pr = table.get_row("pr:alpha/one#42")
             assert str(parent[0]).endswith("IS 41") and str(parent[1]) == "alpha/one"
             assert (
-                str(parent[2]).endswith("Parent with closed children")
+                str(parent[2]).endswith("Parent issue with closed children")
                 and parent[2].style == "bold cyan"
             )
             assert str(leaf[0]).endswith("IS 41") and str(leaf[1]) == "beta/two"
-            assert str(leaf[2]).endswith("Leaf") and not leaf[2].style
+            assert str(leaf[2]).endswith("Leaf issue") and not leaf[2].style
             assert (
                 str(pr[0]).endswith("VR 42")
-                and str(pr[2]).endswith("Pull request")
+                and str(pr[2]).endswith("Pull request for issue")
                 and not pr[2].style
             )
 
@@ -3103,6 +3284,7 @@ def test_autodispatch_lifecycle_refreshes_completed_issue_and_highlights_next(mo
                 ):
                     break
             assert str(table.get_row("issue:owner/repo#1")[2]) == "First (closed)"
+            assert session.work_items[0].state == "CLOSED"
             assert table_style(1) == "bold"
             assert table_style(2) == "bold magenta"
 
@@ -3151,10 +3333,11 @@ def test_autodispatch_highlights_linked_prs_when_issue_row_is_absent() -> None:
         title="Issue",
         closing_issue_numbers=(),
     )
+    parent = replace(issue, number=2, title="Parent issue", has_sub_issues=True)
     session = WorkdashSession(
         config=_DEFAULT_TUI_CONFIG,
         backend=MagicMock(),
-        work_items=[pr, cross, scope],
+        work_items=[pr, cross, scope, parent],
         suggestion_markers={},
         zellij_session=None,
     )
@@ -3182,6 +3365,7 @@ def test_autodispatch_highlights_linked_prs_when_issue_row_is_absent() -> None:
             session.work_items.append(issue)
             app.refresh_from_session()
             assert table.get_row("issue:owner/repo#1")[2].style == "bold magenta"
+            assert table.get_row("issue:owner/repo#2")[2].style == "bold cyan"
             assert table.get_row("pr:owner/repo#9")[2].style == "bold"
             await _submit_search(app, pilot, "Same repo")
             assert table.get_row("pr:owner/repo#9")[2].style == "bold magenta"
@@ -3415,7 +3599,17 @@ def test_loaded_linked_pr_tracks_autodispatch_stop() -> None:
                     break
             assert table.scroll_y == table.scroll_target_y
             assert table._get_row_region(table.cursor_row).y - table.scroll_y < table.size.height
-            selected, scroll = app._selected_item(), table.scroll_y
+            footer = app.query_one("#command-footer", Static)
+
+            def visible_selection() -> str:
+                row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+                title = str(table.get_row(row_key)[2])
+                strips = app.screen._compositor.render_strips()
+                table_rows = strips[table.region.y : min(table.region.bottom, footer.region.y)]
+                assert any(f"{title} " in strip.text for strip in table_rows)
+                return row_key.value
+
+            selected, scroll = visible_selection(), table.scroll_y
             assert scroll > 0
             session.stop_autodispatch(str(entry["id"]))
             for _ in range(100):
@@ -3424,7 +3618,7 @@ def test_loaded_linked_pr_tracks_autodispatch_stop() -> None:
                     break
             assert str(table.get_row("pr:owner/repo#99")[0]).startswith("✗")
             assert table.get_row("pr:owner/repo#99")[2].style == "bold"
-            assert app._selected_item() == selected
+            assert visible_selection() == selected
             assert table.scroll_y == scroll
 
     try:

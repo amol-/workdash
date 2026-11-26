@@ -41,6 +41,9 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     captured: dict[str, object] = {}
+    included_prs = {number: _make_fetched_item(number) for number in (10, 12)}
+    store = IncludedItemsStore(tmp_path / "included.json")
+    store.save([item.url for item in included_prs.values()])
 
     class FakeGitHubClient:
         def list_open_authored_prs(self, login, progress_callback=None):
@@ -51,7 +54,7 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
                     "repo": "owner/repo",
                     "number": 10,
                     "title": "Authored PR",
-                    "url": "https://example.com/pull/10",
+                    "url": included_prs[10].url,
                     "created_at": "2026-02-01T00:00:00Z",
                     "updated_at": "2026-02-01T01:00:00Z",
                     "is_draft": False,
@@ -70,7 +73,7 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
                     "repo": "owner/repo",
                     "number": 10,
                     "title": "Duplicate review requested PR row",
-                    "url": "https://example.com/pull/10",
+                    "url": included_prs[10].url,
                     "created_at": "2026-02-01T00:00:00Z",
                     "updated_at": "2026-02-01T01:00:00Z",
                     "is_draft": False,
@@ -80,7 +83,7 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
                     "repo": "owner/repo",
                     "number": 12,
                     "title": "Review requested PR",
-                    "url": "https://example.com/pull/12",
+                    "url": included_prs[12].url,
                     "created_at": "2026-02-03T00:00:00Z",
                     "updated_at": "2026-02-03T01:00:00Z",
                     "is_draft": False,
@@ -95,7 +98,7 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
                     "repo": "owner/repo",
                     "number": 12,
                     "title": "Duplicate reviewed PR row",
-                    "url": "https://example.com/pull/12",
+                    "url": included_prs[12].url,
                     "created_at": "2026-02-03T00:00:00Z",
                     "updated_at": "2026-02-03T01:00:00Z",
                     "is_draft": False,
@@ -136,7 +139,7 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
                     "repo": "owner/repo",
                     "number": 10,
                     "title": "Duplicate tracked PR row",
-                    "url": "https://example.com/pull/10",
+                    "url": included_prs[10].url,
                     "created_at": "2026-02-01T00:00:00Z",
                     "updated_at": "2026-02-01T01:00:00Z",
                     "is_pull_request": True,
@@ -146,7 +149,7 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
                     "repo": "owner/repo",
                     "number": 12,
                     "title": "Duplicate tracked reviewed PR row",
-                    "url": "https://example.com/pull/12",
+                    "url": included_prs[12].url,
                     "created_at": "2026-02-03T00:00:00Z",
                     "updated_at": "2026-02-03T01:00:00Z",
                     "is_pull_request": True,
@@ -166,6 +169,9 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
         def list_open_todo_issues(self, todo_repository, progress_callback=None):
             captured["todo_repository"] = todo_repository
             return []
+
+        def fetch_item_by_url(self, parsed, login, progress_callback=None):
+            return included_prs[parsed.number]
 
         def fetch_linked_issues(self, pull_requests, progress_callback=None):
             return {}
@@ -194,7 +200,7 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
         analysis_cache=FakeAnalysisCache(),
         analyzer=FakeAnalyzer(),
         config=config,
-        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+        included_items_store=store,
     )
 
     work_items, suggestion_markers = backend.load_items(progress_callback=lambda _: None)
@@ -205,11 +211,11 @@ def test_load_items_parses_selectors_fetches_merges_and_applies_cached_analyses(
     assert captured["assigned_called"] is True
     assert captured["tracked_search_scope"] == "user:owner"
     assert captured["tracked_progress_callback"] is True
-    assert [(item.kind, item.number) for item in work_items] == [
-        (WorkItemKind.AUTHORED_PR, 10),
-        (WorkItemKind.REVIEW_REQUESTED_PR, 12),
-        (WorkItemKind.REVIEW_REQUESTED_PR, 13),
-        (WorkItemKind.ASSIGNED_ISSUE, 11),
+    assert [(item.kind, item.number, item.included) for item in work_items] == [
+        (WorkItemKind.AUTHORED_PR, 10, True),
+        (WorkItemKind.REVIEW_REQUESTED_PR, 12, True),
+        (WorkItemKind.REVIEW_REQUESTED_PR, 13, False),
+        (WorkItemKind.ASSIGNED_ISSUE, 11, False),
     ]
     assert work_items[0].analysis is None
     assert work_items[1].analysis is None
@@ -642,6 +648,21 @@ def test_load_items_hides_an_included_issue_that_a_listed_pull_request_closes(
     assert [(item.item_type, item.number) for item in work_items] == [(WorkItemType.PR, 42149)]
     # The URL stays in the store, so the issue is still there to be re-included.
     assert store.load() == ["https://github.com/owner/repo/issues/41830"]
+
+
+def test_compute_suggestion_markers_marks_only_the_oldest_created_item() -> None:
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    items = [
+        make_work_item(
+            item_type=WorkItemType.ISSUE,
+            kind=WorkItemKind.TRACKED_ISSUE,
+            number=number,
+            created_at=now - timedelta(days=age),
+        )
+        for number, age in ((1, 2), (2, 30), (3, 10))
+    ]
+    items[1].updated_at = now  # The oldest creation has the newest update.
+    assert compute_suggestion_markers(items) == {(WorkItemType.ISSUE, "owner/repo", 2): "*"}
 
 
 def test_compute_suggestion_markers_prefers_pr_when_age_is_tied() -> None:
@@ -1121,6 +1142,9 @@ def test_included_issue_immediately_has_its_native_sub_issue_status(
     result = backend.include_item_by_url(f"{url}?query=1#fragment", set())
 
     assert result.fetched_item is not None
+    assert result.fetched_item.url == url
+    assert result.fetched_item.item_type is WorkItemType.ISSUE
+    assert result.fetched_item.included is True
     assert result.fetched_item.has_sub_issues is expected
     assert result.fetched_item.sub_issue_total == total
     assert store.load() == [url]
@@ -1170,6 +1194,58 @@ def test_native_sub_issue_totals_survive_dedup(tmp_path):
         5: (2, True),
         6: (2, True),
     }
+
+
+@pytest.mark.parametrize("initial_state", ["missing", "CLOSED", "HTTP 503"])
+def test_load_items_handles_unavailable_included_pull_request(monkeypatch, tmp_path, initial_state):
+    import json
+
+    item = _make_fetched_item(111)
+    client = MagicMock(spec=GitHubClient)
+    for name in (
+        "list_open_authored_prs",
+        "list_open_review_requested_prs",
+        "list_open_reviewed_prs",
+        "list_open_assigned_issues",
+        "list_recent_tracked_items",
+        "list_open_todo_issues",
+    ):
+        getattr(client, name).return_value = []
+    client.fetch_item_by_url.side_effect = GitHubClient().fetch_item_by_url
+    client.fetch_linked_issues.return_value = {}
+    backend, store = _make_include_backend(tmp_path, client)
+    state = initial_state
+    if state != "missing":
+        store.save([item.url])
+
+    def run(command, **kwargs):
+        assert command[:6] == ["gh", "pr", "view", "111", "--repo", "owner/repo"]
+        if state == "HTTP 503":
+            raise subprocess.CalledProcessError(1, command, stderr="HTTP 503: Service Unavailable")
+        assert state in {"CLOSED", "OPEN"}
+        payload = {
+            "state": state,
+            "title": item.title,
+            "url": item.url,
+            "createdAt": item.created_at.isoformat(),
+            "updatedAt": item.updated_at.isoformat(),
+        }
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(github_client_module.time, "sleep", lambda _: None)
+
+    items, _ = backend.load_items()
+    assert items == []
+    if initial_state == "HTTP 503":
+        assert store.load() == [item.url]
+        state = "OPEN"
+        items, _ = backend.load_items()
+        assert [(row.url, row.included) for row in items] == [(item.url, True)]
+    else:
+        assert store.load() == []
+        if initial_state == "missing":
+            client.fetch_item_by_url.assert_not_called()
 
 
 @pytest.mark.parametrize(

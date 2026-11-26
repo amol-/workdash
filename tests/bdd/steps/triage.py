@@ -1,7 +1,7 @@
 """Step definitions for the triage domain feature files.
 
-Covers list-work-items, list-command, recent-activity, refresh, search-items,
-suggested-item, and include-item scenarios. Each step exercises real
+Covers dashboard listing and search, the list command,
+refresh, and inclusion. Steps exercise real
 ``WorkdashApp``/``WorkdashBackend`` code — only the external GitHub and
 browser-open boundaries are faked.
 """
@@ -18,17 +18,15 @@ from unittest.mock import MagicMock
 
 import pytest
 from pytest_bdd import given, parsers, then, when
-from rich.text import Text
 from textual.widgets import DataTable, Input, Static
 
-from workdash.backend import WorkdashBackend, compute_suggestion_markers
+from workdash.backend import WorkdashBackend
 from workdash.config import AgentConfig, WorkdashConfig
-from workdash.control import WorkdashSession, _work_items_payload
+from workdash.control import WorkdashSession
 from workdash.github_client import GitHubClient
 from workdash.included_items import IncludedItemsStore
-from workdash.models import WorkItem, WorkItemKind, WorkItemType, format_type_label
+from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import IncludeDialog, SearchDialog
-from workdash.workdash import _print_work_items_result
 
 from .common import (
     NOW_UTC,
@@ -85,60 +83,9 @@ def is_linked_issues_query(command: list[str]) -> bool:
 # --------------------------------------------------------------------------
 
 
-@given("the dashboard contains a work item with a long title")
-def _long_title_item(work_items: list[WorkItem]) -> None:
-    work_items.append(make_work_item(title="A long work item title " * 8))
-
-
-@when("the user opens the dashboard at 80 columns")
-def _open_dashboard_at_80_columns(
-    scenario_state: dict[str, Any], work_items: list[WorkItem]
-) -> None:
-    async def interactions(app, pilot) -> None:
-        table = app.query_one("#work-items", DataTable)
-        command = app.query_one("#command-footer", Static)
-        status = app.query_one("#status-footer", Static)
-        scenario_state["dashboard_rows"] = [
-            strip.text for strip in app.screen._compositor.render_strips()
-        ]
-        scenario_state["dashboard_hint"] = command.render()
-        scenario_state["dashboard_footer_order"] = command.region.y < status.region.y
-        scenario_state["dashboard_status"] = status.render().plain
-        await pilot.press("right", "right")
-        scenario_state["dashboard_horizontal_scroll"] = (
-            table.show_horizontal_scrollbar,
-            table.scroll_x,
-        )
-
-    run_app(work_items=work_items, interactions=interactions)
-
-
-@then("the last update is visible alongside its shortened title")
-def _long_title_details_visible(scenario_state: dict[str, Any]) -> None:
-    rows = scenario_state["dashboard_rows"]
-    assert "Updated" in rows[0], rows
-    assert "A long work item title" in rows[1] and rows[1].count("10d") == 1, rows
-    assert "A long work item title " * 8 not in rows[1], rows
-
-
-@then("the action bar highlights its shortcut keys above the loaded item count")
-def _dashboard_controls_visible(scenario_state: dict[str, Any]) -> None:
-    hint = scenario_state["dashboard_hint"]
-    for key in "/vracdiwq":
-        index = hint.plain.index(f"({key})") + 1
-        assert any(
-            span.start <= index < span.end and "bold" in str(span.style) for span in hint.spans
-        )
-    assert scenario_state["dashboard_footer_order"]
-    assert scenario_state["dashboard_status"] == "Loaded 1 item(s)."
-
-
-@then("the dashboard does not scroll horizontally")
-def _dashboard_no_horizontal_scroll(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["dashboard_horizontal_scroll"] == (False, 0)
-
-
-@given("the user has open work across all supported sources")
+@given(
+    "the user has an authored pull request, a review request, an assigned issue, and other tracked work"
+)
 def _has_open_work_all_sources(work_items: list[WorkItem]) -> None:
     # Build the list through the real normalization + merge pipeline so the
     # Then steps assert on classifications produced by production code rather
@@ -222,58 +169,39 @@ def _has_open_work_all_sources(work_items: list[WorkItem]) -> None:
     work_items.extend(merged)
 
 
-@then("authored pull requests appear as PR items")
-def _authored_prs_are_pr(scenario_state: dict[str, Any]) -> None:
-    items = scenario_state["work_items"]
-    authored = [i for i in items if i.kind == WorkItemKind.AUTHORED_PR]
-    assert authored, "No authored PR items present"
-    for item in authored:
-        assert item.item_type == WorkItemType.PR
+@when('the user opens the dashboard and uses "v" then "o" on the starred row')
+def _open_starred_row(work_items: list[WorkItem], scenario_state: dict[str, Any]) -> None:
+    opened = []
+
+    async def interactions(app, pilot):
+        table = app.query_one("#work-items", DataTable)
+        rows = [table.get_row_at(i) for i in range(table.row_count)]
+        scenario_state["triage_rows"] = [
+            (type_column_label(row[0]), str(row[2]).removeprefix("* ")) for row in rows
+        ]
+        [index] = [i for i, row in enumerate(rows) if str(row[2]).startswith("* ")]
+        scenario_state["starred_title"] = str(rows[index][2]).removeprefix("* ")
+        await pilot.press(*(["down"] * index), "v", "o")
+
+    run_app(work_items=work_items, interactions=interactions, open_callback=opened.append)
+    scenario_state["opened_urls"] = [item.url for item in opened]
 
 
-@then("pull requests requiring the user's review appear as REVIEW items")
-def _review_prs_render_as_review(scenario_state: dict[str, Any]) -> None:
-    items = scenario_state["work_items"]
-    review_items = [i for i in items if i.kind == WorkItemKind.REVIEW_REQUESTED_PR]
-    assert review_items, "No review-requested PR items present"
-    # The REVIEW label is applied by the TUI/list-command layer — verify both.
-    import contextlib
-    import io
-
-    from workdash.workdash import _print_work_items
-
-    buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer):
-        _print_work_items(items, compute_suggestion_markers(items))
-    output = buffer.getvalue()
-    for review_item in review_items:
-        expected_id = f"{review_item.repo}#REVIEW-{review_item.number}"
-        assert any(
-            line.startswith("REVIEW") and expected_id in line for line in output.splitlines()
-        ), f"REVIEW label missing for {expected_id}: {output}"
-
-
-@then("issues assigned to the user appear as ISSUE items")
-def _assigned_issues_are_issue(scenario_state: dict[str, Any]) -> None:
-    assigned = [i for i in scenario_state["work_items"] if i.kind == WorkItemKind.ASSIGNED_ISSUE]
-    assert assigned, "No assigned issue present"
-    for item in assigned:
-        assert item.item_type == WorkItemType.ISSUE
-
-
-@then("other open issues and pull requests in tracked repositories appear as ISSUE or PR items")
-def _tracked_items_carry_expected_type(scenario_state: dict[str, Any]) -> None:
-    tracked = [
-        i
-        for i in scenario_state["work_items"]
-        if i.kind in {WorkItemKind.TRACKED_ISSUE, WorkItemKind.TRACKED_PR}
+@then("all of that work is visible together")
+def _all_work_visible(scenario_state: dict[str, Any]) -> None:
+    assert sorted(scenario_state["triage_rows"]) == [
+        ("IS 11", "Assigned issue"),
+        ("IS 13", "Tracked issue"),
+        ("PR 10", "Authored PR"),
+        ("RV 12", "Please review"),
+        ("VR 14", "Tracked PR"),
     ]
-    assert tracked, "No tracked items present"
-    for item in tracked:
-        expected = (
-            WorkItemType.ISSUE if item.kind == WorkItemKind.TRACKED_ISSUE else WorkItemType.PR
-        )
-        assert item.item_type == expected
+
+
+@then("the starred item's GitHub page opens")
+def _starred_page_opens(work_items: list[WorkItem], scenario_state: dict[str, Any]) -> None:
+    item = next(item for item in work_items if item.title == scenario_state["starred_title"])
+    assert scenario_state["opened_urls"] == [item.url]
 
 
 def type_column_label(cell: object) -> str:
@@ -288,641 +216,6 @@ def type_column_label(cell: object) -> str:
     return str(cell)[2:]
 
 
-@given("the user has authored pull requests whose CI is passing, failing, and still running")
-def _authored_prs_with_ci_results(
-    scenario_state: dict[str, Any], work_items: list[WorkItem]
-) -> None:
-    scenario_state["ci_states"] = {41: "SUCCESS", 42: "FAILURE", 43: "PENDING"}
-    work_items[:] = [
-        make_work_item(
-            item_type=WorkItemType.PR,
-            kind=WorkItemKind.AUTHORED_PR,
-            number=number,
-            title=f"Authored {ci_state}",
-            ci_state=ci_state,
-        )
-        for number, ci_state in scenario_state["ci_states"].items()
-    ] + [make_work_item(number=11, title="An issue")]
-
-
-@then("each authored pull request's Type column carries the symbol for its CI result")
-def _authored_prs_carry_ci_symbols(scenario_state: dict[str, Any]) -> None:
-    expected_symbols = {"SUCCESS": "✓ ", "FAILURE": "✗ ", "PENDING": "● "}
-    type_cells = _rendered_type_cells(scenario_state)
-    for number, ci_state in scenario_state["ci_states"].items():
-        assert type_cells[f"PR {number}"] == expected_symbols[ci_state], (number, type_cells)
-
-
-@then("an issue's Type column carries no CI symbol")
-def _issue_carries_no_ci_symbol(scenario_state: dict[str, Any]) -> None:
-    assert _rendered_type_cells(scenario_state)["IS 11"] == "  "
-
-
-@given("the user has authored a pull request whose CI passed and whose review is approved")
-def _authored_pr_ci_passed_review_approved(
-    scenario_state: dict[str, Any], work_items: list[WorkItem]
-) -> None:
-    work_items.append(
-        make_work_item(
-            item_type=WorkItemType.PR,
-            kind=WorkItemKind.AUTHORED_PR,
-            number=51,
-            title="Approved authored PR",
-            ci_state="SUCCESS",
-            review_decision="APPROVED",
-        )
-    )
-    scenario_state["approved_pr_number"] = 51
-
-
-@given("the user has authored a pull request whose CI passed but whose review requested changes")
-def _authored_pr_ci_passed_review_changes_requested(
-    scenario_state: dict[str, Any], work_items: list[WorkItem]
-) -> None:
-    work_items.append(
-        make_work_item(
-            item_type=WorkItemType.PR,
-            kind=WorkItemKind.AUTHORED_PR,
-            number=52,
-            title="Changes-requested authored PR",
-            ci_state="SUCCESS",
-            review_decision="CHANGES_REQUESTED",
-        )
-    )
-    scenario_state["changes_requested_pr_number"] = 52
-
-
-@given("the user has authored a pull request with a reviewer requested who has not yet reviewed")
-def _authored_pr_with_pending_reviewer(
-    scenario_state: dict[str, Any], work_items: list[WorkItem]
-) -> None:
-    work_items.append(
-        make_work_item(
-            item_type=WorkItemType.PR,
-            kind=WorkItemKind.AUTHORED_PR,
-            number=53,
-            title="Pending-review authored PR",
-            review_requested=True,
-        )
-    )
-    scenario_state["pending_review_pr_number"] = 53
-
-
-@given(
-    "the user has authored a pull request with unresolved review comments "
-    "but no approval or requested changes"
-)
-def _authored_pr_with_unresolved_comments(
-    scenario_state: dict[str, Any], work_items: list[WorkItem]
-) -> None:
-    work_items.append(
-        make_work_item(
-            item_type=WorkItemType.PR,
-            kind=WorkItemKind.AUTHORED_PR,
-            number=55,
-            title="Commented authored PR",
-            has_unresolved_comments=True,
-        )
-    )
-    scenario_state["commented_pr_number"] = 55
-
-
-@given("the user has authored a pull request with no reviewer requested")
-def _authored_pr_with_no_reviewer(
-    scenario_state: dict[str, Any], work_items: list[WorkItem]
-) -> None:
-    work_items.append(
-        make_work_item(
-            item_type=WorkItemType.PR,
-            kind=WorkItemKind.AUTHORED_PR,
-            number=54,
-            title="No-reviewer authored PR",
-        )
-    )
-    scenario_state["no_reviewer_pr_number"] = 54
-
-
-def _rendered_type_cell_strings(scenario_state: dict[str, Any]) -> list[str]:
-    """Return every rendered Type cell's full text, prefix included.
-
-    Unlike ``_rendered_type_cells``, this keeps the whole cell text instead of
-    only its leading two-character CI/review symbol prefix.
-    """
-
-    captured: list[str] = []
-
-    async def interactions(app, pilot) -> None:
-        table = app.query_one("#work-items", DataTable)
-        for index in range(table.row_count):
-            captured.append(str(table.get_row_at(index)[0]))
-
-    run_app(work_items=scenario_state["work_items"], interactions=interactions)
-    return captured
-
-
-@then("the approved pull request's Type column carries a green review checkmark")
-def _approved_pr_carries_green_review_checkmark(scenario_state: dict[str, Any]) -> None:
-    number = scenario_state["approved_pr_number"]
-    assert f"✓✓PR {number}" in _rendered_type_cell_strings(scenario_state)
-
-
-@then("the other pull request's Type column carries a red review cross")
-def _other_pr_carries_red_review_cross(scenario_state: dict[str, Any]) -> None:
-    number = scenario_state["changes_requested_pr_number"]
-    assert f"✓✗PR {number}" in _rendered_type_cell_strings(scenario_state)
-
-
-@then("the pending pull request's Type column carries a question mark review symbol")
-def _pending_pr_carries_question_mark(scenario_state: dict[str, Any]) -> None:
-    number = scenario_state["pending_review_pr_number"]
-    assert f" ?PR {number}" in _rendered_type_cell_strings(scenario_state)
-
-
-@then("the pending pull request's question mark review symbol is yellow")
-def _pending_pr_question_mark_is_yellow(scenario_state: dict[str, Any]) -> None:
-    number = scenario_state["pending_review_pr_number"]
-    assert _review_symbol_style(scenario_state, number) == ("?", "yellow")
-
-
-@then("the commented pull request's question mark review symbol is blue")
-def _commented_pr_question_mark_is_blue(scenario_state: dict[str, Any]) -> None:
-    number = scenario_state["commented_pr_number"]
-    assert _review_symbol_style(scenario_state, number) == ("?", "dodger_blue1")
-
-
-def _review_symbol_style(scenario_state: dict[str, Any], number: int) -> tuple[str, str]:
-    """Return the rendered review symbol and the color it is drawn in for one pull request."""
-
-    captured: list[tuple[str, str]] = []
-
-    async def interactions(app, pilot) -> None:
-        table = app.query_one("#work-items", DataTable)
-        for index in range(table.row_count):
-            cell = table.get_row_at(index)[0]
-            if type_column_label(cell) == f"PR {number}":
-                (span,) = (s for s in cell.spans if s.start == 1)
-                captured.append((cell.plain[1], str(span.style)))
-
-    run_app(work_items=scenario_state["work_items"], interactions=interactions)
-    return captured[0]
-
-
-@then("the other pull request's Type column carries no review symbol")
-def _other_pr_carries_no_review_symbol(scenario_state: dict[str, Any]) -> None:
-    number = scenario_state["no_reviewer_pr_number"]
-    assert f"  PR {number}" in _rendered_type_cell_strings(scenario_state)
-
-
-def _rendered_type_cells(scenario_state: dict[str, Any]) -> dict[str, str]:
-    """Return each rendered Type label mapped to its leading CI/review symbol pair."""
-
-    captured: dict[str, str] = {}
-
-    async def interactions(app, pilot) -> None:
-        table = app.query_one("#work-items", DataTable)
-        for index in range(table.row_count):
-            cell = table.get_row_at(index)[0]
-            captured[type_column_label(cell)] = str(cell)[:2]
-
-    run_app(work_items=scenario_state["work_items"], interactions=interactions)
-    return captured
-
-
-@then("the Type column shows `IS 1`, `PR 2`, `RV 3`, and `TD 4`")
-def _type_column_shows_github_numbers(scenario_state: dict[str, Any]) -> None:
-    captured: list[str] = []
-
-    async def interactions(app, pilot) -> None:
-        table = app.query_one("#work-items", DataTable)
-        captured.extend(
-            type_column_label(table.get_row_at(index)[0]) for index in range(table.row_count)
-        )
-
-    session = MagicMock()
-    session.config = WorkdashConfig(todo_repository="owner/todos")
-    session.work_items = scenario_state["work_items"]
-    session.suggestion_markers = {}
-    session.autodispatch_sessions.return_value = []
-    session.busy_message.return_value = None
-    run_app(work_items=scenario_state["work_items"], interactions=interactions, session=session)
-
-    assert set(captured) == {"IS 1", "PR 2", "RV 3", "TD 4"}
-
-
-# -- S002: direct vs team review requests ---------------------------------
-
-
-@given("a pull request has requested only a team the user belongs to")
-def _pr_team_only_request(scenario_state: dict[str, Any]) -> None:
-    scenario_state["team_only_pr_number"] = 201
-
-
-@given("a separate pull request has requested the user directly")
-def _pr_direct_request(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
-    scenario_state["direct_pr_number"] = 202
-    # Run the github_client against patched subprocess. The search qualifier
-    # makes GitHub return direct requests only, so the team-only pull request
-    # is absent from the response.
-    from workdash import github_client as gc
-
-    direct_search = [
-        {
-            "id": "PR-DIRECT",
-            "number": 202,
-            "title": "Direct review request",
-            "url": "https://github.com/owner/repo/pull/202",
-            "createdAt": "2026-04-22T00:00:00Z",
-            "updatedAt": "2026-04-23T00:00:00Z",
-            "isDraft": False,
-            "repository": {"nameWithOwner": "owner/repo"},
-        },
-    ]
-
-    def fake_run(command, **kwargs):
-        import json
-
-        if command[:3] == ["gh", "search", "prs"]:
-            assert command[3] == "user-review-requested:testuser"
-            return subprocess.CompletedProcess(
-                command, 0, stdout=json.dumps(direct_search), stderr=""
-            )
-        raise AssertionError(f"Unexpected gh command in scenario: {command}")
-
-    scenario_state["_subprocess_patch"] = fake_run
-    scenario_state["_github_client"] = gc.GitHubClient()
-
-
-@then("the team-only pull request does not appear as a REVIEW item")
-def _team_only_filtered_out(scenario_state: dict[str, Any]) -> None:
-    reviewed = scenario_state["reviewed_prs"]
-    assert all(item["number"] != scenario_state["team_only_pr_number"] for item in reviewed)
-
-
-@then("the directly requested pull request appears as a REVIEW item")
-def _direct_pr_present(scenario_state: dict[str, Any]) -> None:
-    reviewed = scenario_state["reviewed_prs"]
-    assert any(item["number"] == scenario_state["direct_pr_number"] for item in reviewed), reviewed
-
-
-# -- S003: sort by most recently updated ----------------------------------
-
-
-@given("the user has several open work items with different last update times")
-def _several_items_different_updates(work_items: list[WorkItem]) -> None:
-    work_items.extend(
-        [
-            make_work_item(
-                number=1,
-                title="Oldest update",
-                updated_at=NOW_UTC - timedelta(days=7),
-                created_at=NOW_UTC - timedelta(days=10),
-            ),
-            make_work_item(
-                number=2,
-                title="Middle update",
-                updated_at=NOW_UTC - timedelta(days=3),
-                created_at=NOW_UTC - timedelta(days=9),
-            ),
-            make_work_item(
-                number=3,
-                title="Latest update",
-                updated_at=NOW_UTC - timedelta(days=1),
-                created_at=NOW_UTC - timedelta(days=8),
-            ),
-        ]
-    )
-
-
-@then("the most recently updated item is listed first")
-def _most_recent_first(work_items: list[WorkItem]) -> None:
-    _ensure_sorted_matches_expected(work_items)
-
-
-@then("older items follow in decreasing order of last update")
-def _older_items_descending(work_items: list[WorkItem]) -> None:
-    _ensure_sorted_matches_expected(work_items)
-
-
-def _ensure_sorted_matches_expected(work_items: list[WorkItem]) -> None:
-    captured: dict[str, Any] = {}
-
-    async def interactions(app, pilot) -> None:
-        table = app.query_one("#work-items", DataTable)
-        captured["rows"] = [
-            [str(cell) for cell in table.get_row_at(index)] for index in range(table.row_count)
-        ]
-
-    run_app(work_items=list(work_items), interactions=interactions)
-    visible_titles = [row[2].lstrip("* ") for row in captured["rows"]]
-    expected = [item.title for item in sorted(work_items, key=lambda i: i.updated_at, reverse=True)]
-    assert visible_titles == expected
-
-
-# -- S004: dedupe authored vs tracked -------------------------------------
-
-
-@given("a pull request the user authored also lives in a tracked repository")
-def _authored_also_tracked(scenario_state: dict[str, Any]) -> None:
-    from workdash.github_client import (
-        merge_normalized_work_items,
-        normalize_authored_pull_requests,
-        normalize_recent_tracked_items,
-    )
-
-    authored_raw = [
-        {
-            "id": "PR-DUPLICATE",
-            "repo": "owner/repo",
-            "number": 77,
-            "title": "Ship feature",
-            "url": "https://github.com/owner/repo/pull/77",
-            "created_at": "2026-04-01T00:00:00Z",
-            "updated_at": "2026-04-20T00:00:00Z",
-            "is_draft": False,
-            "ci_state": None,
-            "review_decision": None,
-            "review_requested": False,
-            "has_unresolved_comments": False,
-        }
-    ]
-    tracked_raw = [
-        {
-            "id": "TRACKED-DUP",
-            "repo": "owner/repo",
-            "number": 77,
-            "title": "Ship feature (tracked view)",
-            "url": "https://github.com/owner/repo/pull/77",
-            "created_at": "2026-04-01T00:00:00Z",
-            "updated_at": "2026-04-20T00:00:00Z",
-            "is_pull_request": True,
-        }
-    ]
-    merged = merge_normalized_work_items(
-        normalize_authored_pull_requests(authored_raw),
-        normalize_recent_tracked_items(tracked_raw),
-    )
-    scenario_state["merged_items"] = merged
-    scenario_state["_dedupe_scenario"] = True
-
-
-@then("the pull request appears exactly once")
-def _pr_appears_once(scenario_state: dict[str, Any]) -> None:
-    merged = scenario_state["merged_items"]
-    matches = [i for i in merged if i.repo == "owner/repo" and i.number == 77]
-    assert len(matches) == 1, matches
-
-
-@then("it is classified as an authored pull request")
-def _pr_classified_authored(scenario_state: dict[str, Any]) -> None:
-    merged = scenario_state["merged_items"]
-    match = next(i for i in merged if i.repo == "owner/repo" and i.number == 77)
-    assert match.kind == WorkItemKind.AUTHORED_PR
-
-
-# -- S005 / empty result listing ------------------------------------------
-
-
-@given("the user has no open work items matching any source")
-def _no_work_items_for_triage(work_items: list[WorkItem]) -> None:
-    work_items.clear()
-
-
-@given("the user has no open work items")
-def _no_work_items(work_items: list[WorkItem]) -> None:
-    work_items.clear()
-
-
-@then("the system reports that no work items were found")
-def _system_reports_empty_from_open(scenario_state: dict[str, Any], capsys) -> None:
-    # When invoked via the triage S005 flow we run the CLI list path once
-    # here so the assertion can consume stdout. If we already captured output
-    # via a prior list-command step we reuse it.
-    if "print_output" in scenario_state:
-        assert "No work items found." in scenario_state["print_output"]
-        return
-    from workdash.workdash import _print_work_items
-
-    _print_work_items(list(scenario_state.get("work_items", [])), {})
-    assert "No work items found." in capsys.readouterr().out
-
-
-# -- S007: review-request authorization failure ---------------------------
-
-
-@given("one review-requested pull request requires additional GitHub authorization")
-def _one_review_requested_pr_requires_authorization() -> None:
-    """Modeled by the search fake, which omits that pull request."""
-
-
-@given("another review-requested pull request has requested the user directly")
-def _another_review_requested_pr_has_direct_request(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    authorized_repo = "owner/repo"
-    authorized_number = 42
-    scenario_state["authorized_review_repo"] = authorized_repo
-    scenario_state["authorized_review_number"] = authorized_number
-
-    monkeypatch.setattr(
-        GitHubClient, "list_open_authored_prs", lambda self, login, progress_callback=None: []
-    )
-    monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
-    monkeypatch.setattr(
-        GitHubClient, "list_open_assigned_issues", lambda self, login, progress_callback=None: []
-    )
-    monkeypatch.setattr(
-        GitHubClient,
-        "list_recent_tracked_items",
-        lambda self, repositories, progress_callback=None: [],
-    )
-    monkeypatch.setattr(
-        GitHubClient,
-        "list_open_todo_issues",
-        lambda self, todo_repository, progress_callback=None: [],
-    )
-
-    def fake_run(command, **kwargs):
-        if command[:3] == ["gh", "search", "prs"]:
-            # GitHub returns direct requests only and omits the pull request
-            # the user cannot access.
-            assert command[3] == "user-review-requested:testuser"
-            payload = [
-                {
-                    "id": "AUTHORIZED-REVIEW",
-                    "number": authorized_number,
-                    "title": "Authorized review request",
-                    "url": f"https://github.com/{authorized_repo}/pull/{authorized_number}",
-                    "createdAt": "2026-04-22T00:00:00Z",
-                    "updatedAt": "2026-04-23T00:00:00Z",
-                    "isDraft": False,
-                    "repository": {"nameWithOwner": authorized_repo},
-                },
-            ]
-            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
-        if is_linked_issues_query(command):
-            return linked_issues_response(command)
-        raise AssertionError(f"Unexpected gh command in review auth scenario: {command}")
-
-    monkeypatch.setattr("workdash.github_client.subprocess.run", fake_run)
-
-    def hook(state: dict[str, Any], items: list[WorkItem], _mp: pytest.MonkeyPatch) -> None:
-        config = WorkdashConfig(
-            github_username="testuser",
-            agents={
-                "codex": AgentConfig(analyze="codex exec", launch="codex"),
-                "claude": AgentConfig(analyze="claude -p", launch="claude"),
-                "pi": AgentConfig(launch="pi"),
-            },
-            repositories=("owner/repo",),
-            workdir=str(tmp_path / "wrk"),
-            todo_repository="testuser/todos",
-        )
-        backend = WorkdashBackend(
-            cache_root=tmp_path / "cache",
-            config=config,
-            included_items_store=IncludedItemsStore(tmp_path / "included.json"),
-        )
-        fetched, markers = backend.load_items()
-        items[:] = list(fetched)
-        state["work_items"] = list(fetched)
-        state["suggestion_markers"] = dict(markers)
-
-    scenario_state["_open_dashboard_hook"] = hook
-
-
-@then("the authorized review-requested pull request appears")
-def _authorized_review_requested_pr_appears(scenario_state: dict[str, Any]) -> None:
-    assert any(
-        item.repo == scenario_state["authorized_review_repo"]
-        and item.number == scenario_state["authorized_review_number"]
-        and item.kind == WorkItemKind.REVIEW_REQUESTED_PR
-        for item in scenario_state["work_items"]
-    )
-
-
-# -- S010: authored pull-request authorization failures -------------------
-
-
-@given("one authored pull request requires additional GitHub authorization")
-def _one_authored_pr_requires_authorization(scenario_state: dict[str, Any]) -> None:
-    scenario_state["unauthorized_authored_repo"] = "protected-org/protected-repo"
-    scenario_state["unauthorized_authored_number"] = 860
-
-
-@given("another authored pull request has a passing CI result")
-def _another_authored_pr_has_passing_ci(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    unauthorized_repo = scenario_state["unauthorized_authored_repo"]
-    unauthorized_number = scenario_state["unauthorized_authored_number"]
-    authorized_repo = "owner/repo"
-    authorized_number = 42
-    scenario_state["authorized_authored_repo"] = authorized_repo
-    scenario_state["authorized_authored_number"] = authorized_number
-    saml_error = "Resource protected by organization SAML enforcement."
-
-    monkeypatch.setattr(GitHubClient, "list_open_review_requested_prs", lambda *args, **kwargs: [])
-    monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda *args, **kwargs: [])
-    monkeypatch.setattr(GitHubClient, "list_open_assigned_issues", lambda *args, **kwargs: [])
-    monkeypatch.setattr(GitHubClient, "list_recent_tracked_items", lambda *args, **kwargs: [])
-    monkeypatch.setattr(GitHubClient, "list_open_todo_issues", lambda *args, **kwargs: [])
-
-    def fake_run(command, **kwargs):
-        if command[:3] == ["gh", "search", "prs"] and "--author" in command:
-            payload = [
-                {
-                    "id": "UNAUTHORIZED-AUTHORED",
-                    "number": unauthorized_number,
-                    "title": "Unauthorized authored pull request",
-                    "url": f"https://github.com/{unauthorized_repo}/pull/{unauthorized_number}",
-                    "createdAt": "2026-04-20T00:00:00Z",
-                    "updatedAt": "2026-04-21T00:00:00Z",
-                    "isDraft": False,
-                    "repository": {"nameWithOwner": unauthorized_repo},
-                },
-                {
-                    "id": "AUTHORIZED-AUTHORED",
-                    "number": authorized_number,
-                    "title": "Authorized authored pull request",
-                    "url": f"https://github.com/{authorized_repo}/pull/{authorized_number}",
-                    "createdAt": "2026-04-22T00:00:00Z",
-                    "updatedAt": "2026-04-23T00:00:00Z",
-                    "isDraft": False,
-                    "repository": {"nameWithOwner": authorized_repo},
-                },
-            ]
-            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
-        if is_linked_issues_query(command):
-            return linked_issues_response(command)
-        if command[:3] == ["gh", "api", "graphql"]:
-            payload = {
-                "data": {
-                    "p0": None,
-                    "p1": {
-                        "pullRequest": {
-                            "commits": {
-                                "nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]
-                            }
-                        }
-                    },
-                },
-                "errors": [{"type": "FORBIDDEN", "path": ["p0"], "message": saml_error}],
-            }
-            raise subprocess.CalledProcessError(
-                1, command, output=json.dumps(payload), stderr=saml_error
-            )
-        raise AssertionError(f"Unexpected gh command in authored auth scenario: {command}")
-
-    monkeypatch.setattr("workdash.github_client.subprocess.run", fake_run)
-
-    def hook(state: dict[str, Any], items: list[WorkItem], _mp: pytest.MonkeyPatch) -> None:
-        progress_messages: list[str] = []
-        backend = WorkdashBackend(
-            cache_root=tmp_path / "cache",
-            config=WorkdashConfig(github_username="testuser", repositories=(authorized_repo,)),
-            included_items_store=IncludedItemsStore(tmp_path / "included.json"),
-        )
-        fetched, markers = backend.load_items(progress_callback=progress_messages.append)
-        items[:] = fetched
-        state["work_items"] = fetched
-        state["suggestion_markers"] = markers
-        state["progress_messages"] = progress_messages
-
-    scenario_state["_open_dashboard_hook"] = hook
-
-
-@then("the authorized authored pull request appears with its CI result")
-def _authorized_authored_pr_appears_with_ci(scenario_state: dict[str, Any]) -> None:
-    item = next(
-        item
-        for item in scenario_state["work_items"]
-        if item.repo == scenario_state["authorized_authored_repo"]
-        and item.number == scenario_state["authorized_authored_number"]
-    )
-    assert item.kind == WorkItemKind.AUTHORED_PR
-    assert item.ci_state == "SUCCESS"
-
-
-@then("the system warns that the unauthorized authored pull request was skipped")
-def _warns_unauthorized_authored_pr_skipped(scenario_state: dict[str, Any]) -> None:
-    item_label = (
-        f"{scenario_state['unauthorized_authored_repo']}"
-        f"#{scenario_state['unauthorized_authored_number']}"
-    )
-    assert any(
-        "Warning: skipped authored pull request" in message
-        and item_label in message
-        and "SAML enforcement" in message
-        for message in scenario_state["progress_messages"]
-    )
-
-
-# ----- S011/S012: CHECK items and the CHECK -> REVIEW transition -----
-
 _CHECK_PR_NUMBER = 909
 _CHECK_PR_RECORD = {
     "id": "TRACKED-909",
@@ -936,8 +229,8 @@ _CHECK_PR_RECORD = {
 }
 
 
-@given("a tracked repository has an open pull request the user neither authored nor reviewed")
-def _tracked_pr_the_user_is_not_involved_in(
+@given("the dashboard lists a pull request as VR")
+def _dashboard_lists_a_check_item(
     scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _install_empty_github_fakes(monkeypatch)
@@ -946,30 +239,13 @@ def _tracked_pr_the_user_is_not_involved_in(
         "list_recent_tracked_items",
         lambda self, repositories, progress_callback=None: [dict(_CHECK_PR_RECORD)],
     )
-    monkeypatch.setattr(
-        GitHubClient,
-        "fetch_linked_issues",
-        lambda self, pull_requests, progress_callback=None: {},
-    )
-    scenario_state["_open_dashboard_hook"] = _make_open_dashboard_hook(tmp_path)
+    monkeypatch.setattr(GitHubClient, "fetch_linked_issues", lambda *args, **kwargs: {})
+    backend = _make_backend(tmp_path)
+    scenario_state["review_backend"] = backend
+    scenario_state["initial_review_items"], _ = backend.load_items()
 
 
-@given("the dashboard lists a pull request as a CHECK item")
-def _dashboard_lists_a_check_item(
-    scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    _tracked_pr_the_user_is_not_involved_in(scenario_state, monkeypatch, tmp_path)
-    backend = _make_backend(scenario_state, tmp_path)
-    fetched, _markers = backend.load_items()
-    work_items[:] = list(fetched)
-    scenario_state["work_items"] = list(fetched)
-    assert [format_type_label(item) for item in fetched] == ["CHECK"], fetched
-
-
-@given("the user has since reviewed that pull request")
+@given("the user has since reviewed that pull request on GitHub")
 def _user_has_reviewed_that_pull_request(monkeypatch: pytest.MonkeyPatch) -> None:
     # `gh search prs --reviewed-by` starts answering for the same pull request,
     # and the merge order lets that stronger relationship win.
@@ -991,21 +267,32 @@ def _user_has_reviewed_that_pull_request(monkeypatch: pytest.MonkeyPatch) -> Non
     )
 
 
-@when("the user refreshes the dashboard")
-def _user_refreshes_the_dashboard(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    backend = _make_backend(scenario_state, tmp_path)
-    fetched, markers = backend.load_items()
-    work_items[:] = list(fetched)
-    scenario_state["work_items"] = list(fetched)
-    scenario_state["suggestion_markers"] = dict(markers)
+@when('the user presses "r" to reload the reviewed pull request')
+def _refresh_reviewed_pr(scenario_state: dict[str, Any]) -> None:
+    async def interactions(app, pilot):
+        table = app.query_one("#work-items", DataTable)
+        assert table.row_count == 1
+        assert type_column_label(table.get_row_at(0)[0]) == "VR 909"
+        await pilot.press("r")
+        footer = app.query_one("#status-footer", Static)
+        for _ in range(100):
+            if footer.render().plain == "Refreshed 1 item(s).":
+                break
+            await pilot.pause(0.01)
+        scenario_state["reviewed_rows"] = [
+            type_column_label(table.get_row_at(i)[0]) for i in range(table.row_count)
+        ]
+
+    run_app(
+        work_items=scenario_state["initial_review_items"],
+        refresh_callback=scenario_state["review_backend"].load_items,
+        interactions=interactions,
+    )
 
 
-@then(parsers.parse("that pull request appears as a {label} item"))
-def _that_pull_request_appears_as(scenario_state: dict[str, Any], label: str) -> None:
-    item = next(item for item in scenario_state["work_items"] if item.number == _CHECK_PR_NUMBER)
-    assert format_type_label(item) == label, item
+@then("the same pull request is listed as RV")
+def _reviewed_pr_is_rv(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["reviewed_rows"] == ["RV 909"]
 
 
 # ----- S013: a pull request replaces the issue it closes -----
@@ -1019,7 +306,7 @@ def _pull_request_closes_an_assigned_issue(scenario_state: dict[str, Any]) -> No
 
 @given("both the pull request and that issue are open work for the user")
 def _pull_request_and_issue_are_open_work(
-    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pr_number = scenario_state["closing_pr_number"]
     issue_number = scenario_state["closed_issue_number"]
@@ -1072,30 +359,29 @@ def _pull_request_and_issue_are_open_work(
             else (_ for _ in ()).throw(AssertionError(f"Unexpected gh command: {command}"))
         ),
     )
-    scenario_state["_open_dashboard_hook"] = _make_open_dashboard_hook(tmp_path)
+
+
+@when("the user returns to the dashboard")
+def _return_to_closing_pr(scenario_state: dict[str, Any], tmp_path: Path) -> None:
+    items, markers = _make_backend(tmp_path).load_items()
+
+    async def interactions(app, pilot):
+        table = app.query_one("#work-items", DataTable)
+        scenario_state["returning_labels"] = [
+            type_column_label(table.get_row_at(i)[0]) for i in range(table.row_count)
+        ]
+
+    run_app(work_items=items, suggestion_markers=markers, interactions=interactions)
 
 
 @then("the pull request appears on the dashboard")
 def _the_pull_request_appears(scenario_state: dict[str, Any]) -> None:
-    pr_number = scenario_state["closing_pr_number"]
-    assert any(
-        item.item_type == WorkItemType.PR and item.number == pr_number
-        for item in scenario_state["work_items"]
-    ), scenario_state["work_items"]
+    assert f"PR {scenario_state['closing_pr_number']}" in scenario_state["returning_labels"]
 
 
 @then("the issue it closes does not appear on the dashboard")
 def _the_closed_issue_does_not_appear(scenario_state: dict[str, Any]) -> None:
-    assert not any(
-        item.item_type == WorkItemType.ISSUE
-        and item.number == scenario_state["closed_issue_number"]
-        for item in scenario_state["work_items"]
-    ), scenario_state["work_items"]
-
-
-# --------------------------------------------------------------------------
-# F-TRIAGE-LIST-COMMAND
-# --------------------------------------------------------------------------
+    assert f"IS {scenario_state['closed_issue_number']}" not in scenario_state["returning_labels"]
 
 
 @given("the user has open work items")
@@ -1171,15 +457,6 @@ def _dashboard_has_item_types(scenario_state: dict[str, Any], work_items: list[W
             updated_at=NOW_UTC,
         ),
     ]
-    scenario_state["work_items"] = list(work_items)
-
-
-@given("the dashboard has issue, todo, pull request, and review work items")
-def _dashboard_has_item_types_and_todo(
-    scenario_state: dict[str, Any], work_items: list[WorkItem]
-) -> None:
-    _dashboard_has_item_types(scenario_state, work_items)
-    work_items.append(make_work_item(repo="owner/todos", number=4, title="Todo"))
     scenario_state["work_items"] = list(work_items)
 
 
@@ -1262,72 +539,6 @@ def _list_work_from_custom_address(scenario_state, capsys):
 def _printed_list_includes(title: str, item_id: str, scenario_state: dict[str, Any]) -> None:
     lines = scenario_state["print_output"].splitlines()
     assert any(item_id in line.split() and line.endswith(title) for line in lines), lines
-
-
-# --------------------------------------------------------------------------
-# F-TRIAGE-RECENT
-# --------------------------------------------------------------------------
-
-
-@given("a work item was last updated within the last 24 hours")
-def _item_updated_recently(work_items: list[WorkItem], scenario_state: dict[str, Any]) -> None:
-    item = make_work_item(
-        number=100,
-        title="Fresh activity",
-        updated_at=NOW_UTC - timedelta(hours=2),
-        created_at=NOW_UTC - timedelta(days=3),
-    )
-    work_items.append(item)
-    scenario_state["target_item"] = item
-
-
-@given("a work item was last updated more than 24 hours ago")
-def _item_updated_long_ago(work_items: list[WorkItem], scenario_state: dict[str, Any]) -> None:
-    item = make_work_item(
-        number=101,
-        title="Stale activity",
-        updated_at=NOW_UTC - timedelta(days=5),
-        created_at=NOW_UTC - timedelta(days=10),
-    )
-    work_items.append(item)
-    scenario_state["target_item"] = item
-
-
-@then("that work item is rendered in bold")
-def _rendered_bold(work_items: list[WorkItem], scenario_state: dict[str, Any]) -> None:
-    captured = _capture_rendered_row(work_items, scenario_state["target_item"])
-    for cell in captured:
-        assert isinstance(cell, Text), f"expected bold Text, got {type(cell)}: {cell}"
-        assert "bold" in str(cell.style)
-
-
-@then("that work item is rendered in the normal weight")
-def _rendered_normal(work_items: list[WorkItem], scenario_state: dict[str, Any]) -> None:
-    captured = _capture_rendered_row(work_items, scenario_state["target_item"])
-    for cell in captured:
-        # The Type cell always carries Text so its CI symbol can be colored, so
-        # normal weight is the absence of bold rather than the absence of Text.
-        if isinstance(cell, Text):
-            assert "bold" not in str(cell.style)
-
-
-def _capture_rendered_row(work_items: list[WorkItem], target: WorkItem) -> list:
-    captured: dict[str, Any] = {}
-
-    async def interactions(app, pilot) -> None:
-        table = app.query_one("#work-items", DataTable)
-        for index in range(table.row_count):
-            # get_row_at returns the raw values (Text or str) used in the cell
-            row = table.get_row_at(index)
-            title_cell = row[2]
-            title_plain = title_cell.plain if isinstance(title_cell, Text) else str(title_cell)
-            if target.title in title_plain:
-                captured["row"] = row
-                return
-
-    run_app(work_items=list(work_items), interactions=interactions)
-    assert "row" in captured, "target item not rendered in table"
-    return captured["row"]
 
 
 # --------------------------------------------------------------------------
@@ -1441,149 +652,9 @@ def _reports_count(scenario_state: dict[str, Any], work_items: list[WorkItem]) -
 # --------------------------------------------------------------------------
 
 
-@given("the user has several open work items with different creation dates")
-def _several_items_different_creation(work_items: list[WorkItem]) -> None:
-    work_items.extend(
-        [
-            make_work_item(
-                number=1,
-                title="Newest",
-                created_at=NOW_UTC - timedelta(days=2),
-                updated_at=NOW_UTC - timedelta(days=1),
-            ),
-            make_work_item(
-                number=2,
-                title="Middle",
-                created_at=NOW_UTC - timedelta(days=10),
-                updated_at=NOW_UTC - timedelta(days=1),
-            ),
-            make_work_item(
-                number=3,
-                title="Oldest creation",
-                created_at=NOW_UTC - timedelta(days=30),
-                updated_at=NOW_UTC - timedelta(days=1),
-            ),
-        ]
-    )
-
-
-@given("the oldest creation date is shared by a pull request and an issue")
-def _tie_oldest_creation(work_items: list[WorkItem]) -> None:
-    shared_creation = NOW_UTC - timedelta(days=30)
-    work_items.extend(
-        [
-            make_work_item(
-                item_type=WorkItemType.ISSUE,
-                kind=WorkItemKind.TRACKED_ISSUE,
-                number=1,
-                title="Tied issue",
-                created_at=shared_creation,
-                updated_at=NOW_UTC - timedelta(days=1),
-            ),
-            make_work_item(
-                item_type=WorkItemType.PR,
-                kind=WorkItemKind.TRACKED_PR,
-                number=2,
-                title="Tied PR",
-                created_at=shared_creation,
-                updated_at=NOW_UTC - timedelta(days=1),
-            ),
-        ]
-    )
-
-
-@then("exactly one work item is marked as suggested")
-def _exactly_one_suggested(scenario_state: dict[str, Any]) -> None:
-    markers = scenario_state["suggestion_markers"]
-    assert len(markers) == 1, markers
-
-
-@then("the suggested item is the oldest by creation date")
-def _suggested_is_oldest(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
-    markers = scenario_state["suggestion_markers"]
-    (_, repo, number), _marker = next(iter(markers.items()))
-    suggested = next(i for i in work_items if i.repo == repo and i.number == number)
-    oldest = min(work_items, key=lambda i: i.created_at)
-    assert suggested.created_at == oldest.created_at
-
-
-@then("the pull request is marked as suggested")
-def _pr_wins_suggestion(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
-    markers = scenario_state["suggestion_markers"]
-    (item_type, _, _), _ = next(iter(markers.items()))
-    assert item_type == WorkItemType.PR, markers
-
-
-@then("no item is marked as suggested")
-def _no_suggestion(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["suggestion_markers"] == {}
-
-
 # --------------------------------------------------------------------------
 # F-TRIAGE-INCLUDE
 # --------------------------------------------------------------------------
-
-_INCLUDE_PR_URL = "https://github.com/owner/repo/pull/111"
-_INCLUDE_ISSUE_URL = "https://github.com/owner/repo/issues/222"
-
-
-def _fake_gh_view_response(item_type: str, number: int, state: str = "OPEN") -> str:
-    kind_segment = "pull" if item_type == "pr" else "issues"
-    return json.dumps(
-        {
-            "number": number,
-            "title": f"Fetched {item_type} {number}",
-            "url": f"https://github.com/owner/repo/{kind_segment}/{number}",
-            "createdAt": "2026-04-20T10:00:00Z",
-            "updatedAt": "2026-04-28T10:00:00Z",
-            "state": state,
-        }
-    )
-
-
-def _install_gh_fetch_fake(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    responses: dict[tuple[str, str], subprocess.CompletedProcess | Exception],
-) -> list[list[str]]:
-    """Patch ``subprocess.run`` so ``gh pr/issue view`` returns canned data."""
-
-    calls: list[list[str]] = []
-    import workdash.github_client as gc
-
-    def fake_run(command, **kwargs):
-        calls.append(list(command))
-        # gh {pr|issue} view N --repo owner/repo --json ...
-        if (
-            len(command) >= 6
-            and command[:3] in (["gh", "pr", "view"], ["gh", "issue", "view"])
-            and command[4] == "--repo"
-        ):
-            key = (command[1], command[3])
-            result = responses.get(key)
-            if isinstance(result, Exception):
-                raise result
-            if result is not None:
-                return result
-        if is_linked_issues_query(command):
-            return linked_issues_response(command)
-        if command[:3] == ["gh", "api", "graphql"] and "subIssuesSummary" in command[4]:
-            number = re.search(r"issue\(number: (\d+)\)", command[4]).group(1)
-            result = responses.get(("issue", number))
-            if isinstance(result, Exception):
-                raise result
-            if result is not None:
-                node = json.loads(result.stdout)
-                node["subIssuesSummary"] = {"total": 0}
-                payload = {"data": {"repository": {"issue": node}}}
-                return subprocess.CompletedProcess(
-                    command, 0, stdout=json.dumps(payload), stderr=""
-                )
-        raise AssertionError(f"Unexpected gh command in include scenario: {command}")
-
-    monkeypatch.setattr(gc.subprocess, "run", fake_run)
-    monkeypatch.setattr(gc.time, "sleep", lambda _: None)
-    return calls
 
 
 def _install_empty_github_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1613,20 +684,7 @@ def _install_empty_github_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _make_tmp_store(scenario_state: dict[str, Any], tmp_path: Path) -> IncludedItemsStore:
-    store_path = scenario_state.get("included_store_path")
-    if store_path is None:
-        store_path = tmp_path / "included.json"
-        scenario_state["included_store_path"] = store_path
-    return IncludedItemsStore(store_path)
-
-
-def _make_backend(
-    scenario_state: dict[str, Any],
-    tmp_path: Path,
-) -> WorkdashBackend:
-    store = _make_tmp_store(scenario_state, tmp_path)
-    scenario_state["included_store"] = store
+def _make_backend(tmp_path: Path) -> WorkdashBackend:
     config = WorkdashConfig(
         github_username="testuser",
         agents={
@@ -1641,534 +699,171 @@ def _make_backend(
     return WorkdashBackend(
         cache_root=tmp_path / "cache",
         config=config,
-        included_items_store=store,
+        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
     )
 
 
-def _make_open_dashboard_hook(tmp_path: Path):
-    """Build the `_open_dashboard_hook` that drives a real WorkdashBackend.
-
-    The hook is invoked by the shared "When the user opens the dashboard"
-    step and captures items + markers into the scenario state for Then-step
-    assertions. Extracted because the Given steps that seed the store share
-    this exact wiring.
-    """
-
-    def hook(state: dict[str, Any], items: list[WorkItem], _mp: pytest.MonkeyPatch) -> None:
-        backend = _make_backend(state, tmp_path)
-        fetched, markers = backend.load_items()
-        items[:] = list(fetched)
-        state["work_items"] = list(fetched)
-        state["suggestion_markers"] = dict(markers)
-
-    return hook
+_INCLUDE_PR_URL = "https://github.com/owner/other/pull/111"
+_INCLUDE_PR_LABEL = "VR+ 111"
 
 
-# ----- F-TRIAGE-INCLUDE: Given steps -----
+@pytest.fixture
+def include_backend(monkeypatch, tmp_path):
+    _install_empty_github_fakes(monkeypatch)
+    monkeypatch.setattr(GitHubClient, "fetch_linked_issues", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        GitHubClient, "fetch_linked_issues_for_pull_request", lambda *args, **kwargs: []
+    )
+    payload = {
+        "number": 111,
+        "title": "Off-dashboard pull request",
+        "url": _INCLUDE_PR_URL,
+        "createdAt": "2026-04-20T10:00:00Z",
+        "updatedAt": "2026-04-28T10:00:00Z",
+        "state": "OPEN",
+    }
+
+    def run(command, **kwargs):
+        assert command[:6] == ["gh", "pr", "view", "111", "--repo", "owner/other"]
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    return _make_backend(tmp_path), payload
 
 
-@given("the TUI is open")
-def _tui_is_open(scenario_state: dict[str, Any]) -> None:
-    scenario_state.setdefault("_tui_open", True)
-
-
-@given("the user pastes a pull request URL into the include dialog")
-def _paste_pr_url(scenario_state: dict[str, Any]) -> None:
-    scenario_state["include_url"] = _INCLUDE_PR_URL
-    scenario_state["_include_kind"] = "pr"
-
-
-@given("the user pastes an issue URL into the include dialog")
-def _paste_issue_url(scenario_state: dict[str, Any]) -> None:
-    scenario_state["include_url"] = _INCLUDE_ISSUE_URL
-    scenario_state["_include_kind"] = "issue"
-
-
-@given("the TUI is open with a work item already visible")
-def _tui_open_with_visible_item(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
-    if not work_items:
-        work_items.append(
-            make_work_item(
-                item_type=WorkItemType.PR,
-                kind=WorkItemKind.AUTHORED_PR,
-                repo="owner/repo",
-                number=111,
-                title="Visible PR",
-                updated_at=NOW_UTC - timedelta(days=2),
-                created_at=NOW_UTC - timedelta(days=5),
-                url=_INCLUDE_PR_URL,
-            )
-        )
-    scenario_state["_visible_item"] = work_items[0]
-
-
-@given("the user pastes that same work item's URL into the include dialog")
-def _paste_existing_url(scenario_state: dict[str, Any]) -> None:
-    scenario_state["include_url"] = scenario_state["_visible_item"].url
-    scenario_state["_include_kind"] = "duplicate"
-
-
-@given(
-    "the user pastes a URL that is not a GitHub issue or pull request URL into the include dialog"
-)
-def _paste_invalid_url(scenario_state: dict[str, Any]) -> None:
-    scenario_state["include_url"] = "https://example.com/not-a-github-url"
-    scenario_state["_include_kind"] = "invalid"
-
-
-@given(
-    "the user has an included pull request, an included issue, and an included review-requested pull request"
-)
-def _seed_three_included_items(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    store = _make_tmp_store(scenario_state, tmp_path)
-    store.save(
+@given("the dashboard is filtered to an unrelated issue")
+def _seed_dashboard_issue(work_items):
+    work_items.extend(
         [
-            "https://github.com/owner/repo/pull/111",
-            "https://github.com/owner/repo/issues/222",
-            "https://github.com/owner/repo/pull/333",
-            "https://github.com/owner/repo/pull/555",
+            make_work_item(title="Fix the parser", updated_at=NOW_UTC),
+            make_work_item(number=2, title="Polish the docs"),
         ]
     )
-    # PR #333 is surfaced by the review-requested source too; the backend
-    # merges the included payload into the existing REVIEW row, keeping the
-    # REVIEW classification while flipping `included` to True.
-    # PR #555 is the user's own pull request, so including it must keep the
-    # authored classification and read "PR+" rather than "CHECK+".
-    monkeypatch.setattr(
-        GitHubClient,
-        "list_open_authored_prs",
-        lambda self, login, progress_callback=None: [
-            {
-                "id": "PR-555",
-                "repo": "owner/repo",
-                "number": 555,
-                "title": "Fetched pr 555",
-                "url": "https://github.com/owner/repo/pull/555",
-                "created_at": "2026-04-20T10:00:00Z",
-                "updated_at": "2026-04-28T10:00:00Z",
-                "is_draft": False,
-                "ci_state": None,
-                "review_decision": None,
-                "review_requested": False,
-                "has_unresolved_comments": False,
-            }
-        ],
-    )
-    monkeypatch.setattr(
-        GitHubClient,
-        "list_open_review_requested_prs",
-        lambda self, login, progress_callback=None: [
-            {
-                "id": "REVIEW-333",
-                "repo": "owner/repo",
-                "number": 333,
-                "title": "Fetched pr 333",
-                "url": "https://github.com/owner/repo/pull/333",
-                "created_at": "2026-04-20T10:00:00Z",
-                "updated_at": "2026-04-28T10:00:00Z",
-                "is_draft": False,
-            }
-        ],
-    )
-    monkeypatch.setattr(GitHubClient, "list_open_reviewed_prs", lambda self, login: [])
-    monkeypatch.setattr(
-        GitHubClient, "list_open_assigned_issues", lambda self, login, progress_callback=None: []
-    )
-    monkeypatch.setattr(
-        GitHubClient,
-        "list_open_todo_issues",
-        lambda self, todo_repository, progress_callback=None: [],
-    )
-    # Seed one non-included tracked PR so the list-command assertion can verify
-    # that format_type_label does not spuriously append "+" to regular rows.
-    monkeypatch.setattr(
-        GitHubClient,
-        "list_recent_tracked_items",
-        lambda self, repositories, progress_callback=None: [
-            {
-                "id": "TRACKED-444",
-                "repo": "owner/repo",
-                "number": 444,
-                "title": "Tracked non-included PR",
-                "url": "https://github.com/owner/repo/pull/444",
-                "created_at": "2026-04-20T10:00:00Z",
-                "updated_at": "2026-04-27T10:00:00Z",
-                "is_pull_request": True,
-            }
-        ],
-    )
-    _install_gh_fetch_fake(
-        monkeypatch,
-        responses={
-            ("pr", "111"): subprocess.CompletedProcess(
-                [], 0, stdout=_fake_gh_view_response("pr", 111), stderr=""
-            ),
-            ("issue", "222"): subprocess.CompletedProcess(
-                [], 0, stdout=_fake_gh_view_response("issue", 222), stderr=""
-            ),
-            ("pr", "333"): subprocess.CompletedProcess(
-                [], 0, stdout=_fake_gh_view_response("pr", 333), stderr=""
-            ),
-            ("pr", "555"): subprocess.CompletedProcess(
-                [], 0, stdout=_fake_gh_view_response("pr", 555), stderr=""
-            ),
-        },
-    )
-    scenario_state["_open_dashboard_hook"] = _make_open_dashboard_hook(tmp_path)
 
 
-@given("the included-items store contains a URL from a previous session")
-def _store_has_prior_url(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    store = _make_tmp_store(scenario_state, tmp_path)
-    store.save([_INCLUDE_PR_URL])
-    _install_empty_github_fakes(monkeypatch)
-    _install_gh_fetch_fake(
-        monkeypatch,
-        responses={
-            ("pr", "111"): subprocess.CompletedProcess(
-                [], 0, stdout=_fake_gh_view_response("pr", 111), stderr=""
-            ),
-        },
-    )
-    scenario_state["_open_dashboard_hook"] = _make_open_dashboard_hook(tmp_path)
-
-
-@given("the included-items store contains a URL for an item that has since closed")
-def _store_has_closed_url(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    store = _make_tmp_store(scenario_state, tmp_path)
-    store.save([_INCLUDE_PR_URL])
-    _install_empty_github_fakes(monkeypatch)
-    _install_gh_fetch_fake(
-        monkeypatch,
-        responses={
-            ("pr", "111"): subprocess.CompletedProcess(
-                [], 0, stdout=_fake_gh_view_response("pr", 111, state="CLOSED"), stderr=""
-            ),
-        },
-    )
-    scenario_state["_open_dashboard_hook"] = _make_open_dashboard_hook(tmp_path)
-
-
-@given("the included-items store contains a URL")
-def _store_has_url(
-    scenario_state: dict[str, Any],
-    tmp_path: Path,
-) -> None:
-    store = _make_tmp_store(scenario_state, tmp_path)
-    store.save([_INCLUDE_PR_URL])
-
-
-@given("the next fetch for that URL will fail transiently")
-def _next_fetch_transient(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    _install_empty_github_fakes(monkeypatch)
-    _install_gh_fetch_fake(
-        monkeypatch,
-        responses={
-            ("pr", "111"): subprocess.CalledProcessError(
-                returncode=1,
-                cmd=["gh", "pr", "view", "111"],
-                stderr="HTTP 503: Service Unavailable",
-            ),
-        },
-    )
-    scenario_state["_open_dashboard_hook"] = _make_open_dashboard_hook(tmp_path)
-
-
-@given("the included-items store does not exist")
-def _store_missing(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    scenario_state["included_store_path"] = tmp_path / "does-not-exist" / "included.json"
-    scenario_state["included_store"] = IncludedItemsStore(scenario_state["included_store_path"])
-    _install_empty_github_fakes(monkeypatch)
-    scenario_state["_open_dashboard_hook"] = _make_open_dashboard_hook(tmp_path)
-
-
-# ----- F-TRIAGE-INCLUDE: When steps -----
-
-
-@when("the user confirms the include dialog")
-def _confirm_include_dialog(
-    scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    url = scenario_state["include_url"]
-    kind = scenario_state["_include_kind"]
-
-    if kind == "pr":
-        _install_gh_fetch_fake(
-            monkeypatch,
-            responses={
-                ("pr", "111"): subprocess.CompletedProcess(
-                    [], 0, stdout=_fake_gh_view_response("pr", 111), stderr=""
-                ),
-            },
+@given("the dashboard shows a pull request below the selected issue")
+def _seed_listed_pull_request(work_items):
+    work_items.append(make_work_item(title="Fix the parser", updated_at=NOW_UTC))
+    work_items.append(
+        make_work_item(
+            item_type=WorkItemType.PR,
+            kind=WorkItemKind.TRACKED_PR,
+            repo="owner/other",
+            number=111,
+            title="Listed pull request",
+            url=_INCLUDE_PR_URL,
         )
-    elif kind == "issue":
-        _install_gh_fetch_fake(
-            monkeypatch,
-            responses={
-                ("issue", "222"): subprocess.CompletedProcess(
-                    [], 0, stdout=_fake_gh_view_response("issue", 222), stderr=""
-                ),
-            },
-        )
-    # For "duplicate" and "invalid" we do not expect any gh call; omit the patch.
+    )
 
-    # Drive the real WorkdashBackend entry points so the TUI exercises
-    # production code (URL parsing, fetch, canonical persistence, duplicate
-    # handling) rather than a hand-rolled mirror.
-    backend = _make_backend(scenario_state, tmp_path)
-    captured: dict[str, Any] = {}
 
-    async def interactions(app, pilot) -> None:
-        await pilot.press("i")
-        for _ in range(20):
-            await pilot.pause()
-            for screen in app.screen_stack:
-                if isinstance(screen, IncludeDialog):
-                    screen.query_one("#include-url", Input).value = url
-                    await pilot.press("enter")
-                    break
-            else:
-                continue
-            break
-        for _ in range(40):
-            await pilot.pause()
-            if not any(isinstance(screen, IncludeDialog) for screen in app.screen_stack):
-                break
+@when('the user presses "i", pastes the off-dashboard pull request\'s URL, and confirms')
+@when('the user presses "i", pastes the listed pull request\'s URL, and confirms')
+def _submit_include(work_items, scenario_state, include_backend):
+    backend, _ = include_backend
+    already_listed = any(item.url == _INCLUDE_PR_URL for item in work_items)
+
+    async def interactions(app, pilot):
         table = app.query_one("#work-items", DataTable)
-        captured["rows"] = [
-            [str(cell) for cell in table.get_row_at(index)] for index in range(table.row_count)
-        ]
-        captured["cursor_row"] = table.cursor_row
-        captured["status"] = app.query_one("#status-footer", Static).render().plain
-        captured["sorted_items"] = list(app._sorted_work_items)
+        if not already_listed:
+            await _apply_search_filter(app, pilot, "parser")
+            assert table.row_count == 1
+        assert str(table.get_row_at(table.cursor_row)[2]).removeprefix("* ") == "Fix the parser"
+        await pilot.press("i")
+        assert isinstance(app.screen, IncludeDialog)
+        app.screen.query_one("#include-url", Input).value = _INCLUDE_PR_URL
+        await pilot.press("enter")
+        footer = app.query_one("#status-footer", Static)
+        for _ in range(100):
+            if footer.render().plain.startswith(("Included ", "Already tracking ")):
+                break
+            await pilot.pause(0.01)
+        else:
+            raise AssertionError(footer.render().plain)
+        selected = table.get_row_at(table.cursor_row)
+        scenario_state["selected_include_label"] = type_column_label(selected[0])
+        scenario_state["selected_include_title"] = str(selected[2]).removeprefix("* ")
 
     run_app(
-        work_items=list(work_items),
+        work_items=work_items,
         include_callback=backend.include_item_by_url,
         interactions=interactions,
     )
-    scenario_state["include_rows"] = captured["rows"]
-    scenario_state["include_cursor_row"] = captured["cursor_row"]
-    scenario_state["include_status"] = captured["status"]
-    scenario_state["include_sorted_items"] = captured["sorted_items"]
 
 
-# ----- F-TRIAGE-INCLUDE: Then steps -----
+@then("the dashboard selects the pull request and marks it as included")
+def _included_pr_selected(scenario_state):
+    assert scenario_state["selected_include_label"] == _INCLUDE_PR_LABEL
+    assert scenario_state["selected_include_title"] == "Off-dashboard pull request"
 
 
-def _cursor_item(scenario_state: dict[str, Any]) -> WorkItem:
-    index = scenario_state["include_cursor_row"]
-    assert index is not None, scenario_state
-    return scenario_state["include_sorted_items"][index]
+@then("the dashboard selects the listed pull request")
+def _listed_pr_selected(scenario_state):
+    assert scenario_state["selected_include_title"] == "Listed pull request"
 
 
-@then("the pull request appears on the dashboard as an included item")
-def _pr_appears_included(scenario_state: dict[str, Any]) -> None:
-    sorted_items = scenario_state["include_sorted_items"]
-    match = next(
-        (item for item in sorted_items if item.url == scenario_state["include_url"]),
-        None,
-    )
-    assert match is not None, sorted_items
-    assert match.item_type == WorkItemType.PR
-    assert match.included is True
+@given("the user included an off-dashboard pull request in a previous dashboard session")
+def _previous_inclusion(include_backend):
+    backend, _ = include_backend
+    assert backend.include_item_by_url(_INCLUDE_PR_URL, set()).fetched_item is not None
 
 
-@then("the issue appears on the dashboard as an included item")
-def _issue_appears_included(scenario_state: dict[str, Any]) -> None:
-    sorted_items = scenario_state["include_sorted_items"]
-    match = next(
-        (item for item in sorted_items if item.url == scenario_state["include_url"]),
-        None,
-    )
-    assert match is not None, sorted_items
-    assert match.item_type == WorkItemType.ISSUE
-    assert match.included is True
+@when("the user reopens the dashboard")
+def _reopen_included_work(scenario_state, tmp_path):
+    items, markers = _make_backend(tmp_path).load_items()
 
-
-@then("the cursor is positioned on that pull request")
-def _cursor_on_pr(scenario_state: dict[str, Any]) -> None:
-    item = _cursor_item(scenario_state)
-    assert item.url == scenario_state["include_url"], (item, scenario_state)
-
-
-@then("the cursor is positioned on that issue")
-def _cursor_on_issue(scenario_state: dict[str, Any]) -> None:
-    item = _cursor_item(scenario_state)
-    assert item.url == scenario_state["include_url"], (item, scenario_state)
-
-
-@then("the cursor is positioned on that work item")
-def _cursor_on_work_item(scenario_state: dict[str, Any]) -> None:
-    item = _cursor_item(scenario_state)
-    assert item.url == scenario_state["include_url"], (item, scenario_state)
-
-
-@then("the URL is persisted in the included-items store")
-def _url_persisted(scenario_state: dict[str, Any]) -> None:
-    store: IncludedItemsStore = scenario_state["included_store"]
-    urls = store.load()
-    assert scenario_state["include_url"] in urls, urls
-
-
-@then("the work item appears exactly once on the dashboard")
-def _work_item_appears_once(scenario_state: dict[str, Any]) -> None:
-    sorted_items = scenario_state["include_sorted_items"]
-    matches = [item for item in sorted_items if item.url == scenario_state["include_url"]]
-    assert len(matches) == 1, matches
-
-
-@then('the included pull request\'s type column reads "VR+ 111"')
-def _pr_plus_label(scenario_state: dict[str, Any]) -> None:
-    _assert_type_column(scenario_state, number=111, expected="VR+ 111")
-
-
-@then('the included issue\'s type column reads "IS+ 222"')
-def _issue_plus_label(scenario_state: dict[str, Any]) -> None:
-    _assert_type_column(scenario_state, number=222, expected="IS+ 222")
-
-
-@then('the included review-requested pull request\'s type column reads "RV+ 333"')
-def _review_plus_label(scenario_state: dict[str, Any]) -> None:
-    _assert_type_column(scenario_state, number=333, expected="RV+ 333")
-    # The merged row must keep the REVIEW_REQUESTED_PR kind so the "+" suffix
-    # genuinely comes from the `included` flag layered onto a REVIEW row,
-    # not a fallback that infers "REVIEW" from some other signal.
-    merged = next(
-        (item for item in scenario_state["work_items"] if item.number == 333),
-        None,
-    )
-    assert merged is not None, scenario_state["work_items"]
-    assert merged.kind == WorkItemKind.REVIEW_REQUESTED_PR
-    assert merged.included is True
-
-
-def _assert_type_column(scenario_state: dict[str, Any], *, number: int, expected: str) -> None:
-    work_items = scenario_state["work_items"]
-    captured: dict[str, Any] = {}
-
-    async def interactions(app, pilot) -> None:
+    async def interactions(app, pilot):
         table = app.query_one("#work-items", DataTable)
-        captured["rows"] = [
-            [str(cell) for cell in table.get_row_at(i)] for i in range(table.row_count)
+        scenario_state["reopened_labels"] = [
+            type_column_label(table.get_row_at(i)[0]) for i in range(table.row_count)
         ]
-        captured["sorted_items"] = list(app._sorted_work_items)
+
+    run_app(work_items=items, suggestion_markers=markers, interactions=interactions)
+
+
+@then("the included pull request is still listed")
+def _included_work_reappears(scenario_state):
+    assert _INCLUDE_PR_LABEL in scenario_state["reopened_labels"]
+
+
+@given("the dashboard shows an included pull request that has since closed on GitHub")
+def _close_included_pr(scenario_state, include_backend):
+    backend, payload = include_backend
+    _previous_inclusion(include_backend)
+    scenario_state["before_close_items"], markers = backend.load_items()
+    scenario_state["before_close_markers"] = markers
+    payload["state"] = "CLOSED"
+
+
+@when('the user presses "r" to refresh the dashboard')
+def _refresh_closed_included_work(scenario_state, include_backend):
+    backend, _ = include_backend
+
+    async def interactions(app, pilot):
+        table = app.query_one("#work-items", DataTable)
+        assert type_column_label(table.get_row_at(0)[0]) == _INCLUDE_PR_LABEL
+        await pilot.press("r")
+        footer = app.query_one("#status-footer", Static)
+        for _ in range(100):
+            if footer.render().plain == "Refreshed 0 item(s).":
+                break
+            await pilot.pause(0.01)
+        else:
+            raise AssertionError(footer.render().plain)
+        scenario_state["refreshed_labels"] = [
+            type_column_label(table.get_row_at(i)[0]) for i in range(table.row_count)
+        ]
 
     run_app(
-        work_items=list(work_items),
-        suggestion_markers=compute_suggestion_markers(list(work_items)),
+        work_items=scenario_state["before_close_items"],
+        suggestion_markers=scenario_state["before_close_markers"],
+        refresh_callback=backend.load_items,
         interactions=interactions,
     )
-    for row, item in zip(captured["rows"], captured["sorted_items"], strict=True):
-        if item.number == number:
-            assert type_column_label(row[0]) == expected, (row, item)
-            return
-    raise AssertionError(f"No row for number {number}: {captured['rows']}")
 
 
-@then("the same suffixes appear when the user runs `workdash list`")
-def _list_command_suffixes(scenario_state: dict[str, Any]) -> None:
-    import contextlib
-    import io
-
-    work_items = scenario_state["work_items"]
-    buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer):
-        _print_work_items_result(
-            _work_items_payload(work_items, compute_suggestion_markers(work_items))
-        )
-    lines = [line for line in buffer.getvalue().splitlines() if line.strip()]
-    # Each seeded item's row identity is the copy/paste Workdash item ID;
-    # per-row assertions guarantee the "+" suffix is anchored to the type
-    # column of the correct row rather than appearing somewhere else.
-    expected_by_id = {
-        "owner/repo#CHECK-111": "CHECK+",
-        "owner/repo#ISSUE-222": "ISSUE+",
-        "owner/repo#REVIEW-333": "REVIEW+",
-        "owner/repo#PR-555": "PR+",
-        # The tracked non-included PR must NOT carry the "+" suffix; this
-        # guards against a regression where format_type_label always
-        # appends "+".
-        "owner/repo#CHECK-444": "CHECK",
-    }
-    found: dict[str, str] = {}
-    for line in lines:
-        for item_id, expected_label in expected_by_id.items():
-            if item_id in line:
-                assert line.startswith(f"{expected_label:7} "), (line, expected_label)
-                found[item_id] = expected_label
-                break
-    assert set(found) == set(expected_by_id), (found, lines)
-
-
-@then("the included item appears on the dashboard")
-def _included_item_appears(scenario_state: dict[str, Any]) -> None:
-    items = scenario_state["work_items"]
-    assert any(item.included for item in items), items
-
-
-@then("the item does not appear on the dashboard")
-def _item_does_not_appear(scenario_state: dict[str, Any]) -> None:
-    items = scenario_state["work_items"]
-    assert not any(item.url == _INCLUDE_PR_URL for item in items), items
-
-
-@then("the URL is no longer persisted in the included-items store")
-def _url_no_longer_persisted(scenario_state: dict[str, Any]) -> None:
-    store: IncludedItemsStore = scenario_state["included_store"]
-    assert _INCLUDE_PR_URL not in store.load()
-
-
-@then("the system reports that the URL is not valid")
-def _reports_invalid(scenario_state: dict[str, Any]) -> None:
-    status = scenario_state["include_status"]
-    assert "Invalid" in status or "not valid" in status.lower(), status
-
-
-@then("no URL is persisted in the included-items store")
-def _no_url_persisted(scenario_state: dict[str, Any]) -> None:
-    store: IncludedItemsStore = scenario_state["included_store"]
-    assert store.load() == []
-
-
-@then("the system retries the included item on the next refresh")
-def _system_retries_included_item_on_next_refresh(scenario_state: dict[str, Any]) -> None:
-    store: IncludedItemsStore = scenario_state["included_store"]
-    assert _INCLUDE_PR_URL in store.load()
-
-
-@then("the dashboard loads without error")
-def _dashboard_loads(scenario_state: dict[str, Any]) -> None:
-    assert "work_items" in scenario_state
-
-
-@then("no included items appear on the dashboard")
-def _no_included_items(scenario_state: dict[str, Any]) -> None:
-    items = scenario_state["work_items"]
-    assert not any(item.included for item in items), items
+@then("the closed pull request is no longer listed")
+def _closed_included_work_disappears(scenario_state):
+    assert not any(label.endswith(" 111") for label in scenario_state["refreshed_labels"])
 
 
 # --------------------------------------------------------------------------
@@ -2176,41 +871,24 @@ def _no_included_items(scenario_state: dict[str, Any]) -> None:
 # --------------------------------------------------------------------------
 
 _SEARCH_TITLE_FRAGMENT = "parser"
-_SEARCH_UNMATCHED_TEXT = "nothing-here-matches-this"
-_SEARCH_ACTION_HINT = "(/)search"
-_FULL_ACTION_BAR = "(/)search (v)iew (r)efresh (a)nalyze (c)ode (d)ispatch (i)nclude (w)todo (q)uit"
 
 
 async def _apply_search_filter(app, pilot, query: str) -> None:
     """Press "/" and submit ``query`` through the real search dialog."""
 
     await pilot.press("/")
-    dialog = None
-    for _ in range(20):
-        await pilot.pause()
-        dialog = next(
-            (screen for screen in app.screen_stack if isinstance(screen, SearchDialog)), None
-        )
-        if dialog is not None:
-            break
-    assert dialog is not None, "SearchDialog did not appear after pressing '/'"
+    dialog = app.screen
+    assert isinstance(dialog, SearchDialog)
     dialog.query_one("#search-text", Input).value = query
     await pilot.press("enter")
-    for _ in range(20):
-        await pilot.pause()
-        if not any(isinstance(screen, SearchDialog) for screen in app.screen_stack):
-            break
 
 
 def _capture_listing(app, captured: dict[str, Any]) -> None:
     table = app.query_one("#work-items", DataTable)
-    hint = app.query_one("#command-footer", Static).render()
     captured["search_rows"] = [
         [str(cell) for cell in table.get_row_at(index)] for index in range(table.row_count)
     ]
     captured["search_status"] = app.query_one("#status-footer", Static).render().plain
-    captured["search_hint"] = hint.plain
-    captured["search_hint_spans"] = [(span.start, span.end, str(span.style)) for span in hint.spans]
     captured["search_modal_names"] = modal_screen_names(app)
 
 
@@ -2239,12 +917,8 @@ def _run_search_clear_scenario(scenario_state: dict[str, Any], work_items: list[
     async def interactions(app, pilot) -> None:
         await _apply_search_filter(app, pilot, scenario_state["search_query"])
         table = app.query_one("#work-items", DataTable)
-        assert table.row_count < len(work_items), "the filter did not narrow the list"
+        assert table.row_count == 0
         await pilot.press("/")
-        for _ in range(20):
-            await pilot.pause()
-            if table.row_count == len(work_items):
-                break
         _capture_listing(app, captured)
 
     run_app(work_items=list(work_items), interactions=interactions)
@@ -2255,118 +929,17 @@ def _run_search_clear_scenario(scenario_state: dict[str, Any], work_items: list[
 # ----- F-TRIAGE-SEARCH: Given steps -----
 
 
-@given("the TUI is open with work items from two repositories")
-def _tui_open_with_two_repositories(
-    work_items: list[WorkItem], scenario_state: dict[str, Any]
-) -> None:
-    # Titles deliberately avoid the repository names so a repo match cannot be
-    # mistaken for a title match.
-    work_items.extend(
-        [
-            make_work_item(
-                repo="owner/alpha",
-                number=1,
-                title="First task",
-                updated_at=NOW_UTC - timedelta(days=2),
-            ),
-            make_work_item(
-                repo="owner/alpha",
-                number=2,
-                title="Second task",
-                updated_at=NOW_UTC - timedelta(days=3),
-            ),
-            make_work_item(
-                repo="owner/beta",
-                number=3,
-                title="Third task",
-                updated_at=NOW_UTC - timedelta(days=4),
-            ),
-        ]
-    )
-    scenario_state["search_repo"] = "owner/alpha"
-
-
-@given("the TUI is open with an active search filter")
-def _tui_open_with_active_search_filter(
+@given("the dashboard has no matches for the active search")
+def _tui_open_with_no_search_matches(
     work_items: list[WorkItem], scenario_state: dict[str, Any]
 ) -> None:
     _tui_open_with_items(work_items)
-    scenario_state["search_query"] = _SEARCH_TITLE_FRAGMENT
+    scenario_state["search_query"] = "nothing-here-matches-this"
 
 
-# ----- F-TRIAGE-SEARCH: When steps -----
-
-
-@when("the user searches for a fragment of one item's title")
+@when('the user presses "/" and searches for part of an item\'s title')
 def _search_for_title_fragment(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
     _run_search_scenario(scenario_state, work_items, _SEARCH_TITLE_FRAGMENT)
-
-
-@when("the user searches for one item's number")
-def _search_for_item_number(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
-    target = max(work_items, key=lambda item: item.number)
-    scenario_state["search_target"] = target
-    _run_search_scenario(scenario_state, work_items, str(target.number))
-
-
-@when("the user searches for one repository's name")
-def _search_for_repository_name(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
-    repo = scenario_state["search_repo"]
-    _run_search_scenario(scenario_state, work_items, repo.split("/")[1])
-
-
-@when("the user searches for text that no work item contains")
-def _search_for_unmatched_text(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
-    _run_search_scenario(scenario_state, work_items, _SEARCH_UNMATCHED_TEXT)
-
-
-@when("the user includes a work item by URL")
-def _include_work_item_by_url_while_filtered(
-    scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    _install_gh_fetch_fake(
-        monkeypatch,
-        responses={
-            ("pr", "111"): subprocess.CompletedProcess(
-                [], 0, stdout=_fake_gh_view_response("pr", 111), stderr=""
-            ),
-        },
-    )
-    backend = _make_backend(scenario_state, tmp_path)
-    captured: dict[str, Any] = {}
-
-    async def interactions(app, pilot) -> None:
-        await _apply_search_filter(app, pilot, scenario_state["search_query"])
-        await pilot.press("i")
-        for _ in range(20):
-            await pilot.pause()
-            dialog = next(
-                (screen for screen in app.screen_stack if isinstance(screen, IncludeDialog)), None
-            )
-            if dialog is not None:
-                dialog.query_one("#include-url", Input).value = _INCLUDE_PR_URL
-                await pilot.press("enter")
-                break
-        for _ in range(40):
-            await pilot.pause()
-            if app.query_one("#status-footer", Static).render().plain.startswith("Included"):
-                break
-        _capture_listing(app, captured)
-
-    run_app(
-        work_items=list(work_items),
-        include_callback=backend.include_item_by_url,
-        interactions=interactions,
-    )
-    # The included item joins the loaded list, so it belongs to the expected listing.
-    scenario_state["added_titles"] = [json.loads(_fake_gh_view_response("pr", 111))["title"]]
-    scenario_state.update(captured)
-
-
-# ----- F-TRIAGE-SEARCH: Then steps -----
 
 
 @then("only the work items whose title contains that fragment are listed")
@@ -2378,22 +951,6 @@ def _only_matching_titles_listed(scenario_state: dict[str, Any]) -> None:
     assert expected, scenario_state["loaded_items"]
     assert len(expected) < len(scenario_state["loaded_items"]), "fixture cannot prove filtering"
     assert _listed_titles(scenario_state) == expected
-
-
-@then("only that work item is listed")
-def _only_that_work_item_listed(scenario_state: dict[str, Any]) -> None:
-    target = scenario_state["search_target"]
-    assert _listed_titles(scenario_state) == [target.title]
-    assert type_column_label(scenario_state["search_rows"][0][0]).endswith(f" {target.number}")
-
-
-@then("only the work items from that repository are listed")
-def _only_items_from_repository_listed(scenario_state: dict[str, Any]) -> None:
-    repo = scenario_state["search_repo"]
-    expected = sorted(item.title for item in scenario_state["loaded_items"] if item.repo == repo)
-    assert len(expected) < len(scenario_state["loaded_items"]), "fixture cannot prove filtering"
-    assert _listed_titles(scenario_state) == expected
-    assert {row[1] for row in scenario_state["search_rows"]} == {repo}
 
 
 @then("the system reports how many of the loaded work items matched")
@@ -2417,111 +974,22 @@ def _no_search_box_shown(scenario_state: dict[str, Any]) -> None:
 def _all_loaded_items_listed_again(
     scenario_state: dict[str, Any], work_items: list[WorkItem]
 ) -> None:
-    # Seeded items plus anything the scenario added while the filter was active.
-    expected = sorted([item.title for item in work_items] + scenario_state.get("added_titles", []))
+    expected = sorted(item.title for item in work_items)
     assert len(expected) > 1, "fixture cannot prove the filter was cleared"
     assert _listed_titles(scenario_state) == expected
 
 
-@then("the included work item is listed")
-def _included_work_item_listed(scenario_state: dict[str, Any]) -> None:
-    assert any(type_column_label(row[0]) == "VR+ 111" for row in scenario_state["search_rows"]), (
-        scenario_state["search_rows"]
-    )
-
-
-@then("the action bar lists the search action first")
-def _action_bar_lists_search_first(work_items: list[WorkItem]) -> None:
-    captured: dict[str, Any] = {}
-
-    async def interactions(app, pilot) -> None:
-        captured["hint"] = app.query_one("#command-footer", Static).render()
-
-    run_app(work_items=list(work_items), interactions=interactions)
-    hint = captured["hint"]
-    assert hint.plain.startswith(_SEARCH_ACTION_HINT), hint.plain
-    # The full search action is emphasized only while a filter is active.
-    assert not any(span.start == 0 and span.end == len(_SEARCH_ACTION_HINT) for span in hint.spans)
-
-
-@then("the action bar emphasizes the search action")
-def _action_bar_emphasizes_search(scenario_state: dict[str, Any]) -> None:
-    spans = scenario_state["search_hint_spans"]
-    assert (0, len(_SEARCH_ACTION_HINT)) in [(start, end) for start, end, _ in spans], spans
-    assert all("bold" in style for _, _, style in spans), spans
-
-
-@then("the action bar does not show the filter text")
-def _action_bar_hides_filter_text(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["search_hint"] == _FULL_ACTION_BAR
-
-
-@then("no work items are listed")
-def _no_work_items_listed(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["search_rows"] == []
-
-
-@then("the system reports that no work items matched")
-def _reports_no_matches(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
-    # The total comes from the seeded items, not from what the table happened to show.
-    assert scenario_state["search_status"] == (f"Search matched 0 of {len(work_items)} item(s)."), (
-        scenario_state["search_status"]
-    )
-
-
-@given("the dashboard contains a parent issue, a leaf issue, and a pull request")
-def _container_rows(work_items: list[WorkItem]) -> None:
-    parent = make_work_item(number=1, title="Example parent")
-    parent.has_sub_issues = True
-    work_items.extend(
-        [
-            parent,
-            make_work_item(number=2, title="Example leaf"),
-            make_work_item(
-                number=3,
-                title="Example pull",
-                item_type=WorkItemType.PR,
-                kind=WorkItemKind.TRACKED_PR,
-            ),
-        ]
-    )
-
-
-@when("the user filters the dashboard to those items")
-def _filter_container_rows() -> None:
-    pass
-
-
-@then("the parent issue title is visually distinguished from the leaf and pull request titles")
-def _container_title_style(work_items: list[WorkItem]) -> None:
-    async def interactions(app, pilot):
-        await _apply_search_filter(app, pilot, "Example")
-        table = app.query_one("#work-items", DataTable)
-        parent = table.get_row("issue:owner/repo#1")[2]
-        leaf = table.get_row("issue:owner/repo#2")[2]
-        pull = table.get_row("pr:owner/repo#3")[2]
-        assert isinstance(parent, Text) and parent.style == "bold cyan"
-        assert not isinstance(leaf, Text) or leaf.style != "bold cyan"
-        assert not isinstance(pull, Text) or pull.style != "bold cyan"
-
-    run_app(work_items=work_items, interactions=interactions)
-
-
-@given("the dashboard contains a parent issue and a leaf issue being worked on by autodispatch")
+@given("the dashboard shows a leaf issue being worked on by autodispatch")
 def _autodispatch_rows(work_items: list[WorkItem]) -> None:
-    parent = make_work_item(number=1, title="Parent")
-    parent.has_sub_issues = True
-    work_items.extend([parent, make_work_item(number=2, title="Leaf")])
-    work_items.extend(make_work_item(number=n, title=f"Other {n}") for n in range(3, 53))
+    work_items.append(make_work_item(number=2, title="Leaf"))
 
 
 @when("autodispatch stops working on the leaf issue after its title changes")
 def _autodispatch_stops(work_items: list[WorkItem], scenario_state: dict[str, Any]) -> None:
     from dataclasses import replace
-    from unittest.mock import MagicMock
 
     backend = MagicMock()
-    updated = replace(work_items[1], title="Finished leaf", state="CLOSED")
+    updated = replace(work_items[0], title="Finished leaf", state="CLOSED")
     backend.github_client.fetch_item.return_value = updated
     backend.github_client.fetch_item_by_url.return_value = None
     session = WorkdashSession(
@@ -2548,109 +1016,21 @@ def _autodispatch_stops(work_items: list[WorkItem], scenario_state: dict[str, An
             await pilot.pause(0.02)
             if "magenta" in str(getattr(table.get_row("issue:owner/repo#2")[2], "style", "")):
                 break
-        assert table.get_row("issue:owner/repo#1")[2].style == "bold cyan"
         assert "magenta" in table.get_row("issue:owner/repo#2")[2].style
-        await pilot.press("end")
-
-        def snapshot():
-            selected = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
-            title = str(table.get_row(selected)[2])
-            footer = app.query_one("#command-footer", Static)
-            rows = [strip.text for strip in app.screen._compositor.render_strips()]
-            return selected, title, rows[table.region.y : min(table.region.bottom, footer.region.y)]
-
-        before = snapshot()
         session.stop_autodispatch(str(entry["id"]))
         for _ in range(150):
             await pilot.pause(0.02)
             row = table.get_row("issue:owner/repo#2")
             if "Finished leaf" in str(row[2]) and "magenta" not in str(row[2].style):
                 break
-        row = table.get_row("issue:owner/repo#2")
-        scenario_state["updated"] = (
-            session.work_items[1].state == "CLOSED"
-            and "Finished leaf" in str(row[2])
-            and "closed" in str(row[2]).lower()
-            and "magenta" not in str(row[2].style)
-        )
-        scenario_state["selection_diagnostics"] = before, snapshot()
+        cell = table.get_row("issue:owner/repo#2")[2]
+        scenario_state["updated_title"] = str(cell)
+        scenario_state["working_highlight"] = "magenta" in cell.style
 
     run_app(work_items=work_items, interactions=interactions, session=session)
 
 
-@then("the leaf issue shows its updated title without the working highlight")
+@then("the leaf issue shows its updated title and closed status without the working highlight")
 def _autodispatch_updated(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["updated"]
-
-
-@then("the same issue remains selected and visible in the work table")
-def _autodispatch_selection_preserved(scenario_state: dict[str, Any]) -> None:
-    before, after = scenario_state["selection_diagnostics"]
-    assert before[0] == after[0]
-    for selected, title, rows in (before, after):
-        assert any(title in row for row in rows), (selected, title, rows)
-
-
-@given("the dashboard has more work items than fit on screen and autodispatch progress is shown")
-def _many_dashboard_items(work_items: list[WorkItem]) -> None:
-    work_items.extend(make_work_item(number=i, title=f"Work item {i}") for i in range(1, 41))
-
-
-@when("the user scrolls through the work items")
-def _scroll_work_items(scenario_state: dict[str, Any], work_items: list[WorkItem]) -> None:
-    visible = []
-    selected = []
-    opened = []
-    expected_opened = []
-    session = MagicMock()
-    session.work_items = work_items
-    session.suggestion_markers = {}
-    session.busy_message.return_value = None
-    session.autodispatch_sessions.return_value = [
-        {"id": "1", "status": "failed", "scope": "owner/repo", "error": "failed"}
-    ]
-
-    async def interactions(app, pilot) -> None:
-        table = app.query_one("#work-items", DataTable)
-        footer = app.query_one("#command-footer", Static)
-        progress = app.query_one("#autodispatch-progress", Static)
-        assert progress.region.height > 0
-        assert "Failed: failed (owner/repo)" in progress.render().plain
-        initial_scroll_y = int(table.scroll_y)
-        first_scrolled_row = None
-        for index in range(table.row_count):
-            item = app._selected_item()
-            selected.append(item.number if item is not None else None)
-            if first_scrolled_row is None and int(table.scroll_y) > initial_scroll_y:
-                first_scrolled_row = index
-            if index in (0, first_scrolled_row, table.row_count - 1):
-                expected_opened.append(index + 1)
-                await pilot.press("v")
-                await pilot.press("o")
-            row_y = table.region.y + table._get_row_region(index).y - int(table.scroll_y)
-            rows = [strip.text for strip in app.screen._compositor.render_strips()]
-            visible.append(
-                table.region.y <= row_y < footer.region.y
-                and f"Work item {index + 1}  " in rows[row_y]
-            )
-            if index < table.row_count - 1:
-                await pilot.press("down")
-
-    run_app(
-        work_items=work_items,
-        interactions=interactions,
-        open_callback=opened.append,
-        session=session,
-    )
-    scenario_state["scroll_visible"] = visible
-    scenario_state["scroll_selected"] = selected
-    scenario_state["scroll_opened"] = [item.number for item in opened]
-    scenario_state["scroll_expected_opened"] = expected_opened
-
-
-@then("every work item can be seen and selected above the action bar")
-def _all_items_visible_and_selected(scenario_state: dict[str, Any]) -> None:
-    assert all(scenario_state["scroll_visible"])
-    assert scenario_state["scroll_selected"] == list(range(1, 41))
-    assert len(scenario_state["scroll_expected_opened"]) == 3
-    assert scenario_state["scroll_opened"] == scenario_state["scroll_expected_opened"]
+    assert scenario_state["updated_title"] == "Finished leaf (closed)"
+    assert not scenario_state["working_highlight"]
