@@ -165,7 +165,7 @@ workdash autodispatch SCOPE [--group NAME] [--agent NAME] [--host HOST] [--json]
 workdash autodispatch-stop SESSION_ID [--host HOST] [--json]  # stop a session
 workdash analyze ITEM [--agent NAME] [--group NAME] [--json]  # analyze an item
 workdash review ITEM [--agent NAME] [--group NAME] [--json]   # autonomously review an open PR
-workdash code ITEM [--agent NAME] [--group NAME] [--autoclose] [--json]  # launch an autonomous coding agent, or report the running one
+workdash code ITEM [--agent NAME] [--group NAME] [--autostart] [--autoclose] [--json]  # launch a coding agent, or report the running one
 workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
 workdash todo TEXT [--target REPOSITORY] [--body BODY] [--json]  # capture a todo
 workdash todo --close ITEM [--json]  # close a todo
@@ -303,17 +303,10 @@ disturbing other in-progress work. When an existing local branch is checked out
 into a new worktree, Workdash preserves its commits. Issue branches keep their
 upstream configuration; pull request branches track the pull request head.
 
-A pull request you authored that closes an issue in the same repository is the
-implementation of that issue, so it shares the issue's worktree directory (named
-after the issue number) while staying checked out on the pull request's own
-branch. That shared checkout is only reused while it holds the pull request's
-branch; a checkout sitting on another branch belongs to other work, so it is left
-alone and the pull request gets its own pull-request-numbered worktree instead.
-Worktree directories created before this behavior existed are still named
-after the pull request number; they are not migrated and keep working, so the
-pull request stays in the checkout it already has and only a pull request with no
-checkout yet gets an issue-numbered one. The link between a pull request and the issue it closes is resolved when the
-dashboard refreshes or the pull request is added by URL.
+An authored pull request that closes an issue is treated as a request to code the
+issue. A pull request with no linked issue has its own worktree. If an issue is
+linked later, plan-first coding uses the issue worktree and leaves the old pull
+request checkout alone.
 
 ## Local control server
 
@@ -577,7 +570,7 @@ The document is agent-produced, not independent verification of GitHub's review 
 
 ## Code command
 
-`workdash code ITEM [--agent NAME] [--group NAME] [--autoclose] [--json]` requires a running
+`workdash code ITEM [--agent NAME] [--group NAME] [--autostart] [--autoclose] [--json]` requires a running
 `workdash` session and launches a configured coding agent for a work
 item. `ITEM` accepts the same items as `workdash analyze`. With `--group NAME`,
 the server opens a new agent pane in the named Zellij tab, creating it if needed;
@@ -604,7 +597,11 @@ terminal in another worktree under the configured `workdir`, even one whose
 directory has the same name. Outside `workdir` a terminal carrying this
 worktree's Workdash title is treated as this worktree's terminal.
 
-`workdash code` always autostarts the agent: its briefing ends with an appendix
+By default, `workdash code` uses the same plan-first briefing as the TUI's `c`:
+for implementation, the agent proposes a plan and waits for your instructions
+before editing, committing, or pushing.
+
+With `--autostart`, the briefing ends with an appendix
 telling it to work without routine confirmation, commit, push, and open a pull
 request that closes the issue (or update the existing one), and verify the pull request's current head: CI `passing`, or GitHub reporting no required or
 observed checks (`no_checks`), and a clean merge. It never merges or closes
@@ -617,19 +614,21 @@ issue an open pull request of yours closes resumes that pull request in place, a
 request with review feedback, merge conflicts, or failing CI is repaired on its
 own branch with every reason included. A pull request waiting on CI, review, or
 merge is described, not reworked, and somebody else's pull request stays a
-review-only session. There is no `--autostart` option; the TUI's `c` keeps the
-plan-first briefing and never commits or pushes by itself, and the HTTP
-`POST /api/v0/code` takes optional boolean `autostart` and `autoclose`, both
+review-only session. The HTTP `POST /api/v0/code` takes optional boolean
+`autostart` and `autoclose`, both
 false when omitted. `already_running` injects nothing into the running agent.
 
-Coding an authored pull request linked to an issue is the same implementation
-task as coding that issue: it uses the issue target and cached issue analysis,
-when available, while continuing the pull request branch. An authored pull
-request without a linked issue remains the target. Reviewing somebody else's
-pull request uses its cached pull request analysis instead; linked issues are
-background, not instructions to implement. An open parent whose descendants are
-closed is briefed to verify its goal and, if already implemented, prove the
-workflow with a test.
+Naming an authored pull request that closes an issue is the same as naming the
+issue, with or without `--autostart`. Plan-first mode uses the issue checkout
+and briefing. Whether that checkout is new or existing, the briefing includes
+context and unresolved review threads from the newest open pull request you
+authored that closes the issue, if there is one. The agent is told to build on
+that work without assuming the checkout contains its commits. The pull request
+does not choose the checkout.
+Reviewing somebody else's pull request uses its cached pull request analysis
+instead; linked issues are background, not instructions to implement. An open
+parent whose descendants are closed is briefed to verify its goal and, if
+already implemented, prove the workflow with a test.
 
 Human output reports the status, item, agent, selected session, actual tab, cwd,
 pane title, and pane id when available, plus an `Autoclose` line saying whether
@@ -643,7 +642,8 @@ and asks the server to supervise the pane it just launched. The CLI polls
 nothing itself: it sends `autostart` and `autoclose` to the server, which owns
 the GitHub lookups, the messages, and the pane. Autoclose requires autostart, so
 the HTTP API answers `bad_request` (400) to `{"autoclose": true}` without
-`autostart: true`; the CLI always autostarts, and the TUI asks for neither.
+`autostart: true`. In the CLI, `--autoclose` implies `--autostart`; the TUI's
+code menu asks for neither.
 `already_running` never turns a pane started elsewhere into a supervised one, and
 the response reports `autoclose_enabled` only when a request asked for it.
 

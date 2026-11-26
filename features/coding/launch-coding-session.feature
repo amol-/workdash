@@ -12,7 +12,8 @@ Feature: Launch a coding session
     - The dialog lists the configured coding agents by name in configuration order, with VSCode Copilot offered as `(e) edit`.
     - Before launching a session, the system prepares the worktree for the selected work item.
     - The launched coding agent is started inside the work item's worktree.
-    - The launched coding agent is preloaded with GitHub context and, when available, the issue analysis for implementation or pull request analysis for review. An authored pull request with a linked issue is coded as that issue, with the same context and worktree selection as coding the issue; an authored pull request without a linked issue remains the target.
+    - The launched coding agent is preloaded with GitHub context and, when available, the issue analysis for implementation or pull request analysis for review.
+    - Coding an authored pull request with a linked issue is the same as coding that issue. An authored pull request without a linked issue has its own checkout. Plan-first coding follows current GitHub links even if the dashboard still shows an old link. If an issue is linked later, plan-first coding uses the issue checkout and leaves the old pull request checkout alone.
     - For an issue, the GitHub context includes the issue's comments.
     - For a pull request, the GitHub context includes the pull request's conversation comments.
     - For a pull request, the GitHub context includes the pull request's reviews.
@@ -41,6 +42,7 @@ Feature: Launch a coding session
     - The TUI, the JSON API, and `workdash code` share one launch path, so they enforce the same claim.
     - VSCode Copilot is not an agent pane, so it holds no claim; it is still not opened while an agent pane is live in the worktree.
     - Coding is plan-first by default: the TUI never asks for autonomous work, so its agent proposes a plan and waits before implementing, and nothing commits, pushes, or opens a pull request without the user's instruction.
+    - A plan-first issue request uses the issue checkout and briefing. If an open authored pull request closes the issue, the briefing includes the newest such pull request's launch context, whether or not the checkout already exists. The pull request does not choose the checkout.
     - A coding request may ask for autostart. The briefing of a newly launched agent then ends with an autonomous appendix, once, saying to start without routine confirmation and overriding the plan-first pause. The pane stays an ordinary interactive agent session.
     - The implementation appendix tells the agent to use the development practices, skills, and coordination workflows it is configured to follow, whatever the task needs (implementing an issue, or fixing CI, merge conflicts, or review feedback of a pull request), without naming a skill or mandating coordination; the review-only appendix and the plan-first briefing do not. It also tells the agent to inspect the checkout, branch, commits and uncommitted changes, continue valid partial work and replace it only for demonstrable defects, commit and push, and open a pull request closing an ordinary issue with `Fixes #NUMBER` without a repository prefix. It tells the agent never to merge or close the issue, and to report the pull request URL, head SHA and actual CI status when done.
     - Autonomous implementation explicitly permits commits and pushes and permits force-pushing only the pull request branch, preferably with a lease and subject to repository restrictions. Other destructive actions still require explicit permission.
@@ -302,6 +304,17 @@ Feature: Launch a coding session
     When the user launches a coding session for that item
     Then the agent is told never to disclose or reference the todo in the pull request
 
+  @id:F-CODING-LAUNCH-S046
+  Scenario: Plan-first coding picks up existing pull request work from the issue checkout
+    Given a server-backed Workdash session is ready to answer
+    And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51`
+    And the worktree of `owner/repo#ISSUE-42` already exists
+    And pull request #51 has an unresolved review thread asking for a regression test
+    When a client requests code for `owner/repo#ISSUE-42` with agent `pi`
+    Then the agent works in the checkout of issue `owner/repo#42`
+    And the agent is briefed to build on the linked pull request's work without assuming its commits are in the checkout
+    And the agent receives the linked pull request's review thread in the briefing
+
   @id:F-CODING-LAUNCH-S030
   Scenario: Autostart on an issue without a pull request is told to implement it
     Given a server-backed Workdash session is ready to answer
@@ -407,7 +420,7 @@ Feature: Launch a coding session
     And the agent is told to follow its configured practices and skills
 
   @id:F-CODING-LAUNCH-S038
-  Scenario: Coding an authored pull request and its issue is the same implementation task
+  Scenario: Autostarting an authored pull request and its issue is the same implementation task
     Given a server-backed Workdash session is ready to answer
     And GitHub issue `owner/repo#42` is open and closed by authored pull request `owner/repo#51` with failed CI
     And the issue and pull request each have cached analysis

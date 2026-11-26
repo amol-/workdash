@@ -161,7 +161,7 @@ workdash analyze ITEM --agent codex
 workdash analyze ITEM --agent codex --json
 
 workdash code ITEM --agent pi
-workdash code ITEM --agent codex --json
+workdash code ITEM --agent codex --autostart --json
 
 workdash terminal ITEM
 workdash terminal ITEM --json
@@ -172,27 +172,28 @@ workdash terminal ITEM --json
 prints that path as `analysis_path`. `terminal` opens a plain terminal pane in the
 item's worktree and prints the pane title and pane ID.
 
-## Code starts autonomous work
+## Choose a coding mode
 
-`workdash code ITEM` launches an autonomous but still interactive agent on an
+`workdash code ITEM` uses the plan-first briefing by default, like the TUI's
+`c` key. The agent waits for user instructions before implementing or publishing.
+
+Add `--autostart` to launch an autonomous but still interactive agent on an
 exact issue or pull request: it implements the work, commits, pushes, and opens
 a pull request linked to the issue (or updates the existing one), then checks
 the CI of the pull request's current head. It never merges a pull request or
 closes an issue, and its Zellij pane stays open at the agent's normal prompt
-when it reports back. There is no `--autostart` option: the CLI always asks for
-it. The TUI's `c` key does not; it keeps the human-directed, plan-first briefing
-and never commits, pushes, or opens a pull request on its own.
+when it reports back.
 
 Use `code ITEM` when you already know the exact task. Use `workdash ready` first
 to see what is actionable; `code` itself does not check readiness.
 
 ```bash
-workdash code owner/repo#42 --agent pi --json
-workdash code owner/repo#PR-51 --agent pi --json            # your PR with merge conflicts, failing CI or review feedback
-workdash code owner/repo#42 --agent pi --host dashboard.lan --json
+workdash code owner/repo#42 --agent pi --autostart --json
+workdash code owner/repo#PR-51 --agent pi --autostart --json  # your PR with merge conflicts, failing CI or review feedback
+workdash code owner/repo#42 --agent pi --autostart --host dashboard.lan --json
 ```
 
-The agent is briefed from GitHub's current state of the work, the same
+With `--autostart`, the agent is briefed from GitHub's current state of the work, the same
 classification `ready` reports:
 
 - An issue without an open pull request is implemented, and a pull request
@@ -208,11 +209,13 @@ classification `ready` reports:
 - A pull request of somebody else stays a review: the agent starts reviewing
   without asking for confirmation and never edits, commits, or pushes.
 
-An authored pull request linked to an issue is normalized to that issue for
-implementation, using its cached issue analysis when available and continuing
-the existing branch. An authored pull request without a linked issue remains the
-target. A review of somebody else's pull request uses cached pull request
-analysis instead; linked issues are background, not implementation tasks.
+Coding a linked authored pull request is the same as coding its issue. A pull
+request with no linked issue uses its own checkout. If an issue is linked later,
+plan-first coding uses the issue checkout and leaves the old checkout alone.
+When creating an issue checkout, the plan-first briefing mentions the newest
+open closing pull request you authored, if any. Implementation briefings use
+cached issue analysis when available; review briefings use the
+pull request's cached analysis.
 
 Successful work leaves the pull request open for a human to review and merge.
 The agent may report completion only when the current head's CI is `passing` or
