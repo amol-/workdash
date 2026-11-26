@@ -22,6 +22,7 @@ from .steps import (
     autoclose as _autoclose,
 )
 from .steps import autodispatch as _autodispatch
+from .steps import birdview as _birdview
 from .steps import (
     branchdiff as _branchdiff,
 )
@@ -73,6 +74,7 @@ for _step_module in (
     _api,
     _autoclose,
     _autodispatch,
+    _birdview,
     _branchdiff,
     _cli_orchestration,
     _triage,

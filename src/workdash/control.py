@@ -34,6 +34,7 @@ from .analysis_cache import AnalysisCache
 from .autoclose import AutocloseSupervisor
 from .autodispatch import _AutodispatchSession
 from .backend import IncludeResult, SuggestionMarkers, WorkdashBackend, compute_suggestion_markers
+from .birdview import DEFAULT_TOP, FORMATS, birdview
 from .config import WorkdashConfig
 from .git import GitHelper, is_repository_name, is_todo_target
 from .github_client import parse_github_item_url
@@ -200,7 +201,7 @@ class WorkdashSession:
             self._notify_items_changed()
         return payload
 
-    def info(self, *, panes: str = "work") -> dict[str, object]:
+    def info(self, *, panes: str = "work", include_shared_items: bool = False) -> dict[str, object]:
         """Return live pane state for the server-backed Workdash session."""
 
         if panes not in ("work", "all", "none"):
@@ -224,9 +225,14 @@ class WorkdashSession:
                 self.work_items,
                 git=self.git,
                 include_all_panes=panes == "all",
+                include_shared_items=include_shared_items,
             )
         result["autodispatch_sessions"] = self.autodispatch_sessions()
         return result
+
+    def birdview(self, *, top: int, format: str) -> dict:
+        """Snapshot available dashboard and live pane state."""
+        return birdview(self, top=top, format=format)
 
     def show_config(self) -> dict[str, object]:
         """Return configured automation choices visible to local API clients."""
@@ -2062,6 +2068,7 @@ def _pane_info_payload(
     *,
     git: GitHelper,
     include_all_panes: bool = False,
+    include_shared_items: bool = False,
 ) -> dict[str, object]:
     item_by_cwd = {}
     checkouts_by_title = {}
@@ -2083,7 +2090,12 @@ def _pane_info_payload(
                 # An agent can change directory into an unrelated checkout.
                 matches = checkouts_by_title.get(title, ())
                 if len(matches) == 1:
-                    ((_, payload["item"], payload["item_url"]),) = matches
+                    _, payload["item"], payload["item_url"] = next(iter(matches))
+                elif include_shared_items and len({root for root, _, _ in matches}) == 1:
+                    payload["items"] = [
+                        {"id": item_id, "url": url}
+                        for _, item_id, url in sorted(matches, key=lambda match: match[1])
+                    ]
             panes.append(payload)
         elif include_all_panes and is_live_zellij_pane(pane):
             panes.append(
@@ -2161,6 +2173,26 @@ def _make_turbogears_app(session: WorkdashSession):
                 response,
                 lambda payload: self._session.info(panes=payload.get("panes", "work")),
             )
+
+        @expose("json")
+        def birdview(self):
+            def snapshot(payload):
+                top = payload.get("top", DEFAULT_TOP)
+                output_format = payload.get("format", "telegram")
+                if type(top) is not int or top < 1:
+                    raise WorkdashControlError(
+                        "bad_request", "top must be a positive integer.", status=400
+                    )
+                if output_format not in FORMATS:
+                    raise WorkdashControlError(
+                        "bad_request", "Invalid birdview format.", status=400
+                    )
+                return self._session.birdview(
+                    top=top,
+                    format=output_format,
+                )
+
+            return _handle_json_request(request, response, snapshot)
 
         @expose("json")
         def analyze(self):

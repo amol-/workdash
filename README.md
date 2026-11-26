@@ -159,6 +159,7 @@ workdash list                # list server-backed dashboard items as plain text
 workdash list --refresh      # ask the server to refresh items before listing
 workdash list --json         # list items as machine-readable JSON
 workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
+workdash birdview [--top N] [--format telegram|markdown|json]  # share a work snapshot
 workdash ready SCOPE [--json]   # list the GitHub work ready to be picked up next
 workdash dispatch SCOPE [--agent NAME] [--group NAME] [--host HOST] [--json]  # launch one ready issue
 workdash autodispatch SCOPE [--group NAME] [--agent NAME] [--host HOST] [--json]  # start a session
@@ -362,7 +363,7 @@ URLs, including read-only artifacts and analysis documents.
 Allowed clients can execute dashboard actions; do not expose it to untrusted
 networks or treat the IP allowlist as authentication or encryption.
 
-Client commands `list`, `info`, `ready`, `dispatch`, `autodispatch`, `autodispatch-stop`, `analyze`, `code`, `terminal`, `todo`, `read`,
+Client commands `list`, `info`, `birdview`, `ready`, `dispatch`, `autodispatch`, `autodispatch-stop`, `analyze`, `code`, `terminal`, `todo`, `read`,
 `write`, `review`, and `close` accept `--host HOST[:PORT]` before or after the command.
 Set `WORKDASH_HOST` to an IPv4 address or IPv4 address:port to select the default
 for both server and clients; omitted ports use 8765. An explicit `--host` replaces
@@ -507,6 +508,22 @@ directory. Terminal panes map by current working directory. When a mapping
 cannot be established, the item is `unknown`. Add `--all` to include other live
 non-plugin panes from the server-backed Workdash session as `kind=unknown` with
 unknown item mapping.
+
+## Birdview command
+
+```bash
+workdash birdview --host dashboard.lan
+workdash birdview --top 10 --format json
+```
+
+`birdview` shares a snapshot of ongoing autodispatch sessions, other live coding
+panes, loaded open pull requests, and recent dashboard items. It uses information
+already available to the server; it does not fetch GitHub data, read pane output,
+or run an analysis agent. Pane IDs can be used with `workdash read`.
+
+Each section shows up to five entries by default. Telegram MarkdownV2 is the
+default; it omits whole entries to fit within 4096 characters. Generic Markdown
+and JSON are also available. `POST /api/v0/birdview` accepts `top` and `format`.
 
 ## Analyze command
 

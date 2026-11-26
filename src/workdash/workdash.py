@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from . import __version__, launcher
 from .backend import SuggestionMarkers, WorkdashBackend
+from .birdview import DEFAULT_TOP, FORMATS
 from .config import (
     CONFIG_PATH,
     WorkdashConfig,
@@ -57,6 +58,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.command in {
         "list",
         "info",
+        "birdview",
         "ready",
         "dispatch",
         "autodispatch",
@@ -213,6 +215,9 @@ class CLIOptions:
     autoclose: bool = False
     automerge: bool = False
     host: str = "127.0.0.1"
+    top: int = DEFAULT_TOP
+    summarize: bool = False
+    output_format: str = "telegram"
 
 
 class WorkdashCommands:
@@ -250,6 +255,19 @@ class WorkdashCommands:
             print(json.dumps(result, ensure_ascii=True, indent=2))
         else:
             _print_pane_info(result)
+        return 0
+
+    def birdview(self, *, top: int, output_format: str) -> int:
+        try:
+            result = self._client.request("birdview", {"top": top, "format": output_format})
+        except WorkdashControlError as error:
+            _print_control_error(error)
+            return 1
+        print(
+            json.dumps(result, ensure_ascii=False, indent=2)
+            if output_format == "json"
+            else result["text"]
+        )
         return 0
 
     def analyze_cli(
@@ -667,6 +685,8 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             json_output=options.json_output,
             include_all_panes=options.include_all_panes,
         )
+    if options.command == "birdview":
+        return commands.birdview(top=options.top, output_format=options.output_format)
     if options.command == "ready":
         return commands.ready_cli(scope=options.target or "", json_output=options.json_output)
     if options.command == "dispatch":
@@ -839,6 +859,13 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         action="store_true",
         default=argparse.SUPPRESS,
         help="Include live non-plugin panes whose titles do not prove Workdash launched them.",
+    )
+    birdview_parser = subparsers.add_parser("birdview", help="Share a snapshot of active work.")
+    birdview_parser.add_argument(
+        "--top", type=int, default=DEFAULT_TOP, help="Maximum entries per section (default: 5)."
+    )
+    birdview_parser.add_argument(
+        "--format", dest="output_format", choices=FORMATS, default="telegram"
     )
     analyze_parser = subparsers.add_parser(
         "analyze",
@@ -1038,6 +1065,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     for client_parser in (
         list_parser,
         info_parser,
+        birdview_parser,
         ready_parser,
         dispatch_parser,
         autodispatch_parser,
@@ -1090,6 +1118,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         help="Show the open pull request and issue for the current branch.",
     )
     namespace = parser.parse_args(argv) if argv is not None else parser.parse_args()
+    if namespace.command == "birdview" and namespace.top < 1:
+        birdview_parser.error("--top must be a positive integer")
     if namespace.command == "todo" and (
         (namespace.text is None) == (namespace.close_todo is None)
         or (
@@ -1102,6 +1132,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     client_commands = {
         "list",
         "info",
+        "birdview",
         "ready",
         "dispatch",
         "autodispatch",
@@ -1146,6 +1177,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         autoclose=getattr(namespace, "autoclose", False),
         automerge=getattr(namespace, "automerge", False),
         host=host or "127.0.0.1",
+        top=getattr(namespace, "top", DEFAULT_TOP),
+        summarize=getattr(namespace, "summarize", False),
+        output_format=getattr(namespace, "output_format", "telegram"),
     )
 
 
