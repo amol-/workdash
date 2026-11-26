@@ -128,3 +128,59 @@ def fake_gh_view_run(
         raise AssertionError(f"unexpected gh command: {command}")
 
     return fake_run
+
+
+def pull_request_routes() -> dict[str, object]:
+    routes = issue_routes()
+    routes["api repos/owner/repo/issues/12"] = issue(
+        pull_request={"url": "https://api.github.com/repos/owner/repo/pulls/12"}
+    )
+    routes["pr view 12 --repo owner/repo"] = {
+        "isDraft": True,
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
+        "reviewDecision": "APPROVED",
+        "statusCheckRollup": [
+            {
+                "__typename": "CheckRun",
+                "name": "unit tests",
+                "conclusion": "FAILURE",
+                "detailsUrl": "https://ci/unit",
+            },
+            {
+                "__typename": "CheckRun",
+                "name": "lint",
+                "conclusion": "SUCCESS",
+                "detailsUrl": "https://ci/lint",
+            },
+        ],
+        "reviews": [{"author": {"login": "reviewer"}, "state": "APPROVED", "body": "Looks good"}],
+    }
+    routes["api graphql"] = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "nodes": [
+                            {
+                                "isResolved": True,
+                                "isOutdated": False,
+                                "path": "src/app.py",
+                                "line": 42,
+                                "comments": {
+                                    "nodes": [
+                                        {
+                                            "author": {"login": "reviewer"},
+                                            "body": "Rename this",
+                                            "diffHunk": "@@ -1,2 +1,2 @@\n-old\n+new",
+                                        }
+                                    ]
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    return routes

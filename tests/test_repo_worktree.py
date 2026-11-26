@@ -115,11 +115,13 @@ def test_worktree_path_appends_number() -> None:
 # --- ensure_worktree tests (mock subprocess.run) ---
 
 
+@pytest.mark.parametrize("linked", [False, True], ids=["unlinked", "closes-issue"])
 def test_ensure_worktree_clones_fetches_and_creates_for_pr(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linked: bool
 ) -> None:
     """Main repo missing, worktree missing, same-repo PR: gh pr view, clone, fetch, worktree add."""
     calls: list[list[str]] = []
+    expected = tmp_path / ("owner_repo_41830" if linked else "owner_repo_42")
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
@@ -142,7 +144,7 @@ def test_ensure_worktree_clones_fetches_and_creates_for_pr(
         if cmd[0] == "git" and cmd[1] == "show-ref":
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "add":
-            (tmp_path / "owner_repo_42").mkdir(exist_ok=True)
+            Path(cmd[cmd.index("-b") + 2]).mkdir(exist_ok=True)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "config":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -152,9 +154,9 @@ def test_ensure_worktree_clones_fetches_and_creates_for_pr(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    result = ensure_worktree(str(tmp_path), make_pr())
+    result = ensure_worktree(str(tmp_path), make_linked_pr() if linked else make_pr())
 
-    assert result == str(tmp_path / "owner_repo_42")
+    assert result == str(expected)
     assert calls[0][:3] == ["gh", "pr", "view"]
     assert calls[1][:3] == ["gh", "repo", "clone"]
     assert calls[2] == ["git", "fetch", "--prune", "origin"]
@@ -164,9 +166,7 @@ def test_ensure_worktree_clones_fetches_and_creates_for_pr(
         < calls.index(["git", "merge", "--ff-only", "origin/HEAD"])
         < calls.index(wt_add)
     )
-    assert "-b" in wt_add
-    assert "feature-branch" in wt_add
-    assert "origin/feature-branch" in wt_add
+    assert wt_add[3:] == ["-b", "feature-branch", result, "origin/feature-branch"]
     config_cmds = [c for c in calls if c[0] == "git" and c[1] == "config"]
     assert ["git", "config", "branch.feature-branch.remote", "origin"] in config_cmds
     assert [
@@ -177,20 +177,29 @@ def test_ensure_worktree_clones_fetches_and_creates_for_pr(
     ] in config_cmds
 
 
+@pytest.mark.parametrize("fork_name", ["repo", "forked-repo"])
 def test_ensure_worktree_fork_pr_clones_from_fork_and_fetches_upstream(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fork_name: str
 ) -> None:
     """Fork PR: clone from fork repo and fetch the base repo as upstream."""
     calls: list[list[str]] = []
+    clone = tmp_path / f"contributor_{fork_name}"
+    expected = clone.with_name(f"{clone.name}_42")
+    head_info = json.loads(_FORK_HEAD_INFO)
+    head_info["headRepository"]["name"] = fork_name
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
         calls.append(cmd)
         if cmd[0] == "gh" and cmd[1] == "pr" and cmd[2] == "view":
-            return subprocess.CompletedProcess(cmd, 0, stdout=_FORK_HEAD_INFO, stderr="")
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps(head_info),
+                stderr="",
+            )
         if cmd[0] == "gh" and cmd[1] == "repo" and cmd[2] == "clone":
-            # Clones contributor/repo, not owner/repo
-            (tmp_path / "contributor_repo").mkdir(exist_ok=True)
+            Path(cmd[-1]).mkdir(exist_ok=True)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "fetch":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -209,7 +218,7 @@ def test_ensure_worktree_fork_pr_clones_from_fork_and_fetches_upstream(
         if cmd[0] == "git" and cmd[1] == "show-ref":
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "add":
-            (tmp_path / "contributor_repo_42").mkdir(exist_ok=True)
+            Path(cmd[cmd.index("-b") + 2]).mkdir(exist_ok=True)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "config":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -221,31 +230,43 @@ def test_ensure_worktree_fork_pr_clones_from_fork_and_fetches_upstream(
 
     result = ensure_worktree(str(tmp_path), make_pr())
 
-    assert result == str(tmp_path / "contributor_repo_42")
+    assert result == str(expected)
+    assert expected.is_dir()
     clone_cmd = [c for c in calls if c[0] == "gh" and c[1] == "repo" and c[2] == "clone"][0]
-    assert "contributor/repo" in clone_cmd
+    assert clone_cmd[3:] == [f"contributor/{fork_name}", str(clone)]
+    wt_add = next(cmd for cmd in calls if cmd[:3] == ["git", "worktree", "add"])
+    assert wt_add[3:] == ["-b", "feature-branch", str(expected), "origin/feature-branch"]
     assert ["git", "remote", "add", "upstream", "https://github.com/owner/repo.git"] in calls
     assert ["git", "fetch", "--prune", "upstream"] in calls
 
 
+@pytest.mark.parametrize("can_link", [True, False], ids=["linked", "local-fallback"])
 def test_ensure_worktree_clones_and_creates_for_issue(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, can_link: bool
 ) -> None:
-    """Main repo missing, issue item: clone, fetch, worktree add with issue-N branch."""
+    """Clone, fetch, and prepare a linked or local issue branch on first use."""
     calls: list[list[str]] = []
     linked = False
 
     def fake_run(*args, **kwargs):
         nonlocal linked
         cmd = args[0]
+        calls.append(cmd)
         if cmd[:3] == ["gh", "issue", "develop"]:
+            if not can_link:
+                raise subprocess.CalledProcessError(1, cmd)
             linked = True
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "ls-remote", "--symref", "origin", "HEAD"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="ref: refs/heads/main\tHEAD\n", stderr=""
+            )
+        if cmd == ["git", "remote", "set-head", "origin", "main"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[:2] == ["git", "ls-remote"]:
             return subprocess.CompletedProcess(cmd, 0 if linked else 2, stdout="", stderr="")
-        calls.append(cmd)
         if cmd[0] == "gh" and cmd[1] == "repo" and cmd[2] == "clone":
-            (tmp_path / "owner_repo").mkdir(exist_ok=True)
+            Path(cmd[-1]).mkdir(exist_ok=True)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "fetch":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -260,7 +281,7 @@ def test_ensure_worktree_clones_and_creates_for_issue(
         if cmd[0] == "git" and cmd[1] == "show-ref":
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "worktree" and cmd[2] == "add":
-            (tmp_path / "owner_repo_42").mkdir(exist_ok=True)
+            Path(cmd[cmd.index("-b") + 2]).mkdir(exist_ok=True)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git" and cmd[1] == "config":
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -273,14 +294,19 @@ def test_ensure_worktree_clones_and_creates_for_issue(
     result = ensure_worktree(str(tmp_path), make_issue())
 
     assert result == str(tmp_path / "owner_repo_42")
+    assert Path(result).is_dir()
+    assert (tmp_path / "owner_repo").is_dir()
+    assert ["gh", "issue", "develop", "42", "--repo", "owner/repo", "--name", "issue-42"] in calls
     assert not any(c[0] == "gh" and c[1] == "pr" for c in calls)
     wt_add = [c for c in calls if c[0] == "git" and c[1] == "worktree" and c[2] == "add"][0]
     assert "-b" in wt_add
     assert "issue-42" in wt_add
-    assert "origin/issue-42" in wt_add
-    config_cmds = [c for c in calls if c[0] == "git" and c[1] == "config"]
-    assert ["git", "config", "branch.issue-42.remote", "origin"] in config_cmds
-    assert ["git", "config", "branch.issue-42.merge", "refs/heads/issue-42"] in config_cmds
+    assert wt_add[-1] == ("origin/issue-42" if can_link else "origin/HEAD")
+    assert calls.index(["git", "fetch", "--prune", "origin"]) < calls.index(wt_add)
+    if can_link:
+        config_cmds = [c for c in calls if c[:2] == ["git", "config"]]
+        assert ["git", "config", "branch.issue-42.remote", "origin"] in config_cmds
+        assert ["git", "config", "branch.issue-42.merge", "refs/heads/issue-42"] in config_cmds
 
 
 def test_ensure_worktree_fetches_existing_main_for_pr(
@@ -408,15 +434,23 @@ def test_existing_worktree_path_finds_the_targeted_todo_worktree_of_the_target_c
     assert existing_worktree_path(str(tmp_path), make_issue(110)) == tmp_path / "owner_repo_110"
 
 
+@pytest.mark.parametrize(
+    ("target", "clone_command"),
+    [
+        ("owner/repo", ["gh", "repo", "clone"]),
+        ("https://gitlab.com/owner/repo.git", ["git", "clone"]),
+        ("https://codeberg.org/owner/repo.git", ["git", "clone"]),
+    ],
+)
 def test_ensure_worktree_creates_a_target_clone_branch_for_a_targeted_todo(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str, clone_command: list[str]
 ) -> None:
     calls: list[list[str]] = []
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
         calls.append(list(cmd))
-        if cmd[:3] == ["gh", "repo", "clone"]:
+        if cmd[: len(clone_command)] == clone_command:
             Path(cmd[-1]).mkdir(parents=True, exist_ok=True)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd == ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]:
@@ -426,20 +460,23 @@ def test_ensure_worktree_creates_a_target_clone_branch_for_a_targeted_todo(
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[:2] == ["git", "show-ref"] or cmd[:3] == ["git", "worktree", "list"]:
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
-        if cmd[0] == "git":
+        if cmd[0] == "git" and cmd[:2] != ["git", "clone"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         raise AssertionError(f"Unexpected command: {cmd}")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    result = ensure_worktree(str(tmp_path), make_targeted_todo())
+    result = ensure_worktree(str(tmp_path), make_targeted_todo(target=target))
 
     assert result == str(tmp_path / "owner_repo_todo_110")
-    assert ["gh", "repo", "clone", "owner/repo", str(tmp_path / "owner_repo")] in calls
+    assert [*clone_command, target, str(tmp_path / "owner_repo")] in calls
     assert not any(cmd[:3] == ["gh", "issue", "view"] for cmd in calls)
+    if clone_command[0] == "git":
+        assert not any(cmd[0] == "gh" for cmd in calls)
     wt_add = next(cmd for cmd in calls if cmd[:3] == ["git", "worktree", "add"])
     assert "wt-110" in wt_add
     assert "origin/HEAD" in wt_add
+    assert calls.index(["git", "fetch", "--prune", "origin"]) < calls.index(wt_add)
 
 
 def test_existing_worktree_path_finds_direct_worktree_when_origin_matches_item_repo(
@@ -518,11 +555,14 @@ def test_existing_worktree_path_finds_the_worktree_of_a_non_lowest_closing_issue
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
             )
+        if cmd == ["git", "pull", "--ff-only"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         raise AssertionError(f"Unexpected command: {cmd}")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     assert existing_worktree_path(str(tmp_path), item) == non_lowest_worktree
+    assert ensure_worktree(str(tmp_path), item) == str(non_lowest_worktree)
 
 
 def test_existing_worktree_path_still_finds_a_pr_numbered_worktree_for_a_linked_pr(
@@ -1077,11 +1117,16 @@ def test_ensure_worktree_finds_fork_worktree_with_upstream_without_gh_call(
 def test_ensure_worktree_pull_failure_is_silent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When worktree exists and pull fails, return the path without raising."""
+    """A divergent pull leaves the existing PR checkout and its local work intact."""
     (tmp_path / "owner_repo").mkdir()
-    (tmp_path / "owner_repo_42").mkdir()
+    worktree = tmp_path / "owner_repo_42"
+    worktree.mkdir()
+    local_file = worktree / "notes.txt"
+    local_file.write_text("local changes")
+    pull_attempted = False
 
     def fake_run(*args, **kwargs):
+        nonlocal pull_attempted
         cmd = args[0]
         if cmd == ["git", "rev-parse", "--show-toplevel"]:
             return _git_show_toplevel(cmd, kwargs["cwd"])
@@ -1089,15 +1134,19 @@ def test_ensure_worktree_pull_failure_is_silent(
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
             )
-        if cmd[0] == "git" and cmd[1] == "pull":
-            raise subprocess.CalledProcessError(1, cmd, stderr="merge conflict")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["git", "pull", "--ff-only"] and not pull_attempted:
+            assert kwargs["cwd"] == worktree
+            pull_attempted = True
+            raise subprocess.CalledProcessError(128, cmd, stderr="Not possible to fast-forward")
+        raise AssertionError(f"Unexpected command: {cmd}")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     result = ensure_worktree(str(tmp_path), make_pr())
 
-    assert result == str(tmp_path / "owner_repo_42")
+    assert pull_attempted
+    assert result == str(worktree)
+    assert local_file.read_text() == "local changes"
 
 
 def test_ensure_worktree_pr_with_existing_local_branch(
@@ -1349,6 +1398,14 @@ def test_ensure_new_issue_worktree_fast_forwards_parent_and_child_to_origin_defa
         capture_output=True,
     )
 
+    github = MagicMock()
+    github.create_issue_branch.side_effect = RuntimeError("link unavailable")
+    siblings = {}
+    for number in (1, 2):
+        path = Path(ensure_worktree(str(workdir), make_issue(number), github_client=github))
+        (path / "notes.txt").write_text(f"notes for issue {number}")
+        siblings[path] = f"notes for issue {number}"
+
     (seed / "README.md").write_text("updated\n", encoding="utf-8")
     subprocess.run(["git", "commit", "-am", "updated"], cwd=seed, check=True, capture_output=True)
     subprocess.run(["git", "push"], cwd=seed, check=True, capture_output=True)
@@ -1356,7 +1413,7 @@ def test_ensure_new_issue_worktree_fast_forwards_parent_and_child_to_origin_defa
         ["git", "rev-parse", "main"], cwd=origin, check=True, capture_output=True, text=True
     ).stdout.strip()
 
-    child = Path(ensure_worktree(str(workdir), make_issue()))
+    child = Path(ensure_worktree(str(workdir), make_issue(), github_client=github))
 
     parent_ref = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=main, check=True, capture_output=True, text=True
@@ -1366,6 +1423,9 @@ def test_ensure_new_issue_worktree_fast_forwards_parent_and_child_to_origin_defa
     ).stdout.strip()
     assert parent_ref == latest
     assert child_ref == latest
+    for path, notes in siblings.items():
+        assert (path / "README.md").read_text() == "initial\n"
+        assert (path / "notes.txt").read_text() == notes
 
 
 @pytest.mark.parametrize(
@@ -1521,56 +1581,12 @@ def test_targeted_todo_worktree_casing_depends_on_host(
         assert pulls == [path]
 
 
-def test_targeted_todo_reuses_matching_worktree_when_main_clone_is_another_repository(
-    tmp_path, monkeypatch
-):
-    workdir = tmp_path / "workdir"
-    workdir.mkdir()
-    main = workdir / "owner_repo"
-    worktree = workdir / "owner_repo_todo_110"
-    source = tmp_path / "source"
-    target = "https://codeberg.org/owner/repo.git"
-    for path, origin in ((main, "https://github.com/owner/repo.git"), (source, target)):
-        subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
-        subprocess.run(["git", "remote", "add", "origin", origin], cwd=path, check=True)
-    (source / "work.txt").write_text("todo work")
-    subprocess.run(["git", "add", "work.txt"], cwd=source, check=True)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.com",
-            "commit",
-            "-m",
-            "initial",
-        ],
-        cwd=source,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "worktree", "add", "-b", "wt-110", str(worktree)],
-        cwd=source,
-        check=True,
-        capture_output=True,
-    )
-    (main / "work.txt").write_text("other repository work")
-    (worktree / "work.txt").write_text("uncommitted todo work")
-    pulls = []
-    monkeypatch.setattr(GitHelper, "pull_ff_only", lambda self, path: pulls.append(path))
-
-    assert ensure_worktree(str(workdir), make_targeted_todo(target=target)) == str(worktree)
-    assert pulls == [worktree]
-    assert (main / "work.txt").read_text() == "other repository work"
-    assert (worktree / "work.txt").read_text() == "uncommitted todo work"
-
-
 @pytest.mark.parametrize("occupied", ["main", "worktree", "branch"])
 def test_targeted_todo_conflicts_never_mutate_another_repository(tmp_path, monkeypatch, occupied):
     main = tmp_path / "owner_repo"
     main.mkdir()
+    main_marker = main / "work.txt"
+    main_marker.write_text("another repository's work")
     candidate = tmp_path / ("owner_repo_todo_110" if occupied == "worktree" else "custom")
     candidate.mkdir()
     marker = candidate / "work.txt"
@@ -1597,6 +1613,7 @@ def test_targeted_todo_conflicts_never_mutate_another_repository(tmp_path, monke
     with pytest.raises(RuntimeError, match="belongs to a different repository"):
         ensure_worktree(str(tmp_path), item)
     assert marker.read_text() == "uncommitted work"
+    assert main_marker.read_text() == "another repository's work"
     assert all(command[0] == "git" for command in calls)
 
 
@@ -2244,8 +2261,8 @@ def test_analysis_refreshes_changed_remote_default(tmp_path, monkeypatch, single
     assert git(main, "rev-parse", "main") != git(seed, "rev-parse", "HEAD")
 
 
-@pytest.mark.parametrize("divergent", [False, True])
-def test_local_issue_branch_updates_from_its_upstream(tmp_path, monkeypatch, divergent):
+@pytest.mark.parametrize("case", ["fast-forward", "divergent-branch", "divergent-worktree"])
+def test_local_issue_branch_updates_from_its_upstream(tmp_path, monkeypatch, case):
     def git(cwd, *args):
         return subprocess.run(
             ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
@@ -2272,18 +2289,25 @@ def test_local_issue_branch_updates_from_its_upstream(tmp_path, monkeypatch, div
     git(main, "config", "user.name", "Test")
     git(main, "config", "user.email", "test@example.com")
     git(main, "switch", "-c", "issue-42", "--track", "origin/shared")
-    if divergent:
+    if case != "fast-forward":
         git(main, "commit", "--allow-empty", "-m", "local")
     local = git(main, "rev-parse", "HEAD")
     git(main, "switch", "main")
+    github = MagicMock()
+    if case == "divergent-worktree":
+        original = Path(ensure_worktree(str(workdir), make_issue(), github_client=github))
+        (original / "notes.txt").write_text("local changes")
+
     git(seed, "commit", "--allow-empty", "-m", "remote")
     git(seed, "push", "origin", "shared")
     remote = git(seed, "rev-parse", "HEAD")
 
-    github = MagicMock()
     worktree = Path(ensure_worktree(str(workdir), make_issue(), github_client=github))
-    assert git(worktree, "rev-parse", "HEAD") == (local if divergent else remote)
+    assert git(worktree, "rev-parse", "HEAD") == (remote if case == "fast-forward" else local)
     assert git(worktree, "rev-parse", "--abbrev-ref", "@{upstream}") == "origin/shared"
+    if case == "divergent-worktree":
+        assert worktree == original
+        assert (worktree / "notes.txt").read_text() == "local changes"
     github.create_issue_branch.assert_not_called()
 
 

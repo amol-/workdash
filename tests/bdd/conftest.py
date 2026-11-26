@@ -12,10 +12,8 @@ monolithic conftest.
 
 from __future__ import annotations
 
-import pytest
-
 from .steps import (
-    analysis as _analysis,
+    analysis_tui as _analysis_tui,
 )
 from .steps import (
     api as _api,
@@ -25,22 +23,13 @@ from .steps import (
 )
 from .steps import autodispatch as _autodispatch
 from .steps import (
-    blocking as _blocking,
-)
-from .steps import (
     branchdiff as _branchdiff,
 )
 from .steps import (
     branchinfo as _branchinfo,
 )
 from .steps import (
-    browse as _browse,
-)
-from .steps import (
     cli_orchestration as _cli_orchestration,
-)
-from .steps import (
-    coding as _coding,
 )
 from .steps import (
     common as _common,
@@ -58,7 +47,6 @@ from .steps import (
 from .steps import (
     show_config as _show_config,
 )
-from .steps import site as _site
 from .steps import (
     startup as _startup,
 )
@@ -74,6 +62,8 @@ from .steps import (
 from .steps import (
     view as _view,
 )
+from .steps import view_menu as _view_menu
+from .steps import viewer_links as _viewer_links
 from .steps import (
     worktrees as _worktrees,
 )
@@ -83,36 +73,36 @@ for _step_module in (
     _api,
     _autoclose,
     _autodispatch,
-    _blocking,
     _branchdiff,
     _cli_orchestration,
     _triage,
     _worktrees,
     _setup,
     _startup,
-    _analysis,
-    _coding,
-    _browse,
+    _analysis_tui,
     _terminal,
     _show_config,
     _todo,
     _branchinfo,
     _ready,
     _review,
-    _site,
     _dispatch,
     _view,
+    _view_menu,
+    _viewer_links,
 ):
     for _name in dir(_step_module):
         if _name.startswith("pytestbdd_stepdef_") or _name in {
             "scenario_state",
+            "analysis_dashboard",
             "review_state",
             "work_items",
             "valid_config",
             "autodispatch_state",
-            "blocking_state",
             "dashboard_dispatch",
-            "config_path",
+            "setup_cli",
+            "worktree_remote",
+            "include_backend",
         }:
             globals()[_name] = getattr(_step_module, _name)
 
@@ -129,18 +119,3 @@ def pytest_bdd_apply_tag(tag, function):
     marker is applied.
     """
     return True
-
-
-@pytest.fixture
-def loopback_aliases():
-    import errno
-    import socket
-
-    for host in ("127.0.0.2", "127.0.0.3"):
-        with socket.socket() as probe:
-            try:
-                probe.bind((host, 0))
-            except OSError as error:
-                if error.errno != errno.EADDRNOTAVAIL:
-                    raise
-                pytest.skip(f"loopback alias {host} is not available")

@@ -193,6 +193,31 @@ def failing_head(supervision: Supervision, head: str = HEAD_SHA) -> None:
     )
 
 
+@pytest.mark.parametrize("already_running", [False, True], ids=["new-pane", "running-pane"])
+def test_code_does_not_supervise_without_a_new_autoclosed_pane(
+    monkeypatch, tmp_path, already_running
+):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests.clear()
+    if already_running:
+        supervision._create_agent_pane(str(supervision.worktree))
+        monkeypatch.setattr(
+            control_module, "existing_worktree_path", lambda *_, **_kwargs: supervision.worktree
+        )
+        result = supervision.launch(autoclose=True)
+        assert result["status"] == "already_running"
+        assert result["autoclose_enabled"] is False
+    else:
+        result = supervision.launch()
+        assert result["status"] == "launched"
+        assert "autoclose_enabled" not in result
+
+    supervision.poll(5)
+
+    assert supervision.sent == []
+    assert supervision.closed == []
+
+
 def test_plugin_with_same_id_does_not_stop_supervision(monkeypatch, tmp_path):
     supervision = Supervision(monkeypatch, tmp_path)
     supervision.github.pull_requests.clear()
@@ -225,6 +250,10 @@ def test_awaiting_launch_gets_publishing_rules_when_ci_fails(monkeypatch, tmp_pa
     assert "has failing checks: tests" in instruction
     assert "Commit and push are explicitly requested and permitted" in instruction
     assert "--add-assignee" not in instruction
+    assert "Make reasonable engineering decisions and continue" in instruction
+    assert "make the decision yourself" in instruction
+    assert "satisfies the requirements" in instruction
+    assert "achieve the goal of the work" in instruction
 
 
 def test_the_worker_waits_30_seconds_between_checks(monkeypatch) -> None:
@@ -309,9 +338,13 @@ def test_replacing_session_git_changes_the_unpublished_work_check(monkeypatch, t
     assert supervision.closed == []
 
 
-def test_an_idle_pane_resolves_its_work_state_every_five_minutes(monkeypatch, tmp_path) -> None:
+def test_an_idle_pane_resolves_its_work_state_every_five_minutes(
+    monkeypatch, tmp_path, caplog
+) -> None:
     supervision = Supervision(monkeypatch, tmp_path)
     supervision.local_work = True
+    supervision.github.pull_requests["owner/repo#51"]["checks"] = {HEAD_SHA: [check_run("tests")]}
+    caplog.set_level(logging.INFO, logger=autoclose_module.logger.name)
     supervision.launch(autoclose=True)
 
     # Finished work held open by unpublished files is decided again every five minutes, so
@@ -319,6 +352,9 @@ def test_an_idle_pane_resolves_its_work_state_every_five_minutes(monkeypatch, tm
     supervision.poll(5)
     # The worktree and the head GitHub reported are what the unpublished work is judged against.
     assert supervision.unpublished_checks == [(str(supervision.worktree), HEAD_SHA)]
+    assert supervision.sent == []
+    assert supervision.closed == []
+    assert "unpublished work" in caplog.text
     supervision.github.operations.clear()
     supervision.poll(4)
     assert supervision.github.operations == ["PullRequestStates"] * 4
@@ -343,6 +379,22 @@ def test_issue_with_someone_elses_new_pull_request_is_not_reminded_or_blocked(
     assert not supervision.closed
 
 
+def test_someone_elses_pull_request_is_only_closed_on_merge(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    pull_request = supervision.github.add_pull_request(
+        "owner/repo#52", author="other", checks={HEAD_SHA: [check_run("tests", "FAILURE")]}
+    )
+    supervision.launch("owner/repo#CHECK-52", autoclose=True)
+    supervision.poll(5)
+    assert not supervision.sent
+    assert not supervision.closed
+
+    pull_request.update(state="MERGED", merged=datetime.now(UTC).isoformat())
+    supervision.poll()
+    assert supervision.closed == ["terminal_21"]
+    assert not supervision.sent
+
+
 def test_a_pull_request_that_merged_before_the_launch_does_not_close_the_pane(
     monkeypatch, tmp_path
 ) -> None:
@@ -359,10 +411,23 @@ def test_a_pull_request_that_merged_before_the_launch_does_not_close_the_pane(
     for attempt in range(3):
         supervision.poll(5)
         assert len(supervision.sent) == attempt + 1
+        assert "Continue the assigned issue" in supervision.sent[-1][1]
+        assert supervision.enters == ["terminal_21"] * (attempt + 1)
         assert not supervision.session.autoclose.blocked("workdash-main", "terminal_21")
     supervision.poll(5)
     assert len(supervision.sent) == 3
     assert supervision.session.autoclose.blocked("workdash-main", "terminal_21")
+    assert not supervision.closed
+
+
+def test_explicit_pull_request_already_merged_at_launch_is_left_alone(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.add_pull_request(
+        "owner/repo#51", state="MERGED", merged=(datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    )
+    supervision.launch("owner/repo#PR-51", autoclose=True)
+    supervision.poll(5)
+    assert not supervision.sent
     assert not supervision.closed
 
 
@@ -440,15 +505,24 @@ def test_explicit_pull_request_merge_closes_without_detailed_lookup(monkeypatch,
     assert supervision.closed == ["terminal_21"]
 
 
-def test_work_that_merges_inside_the_discovery_gap_closes_its_pane(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("old_merge", [False, True], ids=["no-previous-pr", "reopened-issue"])
+def test_work_that_merges_inside_the_discovery_gap_closes_its_pane(
+    monkeypatch, tmp_path, old_merge
+):
     supervision = Supervision(monkeypatch, tmp_path)
-    supervision.github.pull_requests.clear()
+    if old_merge:
+        supervision.github.pull_requests["owner/repo#51"].update(
+            state="MERGED", merged=(datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        )
+    else:
+        supervision.github.pull_requests.clear()
     supervision.launch(autoclose=True)
 
-    # The first check finds no pull request yet, then discovery waits five minutes.
+    # The first check finds no current pull request; discovery waits five minutes.
     supervision.poll()
+    assert not supervision.closed
     supervision.github.add_pull_request(
-        "owner/repo#51",
+        "owner/repo#52" if old_merge else "owner/repo#51",
         closes=("owner/repo#42",),
         state="MERGED",
         merged=datetime.now(UTC).isoformat(),
@@ -465,8 +539,13 @@ def test_a_message_resets_the_timer_and_unchanged_work_is_never_messaged_twice(
     supervision = Supervision(monkeypatch, tmp_path)
     failing_head(supervision)
     supervision.launch(autoclose=True)
-    supervision.poll(5)
-    assert len(supervision.sent) == 1
+    supervision.poll(4)
+    assert supervision.sent == []
+
+    supervision.poll()
+    [(pane_id, _)] = supervision.sent
+    assert pane_id == "terminal_21"
+    assert supervision.enters == [pane_id]
 
     # A new head a minute later is new work, but the message restarted the wait: it is
     # instructed only once five quiet minutes have passed since that message.
@@ -512,6 +591,67 @@ def test_a_new_failing_check_or_another_review_is_messaged_again(monkeypatch, tm
     assert len(supervision.sent) == 4
 
 
+def test_an_idle_pane_is_told_to_resolve_merge_conflicts(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests["owner/repo#51"]["mergeable"] = "CONFLICTING"
+    supervision.launch(autoclose=True)
+    supervision.poll(5)
+
+    [(pane_id, instruction)] = supervision.sent
+    assert pane_id == "terminal_21"
+    assert "cannot merge cleanly into main" in instruction
+    assert supervision.enters == [pane_id]
+
+
+def test_base_and_mergeability_changes_prompt_another_instruction(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    failing_head(supervision)
+    pull_request = supervision.github.pull_requests["owner/repo#51"]
+    supervision.launch(autoclose=True)
+    supervision.poll(5)
+    [(pane_id, instruction)] = supervision.sent
+    assert pane_id == "terminal_21"
+    assert "has failing checks: tests" in instruction
+    assert "fix the underlying problems" in instruction
+
+    pull_request["base_sha"] = "base2"
+    supervision.poll(5)
+    assert supervision.sent == [(pane_id, instruction)] * 2
+
+    pull_request["mergeable"] = "UNKNOWN"
+    supervision.poll(5)
+    assert supervision.sent == [(pane_id, instruction)] * 3
+
+    pull_request["mergeable"] = "CONFLICTING"
+    supervision.poll(5)
+    assert len(supervision.sent) == 4
+    assert supervision.sent[-1][0] == pane_id
+    assert supervision.sent[-1][1] != instruction
+    assert "cannot merge cleanly into main" in supervision.sent[-1][1]
+    assert "resolve the conflicting files" in supervision.sent[-1][1]
+    assert supervision.enters == [pane_id] * 4
+
+
+def test_pane_content_change_restarts_the_idle_window(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    failing_head(supervision)
+    supervision.launch(autoclose=True)
+    supervision.poll(4)
+
+    supervision.screen += " "
+    supervision.poll()
+    assert supervision.sent == []
+    supervision.poll(4)
+    assert supervision.sent == []
+
+    supervision.poll()
+    [(pane_id, instruction)] = supervision.sent
+    assert pane_id == "terminal_21"
+    assert "has failing checks: tests" in instruction
+    assert "fix the underlying problems" in instruction
+    assert supervision.enters == [pane_id]
+
+
 def test_a_screen_that_changes_after_the_idle_check_cancels_the_message(
     monkeypatch, tmp_path
 ) -> None:
@@ -530,6 +670,32 @@ def test_a_screen_that_changes_after_the_idle_check_cancels_the_message(
     assert len(supervision.sent) == 1
 
 
+@pytest.mark.parametrize("unfinished", ["running-checks", "unknown-mergeability"])
+def test_unfinished_pull_request_leaves_its_pane_open(monkeypatch, tmp_path, unfinished):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.launch(autoclose=True)
+    pull_request = supervision.github.pull_requests["owner/repo#51"]
+    if unfinished == "running-checks":
+        pull_request["checks"] = {HEAD_SHA: [check_run("tests", None, status="IN_PROGRESS")]}
+    else:
+        pull_request["mergeable"] = "UNKNOWN"
+
+    supervision.poll(5)
+
+    assert supervision.sent == []
+    assert supervision.closed == []
+
+
+def test_finished_work_without_checks_closes_its_pane(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.github.pull_requests["owner/repo#51"]["checks"] = {}
+    supervision.launch(autoclose=True)
+    supervision.poll(4)
+    assert not supervision.closed
+    supervision.poll()
+    assert supervision.closed == ["terminal_21"]
+
+
 def test_finished_work_is_not_closed_while_its_screen_changes(monkeypatch, tmp_path) -> None:
     supervision = Supervision(monkeypatch, tmp_path)
     supervision.launch(autoclose=True)
@@ -543,6 +709,38 @@ def test_finished_work_is_not_closed_while_its_screen_changes(monkeypatch, tmp_p
     supervision.screen = "still working\n"  # the agent goes quiet on what it printed
     supervision.poll(5)
     assert supervision.closed == ["terminal_21"]
+
+
+def test_a_pane_is_dropped_even_if_its_original_identity_returns(monkeypatch, tmp_path):
+    supervision = Supervision(monkeypatch, tmp_path)
+    failing_head(supervision)
+    supervision.launch(autoclose=True)
+    [pane] = supervision.panes
+    original_title = pane["title"]
+    pane["title"] = "another program"
+    supervision.poll(5)
+    assert not supervision.sent
+    assert not supervision.closed
+
+    pane["title"] = original_title
+    supervision.poll(5)
+    assert not supervision.sent
+    assert not supervision.closed
+
+
+def test_a_pull_request_closed_without_merging_leaves_its_pane_for_review(
+    monkeypatch, tmp_path, caplog
+):
+    supervision = Supervision(monkeypatch, tmp_path)
+    supervision.launch(autoclose=True)
+    supervision.github.pull_requests["owner/repo#51"]["state"] = "CLOSED"
+    with caplog.at_level(logging.INFO, logger=autoclose_module.logger.name):
+        supervision.poll(5)
+    assert not supervision.sent
+    assert not supervision.closed
+    assert (
+        "Pane terminal_21 needs review: its pull request was closed without merging" in caplog.text
+    )
 
 
 def test_an_instruction_is_not_typed_into_a_pane_that_left_before_the_action(
@@ -777,23 +975,35 @@ def test_no_pull_request_blocks_after_three_full_windows_and_input_resumes(monke
     activity.pane = ("workdash-main", "terminal_21")
     supervision.session._autodispatch[activity.id] = activity
 
+    instruction = launch.call_args.args[1].removeprefix("PROMPT\n\n")
+    assert "Make reasonable engineering decisions and continue" in instruction
+    assert "make the decision yourself" in instruction
+    assert "satisfies the requirements" in instruction
+    assert "achieve the goal of the work" in instruction
+    reminder = ("terminal_21", instruction)
     for attempt in range(3):
         supervision.poll(4)
-        assert len(supervision.sent) == attempt
+        assert supervision.sent == [reminder] * attempt
         supervision.poll()
-        assert len(supervision.sent) == attempt + 1
-        assert supervision.sent[-1][1] == launch.call_args.args[1].removeprefix("PROMPT\n\n")
+        assert supervision.sent == [reminder] * (attempt + 1)
+        assert supervision.enters == ["terminal_21"] * (attempt + 1)
     supervision.poll(4)
     assert supervision.session.autodispatch_sessions()[0]["status"] == "running"
     supervision.poll()
     assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
+    assert supervision.sent == [reminder] * 3
     assert not supervision.closed
 
     supervision.session.pane_send(pane_id="terminal_21", data="continue")
     supervision.poll()
     assert supervision.session.autodispatch_sessions()[0]["status"] == "running"
-    supervision.poll(5)
-    assert len(supervision.sent) == 5  # three reminders, human input, then a new reminder
+    sent_after_input = [reminder] * 3 + [("terminal_21", "continue")]
+    assert supervision.sent == sent_after_input
+    supervision.poll(4)
+    assert supervision.sent == sent_after_input
+    supervision.poll()
+    assert supervision.sent == sent_after_input + [reminder]
+    assert supervision.enters == ["terminal_21"] * 4
     supervision.poll(15)
     assert supervision.session.autodispatch_sessions()[0]["status"] == "blocked"
     supervision.screen = "new agent output"

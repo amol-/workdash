@@ -45,6 +45,8 @@ def test_fetch_launch_context_for_pr_adds_linked_issues_and_unresolved_threads(
 ) -> None:
     calls: list[list[str]] = []
     comment = {"author": {"login": "bob"}, "body": "fix this", "createdAt": "2026-02-01T00:00:00Z"}
+    reply = {**comment, "body": "Will fix"}
+    resolved = {**comment, "body": "Already fixed"}
     graphql_stdout = graphql_payload(
         issues=[
             {
@@ -57,8 +59,13 @@ def test_fetch_launch_context_for_pr_adds_linked_issues_and_unresolved_threads(
             }
         ],
         threads=[
-            {"isResolved": False, "path": "a.py", "line": 3, "comments": {"nodes": [comment]}},
-            {"isResolved": True, "path": "b.py", "line": 9, "comments": {"nodes": [comment]}},
+            {
+                "isResolved": False,
+                "path": "a.py",
+                "line": 3,
+                "comments": {"nodes": [comment, reply]},
+            },
+            {"isResolved": True, "path": "b.py", "line": 9, "comments": {"nodes": [resolved]}},
         ],
     )
     monkeypatch.setattr(subprocess, "run", fake_gh(calls, graphql_stdout=graphql_stdout))
@@ -77,7 +84,7 @@ def test_fetch_launch_context_for_pr_adds_linked_issues_and_unresolved_threads(
                 "comments": [comment],
             }
         ],
-        "unresolvedReviewThreads": [{"path": "a.py", "line": 3, "comments": [comment]}],
+        "unresolvedReviewThreads": [{"path": "a.py", "line": 3, "comments": [comment, reply]}],
     }
     view_command, graphql_command = calls
     assert view_command[:7] == ["gh", "pr", "view", "42", "--repo", "owner/repo", "--json"]

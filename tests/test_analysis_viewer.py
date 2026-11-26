@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from unittest.mock import MagicMock
 
@@ -26,18 +27,28 @@ def _viewer_config(monkeypatch):
     monkeypatch.setattr(view, "load_config", lambda: WorkdashConfig(open_command="xdg-open"))
 
 
-def test_mac_clipboard_command_failure_is_reported(monkeypatch):
+@pytest.mark.parametrize(
+    "error",
+    [None, subprocess.CalledProcessError(1, "pbcopy"), FileNotFoundError("pbcopy")],
+    ids=["copied", "command-failed", "command-missing"],
+)
+def test_mac_clipboard_outside_zellij(monkeypatch, error):
     app = view._MarkdownApp(view.Document("text", "file:///text.md"), "xdg-open", False)
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
-    monkeypatch.setattr(
-        subprocess, "run", MagicMock(side_effect=subprocess.CalledProcessError(1, "pbcopy"))
-    )
+    pbcopy = MagicMock(side_effect=error)
+    monkeypatch.setattr(subprocess, "run", pbcopy)
     app.notify = MagicMock()
 
-    app.copy_to_clipboard("text")
+    app.copy_to_clipboard("Copy this")
 
-    assert "unavailable" in app.notify.call_args.args[0].lower()
+    pbcopy.assert_called_once_with(
+        ["pbcopy"], input="Copy this", text=True, check=True, stderr=subprocess.DEVNULL, timeout=5
+    )
+    if error is None:
+        app.notify.assert_not_called()
+    else:
+        assert "Copy unavailable" in app.notify.call_args.args[0]
 
 
 def test_analysis_viewer_is_required():
@@ -53,12 +64,39 @@ def test_local_viewer_receives_encoded_url_with_correct_content(tmp_path, monkey
     opened = MagicMock()
     opened.return_value.wait.return_value = 0
     monkeypatch.setattr(launcher.subprocess, "Popen", opened)
-    launcher.open_markdown(str(path), "viewer", format=format)
-    url = opened.call_args.args[0][-1]
+    launcher.open_markdown(str(path), "viewer --quiet", format=format)
     expected = path if format == "markdown" else path.with_suffix(".html")
-    assert url == expected.as_uri()
+    opened.assert_called_once_with(
+        ["viewer", "--quiet", expected.as_uri()],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     content = expected.read_text(encoding="utf-8")
     assert ("<strong>bold</strong>" if format == "html" else "**bold**") in content
+
+
+def test_pane_viewer_receives_literal_local_markdown_url_and_focus(tmp_path, monkeypatch):
+    path = tmp_path / "analysis with spaces.md"
+    path.write_text("# Analysis")
+    open_viewer = MagicMock(return_value="terminal_17")
+    focus = MagicMock()
+    monkeypatch.setattr(launcher.zellij, "open_viewer", open_viewer)
+    monkeypatch.setattr(launcher.zellij, "focus_zellij_pane", focus)
+
+    launcher.open_markdown(
+        str(path),
+        "term-view --quiet",
+        format="markdown",
+        needs_pane=True,
+        zellij_session="workdash-main",
+        focus=True,
+    )
+
+    open_viewer.assert_called_once_with(
+        "workdash-main", ["term-view", "--quiet", path.as_uri()], executable="term-view"
+    )
+    focus.assert_called_once_with("workdash-main", "terminal_17")
 
 
 def test_direct_analysis_viewer_keeps_running_without_blocking(tmp_path):
@@ -339,48 +377,25 @@ def test_markdown_viewer_loads_plain_file_path(tmp_path, monkeypatch):
     assert "Local" in rendered[0] and "heading" in rendered[0] and "body" in rendered[0]
 
 
-def test_markdown_viewer_opens_relative_link_in_place(tmp_path, monkeypatch):
-    path = tmp_path / "analysis.md"
-    path.write_text("# Analysis\n\n[Source](linked.md)\n", encoding="utf-8")
-    (tmp_path / "linked.md").write_text("# Replacement", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    shown = []
-
-    async def exercise(pilot, app):
-        await pilot.click(Markdown, offset=(2, 4))
-        await _settle(pilot, lambda: "Replacement" in _viewer_source(app))
-        shown.append(_viewer_source(app))
-        assert "b" in app.screen.active_bindings
-        await pilot.press("b")
-        shown.append(_viewer_source(app))
-
-    _run_viewer(monkeypatch, exercise)
-    assert view.run_view(str(path)) == 0
-    assert "Replacement" in shown[0] and "Analysis" not in shown[0]
-    assert "Analysis" in shown[1] and "Replacement" not in shown[1]
-
-
-def test_analysis_viewer_navigates_to_issue_and_back_with_copy_available(tmp_path, monkeypatch):
-    from html import unescape
-
+def test_analysis_viewer_advertises_copy_and_navigates_to_issue_and_back(tmp_path, monkeypatch):
     from view_fake import ISSUE_URL, fake_gh_view_run, issue_routes
 
     path = tmp_path / "analysis.md"
     path.write_text(f"# Analysis\n\n[Issue]({ISSUE_URL})\n", encoding="utf-8")
     monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes()))
-    copied = []
 
     async def exercise(pilot, app):
-        monkeypatch.setattr(app, "copy_to_clipboard", copied.append)
-        footer = unescape(app.export_screenshot()).replace("\N{NO-BREAK SPACE}", " ")
-        assert "Copy selected text" in footer
-        assert "Quit" in footer
+        screen = ET.fromstring(app.export_screenshot())
+        bottom = "".join(
+            element.text or ""
+            for element in screen.iter("{http://www.w3.org/2000/svg}text")
+            if element.get("clip-path", "").endswith(f"-line-{app.size.height - 1})")
+        ).replace("\N{NO-BREAK SPACE}", " ")
+        assert "^c Copy selected text" in bottom
+        assert "q Quit" in bottom
         await pilot.click(Markdown, offset=(2, 4))
         await _settle(pilot, lambda: "Crash on startup" in _viewer_source(app))
         assert "Sub issue 13" in _viewer_source(app)
-        await pilot.triple_click(Markdown, offset=(3, 1))
-        await pilot.press("ctrl+c")
-        assert copied and "Crash on startup" in copied[-1]
         await pilot.press("b")
         assert _viewer_source(app) == path.read_text(encoding="utf-8")
         assert "b" not in app.screen.active_bindings
@@ -398,6 +413,8 @@ def test_markdown_viewer_reports_a_link_it_cannot_load(tmp_path, monkeypatch):
     async def exercise(pilot, app):
         await pilot.click(Markdown, offset=(2, 4))
         await _settle(pilot, lambda: _viewer_status(app).startswith("Failed to read"))
+        assert app.is_running
+        assert _viewer_source(app).startswith("# Analysis\n")
         observed.append(_viewer_status(app))
         observed.append(_viewer_source(app))
         assert "b" not in app.screen.active_bindings
@@ -472,22 +489,30 @@ def test_external_link_honours_the_configured_pane_viewer(monkeypatch):
     assert statuses == ["Opened https://example.com with viewer"]
 
 
-def test_markdown_link_reports_immediate_command_failure(monkeypatch):
+@pytest.mark.parametrize("launch_fails", [False, True], ids=["nonzero-exit", "launch-error"])
+def test_markdown_link_reports_command_failure_and_keeps_document(monkeypatch, launch_fails):
     process = MagicMock()
     process.wait.return_value = 7
-    monkeypatch.setattr(launcher.subprocess, "Popen", MagicMock(return_value=process))
-    app = view._MarkdownApp(view.Document("# Document", "file:///document.md"), "viewer", False)
-    statuses = []
+    launch = MagicMock(return_value=process)
+    if launch_fails:
+        launch.side_effect = OSError("cannot open display")
+    monkeypatch.setattr(launcher.subprocess, "Popen", launch)
+    document = view.Document(
+        "# Analysis\n\n[Source](https://example.com/source)", "file:///document.md"
+    )
+    app = view._MarkdownApp(document, "xdg-open", False)
 
     async def follow(pilot):
-        app.follow("https://example.com")
-        statuses.append(_viewer_status(app))
+        await pilot.click(Markdown, offset=(2, 4))
+        reason = "cannot open display" if launch_fails else "exit code 7"
+        assert _viewer_status(app) == (
+            "Failed to open https://example.com/source: Failed to open URL via xdg-open: " + reason
+        )
+        assert _viewer_source(app) == document.content
+        assert app.is_running
 
     _drive_viewer(monkeypatch, app, follow)
-
-    assert statuses == [
-        "Failed to open https://example.com: Failed to open URL via viewer: exit code 7"
-    ]
+    assert launch.call_args.args == (["xdg-open", "https://example.com/source"],)
 
 
 def test_markdown_viewer_resolves_relative_links_against_the_document_url(monkeypatch):

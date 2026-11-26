@@ -8,12 +8,14 @@ import shutil
 import tarfile
 import urllib.request
 import zipfile
+from functools import partial
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, call
 
 import pytest
 
+from workdash import launcher, workdash
 from workdash.config import (
     AgentConfig,
     WorkdashAgentChoice,
@@ -302,6 +304,19 @@ def test_require_valid_accepts_partial_agent_config():
         WorkdashAgentChoice("1", "codex", "Analyze with codex", "codex")
     ]
     assert config.tui_code_choices() == []
+
+
+def test_agents_without_a_command_are_omitted_from_that_capability():
+    config = WorkdashConfig(
+        agents={
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+            "claude": AgentConfig(launch="claude"),
+            "pi": AgentConfig(analyze="pi -p"),
+        },
+    )
+
+    assert config.configured_analyze_agents() == ["codex", "pi"]
+    assert config.configured_code_agents() == ["codex", "claude"]
 
 
 def test_agents_are_offered_by_name_in_configuration_order():
@@ -600,7 +615,7 @@ def test_configure_fresh_adds_detected_agents_in_order_and_asks_username(tmp_pat
     config_path = tmp_path / "config.json"
     # open command, viewer terminal, no more analyze agents, no more code agents,
     # username, workdir, todo default
-    input_fn, _ = _scripted_input("", "", "", "", "octocat", "~/projects", "")
+    input_fn, prompts = _scripted_input("", "", "", "", "octocat", "~/projects", "")
 
     config = configure(
         config_path,
@@ -609,6 +624,14 @@ def test_configure_fresh_adds_detected_agents_in_order_and_asks_username(tmp_pat
     )
 
     assert config.open_command == "xdg-open"
+    assert config.open_needs_pane is False
+    assert "Enter to accept" in prompts[0]
+    assert config.analysis_viewer == {
+        "command": "workdash view",
+        "format": "markdown",
+        "needs_pane": True,
+    }
+    assert config.todo_repository == "octocat/todos"
     assert config.github_username == "octocat"
     assert list(config.agents.items()) == [
         ("claude", AgentConfig(analyze="claude -p", launch="claude")),
@@ -626,7 +649,8 @@ def test_configure_fresh_adds_detected_agents_in_order_and_asks_username(tmp_pat
     assert "Detected 'claude' on PATH" in output
     assert "Detected 'codex' on PATH" in output
     assert "Detected 'pi' on PATH, using analyze: pi -p" in output
-    assert "octocat/*" in output
+    assert "Repositories set to: octocat/*" in output
+    assert "Detected 'zellij' on PATH: /usr/bin/zellij" in output
     assert json.loads(config_path.read_text())["listens"] == []
     assert "listens" in output and "10.0.0.50@10.0.0.213" in output
 
@@ -757,7 +781,9 @@ def test_configure_repairs_viewer_executable_and_preserves_other_settings(
     assert sum("Does the viewer" in prompt for prompt in prompts) == (
         0 if isinstance(pane_choice, bool) else 2
     )
-    assert "executable exists" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "executable exists" in output
+    assert "advanced viewer commands" in output
 
 
 def test_configure_adds_custom_agents_that_the_users_shell_can_run(
@@ -767,7 +793,7 @@ def test_configure_adds_custom_agents_that_the_users_shell_can_run(
     input_fn, prompts = _scripted_input(
         "term-copy",  # open command
         "y",  # viewer terminal
-        "not-installed -p",  # analyze command no program matches: asked again
+        "aidre --yes",  # analyze command no program matches: asked again
         "my-agent 'broken",  # not a valid command line: asked again
         "FOO=1",  # only an environment assignment, no program: asked again
         "FOO=1 my-agent -p",  # analyze command, run with an environment variable
@@ -795,7 +821,7 @@ def test_configure_adds_custom_agents_that_the_users_shell_can_run(
     ]
     assert load_config(config_path).agents == config.agents
     output = capsys.readouterr().out
-    assert "`not-installed` was not found" in output
+    assert "`aidre` was not found" in output
     assert "`FOO=1` was not found" in output
     assert "Invalid command: No closing quotation" in output
     assert sum(prompt.startswith("Agents for analyze") for prompt in prompts) == 5
@@ -897,26 +923,34 @@ def test_configure_requires_an_agent_before_saving(tmp_path, capsys, shell_with_
         "",
     )
 
-    config = configure(
-        config_path, input_fn=input_fn, which_fn=_on_path("zellij", "gh", "xdg-open")
-    )
+    def reply(prompt):
+        if prompt.startswith(("Agents for", "Agent name")):
+            assert not config_path.exists()
+        return input_fn(prompt)
 
-    assert "At least one agent is required" in capsys.readouterr().out
+    configure(config_path, input_fn=reply, which_fn=_on_path("zellij", "gh", "xdg-open"))
+
+    output = capsys.readouterr().out
+    assert output.index(
+        "No supported agent found on PATH (looked for claude, codex, pi)"
+    ) < output.index("At least one agent is required")
     assert sum(prompt.startswith("Agents for analyze") for prompt in prompts) == 3
-    assert config.agents == {"mine": AgentConfig(analyze="my-agent -p")}
+    assert load_config(config_path).agents == {"mine": AgentConfig(analyze="my-agent -p")}
 
 
+@pytest.mark.parametrize("detected", [(), ("claude", "codex", "pi")], ids=["manual", "detected"])
 def test_configure_counts_detected_agents_toward_the_section_limits(
-    tmp_path, capsys, shell_with_programs
+    tmp_path, capsys, shell_with_programs, detected
 ):
     config_path = tmp_path / "config.json"
-    analyze_agents = [("my-agent -p", f"analyze-{number}") for number in range(6)]
-    code_agents = [("my-agent", f"code-{number}") for number in range(6)]
+    remaining = 9 - len(detected)
+    analyze_agents = [("my-agent -p", f"analyze-{number}") for number in range(remaining)]
+    code_agents = [("my-agent", f"code-{number}") for number in range(remaining)]
     input_fn, prompts = _scripted_input(
         "",  # open command
         "",  # viewer terminal
-        *[answer for pair in analyze_agents for answer in pair],  # 3 detected + 6 = 9, full
-        *[answer for pair in code_agents for answer in pair],  # 3 detected + 6 = 9, full
+        *[answer for pair in analyze_agents for answer in pair],
+        *[answer for pair in code_agents for answer in pair],
         "octocat",
         "",
         "",
@@ -925,11 +959,11 @@ def test_configure_counts_detected_agents_toward_the_section_limits(
     config = configure(
         config_path,
         input_fn=input_fn,
-        which_fn=_on_path("zellij", "gh", "xdg-open", "claude", "codex", "pi"),
+        which_fn=_on_path("zellij", "gh", "xdg-open", *detected),
     )
 
-    assert sum(prompt.startswith("Agents for analyze") for prompt in prompts) == 6
-    assert sum(prompt.startswith("Agents for code") for prompt in prompts) == 6
+    assert sum(prompt.startswith("Agents for analyze") for prompt in prompts) == remaining
+    assert sum(prompt.startswith("Agents for code") for prompt in prompts) == remaining
     assert sum(1 for agent in config.agents.values() if agent.analyze) == 9
     assert sum(1 for agent in config.agents.values() if agent.launch) == 9
     assert capsys.readouterr().out.count("section is full") == 2
@@ -978,7 +1012,7 @@ def test_configure_asks_about_agents_when_the_only_entry_has_no_commands(tmp_pat
         "a" * 35 + "_octo",
     ],
 )
-def test_configure_reprompts_for_invalid_github_username(tmp_path, invalid_username):
+def test_configure_reprompts_for_invalid_github_username(tmp_path, capsys, invalid_username):
     config_path = tmp_path / "config.json"
     # Viewer defaults, both agent sections ended, username retry, workdir and todo defaults.
     input_fn, prompts = _scripted_input("", "", "", "", invalid_username, "Octo-Cat", "", "")
@@ -993,6 +1027,10 @@ def test_configure_reprompts_for_invalid_github_username(tmp_path, invalid_usern
     assert config.repositories == ("octo-cat/*",)
     assert config.workdir == "~/wrk"
     assert sum("GitHub username" in prompt for prompt in prompts) == 2
+    if invalid_username:
+        assert "Enter a GitHub username of 1–39 characters" in capsys.readouterr().out
+    else:
+        assert "GitHub username is required" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -1046,51 +1084,50 @@ def test_configure_fills_only_missing_fields(tmp_path, stored_username, selector
 
 
 @pytest.mark.parametrize(
-    "removed",
+    "previous_viewer",
     [
-        "workdash mdview",
+        None,
         "workdash markdownview",
         "/home/u/.local/bin/workdash mdview",
         "workdash  mdview",
         "workdash mdview --extra",
     ],
 )
-def test_configure_repairs_the_removed_markdown_viewer(tmp_path, removed):
-    """The single view command replaces the removed Markdown-only viewer."""
-
+def test_configure_restores_the_analysis_viewer_without_changing_other_settings(
+    tmp_path, previous_viewer
+):
     config_path = tmp_path / "config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "github_username": "existing-user",
-                "open": "existing-open",
-                "open_needs_pane": False,
-                "analysis_viewer": {
-                    "command": removed,
-                    "format": "markdown",
-                    "needs_pane": True,
-                },
-                "agents": {"claude": {"analyze": "claude -p", "launch": "claude"}},
-                "repositories": ["existing-user/*"],
-                "workdir": "~/src",
-                "todo_repository": "existing-user/todos",
-            }
-        ),
-        encoding="utf-8",
-    )
+    settings = {
+        "github_username": "existing-user",
+        "open": "existing-open",
+        "open_needs_pane": False,
+        "agents": {"claude": {"analyze": "claude -p", "launch": "claude"}},
+        "repositories": ["existing-user/*"],
+        "excluded_repositories": ["existing-user/old"],
+        "workdir": "~/src",
+        "todo_repository": "existing-user/todos",
+        "listens": [],
+    }
+    existing = settings.copy()
+    if previous_viewer:
+        existing["analysis_viewer"] = {
+            "command": previous_viewer,
+            "format": "markdown",
+            "needs_pane": True,
+        }
+    config_path.write_text(json.dumps(existing), encoding="utf-8")
 
     prompts: list[str] = []
-    config = configure(
+    configure(
         config_path,
         input_fn=lambda prompt: prompts.append(prompt) or "",
         which_fn=_on_path("zellij", "gh", "existing-open", "claude"),
     )
 
     assert prompts == ["Analysis viewer [workdash view]: "]
-    assert config.analysis_viewer == {
-        "command": "workdash view",
-        "format": "markdown",
-        "needs_pane": True,
+    assert json.loads(config_path.read_text()) == {
+        **settings,
+        "analysis_viewer": {"command": "workdash view", "format": "markdown", "needs_pane": True},
     }
 
 
@@ -1356,7 +1393,11 @@ def test_configure_tells_where_to_edit_agents_even_when_agents_are_configured(tm
                     "needs_pane": True,
                 },
                 "open_needs_pane": False,
-                "agents": {"claude": {"analyze": "claude -p", "launch": "claude"}},
+                "agents": {
+                    "pi": {"analyze": "pi -p", "launch": "pi"},
+                    "aider": {"analyze": "aider --yes"},
+                    "claude": {"launch": "claude"},
+                },
                 "repositories": ["specific/repo"],
                 "workdir": "~/src",
                 "todo_repository": "octocat/todos",
@@ -1365,15 +1406,22 @@ def test_configure_tells_where_to_edit_agents_even_when_agents_are_configured(tm
         encoding="utf-8",
     )
 
+    before = load_config(config_path)
     configure(
         config_path,
         input_fn=lambda prompt: (_ for _ in ()).throw(AssertionError("should not prompt")),
-        which_fn=_on_path("zellij", "gh", "xdg-open"),
+        which_fn=_on_path("zellij", "gh", "xdg-open", "codex"),
     )
 
-    assert (
-        f"To add or edit agents later, edit 'agents' in {config_path}." in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert f"To add or edit agents later, edit 'agents' in {config_path}." in output
+    assert "Agents for" not in output
+    assert list(load_config(config_path).agents.items()) == list(before.agents.items())
+    hint = (
+        'Hide repositories from the dashboard by adding "owner/repo" or "owner/*" '
+        f'entries to "excluded_repositories" in {config_path}.'
     )
+    assert output.index(f"Configuration saved to {config_path}") < output.index(hint)
 
 
 def test_configure_installs_zellij_when_not_on_path(tmp_path, capsys):
@@ -1840,3 +1888,142 @@ def test_listeners_survive_config_round_trip(tmp_path):
     assert config.listens == ("10.0.0.50@10.0.0.0/24",)
     save_config(config, path)
     assert json.loads(path.read_text())["listens"] == ["10.0.0.50@10.0.0.0/24"]
+
+
+def test_configure_explains_agent_sections_before_prompting(tmp_path, capsys):
+    input_fn, prompts = _scripted_input("", "", "", "", "octocat", "", "")
+
+    def reply(prompt):
+        print(prompt)
+        return input_fn(prompt)
+
+    path = tmp_path / "config.json"
+    configure(path, input_fn=reply, which_fn=_on_path("zellij", "gh", "xdg-open", "claude", "pi"))
+
+    output = capsys.readouterr().out
+    analyze = output.index("Agents for analyze (at most 9)")
+    code = output.index("Agents for code (at most 9)")
+    assert output.index("task prompt appended as its last argument") < analyze < code
+    for title, purpose, section in (
+        ("Agents for analyze", "print the analysis", output[analyze:code]),
+        ("Agents for code", "interactive coding session", output[code:]),
+    ):
+        assert purpose in section.splitlines()[0] and "e.g." in section.splitlines()[0]
+        assert "  claude:" in section and "  pi:" in section
+        assert sum(prompt.startswith(title) for prompt in prompts) == 1
+    assert output.index(f"edit 'agents' in {path}") < output.index("GitHub username:")
+
+
+def test_automatic_setup_retries_invalid_github_username(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "config.json"
+    input_fn, prompts = _scripted_input("", "", "", "", "@octocat", "Octo-Cat", "", "")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(launcher, "_WORKDASH_LOCAL_BIN", tmp_path / "bin")
+    monkeypatch.setattr(workdash, "CONFIG_PATH", path)
+    monkeypatch.setattr(
+        workdash,
+        "configure",
+        partial(
+            configure,
+            path,
+            input_fn=input_fn,
+            which_fn=_on_path("zellij", "gh", "xdg-open", "claude"),
+        ),
+    )
+    assert workdash.main([]) == 0
+
+    saved = load_config(path).require_valid()
+    assert saved.github_username == "Octo-Cat"
+    assert saved.repositories == ("octo-cat/*",)
+    assert saved.workdir == "~/wrk"
+    assert prompts.count("GitHub username: ") == 2
+    output = capsys.readouterr().out
+    assert "Enter a GitHub username of 1–39 characters" in output
+    assert "Repositories set to: octo-cat/*" in output
+
+
+@pytest.mark.parametrize(
+    ("username", "selector", "argv"),
+    [
+        ("Octocat", "octocat/*", ["--configure"]),
+        ("Amol-", "amol-/*", []),
+        ("john--doe", "john--doe/*", ["--configure"]),
+    ],
+)
+def test_configure_preserves_login_spelling_and_announces_default_selector(
+    tmp_path, monkeypatch, capsys, username, selector, argv
+):
+    path = tmp_path / "config.json"
+    input_fn, prompts = _scripted_input("", "", "", "", username, "", "")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(launcher, "_WORKDASH_LOCAL_BIN", tmp_path / "bin")
+    monkeypatch.setattr(workdash, "CONFIG_PATH", path)
+    monkeypatch.setattr(
+        workdash,
+        "configure",
+        partial(
+            configure,
+            path,
+            input_fn=input_fn,
+            which_fn=_on_path("zellij", "gh", "xdg-open", "claude"),
+        ),
+    )
+    assert workdash.main(argv) == 0
+
+    saved = load_config(path).require_valid()
+    assert saved.github_username == username
+    assert saved.repositories == (selector,)
+    assert saved.todo_repository == f"{username}/todos"
+    assert f"Todo repository [{username}/todos]: " in prompts
+    assert f"Repositories set to: {selector}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("username", "selector", "argv"),
+    [("mona-cat_octo", "octo-org/*", []), ("Mona-Cat_Octo", "octo-org/projects", ["--configure"])],
+)
+def test_configure_retries_both_repository_answers_for_managed_login(
+    tmp_path, monkeypatch, capsys, username, selector, argv
+):
+    path = tmp_path / "config.json"
+    input_fn, prompts = _scripted_input(
+        "",
+        "",
+        "",
+        "",
+        username,
+        "",
+        "",
+        "mona-cat_octo/*",
+        selector,
+        "",
+        "octo-org/*",
+        "octo-org/tasks",
+    )
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(launcher, "_WORKDASH_LOCAL_BIN", tmp_path / "bin")
+    monkeypatch.setattr(workdash, "CONFIG_PATH", path)
+    monkeypatch.setattr(
+        workdash,
+        "configure",
+        partial(
+            configure,
+            path,
+            input_fn=input_fn,
+            which_fn=_on_path("zellij", "gh", "xdg-open", "claude"),
+        ),
+    )
+    assert workdash.main(argv) == 0
+
+    saved = load_config(path).require_valid()
+    assert saved.github_username == username
+    assert saved.repositories == (selector,)
+    assert saved.todo_repository == "octo-org/tasks"
+    assert prompts.count("GitHub username: ") == 1
+    assert prompts.count("Repository selector (owner/repo or owner/*): ") == 3
+    assert [prompt for prompt in prompts if prompt.startswith("Todo repository")] == [
+        "Todo repository (owner/repo required): "
+    ] * 3
+    output = capsys.readouterr().out
+    assert "Enter a repository selector in owner/repo or owner/* form." in output
+    assert "Enter a todo repository in owner/repo form." in output

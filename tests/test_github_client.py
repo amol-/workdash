@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from gh_work_state_fake import install_fake_github
+from gh_work_state_fake import install_fake_github, todo_body
 from workdash.github_client import (
     GitHubClient,
     ParsedGitHubItemURL,
@@ -1672,7 +1672,17 @@ def test_fetch_item_by_url_classifies_errors_and_states(
         assert GitHubClient().fetch_item_by_url(parsed, "testuser") is None
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        None,
+        "owner/repo",
+        "https://gitlab.com/owner/repo.git",
+        "https://codeberg.org/owner/repo.git",
+    ],
+)
 def test_list_open_todo_issues_reads_targets_from_issue_body_metadata(
+    target: str | None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -1685,7 +1695,7 @@ def test_list_open_todo_issues_reads_targets_from_issue_body_metadata(
             "url": "https://github.com/testuser/todos/issues/110",
             "createdAt": "2026-02-01T00:00:00Z",
             "updatedAt": "2026-02-02T00:00:00Z",
-            "body": '```json\n{"workdash_todo_version": 1, "target": "owner/repo"}\n```\n',
+            "body": todo_body(target),
         },
         {
             "subIssuesSummary": {"total": 0},
@@ -1713,12 +1723,14 @@ def test_list_open_todo_issues_reads_targets_from_issue_body_metadata(
 
     assert captured["command"][:3] == ["gh", "api", "graphql"]
     query = captured["command"][-1]
+    assert 'owner: "testuser"' in query
+    assert 'name: "todos"' in query
     assert 'labels: ["workdash-todo"]' in query
     assert "states: OPEN" in query
     assert "field: CREATED_AT, direction: DESC" in query
     assert "subIssuesSummary { total } body" in query
     assert [(issue["repo"], issue["number"], issue["target"]) for issue in result] == [
-        ("testuser/todos", 110, "owner/repo"),
+        ("testuser/todos", 110, target),
         ("testuser/todos", 111, None),
     ]
 

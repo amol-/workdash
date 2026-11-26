@@ -10,9 +10,9 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from importlib.metadata import version
 from pathlib import Path
-from threading import Event, Thread
+from threading import Barrier, Event, Thread
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 from webob import Request
@@ -23,14 +23,19 @@ import workdash.repo_worktree as repo_worktree
 from gh_todo_fake import fake_gh_todo_run
 from gh_work_state_fake import (
     AFTER_PUSH,
+    BEFORE_PUSH,
     HEAD_SHA,
+    OLD_HEAD_SHA,
     check_run,
     comment,
     failure,
     install_fake_github,
+    review,
     thread,
     todo_body,
 )
+from pane_launch_fake import install_pane_launch
+from workdash.analysis_cache import AnalysisCache
 from workdash.backend import IncludeResult, WorkdashBackend
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import (
@@ -39,9 +44,12 @@ from workdash.control import (
     format_work_item_id,
     probe_dashboard_session,
 )
+from workdash.git import GitHelper
 from workdash.github_client import GitHubClient
+from workdash.included_items import IncludedItemsStore
 from workdash.models import WorkItem, WorkItemKind, WorkItemType, accepted_worktree_numbers
 from workdash.work_instruction import render_work_instruction
+from zellij_pane_launch import mark_pane_started, pane_launch
 
 
 def _work_item(
@@ -62,35 +70,105 @@ def _work_item(
     )
 
 
-def test_session_refresh_schedules_tui_repaint_through_callback() -> None:
-    initial_item = _work_item(number=1, title="Initial")
+def test_list_api_reads_cached_items_and_refreshes_shared_state(monkeypatch) -> None:
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:8765")
+    initial_item = replace(_work_item(number=1, title="Initial"), analysis="Cached analysis")
     refreshed_item = _work_item(number=2, title="Refreshed", item_type=WorkItemType.PR)
+    authored_pr = replace(
+        _work_item(number=3, title="Authored PR", item_type=WorkItemType.PR),
+        kind=WorkItemKind.AUTHORED_PR,
+    )
+    review_pr = replace(
+        _work_item(number=4, title="Requested review", item_type=WorkItemType.PR),
+        kind=WorkItemKind.REVIEW_REQUESTED_PR,
+    )
     marker = {(WorkItemType.PR, "owner/repo", 2): "*"}
+    backend = MagicMock()
+    backend.load_items.return_value = [refreshed_item], marker
     repainted_item_ids: list[list[str]] = []
-
-    class FakeBackend:
-        def load_items(self, progress_callback=None):
-            assert progress_callback is None
-            return [refreshed_item], marker
-
     session = WorkdashSession(
         config=WorkdashConfig(),
-        backend=FakeBackend(),  # type: ignore[arg-type]
-        work_items=[initial_item],
+        backend=backend,
+        work_items=[initial_item, authored_pr, review_pr],
         suggestion_markers={},
         zellij_session=None,
         items_changed_callback=lambda: repainted_item_ids.append(
             [format_work_item_id(item) for item in session.work_items]
         ),
     )
+    app = control_module._make_turbogears_app(session)
 
-    result = session.list_items(refresh=True)
+    def list_items(*, refresh: bool):
+        response = Request.blank(
+            "/api/v0/list",
+            method="POST",
+            content_type="application/json",
+            body=json.dumps({"refresh": refresh}).encode(),
+        ).get_response(app)
+        assert response.status_int == 200
+        return response.json["result"]["items"]
 
-    assert [item["id"] for item in result["items"]] == ["owner/repo#CHECK-2"]
-    assert [item["display_type"] for item in result["items"]] == ["CHECK"]
-    assert [format_work_item_id(item) for item in session.work_items] == ["owner/repo#CHECK-2"]
+    assert list_items(refresh=False) == [
+        {
+            "id": "owner/repo#REVIEW-4",
+            "type": "pr",
+            "display_type": "REVIEW",
+            "kind": "review_requested_pr",
+            "repo": "owner/repo",
+            "number": 4,
+            "title": "Requested review",
+            "url": "https://example.com/4",
+            "created_at": "2026-02-04T00:00:00+00:00",
+            "updated_at": "2026-02-04T00:00:00+00:00",
+            "suggested": False,
+            "analysis_available": False,
+            "analysis_url": None,
+        },
+        {
+            "id": "owner/repo#PR-3",
+            "type": "pr",
+            "display_type": "PR",
+            "kind": "authored_pr",
+            "repo": "owner/repo",
+            "number": 3,
+            "title": "Authored PR",
+            "url": "https://example.com/3",
+            "created_at": "2026-02-03T00:00:00+00:00",
+            "updated_at": "2026-02-03T00:00:00+00:00",
+            "suggested": False,
+            "analysis_available": False,
+            "analysis_url": None,
+        },
+        {
+            "id": "owner/repo#ISSUE-1",
+            "type": "issue",
+            "display_type": "ISSUE",
+            "kind": "tracked_issue",
+            "repo": "owner/repo",
+            "number": 1,
+            "title": "Initial",
+            "url": "https://example.com/1",
+            "created_at": "2026-02-01T00:00:00+00:00",
+            "updated_at": "2026-02-01T00:00:00+00:00",
+            "suggested": False,
+            "analysis_available": True,
+            "analysis_url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
+        },
+    ]
+    backend.load_items.assert_not_called()
+    assert repainted_item_ids == []
+
+    result = list_items(refresh=True)
+
+    assert [(item["id"], item["display_type"], item["suggested"]) for item in result] == [
+        ("owner/repo#CHECK-2", "CHECK", True)
+    ]
+    assert result[0]["analysis_available"] is False
+    assert result[0]["analysis_url"] is None
     assert session.suggestion_markers == marker
     assert repainted_item_ids == [["owner/repo#CHECK-2"]]
+    assert list_items(refresh=False) == result
+    backend.load_items.assert_called_once()
 
 
 def test_autodispatch_refresh_updates_issue_and_linked_pr() -> None:
@@ -517,19 +595,68 @@ def test_todo_notifies_the_live_tui_after_capturing(body, monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("body_fields", "expected_status"),
+    ("text", "target", "message"),
     [
-        ({}, 200),
-        ({"body": None}, 200),
-        ({"body": "  Details\n\n  "}, 200),
-        ({"body": ""}, 400),
-        ({"body": 123}, 400),
-        ({"body": ["details"]}, 400),
+        ("   ", None, "The todo text is required."),
+        ("Fix the flaky test", "not-a-repo", "must be a GitHub owner/repo or a supported git URL"),
     ],
 )
-def test_todo_api_validates_optional_body_without_reformatting(
-    body_fields, expected_status, monkeypatch
-) -> None:
+def test_todo_session_rejects_invalid_input_before_contacting_github(text, target, message):
+    github = MagicMock(spec=GitHubClient)
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="testuser/todos"),
+        backend=MagicMock(github_client=github),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    with pytest.raises(WorkdashControlError, match=message):
+        session.todo(text=text, target=target)
+
+    assert github.mock_calls == []
+    assert session.work_items == []
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected_status", "message"),
+    [
+        ({}, 200, None),
+        ({"body": None}, 200, None),
+        ({"body": "  Details\n\n  "}, 200, None),
+        ({"body": ""}, 400, "Optional field 'body' must be a non-empty string."),
+        ({"body": 123}, 400, "Optional field 'body' must be a non-empty string."),
+        ({"body": ["details"]}, 400, "Optional field 'body' must be a non-empty string."),
+        pytest.param({"target": "owner/repo"}, 200, None, id="github-target"),
+        pytest.param(
+            {"target": "https://gitlab.com/owner/repo.git"}, 200, None, id="gitlab-target"
+        ),
+        pytest.param(
+            {"target": "https://codeberg.org/owner/repo.git"}, 200, None, id="codeberg-target"
+        ),
+        pytest.param(
+            {
+                "target": "owner/repo",
+                "body": (
+                    "  Detailed context\n\n" * 16
+                    + '```json\n{"workdash_todo_version": 1, "target": "wrong/repository"}\n```\n  '
+                ),
+            },
+            200,
+            None,
+            id="long-details",
+        ),
+        pytest.param(
+            {"target": "not-a-repo"},
+            400,
+            "must be a GitHub owner/repo or a supported git URL",
+            id="invalid-target",
+        ),
+    ],
+)
+def test_todo_api_validates_input_and_captures_the_issue(
+    fields, expected_status, message, monkeypatch
+):
     recorded: list[list[str]] = []
     monkeypatch.setattr(subprocess, "run", fake_gh_todo_run(recorded))
     session = WorkdashSession(
@@ -543,35 +670,133 @@ def test_todo_api_validates_optional_body_without_reformatting(
         "/api/v0/todo",
         method="POST",
         content_type="application/json",
-        body=json.dumps({"text": "Short title", **body_fields}).encode(),
+        body=json.dumps({"text": "Short title", **fields}).encode(),
     )
 
     response = request.get_response(control_module._make_turbogears_app(session))
 
     assert response.status_int == expected_status
-    payload = json.loads(response.text)
+    payload = response.json
     if expected_status == 400:
+        assert payload["ok"] is False
         assert payload["error"]["code"] == "bad_request"
-        assert "Optional field 'body' must be a non-empty string." in payload["error"]["message"]
+        assert message in payload["error"]["message"]
         assert recorded == []
         assert session.work_items == []
-    else:
-        command = recorded[-1]
-        metadata = '```json\n{\n  "workdash_todo_version": 1\n}\n```\n'
-        body = body_fields.get("body")
-        assert command[command.index("--body") + 1] == (
-            metadata if body is None else metadata + "\n" + body
-        )
-        assert payload == {
-            "ok": True,
-            "result": {
-                "item_id": "testuser/todos#ISSUE-110",
-                "todo_repository": "testuser/todos",
-                "target": None,
-                "number": 110,
-                "url": "https://github.com/testuser/todos/issues/110",
-            },
+        return
+
+    command = recorded[-1]
+    assert command[:3] == ["gh", "issue", "create"]
+    assert command[command.index("--repo") + 1] == "testuser/todos"
+    assert command[command.index("--title") + 1] == "Short title"
+    target = fields.get("target")
+    metadata = {"workdash_todo_version": 1}
+    if target is not None:
+        metadata["target"] = target
+    expected_body = f"```json\n{json.dumps(metadata, indent=2)}\n```\n"
+    if fields.get("body") is not None:
+        expected_body += "\n" + fields["body"]
+    assert command[command.index("--body") + 1] == expected_body
+    item_id = "owner/repo#ISSUE-WT110" if target else "testuser/todos#ISSUE-110"
+    assert payload == {
+        "ok": True,
+        "result": {
+            "item_id": item_id,
+            "todo_repository": "testuser/todos",
+            "target": target,
+            "number": 110,
+            "url": "https://github.com/testuser/todos/issues/110",
+        },
+    }
+    [entry] = session.list_items()["items"]
+    assert entry["id"] == item_id
+    assert entry["repo"] == ("owner/repo" if target else "testuser/todos")
+
+
+def test_capture_and_refresh_use_todo_metadata_over_conflicting_body_details(tmp_path, monkeypatch):
+    from gh_todo_fake import TODO_ISSUE_NUMBER, TODO_ISSUE_URL, TODO_REPOSITORY
+
+    config = WorkdashConfig(
+        github_username="testuser", todo_repository=TODO_REPOSITORY, workdir=str(tmp_path)
+    )
+    backend = WorkdashBackend(config=config, cache_root=tmp_path / "cache")
+    github = backend.github_client
+    for method in (
+        "list_open_authored_prs",
+        "list_open_review_requested_prs",
+        "list_open_reviewed_prs",
+        "list_open_assigned_issues",
+        "list_recent_tracked_items",
+    ):
+        monkeypatch.setattr(github, method, lambda *args, **kwargs: [])
+    session = WorkdashSession(
+        config=config,
+        backend=backend,
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    title = "Fix the flaky test"
+    conflicting_metadata = todo_body("wrong/repository")
+    details = f"Research for wrong/repository.\n\n{conflicting_metadata}"
+    commands = []
+    capture = fake_gh_todo_run(commands)
+
+    def run(cmd, **kwargs):
+        if cmd[:3] != ["gh", "api", "graphql"]:
+            return capture(cmd, **kwargs)
+        create = commands[-1]
+        assert create[:3] == ["gh", "issue", "create"]
+        body = create[create.index("--body") + 1]
+        assert conflicting_metadata in body
+        node = {
+            "id": "I110",
+            "number": TODO_ISSUE_NUMBER,
+            "title": title,
+            "url": TODO_ISSUE_URL,
+            "createdAt": "2026-04-01T00:00:00Z",
+            "updatedAt": "2026-04-02T00:00:00Z",
+            "subIssuesSummary": {"total": 0},
+            "body": body,
         }
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=json.dumps(
+                {
+                    "data": {"repository": {"issues": {"nodes": [node]}}},
+                }
+            ),
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+    checkout = str(tmp_path / "owner_repo_todo_110")
+    prepare = MagicMock(return_value=checkout)
+    launch = MagicMock(
+        return_value=SimpleNamespace(
+            session=None, cwd=checkout, pane_title="Todo", pane_id="terminal_23"
+        )
+    )
+    monkeypatch.setattr(control_module, "ensure_worktree", prepare)
+    monkeypatch.setattr(control_module, "launch_terminal_context", launch)
+    result = session.todo(text=title, target="owner/repo", body=details)
+    assert result["item_id"] == "owner/repo#ISSUE-WT110"
+    [captured] = session.work_items
+    assert captured.todo_target == "owner/repo"
+    assert session.terminal(target=result["item_id"])["cwd"] == checkout
+    assert prepare.call_args.args[1] is captured
+
+    [entry] = session.list_items(refresh=True)["items"]
+
+    [refreshed] = session.work_items
+    assert refreshed is not captured
+    assert (entry["repo"], entry["id"], refreshed.todo_target) == (
+        "owner/repo",
+        "owner/repo#ISSUE-WT110",
+        "owner/repo",
+    )
+    assert session.terminal(target=entry["id"])["cwd"] == checkout
+    assert prepare.call_args.args[1] is refreshed
 
 
 def _ready_session(tmp_path, *, repositories: tuple[str, ...] = ()) -> WorkdashSession:
@@ -622,17 +847,436 @@ def test_ready_api_reports_ready_work(monkeypatch, tmp_path) -> None:
     [
         ({}, 400, "bad_request"),
         ({"scope": "https://github.com/owner/repo/pull/5"}, 400, "unsupported_item_type"),
+        ({"scope": "owner/repo#404"}, 404, "unknown_item"),
+        ({"scope": "owner/repo#PR-51"}, 400, "unsupported_item_type"),
+        ({"scope": "not a scope"}, 400, "invalid_target"),
         ({"scope": "owner/down"}, 502, "github_error"),
     ],
 )
 def test_ready_api_reports_a_scope_error(payload, status, code, monkeypatch, tmp_path) -> None:
     github = install_fake_github(monkeypatch)
-    github.failures["ReadyRepositoryIssues"] = failure("GraphQL: Something went wrong")
+    github.add_issue("owner/repo#1")
+    if code == "github_error":
+        github.failures["ReadyRepositoryIssues"] = failure("GraphQL: Something went wrong")
     monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _session: [])
 
     status_code, body = _post_ready(_ready_session(tmp_path), payload)
 
     assert (status_code, body["error"]["code"]) == (status, code)
+    assert body["ok"] is False
+    if status < 500:
+        assert "ReadyRepositoryIssues" not in github.operations
+
+
+@pytest.fixture
+def ready_session(monkeypatch, tmp_path):
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _session: [])
+    return _ready_session(tmp_path, repositories=("owner/repo", "team/*"))
+
+
+def test_ready_reports_work_outside_the_dashboard_without_side_effects(monkeypatch, ready_session):
+    github = install_fake_github(monkeypatch)
+    for number in (1, 2, 3):
+        github.add_issue(f"owner/repo#{number}", state="CLOSED" if number == 3 else "OPEN")
+    dashboard_item = replace(_work_item(number=9, title="Other work"), repo="elsewhere/dashboard")
+    ready_session.work_items[:] = [dashboard_item]
+    launch = MagicMock()
+    terminal = MagicMock()
+    prepare = MagicMock()
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch)
+    monkeypatch.setattr(control_module, "launch_terminal_context", terminal)
+    monkeypatch.setattr(control_module, "ensure_worktree", prepare)
+
+    items = ready_session.ready(scope="owner/repo")["items"]
+
+    assert [(item["id"], item["action"]) for item in items] == [
+        ("owner/repo#ISSUE-1", "implement"),
+        ("owner/repo#ISSUE-2", "implement"),
+    ]
+    assert all(item["number"] != 3 for item in items)
+    assert ready_session.work_items == [dashboard_item]
+    launch.assert_not_called()
+    terminal.assert_not_called()
+    prepare.assert_not_called()
+
+
+def test_ready_todo_lists_targeted_and_ordinary_todos(monkeypatch, ready_session):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("testuser/todos#7", body=todo_body("owner/other"))
+    github.add_issue("testuser/todos#8", body=todo_body(None))
+
+    assert [
+        (item["id"], item["action"]) for item in ready_session.ready(scope="todo")["items"]
+    ] == [("owner/other#ISSUE-WT7", "implement"), ("testuser/todos#ISSUE-8", "implement")]
+    assert [item["id"] for item in ready_session.ready(scope="owner/other#ISSUE-WT7")["items"]] == [
+        "owner/other#ISSUE-WT7"
+    ]
+
+
+def test_ready_any_expands_selectors_and_lists_linked_targeted_todo_once(
+    monkeypatch, ready_session
+):
+    github = install_fake_github(monkeypatch)
+    github.owners["team"] = ["team/a", "team/b"]
+    ready_session.config = replace(
+        ready_session.config, repositories=("owner/repo", "team/a", "team/*", "testuser/todos")
+    )
+    for repo in ("owner/repo", "team/a", "team/b"):
+        github.add_issue(f"{repo}#1")
+    github.add_issue("testuser/todos#9", body=todo_body("owner/repo"))
+    github.add_pull_request(
+        "owner/repo#30",
+        closes=("testuser/todos#9",),
+        checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+    )
+
+    todo, *other = ready_session.ready(scope="any")["items"]
+
+    assert (todo["id"], todo["action"], todo["pr_id"]) == (
+        "owner/repo#ISSUE-WT9",
+        "fix_ci",
+        "owner/repo#PR-30",
+    )
+    assert [item["id"] for item in other] == [
+        "owner/repo#ISSUE-1",
+        "team/a#ISSUE-1",
+        "team/b#ISSUE-1",
+    ]
+
+
+@pytest.mark.parametrize(
+    "replacement_check, expected_ids",
+    [
+        pytest.param(check_run("tests", None, status="IN_PROGRESS"), [], id="pending"),
+        pytest.param(check_run("tests", "FAILURE"), ["owner/repo#ISSUE-42"], id="failing"),
+    ],
+)
+def test_ready_result_carries_current_head_failure_details(
+    monkeypatch, ready_session, replacement_check, expected_ids
+):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    pr = github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#42",),
+        head=OLD_HEAD_SHA,
+        checks={OLD_HEAD_SHA: [check_run("tests", "FAILURE")]},
+    )
+
+    [item] = ready_session.ready(scope="owner/repo")["items"]
+
+    assert (item["id"], item["action"], item["reasons"]) == (
+        "owner/repo#ISSUE-42",
+        "fix_ci",
+        ["fix_ci"],
+    )
+    assert item["pr_id"] == "owner/repo#PR-51"
+    assert item["issue_url"] == "https://github.com/owner/repo/issues/42"
+    assert (item["ci_status"], item["failing_checks"], item["pr_head_sha"]) == (
+        "failing",
+        ["tests"],
+        OLD_HEAD_SHA,
+    )
+
+    pr.update(head=HEAD_SHA, pushed_at="2026-03-10T00:00:00Z")
+    pr["checks"][HEAD_SHA] = [replacement_check]
+    assert [item["id"] for item in ready_session.ready(scope="owner/repo")["items"]] == expected_ids
+
+
+def test_ready_reports_actionable_feedback_references(monkeypatch, ready_session):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    verdict = review("reviewer", "CHANGES_REQUESTED", created=AFTER_PUSH)
+    inline = comment("another-reviewer", created=AFTER_PUSH)
+    github.add_pull_request(
+        "owner/repo#51", closes=("owner/repo#42",), reviews=[verdict], threads=[thread(inline)]
+    )
+
+    [item] = ready_session.ready(scope="owner/repo")["items"]
+
+    assert (item["id"], item["pr_id"]) == ("owner/repo#ISSUE-42", "owner/repo#PR-51")
+    assert (item["action"], item["reasons"]) == ("address_review", ["address_review"])
+    assert sorted((ref["kind"], ref["author"], ref["url"]) for ref in item["feedback"]) == [
+        ("changes_requested", "reviewer", verdict["url"]),
+        ("review_thread", "another-reviewer", inline["url"]),
+    ]
+
+
+def test_ready_lists_one_issue_with_all_reasons_in_priority_order(monkeypatch, ready_session):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#42",),
+        checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+        mergeable="CONFLICTING",
+        threads=[thread(comment("reviewer", created=AFTER_PUSH))],
+    )
+
+    status, body = _post_ready(ready_session, {"scope": "owner/repo"})
+
+    assert status == 200
+    [item] = body["result"]["items"]
+    assert (item["id"], item["action"], item["reasons"]) == (
+        "owner/repo#ISSUE-42",
+        "address_review",
+        ["address_review", "fix_merge_conflicts", "fix_ci"],
+    )
+
+
+def test_ready_respects_a_rerequested_review_but_keeps_unresolved_threads(
+    monkeypatch, ready_session
+):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    pr = github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#42",),
+        reviews=[
+            review(
+                "reviewer",
+                "CHANGES_REQUESTED",
+                created=BEFORE_PUSH,
+                commit=OLD_HEAD_SHA,
+                body="Please rework this.",
+            )
+        ],
+    )
+    expected = [("owner/repo#ISSUE-42", "address_review", ["address_review"])]
+
+    assert [
+        (i["id"], i["action"], i["reasons"])
+        for i in ready_session.ready(scope="owner/repo")["items"]
+    ] == expected
+    pr["review_requests"].append("reviewer")
+    assert ready_session.ready(scope="owner/repo")["items"] == []
+    pr["threads"].append(thread(comment("reviewer", created=AFTER_PUSH)))
+    assert [
+        (i["id"], i["action"], i["reasons"])
+        for i in ready_session.ready(scope="owner/repo")["items"]
+    ] == expected
+
+
+def test_ready_reports_conflicts_against_the_current_base(monkeypatch, ready_session):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    pr = github.add_pull_request("owner/repo#51", closes=("owner/repo#42",), base_sha="base1")
+
+    assert ready_session.ready(scope="owner/repo")["items"] == []
+
+    pr.update(base_sha="base2", mergeable="CONFLICTING")
+    [item] = ready_session.ready(scope="owner/repo")["items"]
+
+    assert (item["id"], item["action"], item["mergeability"]) == (
+        "owner/repo#ISSUE-42",
+        "fix_merge_conflicts",
+        "conflicting",
+    )
+    assert (item["base_ref"], item["base_head_sha"], item["pr_head_sha"]) == (
+        "main",
+        "base2",
+        HEAD_SHA,
+    )
+
+
+@pytest.mark.parametrize(
+    "required, ci_status",
+    [
+        pytest.param([], "no_checks", id="no-checks-required"),
+        pytest.param(["build"], "unknown", id="absent-required-check"),
+        pytest.param("unreadable", "unknown", id="unreadable-ruleset"),
+    ],
+)
+def test_ready_projects_ci_status_when_review_needs_work(
+    monkeypatch, ready_session, required, ci_status
+):
+    github = install_fake_github(monkeypatch)
+    github.ruleset_checks["owner/repo", "main"] = required
+    github.add_issue("owner/repo#42")
+    github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#42",),
+        checks={},
+        threads=[thread(comment("reviewer", created=AFTER_PUSH))],
+    )
+
+    status, body = _post_ready(ready_session, {"scope": "owner/repo"})
+
+    assert status == 200
+    [item] = body["result"]["items"]
+    assert (item["id"], item["action"]) == ("owner/repo#ISSUE-42", "address_review")
+    assert (item["ci_status"], item["failing_checks"]) == (ci_status, [])
+
+
+def test_ready_ignores_terminal_panes_but_filters_agent_claims(
+    monkeypatch, ready_session, tmp_path
+):
+    github = install_fake_github(monkeypatch)
+    for number in (42, 43, 44):
+        github.add_issue(f"owner/repo#{number}")
+    for number, links in [(51, ("owner/repo#42",)), (52, ())]:
+        github.add_pull_request(
+            f"owner/repo#{number}",
+            closes=links,
+            author="someone-else",
+            checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+        )
+    ready_session.git = MagicMock()
+    ready_session.git.worktree_proves_item.return_value = True
+    panes = []
+    for number, kind in [(42, "code"), (43, "terminal"), (44, "code"), (52, "code")]:
+        worktree = tmp_path / f"owner_repo_{number}"
+        worktree.mkdir()
+        panes.append({"id": number, "title": f"{kind}_{worktree.name}", "pane_cwd": str(worktree)})
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _session: panes)
+
+    assert [item["id"] for item in ready_session.ready(scope="owner/repo")["items"]] == [
+        "owner/repo#ISSUE-43"
+    ]
+
+
+@pytest.mark.parametrize(
+    "state, blocker, check, action",
+    [
+        pytest.param("OPEN", None, None, "implement", id="open-no-pr"),
+        pytest.param("CLOSED", None, None, None, id="closed-no-pr"),
+        pytest.param("OPEN", "owner/blockers#1", None, None, id="open-blocker"),
+        pytest.param("OPEN", None, check_run("tests", "FAILURE"), "fix_ci", id="open-failing-ci"),
+        pytest.param(
+            "OPEN", None, check_run("tests", None, status="IN_PROGRESS"), None, id="open-pending-ci"
+        ),
+        pytest.param("CLOSED", None, check_run("tests", "FAILURE"), None, id="closed-failing-ci"),
+    ],
+)
+def test_ready_exact_leaf_scope_does_not_fall_back_to_the_repository(
+    monkeypatch, ready_session, state, blocker, check, action
+):
+    github = install_fake_github(monkeypatch)
+    if blocker is not None:
+        github.add_issue(blocker)
+    github.add_issue("owner/repo#42", state=state, blocked_by=(blocker,) if blocker else ())
+    github.add_issue("owner/repo#43")
+    if check is not None:
+        github.add_pull_request(
+            "owner/repo#51", closes=("owner/repo#42",), checks={HEAD_SHA: [check]}
+        )
+
+    items = ready_session.ready(scope="owner/repo#42")["items"]
+
+    assert [(item["id"], item["action"]) for item in items] == (
+        [("owner/repo#ISSUE-42", action)] if action else []
+    )
+
+
+@pytest.mark.parametrize("state", ["OPEN", "CLOSED"])
+def test_ready_scopes_open_descendants_of_an_open_or_closed_parent(
+    monkeypatch, ready_session, state
+):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#99", state=state)
+    github.add_issue("owner/repo#101", parent="owner/repo#99")
+    github.add_issue("owner/repo#102", parent="owner/repo#99", state="CLOSED")
+
+    assert [item["id"] for item in ready_session.ready(scope="owner/repo#ISSUE-99")["items"]] == [
+        "owner/repo#ISSUE-101"
+    ]
+
+
+def test_ready_url_scopes_only_eligible_descendants_across_repositories(monkeypatch, ready_session):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#99")
+    github.add_issue("owner/repo#100", parent="owner/repo#99")
+    github.add_issue("owner/repo#101", parent="owner/repo#100")
+    github.add_issue("other/lib#7", parent="owner/repo#100")
+    github.add_issue("owner/repo#102", parent="owner/repo#99")
+    github.add_issue("owner/repo#103", parent="owner/repo#99", state="CLOSED")
+    github.add_issue("owner/repo#200")
+    failed = {HEAD_SHA: [check_run("tests", "FAILURE")]}
+    github.add_pull_request("owner/repo#110", closes=("owner/repo#102",), checks=failed)
+    github.add_pull_request("owner/repo#210", checks=failed)
+
+    items = ready_session.ready(scope="https://github.com/owner/repo/issues/99")["items"]
+
+    assert [item["id"] for item in items] == [
+        "owner/repo#ISSUE-102",
+        "other/lib#ISSUE-7",
+        "owner/repo#ISSUE-101",
+    ]
+
+
+def test_ready_cli_formats_the_same_prioritized_issues_in_text_and_json(
+    monkeypatch, ready_session, capsys
+):
+    import workdash.workdash as cli
+
+    github = install_fake_github(monkeypatch)
+    for issue, created, pr_created in [
+        (1, "2026-01-01", None),
+        (2, "2026-01-03", None),
+        (60, "2026-02-01", "2026-03-02"),
+        (61, "2026-02-02", "2026-03-01"),
+    ]:
+        ref = f"owner/repo#{issue}"
+        github.add_issue(ref, created=f"{created}T00:00:00Z")
+        if pr_created is not None:
+            github.add_pull_request(
+                f"owner/repo#{issue + 100}",
+                closes=(ref,),
+                created=f"{pr_created}T00:00:00Z",
+                checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+            )
+
+    def request(endpoint, payload):
+        assert endpoint == "ready"
+        return ready_session.ready(**payload)
+
+    monkeypatch.setattr(
+        cli, "WorkdashControlClient", lambda _host: SimpleNamespace(request=request)
+    )
+    args = ["ready", "owner/repo"]
+    assert cli.main([*args, "--json"]) == 0
+    items = json.loads(capsys.readouterr().out)["items"]
+    assert [item["id"] for item in items] == [f"owner/repo#ISSUE-{n}" for n in (61, 60, 1, 2)]
+
+    assert cli.main(args) == 0
+    lines = capsys.readouterr().out.splitlines()
+    for line, item in zip(lines, items, strict=True):
+        assert line.split()[:3] == [item["type"].upper(), item["id"], item["action"]]
+        assert f"{item['title']} {item['url']}" in line
+
+
+@pytest.mark.parametrize(
+    "outage, status, code, messages",
+    [
+        ("zellij", 503, "zellij_unavailable", ("Failed to list Zellij panes",)),
+        (
+            "github",
+            502,
+            "github_error",
+            ("GitHub lookup for 'owner/repo' failed", "HTTP 502"),
+        ),
+    ],
+)
+def test_ready_api_reports_outages_instead_of_empty_results(
+    monkeypatch, ready_session, outage, status, code, messages
+):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    if outage == "github":
+        github.failures["ReadyRepositoryIssues"] = failure("HTTP 502: Bad Gateway")
+    else:
+
+        def unavailable(_session):
+            raise RuntimeError("Failed to list Zellij panes for workdash-main: session not found")
+
+        monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", unavailable)
+
+    status_code, body = _post_ready(ready_session, {"scope": "owner/repo"})
+
+    assert (status_code, body["error"]["code"]) == (status, code)
+    assert body["ok"] is False
+    assert "result" not in body
+    assert all(message in body["error"]["message"] for message in messages)
 
 
 def test_ready_ids_resolve_to_the_same_items_code_acts_on(monkeypatch, tmp_path) -> None:
@@ -903,14 +1547,13 @@ def _coding_session(
     worktree = tmp_path / "owner_repo_1"
     worktree.mkdir(exist_ok=True)
     ensure_worktree = MagicMock(return_value=str(worktree))
-    launch_agent = MagicMock(
-        side_effect=lambda repo, *_args, **_kwargs: (
-            panes.append({"id": 30, "title": "code_owner_repo_1", "pane_cwd": repo})
-            or SimpleNamespace(
-                session=None, pane_id="terminal_30", pane_title="code_owner_repo_1", cwd=repo
-            )
-        )
-    )
+
+    def launch(repo, *_args, **_kwargs):
+        title = f"code_{Path(repo).name}"
+        panes.append({"id": 30, "title": title, "pane_cwd": repo})
+        return SimpleNamespace(session=None, pane_id="terminal_30", pane_title=title, cwd=repo)
+
+    launch_agent = MagicMock(side_effect=launch)
     monkeypatch.setattr(
         control_module.launcher.zellij, "load_zellij_panes", lambda _session: list(panes)
     )
@@ -930,6 +1573,66 @@ def _coding_session(
         zellij_session=zellij_session,
     )
     return session, worktree, ensure_worktree, launch_agent
+
+
+def test_concurrent_code_requests_launch_one_agent(monkeypatch, tmp_path) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
+    session, _worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
+    target = "owner/repo#ISSUE-1"
+    launching, second_request = Event(), Event()
+    launch = launch_agent.side_effect
+    parse_target = session._item_target
+
+    def launch_while_second_request_arrives(*args, **kwargs):
+        launching.set()
+        assert second_request.wait(5)
+        return launch(*args, **kwargs)
+
+    def signal_target(ref):
+        if launching.is_set():
+            second_request.set()
+        return parse_target(ref)
+
+    launch_agent.side_effect = launch_while_second_request_arrives
+    monkeypatch.setattr(session, "_item_target", signal_target)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(session.code, target=target, agent="pi")
+        assert launching.wait(5)
+        second = pool.submit(session.code, target=target, agent="pi")
+        launched, running = first.result(timeout=5), second.result(timeout=5)
+
+    assert (launched["status"], launched["pane_id"]) == ("launched", "terminal_30")
+    assert (running["status"], running["pane_id"]) == ("already_running", launched["pane_id"])
+    launch_agent.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "panes",
+    [
+        [{"id": 3, "title": "code_owner_repo_1", "pane_cwd": "owner_repo_1", "exited": True}],
+        [
+            {"id": 4, "title": "terminal_owner_repo_1", "pane_cwd": "owner_repo_1"},
+            {"id": 5, "title": "code_owner_repo_2", "pane_cwd": "owner_repo_2"},
+        ],
+    ],
+    ids=["exited-agent", "terminal-and-other-worktree"],
+)
+def test_code_launches_in_existing_worktree_without_a_live_claim(
+    monkeypatch, tmp_path, panes
+) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
+    panes = [{**pane, "pane_cwd": str(tmp_path / pane["pane_cwd"])} for pane in panes]
+    session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
+
+    result = session.code(target="owner/repo#ISSUE-1", agent="pi")
+
+    assert (result["status"], result["pane_id"], result["cwd"]) == (
+        "launched",
+        "terminal_30",
+        str(worktree),
+    )
+    launch_agent.assert_called_once()
+    assert launch_agent.call_args.args[0] == str(worktree)
 
 
 def test_code_reports_the_lowest_live_agent_pane_tied_to_the_worktree(
@@ -994,11 +1697,45 @@ def test_code_does_not_launch_when_pane_listing_fails(monkeypatch, tmp_path) -> 
         MagicMock(side_effect=RuntimeError("pane listing failed")),
     )
 
-    with pytest.raises(control_module.WorkdashControlError, match="pane listing failed"):
-        session.code(target="owner/repo#ISSUE-1", agent="pi")
+    response = _post_item_action(session, "code", "owner/repo#ISSUE-1", agent="pi")
+
+    assert response.status_int == 503
+    assert response.json["error"]["code"] == "zellij_unavailable"
+    assert "pane listing failed" in response.json["error"]["message"]
 
     ensure_worktree.assert_not_called()
     launch_agent.assert_not_called()
+
+
+@pytest.mark.parametrize("unusable_count", [1, 2], ids=["first-read", "first-two-reads"])
+def test_code_launches_after_unusable_pane_listings(monkeypatch, tmp_path, unusable_count):
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
+    panes = []
+    session, _worktree, _ensure, launch = _coding_session(monkeypatch, tmp_path, panes)
+    unusable = [
+        subprocess.CompletedProcess([], 0, stdout="Session 'workdash-main' not found.\n")
+    ] * unusable_count
+
+    def run(command, **_kwargs):
+        assert command[3:5] == ["action", "list-panes"]
+        if unusable:
+            return unusable.pop()
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(panes))
+
+    monkeypatch.setattr(launcher_module, "subprocess", SimpleNamespace(run=run))
+    monkeypatch.setattr(launcher_module, "_resolve_zellij_binary", lambda: "zellij")
+    monkeypatch.setattr(launcher_module, "_ZELLIJ_PANE_READ_RETRY_SECONDS", 0)
+    monkeypatch.setattr(
+        launcher_module.zellij, "load_zellij_panes", launcher_module.Zellij.load_zellij_panes
+    )
+
+    response = _post_item_action(session, "code", "owner/repo#ISSUE-1", agent="pi")
+
+    assert response.status_int == HTTPStatus.OK
+    result = response.json["result"]
+    assert (result["status"], result["pane_id"]) == ("launched", "terminal_30")
+    assert not unusable
+    launch.assert_called_once()
 
 
 def test_vscode_is_not_opened_while_an_agent_pane_is_live(monkeypatch, tmp_path) -> None:
@@ -1025,6 +1762,22 @@ def test_vscode_opens_without_a_zellij_session(monkeypatch, tmp_path) -> None:
 
     assert result["status"] == "launched"
     launch_vscode.assert_called_once_with(str(worktree), "PROMPT")
+
+
+def test_code_retry_does_not_repeat_an_unconfirmed_launch(monkeypatch, tmp_path) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
+    session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
+    launch_agent.side_effect = None
+    launch_agent.return_value = SimpleNamespace(
+        pane_id="terminal_30", pane_title=f"code_{worktree.name}"
+    )
+
+    for _ in range(2):
+        response = _post_item_action(session, "code", "owner/repo#ISSUE-1", agent="pi")
+        assert response.status_int == 409
+        assert response.json["error"]["code"] == "launch_unconfirmed"
+
+    launch_agent.assert_called_once()
 
 
 def test_an_unconfirmed_launch_whose_pane_shows_up_later_is_reported_as_running(
@@ -1213,6 +1966,8 @@ def test_code_with_autostart_adds_the_implementation_appendix_once(monkeypatch, 
     github.add_issue("owner/repo#1")
     session, _worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
 
+    session.work_items[0].url = "https://github.com/owner/repo/issues/1"
+
     result = session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
 
     prompt = _launched_prompt(launch_agent)
@@ -1221,6 +1976,44 @@ def test_code_with_autostart_adds_the_implementation_appendix_once(monkeypatch, 
     assert prompt.count("AUTOSTART:") == 1
     assert prompt.endswith(render_work_instruction("implement", session.work_items[0]))
     assert prompt.count("coordination workflows") == 1
+
+    normalized = " ".join(prompt.split())
+    for instruction in (
+        "Disregard the interactive instruction above to stop at a plan",
+        "start implementing without asking for routine confirmation",
+        "existing commits and uncommitted changes",
+        "continue valid partial work",
+        "Replace or discard it only for a clear technical reason",
+        "Preserve unrelated user changes",
+        "committed, pushed, and represented by a GitHub pull request",
+        "create a pull request that closes it with `Fixes #NUMBER`",
+        "Commit and push are explicitly requested and permitted",
+        "force-push only the pull request branch",
+        "--force-with-lease",
+        "CURRENT head has all applicable CI checks passing",
+        "if pending, wait",
+        'report "no checks required or reported", never "CI passed"',
+        "report INCOMPLETE",
+        "Use GitHub metadata only for this",
+        "never read, search or parse repository files, workflow definitions or CI configuration",
+        "mergeable against the CURRENT base branch",
+        "A changed base SHA invalidates any earlier mergeability decision",
+        "Only report INCOMPLETE and wait for instructions if blocked by missing credentials "
+        "or access to development tools or external infrastructure, external service or "
+        "platform outages, or genuinely impossible or contradictory requirements where "
+        "essential specification is absent from both the repository and the issue.",
+        "Application-under-test endpoint errors are not external access blockers",
+        "tool or subagent disagreement",
+        "failing tests, lint or formatting, timeouts, and trade-offs",
+        "Inspect, resume, and finish partial uncommitted subagent work",
+        "Never merge the pull request or close the issue",
+        "stay in this interactive session without exiting the agent",
+        "development practices, skills, and coordination workflows you have been configured",
+        "do not open a duplicate pull request",
+    ):
+        assert instruction in normalized
+    assert "anything else real" not in normalized
+    assert "Continue the assigned issue https://github.com/owner/repo/issues/1." in normalized
 
 
 @pytest.mark.parametrize("conflict", [False, True])
@@ -1353,21 +2146,32 @@ def test_autostart_does_not_launch_where_the_redirected_pull_requests_agent_live
 
 
 @pytest.mark.parametrize(
-    "pull_request",
+    ("pull_request", "instruction"),
     [
-        {"checks": {HEAD_SHA: [check_run("tests", "FAILURE")]}},
-        {"mergeable": "CONFLICTING"},
-        {"threads": [thread(comment("reviewer", created=AFTER_PUSH))]},
+        pytest.param(
+            {"checks": {HEAD_SHA: [check_run("tests", "FAILURE")]}},
+            "has failing checks: tests",
+            id="failing_ci",
+        ),
+        pytest.param(
+            {"mergeable": "CONFLICTING", "checks": {HEAD_SHA: [check_run("tests", "SUCCESS")]}},
+            "cannot merge cleanly into main (base head base1)",
+            id="merge_conflicts",
+        ),
+        pytest.param(
+            {"threads": [thread(comment("reviewer", created=AFTER_PUSH))]},
+            None,
+            id="review_feedback",
+        ),
     ],
-    ids=["failing_ci", "merge_conflicts", "review_feedback"],
 )
 def test_autostarting_an_issue_with_an_authored_pull_request_repairs_that_pull_request(
-    pull_request, monkeypatch, tmp_path
+    pull_request, instruction, monkeypatch, tmp_path
 ) -> None:
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
     github.add_pull_request("owner/repo#51", closes=("owner/repo#1",), **pull_request)
-    session, _worktree, _ensure, launch_agent, prepare = _authored_session(monkeypatch, tmp_path)
+    session, worktree, ensure, launch_agent, prepare = _authored_session(monkeypatch, tmp_path)
 
     result = session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
 
@@ -1377,6 +2181,16 @@ def test_autostarting_an_issue_with_an_authored_pull_request_repairs_that_pull_r
     prompt = _launched_prompt(launch_agent)
     worked_on = prepare.call_args.args[0]
     assert (worked_on.item_type, worked_on.number) == (WorkItemType.PR, 51)
+    assert ensure.call_args.args[1] == worked_on
+    assert result["cwd"] == str(worktree)
+    if instruction is not None:
+        normalized = " ".join(prompt.split())
+        assert instruction in normalized
+        assert (
+            "development practices, skills, and coordination workflows you have been configured"
+            in normalized
+        )
+        assert "do not create another pull request" in normalized.lower()
     # The result still names the target that was asked for.
     assert result["item_id"] == "owner/repo#ISSUE-1"
     assert prompt.startswith("PROMPT\n\nAUTOSTART: IMPLEMENT")
@@ -1385,23 +2199,105 @@ def test_autostarting_an_issue_with_an_authored_pull_request_repairs_that_pull_r
     assert prompt.count("coordination workflows") == 1
 
 
-def test_autostarting_a_pull_request_waiting_for_others_orders_no_work(
-    monkeypatch, tmp_path
-) -> None:
+@pytest.mark.parametrize(
+    ("pr_fields", "instructions"),
+    [
+        pytest.param(
+            {
+                "mergeable": "CONFLICTING",
+                "checks": {HEAD_SHA: [check_run("tests", "FAILURE")]},
+                "threads": [thread(comment("reviewer", created=AFTER_PUSH))],
+            },
+            (
+                "has actionable review feedback",
+                "Also resolve the confirmed merge conflicts into main (base head base1)",
+                "Also investigate and fix these failing checks: tests.",
+            ),
+            id="review-conflicts-ci",
+        ),
+        pytest.param(
+            {
+                "reviews": [
+                    review(
+                        "reviewer",
+                        "CHANGES_REQUESTED",
+                        created=AFTER_PUSH,
+                        body="Please rework this.",
+                    )
+                ]
+            },
+            (
+                "full body of each changes-requested review",
+                "resolve every inline review thread",
+                "request re-review from each reviewer whose changes-requested review you addressed",
+                "If a re-review request fails, report the blocker",
+            ),
+            id="requested-changes",
+        ),
+    ],
+)
+def test_autostart_briefs_the_agent_on_pr_feedback_in_work_order(
+    monkeypatch, tmp_path, pr_fields, instructions
+):
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
-    github.add_pull_request(
-        "owner/repo#51",
-        closes=("owner/repo#1",),
-        checks={HEAD_SHA: [check_run("tests", None, status="IN_PROGRESS")]},
-    )
-    session, _worktree, _ensure, launch_agent, _prepare = _authored_session(monkeypatch, tmp_path)
+    github.add_pull_request("owner/repo#51", closes=("owner/repo#1",), **pr_fields)
+    session, _worktree, _ensure, launch, _prepare = _authored_session(monkeypatch, tmp_path)
 
     session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
 
-    prompt = _launched_prompt(launch_agent)
+    prompt = " ".join(_launched_prompt(launch).split())
+    assert prompt.startswith("PROMPT AUTOSTART: IMPLEMENT")
+    positions = [prompt.index(instruction) for instruction in instructions]
+    assert positions == sorted(positions)
+
+
+@pytest.mark.parametrize(
+    ("ci", "status"),
+    [
+        ("pending", "without a final CI result (its current head's checks are still running)"),
+        ("passing", "waiting for human review (its current head's checks pass)"),
+        (
+            "no_checks",
+            "waiting for human review (GitHub reports no required or observed checks for its current head)",
+        ),
+        (
+            "unknown",
+            "without a final CI result (GitHub reports an unknown or unavailable CI status for its current head, which is neither passing nor proof that no checks exist)",
+        ),
+    ],
+    ids=["pending", "passing", "no_checks", "unknown"],
+)
+def test_autostarting_a_pull_request_waiting_for_others_orders_no_work(
+    monkeypatch, tmp_path, ci, status
+) -> None:
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    checks = (
+        [check_run("tests", None, status="IN_PROGRESS")]
+        if ci == "pending"
+        else []
+        if ci == "no_checks"
+        else [check_run("tests")]
+    )
+    if ci == "unknown":
+        github.ruleset_checks[("owner/repo", "main")] = ["build"]
+    github.add_pull_request("owner/repo#51", closes=("owner/repo#1",), checks={HEAD_SHA: checks})
+    session, worktree, ensure, launch_agent, _prepare = _authored_session(monkeypatch, tmp_path)
+
+    result = session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+
+    checkout = ensure.call_args.args[1]
+    assert (checkout.repo, checkout.item_type, checkout.number) == (
+        "owner/repo",
+        WorkItemType.PR,
+        51,
+    )
+    assert result["cwd"] == str(worktree)
+    prompt = " ".join(_launched_prompt(launch_agent).split())
+    assert status in prompt
+    assert "do not invent changes, make redundant commits, or create another pull request" in prompt
     assert "AUTOSTART" not in prompt
-    assert "still without a final CI result" in prompt
     assert "--add-assignee" not in prompt and "force-push" not in prompt
 
 
@@ -1411,13 +2307,20 @@ def test_autostarting_an_issue_closed_by_somebody_elses_pull_request_still_imple
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
     github.add_pull_request("owner/repo#51", closes=("owner/repo#1",), author="someone-else")
-    session, _worktree, _ensure, launch_agent, prepare = _authored_session(monkeypatch, tmp_path)
+    session, worktree, ensure, launch_agent, prepare = _authored_session(monkeypatch, tmp_path)
+    issue = session.work_items[0]
+    issue.url = "https://github.com/owner/repo/issues/1"
 
-    session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+    result = session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
 
-    assert prepare.call_args.args[0] is session.work_items[0]
-    assert "AUTOSTART: IMPLEMENT" in _launched_prompt(launch_agent)
-    assert "Continue the assigned issue" in _launched_prompt(launch_agent)
+    assert prepare.call_args.args[0] is issue
+    assert ensure.call_args.args[1] is issue
+    assert result["cwd"] == str(worktree)
+    prompt = _launched_prompt(launch_agent)
+    assert prompt.startswith("PROMPT\n\nAUTOSTART: IMPLEMENT, PUBLISH AND VERIFY")
+    assert prompt.count("AUTOSTART:") == 1
+    assert "Continue the assigned issue https://github.com/owner/repo/issues/1." in prompt
+    assert "development practices, skills, and coordination workflows" in " ".join(prompt.split())
 
 
 def test_autostart_prefers_the_users_own_pull_request_among_several(monkeypatch, tmp_path) -> None:
@@ -1459,18 +2362,63 @@ def test_coding_a_todo_protects_its_identity(monkeypatch, tmp_path, autostart, t
     assert "Fixes owner/other#7" not in prompt
 
 
+@pytest.mark.parametrize(
+    "target",
+    ["owner/repo", "https://gitlab.com/owner/repo.git", "https://codeberg.org/owner/repo.git"],
+)
+def test_coding_a_targeted_todo_launches_in_its_checkout_with_the_original_task(
+    target, monkeypatch, tmp_path
+):
+    install_fake_github(monkeypatch).add_issue("testuser/todos#1")
+    prepare_prompt = control_module.prepare_launch_agent_prompt
+    session, _, ensure, launch = _coding_session(monkeypatch, tmp_path, [])
+    monkeypatch.setattr(control_module, "prepare_launch_agent_prompt", prepare_prompt)
+    session.config = replace(session.config, todo_repository="testuser/todos")
+    todo = replace(
+        _github_issue("testuser/todos", 1, todo_target=target),
+        url="https://github.com/testuser/todos/issues/1",
+    )
+    session.work_items = [todo]
+    checkout = str(tmp_path / "owner_repo_todo_1")
+    ensure.return_value = checkout
+    body = "Find what makes the test fail intermittently"
+    context = MagicMock(return_value={"title": todo.title, "body": body})
+    monkeypatch.setattr(session.backend.github_client, "fetch_launch_context", context)
+
+    result = session.code(target="owner/repo#ISSUE-WT1", agent="pi")
+
+    assert result["cwd"] == launch.call_args.args[0] == checkout
+    assert ensure.call_args.args == (str(tmp_path), todo)
+    context.assert_called_once_with(todo)
+    prompt = _launched_prompt(launch)
+    assert {"- repo: testuser/todos", "- number: 1", f"- url: {todo.url}"} <= set(
+        prompt.splitlines()
+    )
+    assert f"- repo: {target}" not in prompt.splitlines()
+    assert body in prompt
+
+
 def test_autostarting_a_review_reads_no_github_state_and_stays_review_only(
     monkeypatch, tmp_path
 ) -> None:
     github = install_fake_github(monkeypatch)
     session, _worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
-    review = _work_item(number=2, title="Review", item_type=WorkItemType.PR)
-    session.work_items.append(review)
+    github.add_pull_request(
+        "owner/repo#2", author="someone-else", checks={HEAD_SHA: [check_run("tests", "FAILURE")]}
+    )
+    session.work_items.append(_work_item(number=2, title="Review", item_type=WorkItemType.PR))
 
     session.code(target="owner/repo#CHECK-2", agent="pi", autostart=True)
 
-    prompt = _launched_prompt(launch_agent)
-    assert prompt.startswith("PROMPT\n\nAUTOSTART: REVIEW")
+    prompt = " ".join(_launched_prompt(launch_agent).split())
+    assert prompt.startswith("PROMPT AUTOSTART: REVIEW")
+    assert prompt.count("AUTOSTART:") == 1
+    assert (
+        "start reviewing the pull request right away without asking for routine confirmation"
+        in prompt
+    )
+    assert "Never edit files, commit, push, or change the pull request." in prompt
+    assert "IMPLEMENT" not in prompt and "closing keyword" not in prompt
     assert "coordination workflows" not in prompt
     assert "--add-assignee" not in prompt and "force-push" not in prompt
     assert github.operations == []
@@ -1483,10 +2431,10 @@ def test_autostart_reports_a_failed_work_state_lookup_without_launching(
     github.failures["ReadyIssueTree"] = failure("HTTP 502: Bad Gateway")
     session, _worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
 
-    with pytest.raises(WorkdashControlError) as raised:
-        session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)
+    response = _post_item_action(session, "code", "owner/repo#ISSUE-1", agent="pi", autostart=True)
 
-    assert (raised.value.code, raised.value.status) == ("github_error", HTTPStatus.BAD_GATEWAY)
+    assert response.status_int == HTTPStatus.BAD_GATEWAY
+    assert response.json["error"]["code"] == "github_error"
     launch_agent.assert_not_called()
 
 
@@ -1537,6 +2485,24 @@ def test_code_api_forwards_boolean_autostart_and_autoclose_defaulting_to_false(
     session.code.assert_called_once_with(
         target="owner/repo#1", agent=None, autostart=autostart, autoclose=autoclose
     )
+
+
+def test_code_api_rejects_autoclose_without_autostart(monkeypatch, tmp_path) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
+    session, _, _, launch_agent = _coding_session(monkeypatch, tmp_path, [])
+    request = Request.blank(
+        "/api/v0/code",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps(
+            {"target": "owner/repo#1", "agent": "pi", "autostart": False, "autoclose": True}
+        ).encode(),
+    )
+
+    response = request.get_response(control_module._make_turbogears_app(session))
+
+    assert (response.status_int, json.loads(response.text)["error"]["code"]) == (400, "bad_request")
+    launch_agent.assert_not_called()
 
 
 @pytest.mark.parametrize("value", ["false", "true", 1, 0, [], {}])
@@ -1602,6 +2568,459 @@ def test_list_api_hides_repositories_without_restricting_explicit_targets(tmp_pa
     assert json.loads(response.text)["result"]["item_id"] == "archive/private#ISSUE-7"
     backend.github_client.fetch_item.assert_not_called()
     backend.analyze_item.assert_called_once_with(hidden, tool="cached")
+
+
+def _post_item_action(session, action, target, **fields):
+    request = Request.blank(
+        f"/api/v0/{action}",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps({"target": target, **fields}).encode(),
+    )
+    return request.get_response(control_module._make_turbogears_app(session))
+
+
+@pytest.mark.parametrize(
+    ("fields", "agent", "group", "agents"),
+    [
+        pytest.param(
+            {"agent": "codex"}, "codex", "repo", ("pi", "claude", "codex"), id="selected-agent"
+        ),
+        pytest.param({"agent": "codex"}, "codex", "repo", ("codex",), id="analyze-only-config"),
+        pytest.param({}, "pi", "repo", ("pi", "claude", "codex"), id="first-agent"),
+        pytest.param(
+            {"group": "epic"}, "pi", "epic", ("pi", "claude", "codex"), id="requested-tab"
+        ),
+    ],
+)
+def test_analyze_api_runs_the_configured_agent(monkeypatch, tmp_path, fields, agent, group, agents):
+    item = _work_item(number=1, title="Issue")
+    analysis = tmp_path / "analysis.md"
+    analysis.write_bytes(b"analysis body\n")
+    worktree = str(tmp_path / "owner_repo_1")
+    monkeypatch.setattr(control_module, "analysis_worktree", lambda *a, **k: nullcontext(worktree))
+    analyze_item = MagicMock(side_effect=[None, str(analysis)])
+    analyze_commands = {"pi": "pi", "claude": "claude -p", "codex": "codex exec"}
+    session = WorkdashSession(
+        config=WorkdashConfig(
+            agents={name: AgentConfig(analyze=analyze_commands[name]) for name in agents}
+        ),
+        backend=SimpleNamespace(analyze_item=analyze_item, github_client=MagicMock()),
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+
+    response = _post_item_action(session, "analyze", "owner/repo#ISSUE-1", **fields)
+
+    assert response.status_int == 200
+    url = "http://localhost:80/api/items/owner/repo%23ISSUE-1/analysis"
+    assert response.json == {
+        "ok": True,
+        "result": {
+            "item_id": "owner/repo#ISSUE-1",
+            "agent": agent,
+            "path": str(analysis),
+            "url": url,
+            "markdown_url": url,
+            "html_url": url + "/html",
+            "cache_used": False,
+            "status": "generated",
+            "content_type": "text/markdown",
+            "file_name": "analysis.md",
+            "file_content": base64.b64encode(b"analysis body\n").decode(),
+        },
+    }
+    assert analyze_item.call_args_list == [
+        call(item, tool="cached"),
+        call(item, tool=agent, cwd=worktree, zellij_session="workdash-main", group=group),
+    ]
+
+
+def test_code_api_launches_the_selected_agent(monkeypatch, tmp_path):
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
+    session, worktree, _, launch_agent = _coding_session(monkeypatch, tmp_path, [])
+
+    response = _post_item_action(session, "code", "owner/repo#ISSUE-1", agent="pi")
+
+    assert response.status_int == 200
+    assert response.json == {
+        "ok": True,
+        "result": {
+            "status": "launched",
+            "item_id": "owner/repo#ISSUE-1",
+            "session": "workdash-main",
+            "agent": "pi",
+            "cwd": str(worktree),
+            "pane_title": "code_owner_repo_1",
+            "pane_id": "terminal_30",
+            "tab_name": None,
+        },
+    }
+    launch_agent.assert_called_once_with(
+        str(worktree), "PROMPT", agent_command_tokens=["pi"], zellij_session="workdash-main"
+    )
+
+
+@pytest.mark.parametrize(
+    ("action", "target", "repo", "number", "item_type", "item_id", "worktree_name"),
+    [
+        pytest.param(
+            "analyze",
+            "other/tool#7",
+            "other/tool",
+            7,
+            WorkItemType.ISSUE,
+            "other/tool#ISSUE-7",
+            "other_tool_7",
+            id="analyze-issue",
+        ),
+        pytest.param(
+            "code",
+            "owner/repo#ISSUE-99",
+            "owner/repo",
+            99,
+            WorkItemType.ISSUE,
+            "owner/repo#ISSUE-99",
+            "owner_repo_99",
+            id="code-issue",
+        ),
+        pytest.param(
+            "terminal",
+            "https://github.com/owner/repo/issues/42",
+            "owner/repo",
+            42,
+            WorkItemType.ISSUE,
+            "owner/repo#ISSUE-42",
+            "owner_repo_42",
+            id="terminal-issue",
+        ),
+        pytest.param(
+            "code",
+            "owner/repo#REVIEW-5",
+            "owner/repo",
+            5,
+            WorkItemType.PR,
+            "owner/repo#CHECK-5",
+            "owner_repo_5",
+            id="code-pr-id",
+        ),
+        pytest.param(
+            "code",
+            "https://github.com/owner/repo/pull/5",
+            "owner/repo",
+            5,
+            WorkItemType.PR,
+            "owner/repo#CHECK-5",
+            "owner_repo_5",
+            id="code-pr-url",
+        ),
+    ],
+)
+def test_actions_use_items_outside_the_dashboard_without_including_them(
+    monkeypatch, tmp_path, action, target, repo, number, item_type, item_id, worktree_name
+):
+    visible_item = _work_item(number=1, title="Visible issue")
+    item = replace(
+        _work_item(number=5, title="Other work", item_type=item_type), repo=repo, number=number
+    )
+    config = WorkdashConfig(
+        workdir=str(tmp_path),
+        agents={"pi": AgentConfig(launch="pi"), "codex": AgentConfig(analyze="codex exec")},
+    )
+    github = MagicMock()
+    github.fetch_item.return_value = item
+    backend = WorkdashBackend(
+        config=config,
+        github_client=github,
+        cache_root=tmp_path / "cache",
+        included_items_store=IncludedItemsStore(tmp_path / "included-items.json"),
+    )
+    worktree = str(tmp_path / worktree_name)
+    prepare = MagicMock(return_value=worktree)
+    monkeypatch.setattr(control_module, "ensure_worktree", prepare)
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *a, **k: None)
+    monkeypatch.setattr(control_module, "get_merge_base", lambda *a, **k: None)
+    monkeypatch.setattr(control_module, "prepare_launch_agent_prompt", lambda *a, **k: "PROMPT")
+    monkeypatch.setattr(
+        control_module, "analysis_worktree", lambda *a, **k: nullcontext(prepare(*a, **k))
+    )
+    analysis = tmp_path / "analysis.md"
+    analysis.write_text("# Analysis\n")
+    analyze = MagicMock(side_effect=[None, str(analysis)])
+    monkeypatch.setattr(backend, "analyze_item", analyze)
+    terminal = MagicMock(
+        return_value=SimpleNamespace(
+            session="workdash-main",
+            cwd=worktree,
+            pane_title=f"terminal_{worktree_name}",
+            pane_id="terminal_23",
+        )
+    )
+    monkeypatch.setattr(control_module, "launch_terminal_context", terminal)
+    panes = []
+
+    def launch(cwd, *_args, **_kwargs):
+        title = f"code_{worktree_name}"
+        panes.append({"id": 30, "title": title, "pane_cwd": cwd})
+        return SimpleNamespace(pane_id="terminal_30", pane_title=title, cwd=cwd, session=None)
+
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: panes)
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch)
+    session = WorkdashSession(
+        config=config,
+        backend=backend,
+        work_items=[visible_item],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+
+    fields = {"analyze": {"agent": "codex"}, "code": {"agent": "pi"}}
+    response = _post_item_action(session, action, target, **fields.get(action, {}))
+
+    assert response.status_int == 200, response.text
+    assert response.json["ok"] is True
+    result = response.json["result"]
+    assert result["item_id"] == item_id
+    if action == "analyze":
+        analyze.assert_called_with(
+            item, tool="codex", cwd=worktree, zellij_session="workdash-main", group="tool"
+        )
+    elif action == "code":
+        assert result["status"] == "launched"
+        assert [pane["pane_cwd"] for pane in panes] == [worktree]
+    else:
+        terminal.assert_called_once_with(worktree, zellij_session="workdash-main")
+    github.fetch_item.assert_called_once_with(
+        repo, number, github_username=config.github_username, todo_repository=config.todo_repository
+    )
+    assert prepare.call_count == 1
+    assert prepare.call_args.args == (str(tmp_path), item)
+    assert [row["id"] for row in session.list_items()["items"]] == ["owner/repo#ISSUE-1"]
+    assert backend.included_items_store.load() == []
+
+
+@pytest.mark.parametrize(
+    ("target", "hidden"),
+    [
+        pytest.param("owner/repo#42", False, id="issue-number"),
+        pytest.param("owner/repo#ISSUE-42", False, id="issue-id"),
+        pytest.param("owner/repo#42", True, id="hidden-by-closing-pr"),
+    ],
+)
+def test_terminal_resolves_issue_references(monkeypatch, tmp_path, target, hidden):
+    item = replace(
+        _work_item(number=1, title="Issue"),
+        number=42,
+        url="https://github.com/owner/repo/issues/42",
+    )
+    pull_request = replace(
+        _work_item(number=5, title="Fix it", item_type=WorkItemType.PR),
+        kind=WorkItemKind.AUTHORED_PR,
+        closing_issue_numbers=(42,),
+    )
+    backend = MagicMock()
+    backend.github_client.fetch_item.return_value = item
+    session = WorkdashSession(
+        config=WorkdashConfig(workdir=str(tmp_path)),
+        backend=backend,
+        work_items=[pull_request] if hidden else [],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+    worktree = str(tmp_path / "owner_repo_42")
+    prepare = MagicMock(return_value=worktree)
+    launch = MagicMock(
+        return_value=SimpleNamespace(
+            session="workdash-main",
+            cwd=worktree,
+            pane_title="terminal_owner_repo_42",
+            pane_id="terminal_23",
+        )
+    )
+    monkeypatch.setattr(control_module, "ensure_worktree", prepare)
+    monkeypatch.setattr(control_module, "launch_terminal_context", launch)
+
+    response = _post_item_action(session, "terminal", target)
+
+    assert response.status_int == 200, response.text
+    assert response.json["ok"] is True
+    assert response.json["result"]["item_id"] == "owner/repo#ISSUE-42"
+    assert backend.github_client.fetch_item.call_args.args == ("owner/repo", 42)
+    assert prepare.call_args.args == (str(tmp_path), item)
+    assert prepare.call_count == 1
+    launch.assert_called_once_with(worktree, zellij_session="workdash-main")
+
+
+def test_terminal_resolves_an_unlisted_targeted_todo_not_the_targets_issue(monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("testuser/todos#42", body=todo_body("owner/repo"))
+    github.add_issue("owner/repo#42")
+    session = _ready_session(tmp_path)
+    lookup = MagicMock(wraps=session.backend.github_client.fetch_item)
+    monkeypatch.setattr(session.backend.github_client, "fetch_item", lookup)
+    worktree = str(tmp_path / "owner_repo_todo_42")
+    prepare = MagicMock(return_value=worktree)
+    launch = MagicMock(
+        return_value=SimpleNamespace(
+            session="workdash-main", cwd=worktree, pane_title="Todo", pane_id="terminal_23"
+        )
+    )
+    monkeypatch.setattr(control_module, "ensure_worktree", prepare)
+    monkeypatch.setattr(control_module, "launch_terminal_context", launch)
+
+    response = _post_item_action(session, "terminal", "owner/repo#ISSUE-WT42")
+
+    assert response.status_int == 200, response.text
+    result = response.json["result"]
+    assert (result["item_id"], result["cwd"], result["pane_id"]) == (
+        "owner/repo#ISSUE-WT42",
+        worktree,
+        "terminal_23",
+    )
+    assert [called.args for called in lookup.call_args_list] == [("testuser/todos", 42)]
+    assert prepare.call_count == 1
+    workdir, item = prepare.call_args.args
+    assert workdir == str(tmp_path)
+    assert (item.repo, item.number, item.todo_target) == ("testuser/todos", 42, "owner/repo")
+    launch.assert_called_once_with(worktree, zellij_session="workdash-main")
+    assert session.work_items == []
+
+
+def test_terminal_does_not_launch_when_todo_checkout_conflicts(monkeypatch, tmp_path):
+    session = _ready_session(tmp_path)
+    todo = _github_issue("testuser/todos", 1, todo_target="https://codeberg.org/owner/repo.git")
+    session.work_items.append(todo)
+    clone = tmp_path / "owner_repo"
+    clone.mkdir()
+    marker = clone / "work.txt"
+    marker.write_text("local changes")
+
+    def run(cmd, *, cwd, **kwargs):
+        assert cwd == clone
+        match cmd:
+            case ["git", "rev-parse", "--show-toplevel"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout=f"{clone}\n")
+            case ["git", "config", "--local", "--get", "remote.origin.url"]:
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout="https://github.com/owner/repo.git\n"
+                )
+            case _:
+                pytest.fail(f"Unexpected command against the unrelated clone: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    launch = MagicMock()
+    monkeypatch.setattr(control_module, "launch_terminal_context", launch)
+
+    with pytest.raises(RuntimeError, match="belongs to a different repository"):
+        session.terminal(target="owner/repo#ISSUE-WT1")
+
+    launch.assert_not_called()
+    assert marker.read_text() == "local changes"
+
+
+def test_terminal_reuses_matching_todo_worktree_when_main_clone_is_unrelated(tmp_path, monkeypatch):
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    main = workdir / "owner_repo"
+    worktree = workdir / "owner_repo_todo_110"
+    source = tmp_path / "source"
+    target = "https://codeberg.org/owner/repo.git"
+    for path, origin in ((main, "https://github.com/owner/repo.git"), (source, target)):
+        subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+        subprocess.run(["git", "remote", "add", "origin", origin], cwd=path, check=True)
+    (source / "work.txt").write_text("todo work")
+    subprocess.run(["git", "add", "work.txt"], cwd=source, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "initial",
+        ],
+        cwd=source,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "wt-110", str(worktree)],
+        cwd=source,
+        check=True,
+        capture_output=True,
+    )
+    (main / "work.txt").write_text("other repository work")
+    (worktree / "work.txt").write_text("uncommitted todo work")
+    pulls = []
+    monkeypatch.setattr(GitHelper, "pull_ff_only", lambda self, path: pulls.append(path))
+
+    session = _ready_session(workdir)
+    session.work_items.append(
+        replace(_github_issue("testuser/todos", 1, todo_target=target), number=110)
+    )
+    launch = MagicMock(
+        return_value=SimpleNamespace(
+            cwd=str(worktree), session="workdash-main", pane_title="Todo", pane_id="terminal_23"
+        )
+    )
+    monkeypatch.setattr(control_module, "launch_terminal_context", launch)
+
+    assert session.terminal(target="owner/repo#ISSUE-WT110")["cwd"] == str(worktree)
+
+    launch.assert_called_once_with(str(worktree), zellij_session="workdash-main")
+    assert pulls == [worktree]
+    assert (main / "work.txt").read_text() == "other repository work"
+    assert (worktree / "work.txt").read_text() == "uncommitted todo work"
+    assert subprocess.check_output(
+        ["git", "remote", "get-url", "origin"], cwd=main, text=True
+    ).strip() == ("https://github.com/owner/repo.git")
+    assert subprocess.check_output(["git", "status", "--porcelain"], cwd=main, text=True) == (
+        "?? work.txt\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "github_item", "error", "status"),
+    [
+        ("owner/repo#banana", _work_item(number=1, title="Issue"), "invalid_target", 400),
+        ("owner/repo#404", None, "unknown_item", 404),
+        (
+            "owner/repo#5",
+            _work_item(number=5, title="PR", item_type=WorkItemType.PR),
+            "unsupported_item_type",
+            400,
+        ),
+        ("owner/repo#ISSUE-77", RuntimeError("GitHub unavailable"), "github_error", 502),
+    ],
+    ids=["malformed", "missing", "wrong-kind", "outage"],
+)
+def test_terminal_api_rejects_unusable_targets_before_preparing_a_worktree(
+    monkeypatch, target, github_item, error, status
+):
+    backend = MagicMock()
+    if isinstance(github_item, RuntimeError):
+        backend.github_client.fetch_item.side_effect = github_item
+    else:
+        backend.github_client.fetch_item.return_value = github_item
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=backend,
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+    prepare = MagicMock()
+    monkeypatch.setattr(control_module, "ensure_worktree", prepare)
+
+    response = _post_item_action(session, "terminal", target)
+
+    assert response.status_int == status
+    assert response.json["ok"] is False
+    assert response.json["error"]["code"] == error
+    prepare.assert_not_called()
 
 
 def test_analyze_uses_the_cached_analysis_of_an_item_fetched_from_github(tmp_path) -> None:
@@ -1738,17 +3157,23 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
     server = control_module.WorkdashControlServer(
         session,
         listeners=(
-            (hosts[0], ("127.0.0.5",)),
+            (hosts[0], ("127.0.0.18",)),
             (hosts[1], ("127.0.0.0/29",)),
-            (hosts[2], (hosts[1],)),
+            (hosts[2], ("127.0.0.21",)),
         ),
     )
     server.start()
     httpds, threads = list(server._httpds), list(server._threads)
     try:
-        # Both explicit sources can use every listener, including the default.
         for host in hosts:
-            for source in (*hosts[1:], "127.0.0.5", "127.0.0.6"):
+            for source, status in (
+                (hosts[1], 200),
+                (hosts[2], 200),
+                ("127.0.0.18", 200),
+                ("127.0.0.21", 200),
+                ("127.0.0.6", 200),
+                ("127.0.0.9", 403),
+            ):
                 connection = HTTPConnection(host, port, timeout=2, source_address=(source, 0))
                 try:
                     connection.request(
@@ -1758,10 +3183,14 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
                         {"Content-Type": "application/json", "X-Workdash": version("workdash")},
                     )
                     response = connection.getresponse()
-                    assert response.status == 200
-                    assert (
-                        json.loads(response.read())["result"]["items"][0]["title"] == "Shared item"
-                    )
+                    assert response.status == status
+                    envelope = json.loads(response.read())
+                    if status == 200:
+                        assert envelope["ok"] is True
+                        [item] = envelope["result"]["items"]
+                        assert (item["id"], item["title"]) == ("owner/repo#ISSUE-1", "Shared item")
+                    else:
+                        assert envelope["error"]["code"] == "forbidden"
                 finally:
                     connection.close()
             denied = HTTPConnection(host, port, timeout=2, source_address=("127.0.0.9", 0))
@@ -1772,6 +3201,7 @@ def test_listeners_share_sources_and_stop_all_sockets_and_threads(monkeypatch) -
                     '{"text":"not allowed"}',
                     {
                         "Content-Type": "application/json",
+                        "X-Workdash": version("workdash"),
                         "X-Forwarded-For": "127.0.0.1",
                         "Forwarded": "for=127.0.0.1",
                     },
@@ -2060,10 +3490,66 @@ def test_probe_refuses_a_server_that_is_not_a_dashboard(monkeypatch) -> None:
         thread.join()
 
 
-def test_environment_selects_real_server_and_cli(monkeypatch, capsys):
-    import socket
+def test_show_config_api_reports_session_agents_and_default_server(monkeypatch):
+    monkeypatch.delenv("WORKDASH_HOST", raising=False)
+    session = WorkdashSession(
+        config=WorkdashConfig(
+            agents={
+                "codex": AgentConfig(analyze="codex exec", launch="codex"),
+                "claude": AgentConfig(analyze="claude -p", launch="claude"),
+                "pi": AgentConfig(launch="pi"),
+            },
+        ),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    request = Request.blank(
+        "/api/v0/show-config",
+        method="POST",
+        headers={"X-Workdash": version("workdash")},
+        environ={"REMOTE_ADDR": "127.0.0.1"},
+        content_type="application/json",
+        body=b"{}",
+    )
 
-    import workdash.workdash as cli
+    response = request.get_response(app)
+
+    assert response.status_int == 200
+    payload = response.json
+    assert payload["ok"] is True
+    assert payload["result"] == {
+        "agents": {"analyze": ["codex", "claude"], "code": ["codex", "claude", "pi"]},
+        "server": {"host": "127.0.0.1", "port": 8765},
+    }
+
+
+def test_show_config_payload_reports_environment_server_address(monkeypatch):
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:18765")
+    assert control_module.show_config_payload(WorkdashConfig())["server"] == {
+        "host": "127.0.0.1",
+        "port": 18765,
+    }
+
+
+def test_control_server_checks_loopback_alias_sources(monkeypatch):
+    import errno
+    import socket
+    from http.client import HTTPConnection
+
+    sources = (("127.0.0.2", 200), ("127.0.0.3", 403))
+    for source, _ in sources:
+        with socket.socket() as probe:
+            try:
+                probe.bind((source, 0))
+            except OSError as error:
+                if error.errno != errno.EADDRNOTAVAIL:
+                    raise
+                pytest.skip(f"loopback alias {source} is not available")
 
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -2077,15 +3563,27 @@ def test_environment_selects_real_server_and_cli(monkeypatch, capsys):
         suggestion_markers={},
         zellij_session=None,
     )
-    server = control_module.WorkdashControlServer(session, listeners=((host, ("127.0.0.2",)),))
+    listeners = ((host, ("127.0.0.2",)),)
+    server = control_module.WorkdashControlServer(session, listeners=listeners)
     server.start()
     try:
-        assert cli.main(["list", "--json"]) == 0
-        assert json.loads(capsys.readouterr().out)["items"][0]["title"] == "Isolated"
-        assert control_module.show_config_payload(WorkdashConfig())["server"] == {
-            "host": host,
-            "port": port,
-        }
+        for source, status in sources:
+            connection = HTTPConnection(host, port, timeout=2, source_address=(source, 0))
+            try:
+                connection.request(
+                    "POST",
+                    "/api/v0/list",
+                    "{}",
+                    {"Content-Type": "application/json", "X-Workdash": version("workdash")},
+                )
+                response = connection.getresponse()
+                assert response.status == status
+                if status == 200:
+                    assert json.loads(response.read())["result"]["items"][0]["id"] == (
+                        "owner/repo#ISSUE-1"
+                    )
+            finally:
+                connection.close()
     finally:
         server.stop()
 
@@ -2196,6 +3694,55 @@ def test_local_non_loopback_primary_accepts_default_client(monkeypatch, host_onl
     try:
         result = control_module.WorkdashControlClient().request("list")
         assert result["items"][0]["title"] == "Local network"
+    finally:
+        server.stop()
+
+
+def test_selected_primary_accepts_itself_but_not_an_unlisted_peer(monkeypatch):
+    import errno
+    import socket
+    from http.client import HTTPConnection
+
+    host = "127.0.0.2"
+    unlisted = "127.0.0.3"
+    for peer in (unlisted, host):
+        with socket.socket() as probe:
+            try:
+                probe.bind((peer, 0))
+            except OSError as error:
+                if error.errno != errno.EADDRNOTAVAIL:
+                    raise
+                pytest.skip(f"loopback alias {peer} is unavailable")
+            port = probe.getsockname()[1]
+    monkeypatch.setenv("WORKDASH_HOST", f"{host}:{port}")
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="Work")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    server = control_module.WorkdashControlServer(session)
+    server.start()
+    try:
+        for peer, status in ((host, 200), (unlisted, 403)):
+            connection = HTTPConnection(host, port, timeout=2, source_address=(peer, 0))
+            try:
+                connection.request(
+                    "POST",
+                    "/api/v0/list",
+                    "{}",
+                    {"Content-Type": "application/json", "X-Workdash": version("workdash")},
+                )
+                response = connection.getresponse()
+                assert response.status == status
+                envelope = json.loads(response.read())
+                if status == 200:
+                    assert envelope["result"]["items"][0]["id"] == "owner/repo#ISSUE-1"
+                else:
+                    assert envelope["error"]["code"] == "forbidden"
+            finally:
+                connection.close()
     finally:
         server.stop()
 
@@ -2380,6 +3927,9 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
     (artifacts / "escape-dir").symlink_to(worktree)
     (artifacts / "root-alias").symlink_to(".")
     (artifacts / "alias").symlink_to(artifacts / "review.md")
+    (artifacts / "alias.md").symlink_to("review.md")
+    (artifacts / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\xff")
+    (artifacts / "data.unknownworkdash").write_bytes(b"\x00\xff")
     (artifacts / "nested-alias").symlink_to("nested")
     (artifacts / "nested" / "relative-alias").symlink_to("../review.md")
     (artifacts / "chain").symlink_to("nested/relative-alias")
@@ -2406,8 +3956,9 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
         control_module._make_turbogears_app(session)
     )
 
-    def get(path, method="GET", peer="127.0.0.1"):
-        request = Request.blank(path, method=method, headers={"X-Workdash": version("workdash")})
+    def get(path, method="GET", peer="127.0.0.1", header=version("workdash")):
+        headers = {"X-Workdash": header} if header is not None else {}
+        request = Request.blank(path, method=method, headers=headers)
         request.environ["REMOTE_ADDR"] = peer
         return request.get_response(app)
 
@@ -2416,11 +3967,27 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
     assert response.status_int == 200 and response.text == "real review", response.text
     assert response.content_type == "text/markdown"
     assert get(base + ".workdash/nested/review.md").text == "nested review"
+    for name, body, media_type in (
+        ("alias.md", b"real review", "text/markdown"),
+        ("image.png", b"\x89PNG\r\n\x1a\n\x00\xff", "image/png"),
+        ("data.unknownworkdash", b"\x00\xff", "application/octet-stream"),
+    ):
+        response = get(base + ".workdash/" + name)
+        assert response.status_int == 200
+        assert response.body == body
+        assert response.content_type == media_type
+    for header in (None, "wrong"):
+        response = get(base + ".workdash/review.md", header=header)
+        assert response.status_int == 200
+        assert response.body == b"real review"
     assert get(base + ".workdash/alias").text == "real review"
     assert get(base + ".workdash/nested-alias/relative-alias").text == "real review"
     assert get(base).json["result"]["entries"] == [
         "alias",
+        "alias.md",
         "chain",
+        "data.unknownworkdash",
+        "image.png",
         "nested",
         "nested-alias",
         "review.md",
@@ -2454,6 +4021,9 @@ def test_item_files_http_confinement(tmp_path, monkeypatch, symlinked_worktree):
     (artifacts / "escape-dir").unlink()
     (artifacts / "root-alias").unlink()
     (artifacts / "alias").unlink()
+    (artifacts / "alias.md").unlink()
+    (artifacts / "image.png").unlink()
+    (artifacts / "data.unknownworkdash").unlink()
     (artifacts / "nested-alias").unlink()
     (artifacts / "chain").unlink()
     (artifacts / "chain-escape").unlink()
@@ -2695,6 +4265,38 @@ def test_item_files_listing_rejects_directory_substitution(tmp_path, monkeypatch
     assert "alias" not in response.json["result"]["entries"]
 
 
+def test_item_files_list_and_read_from_issue_worktree(tmp_path):
+    checkout = tmp_path / "owner_repo_1"
+    subprocess.run(["git", "init", "-q", "-b", "issue-1", str(checkout)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/repo.git"],
+        cwd=checkout,
+        check=True,
+    )
+    artifacts = checkout / ".workdash"
+    artifacts.mkdir()
+    (artifacts / "review.md").write_text("Review contents")
+    session = WorkdashSession(
+        config=WorkdashConfig(workdir=str(tmp_path)),
+        backend=MagicMock(),
+        work_items=[_work_item(number=1, title="Issue")],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    base = "/api/items/owner/repo%23ISSUE-1/files/"
+    listing = Request.blank(base, environ={"REMOTE_ADDR": "127.0.0.1"}).get_response(app)
+    assert listing.status_int == 200
+    assert listing.json["result"]["entries"] == ["review.md"]
+    artifact = Request.blank(
+        base + ".workdash/review.md", environ={"REMOTE_ADDR": "127.0.0.1"}
+    ).get_response(app)
+    assert artifact.status_int == 200
+    assert artifact.text == "Review contents"
+
+
 @pytest.mark.parametrize("symlinked_worktree", [False, True])
 def test_item_files_resolve_shared_pr_and_targeted_todo_worktrees(
     tmp_path, monkeypatch, symlinked_worktree
@@ -2883,7 +4485,7 @@ def test_coding_authored_pr_uses_linked_issue_analysis_and_claim(monkeypatch, tm
         closes=("owner/repo#1",),
         checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
     )
-    session, _worktree, _ensure, launch, prepare = _authored_session(monkeypatch, tmp_path)
+    session, worktree, ensure, launch, prepare = _authored_session(monkeypatch, tmp_path)
     issue = session.work_items[0]
     issue.analysis = "issue analysis"
     pr = _work_item(number=2, title="PR", item_type=WorkItemType.PR)
@@ -2895,13 +4497,67 @@ def test_coding_authored_pr_uses_linked_issue_analysis_and_claim(monkeypatch, tm
     result = session.code(target="owner/repo#PR-51", agent="pi", autostart=autostart)
     assert result["item_id"] == "owner/repo#ISSUE-1"
     assert prepare.call_args.kwargs["analysis_path"] == session.analysis_url(issue)
-    assert prepare.call_args.args[0].number == (51 if autostart else 1)
+    checkout = ensure.call_args.args[1]
+    assert prepare.call_args.args[0] is checkout
+    assert (checkout.repo, checkout.item_type, checkout.number) == (
+        "owner/repo",
+        WorkItemType.PR if autostart else WorkItemType.ISSUE,
+        51 if autostart else 1,
+    )
+    if autostart:
+        session.git.branch_tracks_repository.assert_called_with(worktree, "pr-branch", "owner/repo")
     assert ("has failing checks: tests" in _launched_prompt(launch)) == autostart
     assert github.operations.count("ReadyPullRequests") == int(autostart)
-    assert (
-        session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=autostart)["status"]
-        == "already_running"
+
+    repeated = session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=autostart)
+
+    assert (repeated["status"], repeated["pane_id"]) == ("already_running", result["pane_id"])
+    launch.assert_called_once()
+
+
+def test_coding_shared_worktree_does_not_report_the_requested_agent(monkeypatch, tmp_path):
+    import workdash.repo_worktree as repo_worktree
+
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_pull_request("owner/repo#51", closes=("owner/repo#1",))
+    session, worktree, _ensure, launch, _prepare = _authored_session(monkeypatch, tmp_path)
+    worktree.rmdir()
+    monkeypatch.setattr(
+        control_module, "existing_worktree_path", repo_worktree.existing_worktree_path
     )
+    monkeypatch.setattr(control_module, "ensure_worktree", repo_worktree.ensure_worktree)
+    session.git.find_worktree_for_branch.return_value = None
+    session.git.local_branch_exists.return_value = False
+    session.git.worktree_proves_item.return_value = True
+    session.git.create_worktree.side_effect = lambda _repo, path, *_: path.mkdir()
+    session.config = replace(
+        session.config, agents={**session.config.agents, "claude": AgentConfig(launch="claude")}
+    )
+    session.work_items.append(
+        replace(
+            _work_item(number=1, title="PR", item_type=WorkItemType.PR),
+            number=51,
+            kind=WorkItemKind.AUTHORED_PR,
+            closing_issue_numbers=(1,),
+        )
+    )
+
+    first = session.code(target="owner/repo#PR-51", agent="pi")
+    second = session.code(target="owner/repo#ISSUE-1", agent="claude")
+
+    assert (first["status"], first["agent"], first["item_id"], first["cwd"]) == (
+        "launched",
+        "pi",
+        "owner/repo#ISSUE-1",
+        str(worktree),
+    )
+    assert (second["status"], second["pane_id"], second["agent"]) == (
+        "already_running",
+        first["pane_id"],
+        None,
+    )
+    launch.assert_called_once()
 
 
 @pytest.mark.parametrize("autostart", [False, True])
@@ -2940,7 +4596,7 @@ def test_coding_pr_ignores_removed_issue_link_without_changing_dashboard(
 def test_authored_pr_without_issue_never_uses_pr_analysis(monkeypatch, tmp_path):
     github = install_fake_github(monkeypatch)
     github.add_pull_request("owner/repo#51")
-    session, _worktree, _ensure, _launch, prepare = _authored_session(monkeypatch, tmp_path)
+    session, worktree, ensure, _launch, prepare = _authored_session(monkeypatch, tmp_path)
     pr = _work_item(number=2, title="PR", item_type=WorkItemType.PR)
     pr.number = 51
     pr.kind = WorkItemKind.AUTHORED_PR
@@ -2949,6 +4605,38 @@ def test_authored_pr_without_issue_never_uses_pr_analysis(monkeypatch, tmp_path)
     result = session.code(target="owner/repo#PR-51", agent="pi")
     assert result["item_id"] == "owner/repo#PR-51"
     assert prepare.call_args.kwargs["analysis_path"] is None
+
+    assert ensure.call_args.args[1] is pr
+    assert result["cwd"] == str(worktree)
+    session.git.branch_tracks_repository.assert_called_with(worktree, "pr-branch", "owner/repo")
+
+
+def test_coding_somebody_elses_pr_uses_pr_analysis_not_the_linked_issue_analysis(
+    monkeypatch, tmp_path
+):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_pull_request("owner/repo#2", closes=("owner/repo#1",), author="someone-else")
+    session, _worktree, _ensure, launch, _prepare = _authored_session(monkeypatch, tmp_path)
+    issue = session.work_items[0]
+    issue.analysis = "issue analysis"
+    pr = replace(
+        _work_item(number=2, title="Review", item_type=WorkItemType.PR),
+        analysis="pr analysis",
+        closing_issue_numbers=(1,),
+    )
+    session.work_items.append(pr)
+    monkeypatch.setattr(
+        control_module, "prepare_launch_agent_prompt", launcher_module.prepare_launch_agent_prompt
+    )
+    monkeypatch.setattr(session.backend.github_client, "fetch_launch_context", lambda _item: {})
+
+    session.code(target="owner/repo#CHECK-2", agent="pi")
+
+    prompt = _launched_prompt(launch)
+    assert "Discuss review findings, risks, and open questions for the author." in prompt
+    assert session.analysis_url(pr) in prompt
+    assert session.analysis_url(issue) not in prompt
 
 
 def test_issue_redirect_preserves_issue_analysis(monkeypatch, tmp_path):
@@ -3014,6 +4702,39 @@ def test_plan_first_issue_uses_linked_pr_as_context_not_checkout(monkeypatch, tm
     assert "AUTOSTART" not in prompt
 
 
+def test_plan_first_authored_pr_and_issue_use_same_context_and_worktree(monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_pull_request("owner/repo#51", closes=("owner/repo#1",))
+    results = []
+    for target in ("owner/repo#ISSUE-1", "owner/repo#PR-51"):
+        session, worktree, ensure, launch, prepare = _authored_session(monkeypatch, tmp_path)
+        issue = session.work_items[0]
+        issue.analysis = "issue analysis"
+        pr = _work_item(number=2, title="PR", item_type=WorkItemType.PR)
+        pr.number = 51
+        pr.kind = WorkItemKind.AUTHORED_PR
+        session.work_items.append(pr)
+        monkeypatch.setattr(
+            control_module,
+            "existing_worktree_path",
+            lambda _wd, item, **kwargs: worktree if item.item_type == WorkItemType.ISSUE else None,
+        )
+        result = session.code(target=target, agent="pi")
+        results.append(
+            (
+                result["item_id"],
+                ensure.call_args.args[1],
+                prepare.call_args.args,
+                {k: v for k, v in prepare.call_args.kwargs.items() if k != "github_client"},
+                launch.call_args.args,
+            )
+        )
+    assert results[0] == results[1]
+    assert results[0][1] is results[0][2][0]
+    assert results[0][1].item_type == WorkItemType.ISSUE
+
+
 def test_dispatch_revalidates_and_retries_claimed_candidate(monkeypatch, tmp_path):
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
@@ -3049,6 +4770,135 @@ def test_dispatch_revalidates_and_retries_claimed_candidate(monkeypatch, tmp_pat
     assert all(
         call["autostart"] and call["autoclose"] and call["group"] == "repo" for call in calls
     )
+
+
+def test_dispatch_racing_callers_launch_distinct_issues(monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    for number in (1, 2):
+        github.add_issue(f"owner/repo#{number}")
+    panes = []
+    session, _, _, launch = _coding_session(monkeypatch, tmp_path, panes)
+    session.config = replace(session.config, github_username="testuser")
+
+    def checkout(_workdir, item, **kwargs):
+        path = tmp_path / f"owner_repo_{item.number}"
+        path.mkdir(exist_ok=True)
+        return path
+
+    def start(repo, *_args, **kwargs):
+        number = int(Path(repo).name.rsplit("_", 1)[1])
+        title = f"code_{Path(repo).name}"
+        panes.append({"id": number, "title": title, "pane_cwd": repo})
+        return SimpleNamespace(
+            pane_id=f"terminal_{number}",
+            pane_title=title,
+            cwd=repo,
+            session=kwargs["zellij_session"],
+        )
+
+    monkeypatch.setattr(control_module, "existing_worktree_path", checkout)
+    monkeypatch.setattr(control_module, "ensure_worktree", lambda *a, **kw: str(checkout(*a, **kw)))
+    launch.side_effect = start
+    ready = session._ready
+    selected = Barrier(2)
+
+    def synchronize_selection(scope, *args, **kwargs):
+        result = ready(scope, *args, **kwargs)
+        if scope == "owner/repo":
+            assert [work.item.number for work in result.items] == [1, 2]
+            selected.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(session, "_ready", synchronize_selection)
+    app = control_module._make_turbogears_app(session)
+
+    def dispatch_request():
+        request = Request.blank(
+            "/api/v0/dispatch",
+            method="POST",
+            content_type="application/json",
+            body=b'{"scope":"owner/repo"}',
+        )
+        response = request.get_response(app)
+        assert response.status_int == 200
+        return json.loads(response.text)["result"]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        calls = [pool.submit(dispatch_request) for _ in range(2)]
+        results = [call.result(timeout=10) for call in calls]
+
+    assert {(r["status"], r["issue_id"], r["pane_id"]) for r in results} == {
+        ("launched", "owner/repo#ISSUE-1", "terminal_1"),
+        ("launched", "owner/repo#ISSUE-2", "terminal_2"),
+    }
+    assert launch.call_count == 2
+
+
+def test_dispatch_skips_waiting_and_others_pull_requests(monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    github.add_issue("owner/repo#43")
+    github.add_pull_request("owner/repo#51", closes=("owner/repo#42",))
+    github.add_pull_request(
+        "owner/repo#52",
+        closes=("owner/repo#43",),
+        author="other",
+        checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+    )
+    session, _, _, launch = _coding_session(monkeypatch, tmp_path, [])
+    session.config = replace(session.config, github_username="testuser")
+
+    assert session.dispatch_once(scope="owner/repo")["status"] == "no_ready_task"
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("fault", "message", "launches"),
+    [
+        ("github", "GitHub lookup", 0),
+        ("zellij", "Cannot check for running coding agents", 0),
+        ("unconfirmed", "its pane did not appear", 1),
+    ],
+)
+def test_dispatch_cli_reports_failures_without_trying_another_launch(
+    monkeypatch, tmp_path, capsys, fault, message, launches
+):
+    import workdash.workdash as cli
+
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_issue("owner/repo#2")
+    session, _, ensure, launch = _coding_session(monkeypatch, tmp_path, [])
+    session.config = replace(session.config, github_username="testuser")
+    monkeypatch.setattr(
+        control_module,
+        "existing_worktree_path",
+        lambda workdir, item, **kwargs: Path(workdir) / f"owner_repo_{item.number}",
+    )
+    ensure.side_effect = lambda workdir, item, **kwargs: str(
+        Path(workdir) / f"owner_repo_{item.number}"
+    )
+    if fault == "github":
+        github.failures["ReadyRepositoryIssues"] = failure("HTTP 502")
+    elif fault == "zellij":
+        monkeypatch.setattr(
+            control_module.launcher.zellij,
+            "load_zellij_panes",
+            MagicMock(side_effect=RuntimeError("pane listing failed")),
+        )
+    else:
+        launch.side_effect = None  # The launch returned a pane ID, but it never becomes visible.
+        launch.return_value = SimpleNamespace(pane_id="terminal_30", pane_title="code_owner_repo_1")
+    client = MagicMock()
+    client.request.side_effect = lambda _endpoint, payload: session.dispatch_once(**payload)
+    monkeypatch.setattr(cli, "WorkdashControlClient", MagicMock(return_value=client))
+
+    assert cli.main(["dispatch", "owner/repo", "--json"]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.startswith("Error: ") and message in err
+    assert "no_ready_task" not in err and '"launched"' not in err
+    assert launch.call_count == launches
 
 
 def test_dispatch_skips_claim_before_checking_launch_limit(monkeypatch, tmp_path):
@@ -3123,11 +4973,32 @@ def test_remote_dispatch_cli_through_http(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("WORKDASH_HOST", f"127.0.0.1:{port}")
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
-    session, _, _, launch = _coding_session(monkeypatch, tmp_path, [])
+    panes = []
+    session, _, _, launch = _coding_session(monkeypatch, tmp_path, panes)
     session.config = replace(session.config, github_username="testuser")
+    start = launch.side_effect
+
+    def start_in_group(*args, **kwargs):
+        pane = start(*args, **kwargs)
+        panes[-1]["tab_name"] = kwargs["group"]
+        return pane
+
+    launch.side_effect = start_in_group
     server = control_module.WorkdashControlServer(session)
     server.start()
     host = f"127.0.0.1:{port}"
+    monkeypatch.setenv("WORKDASH_HOST", "invalid default address")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(
+        cli.GitHubClient,
+        "check_authentication",
+        MagicMock(side_effect=AssertionError("unexpected client GitHub preflight")),
+    )
+    monkeypatch.setattr(
+        launcher_module,
+        "_resolve_zellij_binary",
+        MagicMock(side_effect=AssertionError("unexpected local Zellij lookup")),
+    )
     try:
         assert (
             cli.main(["dispatch", "owner/repo", "--host", host, "--agent", "missing", "--json"])
@@ -3162,8 +5033,10 @@ def test_remote_dispatch_cli_through_http(monkeypatch, tmp_path, capsys):
             "pi",
             "epic",
         )
-        assert result["pane_id"] == "terminal_30"
+        assert result["tab_name"] == "epic"
+        assert result["pane_id"] == f"terminal_{panes[0]['id']}"
         assert result["autoclose_enabled"] is True
+        assert (result["session"], result["pane_id"]) in session.autoclose._panes
         assert launch.call_count == 1
     finally:
         server.stop()
@@ -3174,19 +5047,22 @@ def test_remote_dispatch_cli_through_http(monkeypatch, tmp_path, capsys):
     assert error.value.code == "server_unreachable"
 
 
-def test_dispatch_launches_and_supervises_selected_issue(monkeypatch, tmp_path):
+@pytest.mark.parametrize("closed_subissue", [False, True], ids=["unstarted", "parent"])
+def test_dispatch_launches_and_supervises_selected_issue(monkeypatch, tmp_path, closed_subissue):
     github = install_fake_github(monkeypatch)
-    github.add_issue("owner/repo#1")
+    github.add_issue("owner/repo#42")
+    if closed_subissue:
+        github.add_issue("owner/repo#43", parent="owner/repo#42", state="CLOSED")
     session, _, _, launch = _coding_session(monkeypatch, tmp_path, [])
     session.config = replace(
         session.config, github_username="testuser", todo_repository="testuser/todos"
     )
 
-    result = session.dispatch_once(scope="owner/repo", agent="pi")
+    result = session.dispatch_once(scope="owner/repo#42", agent="pi")
 
     assert (result["status"], result["issue_id"], result["action"]) == (
         "launched",
-        "owner/repo#ISSUE-1",
+        "owner/repo#ISSUE-42",
         "implement",
     )
     assert result["pane_id"] == "terminal_30"
@@ -3194,7 +5070,14 @@ def test_dispatch_launches_and_supervises_selected_issue(monkeypatch, tmp_path):
     assert launch.call_count == 1
     assert launch.call_args.kwargs["group"] == "repo"
     assert ("workdash-main", "terminal_30") in session.autoclose._panes
-    assert "AUTOSTART: IMPLEMENT" in _launched_prompt(launch)
+    prompt = _launched_prompt(launch)
+    assert "AUTOSTART: IMPLEMENT" in prompt
+    assert "https://github.com/owner/repo/issues/42" in prompt
+    if closed_subissue:
+        assert (
+            "If sub-issues already fulfilled the issue goal, verify the described workflow "
+            "and add a test proving it works instead of reimplementing it."
+        ) in prompt
 
 
 @pytest.mark.parametrize("target", ["owner/other", "https://github.com/owner/other.git"])
@@ -3761,7 +5644,8 @@ def test_dispatch_checks_out_pull_request_head_branch(monkeypatch, tmp_path):
     )
 
 
-def test_dispatch_rechecks_conflict_before_launch(monkeypatch, tmp_path):
+@pytest.mark.parametrize("scope", ["owner/repo", "owner/repo#1"])
+def test_dispatch_rechecks_conflict_before_launch(monkeypatch, tmp_path, scope):
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
     pr = github.add_pull_request("owner/repo#51", closes=("owner/repo#1",), mergeable="CONFLICTING")
@@ -3778,11 +5662,210 @@ def test_dispatch_rechecks_conflict_before_launch(monkeypatch, tmp_path):
     launch = MagicMock()
     monkeypatch.setattr(session, "code", launch)
 
-    assert session.dispatch_once(scope="owner/repo") == {
+    assert session.dispatch_once(scope=scope) == {
         "status": "no_ready_task",
-        "scope": "owner/repo",
+        "scope": scope,
     }
     launch.assert_not_called()
+
+
+@pytest.mark.parametrize("all_reasons", [False, True], ids=["failed-ci", "all-reasons"])
+def test_dispatch_resumes_existing_pr_and_passes_its_reasons_to_the_agent(
+    monkeypatch, tmp_path, all_reasons
+):
+    import workdash.repo_worktree as repo_worktree
+
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_issue("owner/repo#42", created="2026-01-02T00:00:00Z")
+    github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#42",),
+        checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+        **(
+            {
+                "mergeable": "CONFLICTING",
+                "threads": [thread(comment("reviewer", created=AFTER_PUSH))],
+            }
+            if all_reasons
+            else {}
+        ),
+    )
+    panes = []
+    session, _, _, launch, _ = _authored_session(monkeypatch, tmp_path, panes)
+    main = tmp_path / "owner_repo"
+    path = tmp_path / "owner_repo_51"
+    branch = "fix-ci-51"
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")
+    subprocess.run(["git", "init", "-qb", "main", str(main)], check=True)
+    git = ["git", "-C", str(main)]
+    subprocess.run(
+        [
+            *git,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [*git, "remote", "add", "origin", "https://github.com/owner/repo.git"], check=True
+    )
+    subprocess.run([*git, "update-ref", f"refs/remotes/origin/{branch}", "HEAD"], check=True)
+    subprocess.run(
+        [*git, "worktree", "add", "-q", "--track", "-b", branch, str(path), f"origin/{branch}"],
+        check=True,
+    )
+    monkeypatch.setattr(
+        control_module, "existing_worktree_path", repo_worktree.existing_worktree_path
+    )
+    monkeypatch.setattr(control_module, "ensure_worktree", repo_worktree.ensure_worktree)
+    monkeypatch.setattr(GitHelper, "pull_ff_only", lambda *_: None)
+    session.git = GitHelper()
+    session.backend.github_client.fetch_worktree_head.side_effect = lambda item: (
+        f"fix-ci-{item.number}",
+        item.repo,
+    )
+    scope = "owner/repo#42" if all_reasons else "owner/repo"
+    if not all_reasons:
+        assert [item["id"] for item in session.ready(scope=scope)["items"]] == [
+            "owner/repo#ISSUE-42",
+            "owner/repo#ISSUE-1",
+        ]
+
+    result = session.dispatch_once(scope=scope, agent="pi")
+
+    expected = ["address_review", "fix_merge_conflicts", "fix_ci"] if all_reasons else ["fix_ci"]
+    assert (result["status"], result["issue_id"], result["action"], result["reasons"]) == (
+        "launched",
+        "owner/repo#ISSUE-42",
+        expected[0],
+        expected,
+    )
+    assert result["pane_id"] == f"terminal_{panes[0]['id']}"
+    assert result["autoclose_enabled"] is True
+    assert (result["session"], result["pane_id"]) in session.autoclose._panes
+    launch.assert_called_once()
+    assert result["pr_id"] == "owner/repo#PR-51"
+    assert launch.call_args.args[0] == panes[0]["pane_cwd"] == result["cwd"] == str(path)
+    assert (
+        subprocess.check_output(["git", "branch", "--show-current"], cwd=path, text=True).strip()
+        == branch
+    )
+    prompt = _launched_prompt(launch)
+    if all_reasons:
+        assert (
+            prompt.index("https://github.com/comment/")
+            < prompt.index("confirmed merge conflicts")
+            < prompt.index("failing checks: tests")
+        )
+        assert list(github.pull_requests) == ["owner/repo#51"]
+    else:
+        [state] = session.backend.github_client.evaluate_pull_requests(
+            [("owner/repo", 51)],
+            github_username=session.config.github_username,
+            todo_repository=session.config.todo_repository,
+        )
+        assert state.action == "fix_ci"
+        assert render_work_instruction(state.action, state) in prompt
+
+
+def test_dispatch_groups_nested_descendant_by_its_own_repository(monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/parent#42", state="CLOSED")
+    github.add_issue("owner/parent#43", parent="owner/parent#42")
+    github.add_issue("owner/child#7", parent="owner/parent#43")
+    github.add_issue("owner/parent#50")
+    session, _, ensure, launch = _coding_session(monkeypatch, tmp_path, [])
+    session.config = replace(session.config, github_username="testuser")
+
+    result = session.dispatch_once(scope="owner/parent#42")
+
+    assert (result["status"], result["issue_id"], result["pane_id"], result["group"]) == (
+        "launched",
+        "owner/child#ISSUE-7",
+        "terminal_30",
+        "child",
+    )
+    launch.assert_called_once()
+    assert launch.call_args.kwargs["group"] == "child"
+    ensure.assert_called_once()
+    item = ensure.call_args.args[1]
+    assert (item.repo, item.number) == ("owner/child", 7)
+
+
+def test_dispatch_briefs_review_wait_when_conflict_disappears_after_revalidation(
+    monkeypatch, tmp_path
+):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    pr = github.add_pull_request("owner/repo#51", closes=("owner/repo#1",), mergeable="CONFLICTING")
+    session, _, _, launch, _ = _authored_session(monkeypatch, tmp_path)
+    ready = session._ready
+
+    def resolve_after_recheck(scope, *args, **kwargs):
+        result = ready(scope, *args, **kwargs)
+        if scope == "owner/repo#ISSUE-1":
+            pr["mergeable"] = "MERGEABLE"
+        return result
+
+    monkeypatch.setattr(session, "_ready", resolve_after_recheck)
+    result = session.dispatch_once(scope="owner/repo#1")
+
+    assert (result["status"], result["issue_id"], result["pane_id"]) == (
+        "launched",
+        "owner/repo#ISSUE-1",
+        "terminal_30",
+    )
+    assert result["action"] == "fix_merge_conflicts"
+    launch.assert_called_once()
+    prompt = _launched_prompt(launch)
+    assert "https://github.com/owner/repo/pull/51" in prompt
+    assert "waiting for human review" in prompt
+    assert "cannot merge cleanly" not in prompt
+    assert "AUTOSTART: IMPLEMENT" not in prompt
+    assert result["autoclose_enabled"] is True
+    assert (result["session"], result["pane_id"]) in session.autoclose._panes
+
+
+def test_dispatch_retries_a_transient_github_launch_context_read(monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    session, _, _, launch = _coding_session(monkeypatch, tmp_path, [])
+    session.config = replace(session.config, github_username="testuser")
+    monkeypatch.setattr(
+        control_module, "prepare_launch_agent_prompt", launcher_module.prepare_launch_agent_prompt
+    )
+    run = subprocess.run
+    responses = iter([failure("HTTP 502"), {"state": "OPEN", "title": "Fix the thing"}])
+    reads = []
+
+    def flaky(command, *args, **kwargs):
+        if command[:3] != ["gh", "issue", "view"]:
+            return run(command, *args, **kwargs)
+        reads.append(command[:4])
+        response = next(responses)
+        if isinstance(response, subprocess.CalledProcessError):
+            raise response
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(response))
+
+    monkeypatch.setattr(subprocess, "run", flaky)
+    result = session.dispatch_once(scope="owner/repo")
+
+    assert (result["status"], result["issue_id"], result["action"], result["pane_id"]) == (
+        "launched",
+        "owner/repo#ISSUE-42",
+        "implement",
+        "terminal_30",
+    )
+    assert reads == [["gh", "issue", "view", "42"]] * 2
+    launch.assert_called_once()
+    assert "https://github.com/owner/repo/issues/42" in _launched_prompt(launch)
 
 
 def test_dispatch_uses_cross_repo_pr_for_default_group(monkeypatch, tmp_path):
@@ -4371,7 +6454,7 @@ def test_session_uses_its_git_to_identify_worktrees_for_ready_and_panes(monkeypa
     assert session.info()["panes"][0]["item"] == "owner/repo#ISSUE-1"
 
 
-def test_terminal_prepares_worktree_with_session_git(monkeypatch, tmp_path) -> None:
+def test_terminal_api_prepares_worktree_with_session_git(monkeypatch, tmp_path) -> None:
     item = _work_item(number=1, title="Issue")
     session = WorkdashSession(
         config=WorkdashConfig(workdir=str(tmp_path)),
@@ -4383,22 +6466,72 @@ def test_terminal_prepares_worktree_with_session_git(monkeypatch, tmp_path) -> N
     git = MagicMock()
     git.find_worktree_for_branch.return_value = None
     session.git = git
-    monkeypatch.setattr(
-        control_module,
-        "launch_terminal_context",
-        lambda path, **kwargs: SimpleNamespace(
-            session=kwargs["zellij_session"], cwd=path, pane_title="terminal", pane_id="1"
-        ),
-    )
+    worktree = tmp_path / "owner_repo_1"
+
+    def open_terminal(path, *, zellij_session):
+        assert git.create_worktree.called, "prepare the worktree before opening the terminal"
+        return SimpleNamespace(
+            session=zellij_session,
+            cwd=path,
+            pane_title="terminal_owner_repo_1",
+            pane_id="terminal_23",
+        )
+
+    launch = MagicMock(side_effect=open_terminal)
+    monkeypatch.setattr(control_module, "launch_terminal_context", launch)
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("real subprocess"))
 
-    result = session.terminal(target="owner/repo#ISSUE-1")
-
-    worktree = tmp_path / "owner_repo_1"
-    assert result["cwd"] == str(worktree)
+    response = _post_item_action(session, "terminal", "owner/repo#ISSUE-1")
+    assert response.status_int == 200
+    assert response.json == {
+        "ok": True,
+        "result": {
+            "item_id": "owner/repo#ISSUE-1",
+            "session": "workdash-main",
+            "cwd": str(worktree),
+            "pane_title": "terminal_owner_repo_1",
+            "pane_id": "terminal_23",
+        },
+    }
+    launch.assert_called_once_with(str(worktree), zellij_session="workdash-main")
     git.create_worktree.assert_called_once_with(
         tmp_path / "owner_repo", worktree, "issue-1", "origin/HEAD"
     )
+
+
+def test_terminal_uses_current_zellij_session_without_an_override(monkeypatch, tmp_path):
+    item = _work_item(number=1, title="Issue")
+    session = WorkdashSession(
+        config=WorkdashConfig(workdir=str(tmp_path)),
+        backend=SimpleNamespace(github_client=GitHubClient()),
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    worktree = str(tmp_path / "owner_repo_1")
+    prepare = MagicMock(return_value=worktree)
+    monkeypatch.setattr(control_module, "ensure_worktree", prepare)
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setattr(
+        launcher_module.shutil,
+        "which",
+        lambda name: "/usr/bin/zellij" if name == "zellij" else None,
+    )
+
+    def run_zellij(argv, **kwargs):
+        mark_pane_started(argv, "23")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    run = MagicMock(side_effect=run_zellij)
+    monkeypatch.setattr(subprocess, "run", run)
+
+    session.terminal(target="owner/repo#ISSUE-1")
+
+    assert prepare.call_args.args == (str(tmp_path), item)
+    run.assert_called_once()
+    zellij_args, _ = pane_launch(run.call_args.args[0])
+    assert zellij_args[:3] == ["/usr/bin/zellij", "action", "new-pane"]
+    assert zellij_args[zellij_args.index("--cwd") + 1] == worktree
 
 
 def test_session_analyzes_and_launches_coding_agent_with_real_executor(
@@ -4430,7 +6563,10 @@ def test_session_analyzes_and_launches_coding_agent_with_real_executor(
     monkeypatch.setattr(control_module, "existing_worktree_path", lambda *_, **kwargs: worktree)
     monkeypatch.setattr(control_module, "get_merge_base", lambda *_, **kwargs: None)
     monkeypatch.setattr("workdash.github_client.GitHubClient.fetch_analysis_context", lambda *_: {})
-    monkeypatch.setattr("workdash.github_client.GitHubClient.fetch_launch_context", lambda *_: {})
+    monkeypatch.setattr(
+        "workdash.github_client.GitHubClient.fetch_launch_context",
+        lambda *_: {"body": "Keep existing shortcuts", "url": item.url},
+    )
 
     analysis_launches = []
     coding_launches = []
@@ -4488,10 +6624,23 @@ def test_session_analyzes_and_launches_coding_agent_with_real_executor(
         "group": "team",
     }
     assert command[1] == "-ic"
-    shell_command = shlex.split(command[2])
-    assert shell_command[0] == "pi"
-    assert "Implement the issue" in shell_command[1]
-    assert analysis["url"] in shell_command[1]
+    agent, prompt = shlex.split(command[2])
+    assert agent == "pi"
+    assert "Implement the issue" in prompt
+    assert "PREVIOUS ANALYSIS:" in prompt
+    assert AnalysisCache.build_analysis_url_path(item) in prompt
+    assert analysis["url"] in prompt
+    assert str(backend.analysis_cache.build_analysis_path(item)) not in prompt
+    assert item.url in prompt
+    assert "Keep existing shortcuts" in prompt
+    assert "Propose a concrete implementation plan and clarifying questions." in prompt
+    assert "Do not start implementing code yet." in prompt
+    assert "Discuss review findings" not in prompt
+    assert "AUTOSTART" not in prompt
+    assert (
+        "development practices, skills, and coordination workflows you have been configured"
+        not in prompt
+    )
 
 
 def test_shared_agent_execution_can_simulate_analysis_and_coding(monkeypatch, tmp_path) -> None:
@@ -4617,14 +6766,20 @@ def test_terminal_panes_match_worktree_and_exclude_agents_and_exited_panes(tmp_p
                 "pane_cwd": str(worktree),
             },
             {
+                "id": 15,
+                "title": "terminal_owner_repo_1",
+                "pane_command": "sleep 300",
+                "pane_cwd": str(worktree),
+            },
+            {
                 "id": 14,
                 "title": "my shell",
                 "pane_command": "/usr/local/bin/nu -i",
                 "pane_cwd": str(worktree),
             },
             {"id": 13, "title": "terminal_owner_repo_1", "pane_cwd": str(worktree)},
-            {"id": 8, "title": "nvim", "pane_cwd": str(worktree)},
-            {"id": 9, "title": "pytest", "pane_cwd": str(worktree)},
+            {"id": 8, "title": "nvim", "pane_command": "nvim", "pane_cwd": str(worktree)},
+            {"id": 9, "title": "pytest", "pane_command": "pytest", "pane_cwd": str(worktree)},
             {"id": 10, "title": "claude", "pane_cwd": str(worktree)},
             {
                 "id": 5,
@@ -4641,9 +6796,31 @@ def test_terminal_panes_match_worktree_and_exclude_agents_and_exited_panes(tmp_p
         "terminal_7",
         "terminal_11",
         "terminal_12",
+        "terminal_15",
         "terminal_14",
         "terminal_13",
     ]
+
+
+def test_terminal_lookup_ignores_a_viewer_in_the_worktree(tmp_path, monkeypatch):
+    worktree = tmp_path / "owner_repo_1"
+    worktree.mkdir()
+    item = _work_item(number=1, title="Work")
+    session = _terminal_session(tmp_path, item)
+    session.git = MagicMock()
+    session.git.worktree_proves_item.return_value = True
+    viewer = {
+        "id": 3,
+        "title": "view",
+        "pane_command": '/bin/sh -c claim="$ZELLIJ_PANE_ID"; ... '
+        "workdash-pane /tmp/workdash-pane-test/launch/pane workdash view analysis.md",
+        "pane_cwd": str(worktree),
+    }
+    list_panes = MagicMock(return_value=[viewer])
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", list_panes)
+
+    assert session.get_terminal_panes_for_item(item) == []
+    list_panes.assert_called_once_with("workdash")
 
 
 @pytest.mark.parametrize("item_type", [WorkItemType.ISSUE, WorkItemType.PR])
@@ -4680,8 +6857,8 @@ def test_terminal_pane_is_reused_unless_it_moved_into_another_worktree(tmp_path,
     worktree.mkdir(parents=True)
     other_worktree = workdir / "other" / worktree.name
     other_worktree.mkdir(parents=True)
-    elsewhere = tmp_path / "elsewhere" / worktree.name
-    elsewhere.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
     item = _work_item(number=1, title="Work")
     panes = [
         {
@@ -4717,6 +6894,7 @@ def test_terminal_pane_lookup_returns_nothing_without_a_zellij_session(monkeypat
 def test_control_boundary_requires_header_except_analysis_documents():
     session = MagicMock()
     session.show_config.return_value = {"ok": "yes"}
+    session.list_items.return_value = {"items": []}
     session.backend.analysis_cache.load_analysis.return_value = (
         "![diagram](https://example.com/image.png)"
     )
@@ -4727,14 +6905,19 @@ def test_control_boundary_requires_header_except_analysis_documents():
     def call(path, method="GET", headers=None, peer="127.0.0.1"):
         req = Request.blank(path, method=method, headers=headers or {})
         req.environ["REMOTE_ADDR"] = peer
+        if path == "/api/v0/list" and method == "POST":
+            req.content_type = "application/json"
+            req.body = b"{}"
         return req.get_response(app)
 
     control = "/api/v0/show-config"
+    list_api = "/api/v0/list"
     artifact = "/api/items/owner/repo%23ISSUE-1/files/"
     analysis = "/api/items/owner/repo%23ISSUE-1/analysis"
     short_item = "/api/items"
     for path, method in (
         (control, "POST"),
+        (list_api, "POST"),
         (artifact, "POST"),
         (analysis, "POST"),
         (short_item, "GET"),
@@ -4747,7 +6930,17 @@ def test_control_boundary_requires_header_except_analysis_documents():
     assert form.status_int == 403
     assert "Access-Control-Allow-Origin" not in form.headers
     session.show_config.assert_not_called()
+    session.list_items.assert_not_called()
     assert call(control, "POST", {"X-Workdash": version("workdash")}).status_int == 200
+    response = call(list_api, "POST", {"X-Workdash": version("workdash")})
+    assert response.status_int == 200
+    assert response.json["ok"] is True
+    list_preflight = call(
+        list_api,
+        "OPTIONS",
+        {"Origin": "https://example.com", "Access-Control-Request-Method": "POST"},
+    )
+    assert list_preflight.status_int == 403
     for path in (analysis, analysis + "/html"):
         assert call(path).status_int == 200
         assert call(path, peer="192.0.2.1").status_int == 403
@@ -4763,6 +6956,56 @@ def test_control_boundary_requires_header_except_analysis_documents():
     assert preflight.status_int == 403
     assert "Access-Control-Allow-Origin" not in preflight.headers
     assert "Access-Control-Allow-Headers" not in preflight.headers
+
+
+@pytest.mark.parametrize("cached", [True, False], ids=["cached", "missing"])
+def test_analysis_documents_serve_cached_content_without_header(tmp_path, cached):
+    item = _work_item(number=1, title="Work")
+    cache = AnalysisCache(tmp_path / "analysis-cache")
+    markdown = "# Cached analysis\n\nRecommended next step.\n"
+    if cached:
+        cache.save(item, markdown)
+        item.analysis = cache.load_analysis(item)
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=WorkdashBackend(analysis_cache=cache),
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    app = control_module._source_and_header_guarded_wsgi_app(
+        control_module._make_turbogears_app(session)
+    )
+    path = "/api/items/owner/repo%23ISSUE-1/analysis"
+    peer = {"REMOTE_ADDR": "127.0.0.1"}
+    if not cached:
+        response = Request.blank(path, environ=peer).get_response(app)
+        assert response.status_int == 404
+        assert response.json["ok"] is False
+        assert response.json["error"]["code"] == "not_found"
+        return
+    result = Request.blank(
+        "/api/v0/analyze",
+        method="POST",
+        host="dashboard.test:9876",
+        headers={"X-Workdash": version("workdash")},
+        content_type="application/json",
+        body=b'{"target":"owner/repo#ISSUE-1"}',
+        environ=peer,
+    ).get_response(app)
+    assert result.status_int == 200
+    urls = result.json["result"]
+    assert urls["markdown_url"] == f"http://dashboard.test:9876{path}"
+    assert urls["html_url"] == urls["markdown_url"] + "/html"
+    response = Request.blank(urls["markdown_url"], environ=peer).get_response(app)
+    assert response.status_int == 200
+    assert response.content_type == "text/markdown"
+    assert response.body == markdown.encode()
+    html = Request.blank(urls["html_url"], environ=peer).get_response(app)
+    assert html.status_int == 200
+    assert html.content_type == "text/html"
+    assert "<h1>Cached analysis</h1>" in html.text
+    assert "<p>Recommended next step.</p>" in html.text
 
 
 def test_control_boundary_allows_trailing_slash_analysis_documents():
@@ -4789,8 +7032,34 @@ def test_control_boundary_allows_trailing_slash_analysis_documents():
         assert call(path, method).status_int == 403, path
 
 
-@pytest.mark.parametrize("fail", [False, True])
-def test_issue_analysis_uses_disposable_default_branch_worktree(tmp_path, monkeypatch, fail):
+def test_fresh_analysis_needs_a_session_before_preparing_worktree(tmp_path, monkeypatch):
+    item = _work_item(number=1, title="Issue")
+    workdir = tmp_path / "work"
+    config = WorkdashConfig(workdir=str(workdir), agents={"pi": AgentConfig(analyze="pi")})
+    github = MagicMock(spec=GitHubClient)
+    backend = WorkdashBackend(config=config, github_client=github, cache_root=tmp_path / "cache")
+    launches = install_pane_launch(monkeypatch)
+    session = WorkdashSession(
+        config=config,
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    with pytest.raises(
+        WorkdashControlError, match="Analysis requires a known Workdash Zellij session"
+    ):
+        session.analyze(target="owner/repo#ISSUE-1", prefer_cache=False)
+
+    assert not workdir.exists()
+    github.clone_repository.assert_not_called()
+    github.fetch_analysis_context.assert_not_called()
+    assert not launches
+
+
+@pytest.mark.parametrize("outcome", ["success", "error", "empty"])
+def test_issue_analysis_uses_disposable_default_branch_worktree(tmp_path, monkeypatch, outcome):
     source = tmp_path / "source"
     source.mkdir()
 
@@ -4806,52 +7075,64 @@ def test_issue_analysis_uses_disposable_default_branch_worktree(tmp_path, monkey
     git("add", ".")
     git("commit", "-m", "initial")
     item = _work_item(number=1, title="Issue")
-    backend = MagicMock()
-    paths = []
-    output = tmp_path / "analysis.md"
-    output.write_text("analysis")
-
-    def analyze(requested_item, *, tool, **kwargs):
-        if tool == "cached":
-            return None
-        path = Path(kwargs["cwd"])
-        paths.append(path)
-        assert (path / "code.txt").read_text() == "default code"
-        assert git("rev-parse", "--abbrev-ref", "HEAD", cwd=path) == "HEAD"
-        (path / "agent-created").write_text("untracked")
-        if fail:
-            raise RuntimeError("agent failed")
-        return str(output)
-
-    backend.analyze_item.side_effect = analyze
-
-    def clone(repo, target):
-        subprocess.run(["git", "clone", str(source), str(target)], check=True, capture_output=True)
-
-    backend.github_client.clone_repository.side_effect = clone
+    github = MagicMock(spec=GitHubClient)
+    github.fetch_analysis_context.return_value = {"body": "Issue discussion"}
+    github.clone_repository.side_effect = lambda repo, target: git(
+        "clone", str(source), str(target)
+    )
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    launches = install_pane_launch(monkeypatch)
+    script = (
+        "import pathlib, subprocess, sys\n"
+        "assert pathlib.Path('code.txt').read_text() == 'default code'\n"
+        "assert subprocess.check_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD']) == b'HEAD\\n'\n"
+        "assert 'Issue discussion' in sys.argv[-1]\n"
+        "pathlib.Path('agent-created').touch()\n"
+        + {
+            "success": "print('# Fresh analysis')",
+            "error": "print('# Partial analysis')\nsys.exit('agent failed')",
+            "empty": "pass",
+        }[outcome]
+    )
+    workdir = tmp_path / "work"
+    config = WorkdashConfig(
+        workdir=str(workdir),
+        agents={"pi": AgentConfig(analyze=shlex.join([sys.executable, "-c", script]))},
+    )
+    backend = WorkdashBackend(config=config, github_client=github, cache_root=tmp_path / "cache")
+    cache = backend.analysis_cache
+    if outcome != "success":
+        cache.save(item, "# Prior analysis")
     session = WorkdashSession(
-        config=WorkdashConfig(
-            workdir=str(tmp_path / "work"), agents={"pi": AgentConfig(analyze="pi")}
-        ),
+        config=config,
         backend=backend,
         work_items=[item],
         suggestion_markers={},
         zellij_session="test",
     )
-    if fail:
-        with pytest.raises(RuntimeError, match="agent failed"):
-            session.analyze(target="owner/repo#ISSUE-1")
+    if outcome == "success":
+        result = session.analyze(target="owner/repo#ISSUE-1", prefer_cache=False)
+        assert result["status"] == "generated"
+        assert Path(result["path"]).read_text() == cache.load_analysis(item) == "# Fresh analysis"
     else:
-        assert session.analyze(target="owner/repo#ISSUE-1")["status"] == "generated"
-    assert len(paths) == 1 and not paths[0].exists()
-    main = tmp_path / "work" / "owner_repo"
+        message = "agent failed" if outcome == "error" else "Analysis failed for owner/repo#ISSUE-1"
+        with pytest.raises(RuntimeError, match=message):
+            session.analyze(target="owner/repo#ISSUE-1", prefer_cache=False)
+        assert cache.load_analysis(item) == "# Prior analysis"
+    [launch] = launches
+    assert not Path(launch["repo_path"]).exists()
+    assert launch["pane_name"] == "analyse_owner_repo_1"
+    assert launch["group"] == "repo"
+    main = workdir / "owner_repo"
+    assert not (workdir / "owner_repo_1").exists()
     assert len(git("worktree", "list", "--porcelain", cwd=main).split("worktree ")) == 2
-    assert "issue-1" not in git("branch", "--list", cwd=main)
-    backend.github_client.create_issue_branch.assert_not_called()
+    assert git("branch", "-a", "--list", "*issue-1", cwd=main) == ""
+    github.create_issue_branch.assert_not_called()
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_targeted_todo_analysis_uses_target_default_branch(tmp_path, fail):
+@pytest.mark.parametrize("target_url", [None, "https://codeberg.org/owner/target.git"])
+def test_targeted_todo_analysis_uses_target_default_branch(tmp_path, monkeypatch, fail, target_url):
     repos = {"owner/todos": tmp_path / "todos", "owner/target": tmp_path / "target"}
 
     def git(cwd, *args):
@@ -4873,8 +7154,18 @@ def test_targeted_todo_analysis_uses_target_default_branch(tmp_path, fail):
     git(target, "commit", "-am", "other branch")
     git(target, "switch", "main")
 
+    if target_url:
+        # Exercise Git URL cloning without contacting the forge.
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+        monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{target}.insteadOf")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", target_url)
+
     item = replace(
-        _work_item(number=1, title="Todo"), repo="owner/todos", todo_target="owner/target"
+        _work_item(number=1, title="Todo"),
+        repo="owner/todos",
+        todo_target=target_url or "owner/target",
     )
     backend = MagicMock()
     paths = []
@@ -4913,11 +7204,16 @@ def test_targeted_todo_analysis_uses_target_default_branch(tmp_path, fail):
             session.analyze(target="owner/target#ISSUE-WT1")
     else:
         assert session.analyze(target="owner/target#ISSUE-WT1")["status"] == "generated"
-    assert len(paths) == 1 and not paths[0].exists()
+    [temporary_checkout] = paths
+    assert temporary_checkout.name == "owner_target_todo_1"
+    assert not temporary_checkout.exists()
     main = tmp_path / "work" / "owner_target"
     assert len(git(main, "worktree", "list", "--porcelain").split("worktree ")) == 2
     assert "wt-1" not in git(main, "branch", "--list")
-    backend.github_client.clone_repository.assert_called_once_with("owner/target", main)
+    if target_url:
+        backend.github_client.clone_repository.assert_not_called()
+    else:
+        backend.github_client.clone_repository.assert_called_once_with("owner/target", main)
     backend.github_client.create_issue_branch.assert_not_called()
 
 
@@ -5431,8 +7727,15 @@ def test_close_todo_api_updates_tui_table():
                 content_type="application/json",
                 body=json.dumps({"item": "10"}).encode(),
             )
-            response = await asyncio.to_thread(request.get_response, api)
-            assert response.status_int == 200
+
+            def close_todo():
+                response = request.get_response(api)
+                assert response.status_int == 200
+                return response.json["result"]
+
+            result = await asyncio.to_thread(close_todo)
+            assert result["item_id"] == "testuser/todos#ISSUE-10"
+            assert result["status"] == "closed"
             await pilot.pause()
             assert table.row_count == 1
             assert str(table.get_row_at(0)[2]).lstrip("* ") == "Keep this item"
@@ -5465,8 +7768,42 @@ def test_dispatch_api_does_not_expose_blocked_scope_metadata(monkeypatch, tmp_pa
 def test_info_api_filters_unrelated_panes_unless_all_requested(monkeypatch, tmp_path):
     worktree = tmp_path / "owner_repo_1"
     panes = [
-        {"id": 1, "title": "code_owner_repo_1", "pane_cwd": str(worktree)},
-        {"id": 2, "title": "shell", "pane_cwd": str(worktree), "pane_command": "bash"},
+        {
+            "id": 1,
+            "title": "code_owner_repo_1",
+            "pane_cwd": str(worktree),
+            "tab_id": 7,
+            "tab_name": "work",
+            "pane_command": "codex",
+            "state": "Running",
+        },
+        {
+            "id": 2,
+            "title": "terminal_owner_repo_1",
+            "pane_cwd": str(worktree),
+            "tab_id": 7,
+            "tab_name": "work",
+            "terminal_command": "bash",
+        },
+        {
+            "id": 5,
+            "title": "code_unknown",
+            "pane_cwd": str(worktree),
+            "pane_command": "pi",
+            "state": "Running",
+        },
+        {"id": 6, "title": "code_old", "exited": True},
+        {"id": 7, "title": "terminal_held", "exited": False, "is_held": True},
+        {
+            "id": 11,
+            "title": "shell",
+            "pane_cwd": str(worktree),
+            "pane_command": "bash",
+            "tab_name": "scratch",
+        },
+        {"id": 12, "title": "old-shell", "exited": True},
+        {"id": 13, "title": "held-shell", "is_held": True},
+        {"id": 14, "title": "status", "is_plugin": True},
     ]
     monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: panes)
     monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args, **kwargs: worktree)
@@ -5493,17 +7830,152 @@ def test_info_api_filters_unrelated_panes_unless_all_requested(monkeypatch, tmp_
         request.environ["REMOTE_ADDR"] = "127.0.0.1"
         response = request.get_response(app)
         assert response.status_int == 200
+        assert response.json["result"]["session"] == "project"
         result = response.json["result"]["panes"]
-        assert [pane["pane_id"] for pane in result] == (
-            ["terminal_1", "terminal_2"] if payload.get("panes") == "all" else ["terminal_1"]
-        )
+        expected_ids = ["terminal_1", "terminal_2", "terminal_5"]
+        if payload.get("panes") == "all":
+            expected_ids.append("terminal_11")
+        assert [pane["pane_id"] for pane in result] == expected_ids
+        assert result[0]["session"] == "project"
+        assert result[0]["tab_id"] == 7
+        assert result[0]["tab_name"] == "work"
+        assert result[0]["title"] == "code_owner_repo_1"
+        assert result[0]["cwd"] == str(worktree)
+        assert result[0]["command"] == "codex"
         assert result[0]["kind"] == "agent"
+        assert result[0]["state"] == "Running"
         assert result[0]["item"] == "owner/repo#ISSUE-1"
         assert result[0]["item_url"] == "https://github.com/owner/repo/issues/1"
+        terminal, unmatched = result[1:3]
+        assert terminal["session"] == "project"
+        assert terminal["tab_id"] == 7
+        assert terminal["tab_name"] == "work"
+        assert terminal["title"] == "terminal_owner_repo_1"
+        assert terminal["cwd"] == str(worktree)
+        assert terminal["command"] == "bash"
+        assert terminal["kind"] == "terminal"
+        assert terminal["state"] == "running"
+        assert terminal["item"] == "owner/repo#ISSUE-1"
+        assert unmatched["title"] == "code_unknown"
+        assert unmatched["cwd"] == str(worktree)
+        assert unmatched["command"] == "pi"
+        assert unmatched["state"] == "Running"
+        assert unmatched["item"] == "unknown"
         if payload.get("panes") == "all":
-            assert result[1]["kind"] == "unknown"
-            assert result[1]["item"] == "unknown"
-            assert result[1]["command"] == "bash"
+            shell = result[3]
+            assert shell["title"] == "shell"
+            assert shell["kind"] == "unknown"
+            assert shell["item"] == "unknown"
+            assert shell["cwd"] == str(worktree)
+            assert shell["command"] == "bash"
+            assert shell["tab_name"] == "scratch"
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload", "zellij_action", "args", "options", "output", "result"),
+    [
+        pytest.param(
+            "content",
+            {},
+            "dump_zellij_pane",
+            (),
+            {"full": False},
+            "visible output",
+            {"content": "visible output", "full": False},
+            id="viewport",
+        ),
+        pytest.param(
+            "content",
+            {"full": True},
+            "dump_zellij_pane",
+            (),
+            {"full": True},
+            "full output",
+            {"content": "full output", "full": True},
+            id="scrollback",
+        ),
+        pytest.param(
+            "send",
+            {"data": "pwd"},
+            "send_zellij_pane_input",
+            ("pwd",),
+            {"raw": False},
+            None,
+            {"accepted": True, "raw": False},
+            id="send-with-enter",
+        ),
+        pytest.param(
+            "send",
+            {"data": "pwd", "raw": True},
+            "send_zellij_pane_input",
+            ("pwd",),
+            {"raw": True},
+            None,
+            {"accepted": True, "raw": True},
+            id="send-raw",
+        ),
+        pytest.param(
+            "close",
+            {},
+            "close_zellij_pane",
+            (),
+            {},
+            None,
+            {"accepted": True},
+            id="close",
+        ),
+    ],
+)
+def test_pane_api_calls_zellij_and_reports_result(
+    monkeypatch, endpoint, payload, zellij_action, args, options, output, result
+):
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="project",
+    )
+    action = MagicMock(return_value=output)
+    monkeypatch.setattr(launcher_module.zellij, zellij_action, action)
+    response = Request.blank(
+        f"/api/v0/pane/{endpoint}",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps({"pane_id": "terminal_23", **payload}).encode(),
+    ).get_response(control_module._make_turbogears_app(session))
+    assert response.status_int == 200
+    assert response.json == {"ok": True, "result": {"pane_id": "terminal_23", **result}}
+    action.assert_called_once_with("project", "terminal_23", *args, **options)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "zellij_action"), [("content", "dump_zellij_pane"), ("close", "close_zellij_pane")]
+)
+def test_pane_api_reports_zellij_failure(monkeypatch, endpoint, zellij_action):
+    session = WorkdashSession(
+        config=WorkdashConfig(),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="project",
+    )
+    monkeypatch.setattr(
+        launcher_module.zellij,
+        zellij_action,
+        MagicMock(side_effect=RuntimeError("Zellij rejected terminal_404")),
+    )
+    response = Request.blank(
+        f"/api/v0/pane/{endpoint}",
+        method="POST",
+        content_type="application/json",
+        body=b'{"pane_id":"terminal_404"}',
+    ).get_response(control_module._make_turbogears_app(session))
+    assert response.status_int == 500
+    assert response.json == {
+        "ok": False,
+        "error": {"code": "server_error", "message": "Zellij rejected terminal_404"},
+    }
 
 
 def test_info_without_panes_identifies_dashboard_without_listing(monkeypatch):

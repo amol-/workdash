@@ -12,7 +12,7 @@ from workdash.github_client import (
     normalize_review_requested_pull_requests,
     parse_github_datetime,
 )
-from workdash.models import WorkItem, WorkItemKind, WorkItemType
+from workdash.models import WorkItem, WorkItemKind, WorkItemType, format_type_label
 
 
 def _make_item(
@@ -96,6 +96,7 @@ def test_normalize_recent_tracked_item_maps_issue_and_pr() -> None:
     assert issue.item_type is WorkItemType.ISSUE
     assert pull_request.kind is WorkItemKind.TRACKED_PR
     assert pull_request.item_type is WorkItemType.PR
+    assert format_type_label(pull_request) == "CHECK"
 
 
 def test_normalize_review_requested_pull_request_maps_to_work_item() -> None:

@@ -48,11 +48,15 @@ def test_create_todo_without_target_records_no_target_in_its_metadata(
     recorded: list[list[str]] = []
     monkeypatch.setattr(todo_module.subprocess, "run", fake_gh_todo_run(recorded))
 
-    assert (
-        GitHubClient().create_todo(todo_repository="testuser/todos", text="Buy milk").todo_target
-        is None
-    )
-    body = recorded[1][recorded[1].index("--body") + 1]
+    item = GitHubClient().create_todo(todo_repository="testuser/todos", text="Buy milk")
+
+    assert item.todo_target is None
+    command = recorded[-1]
+    assert command[:5] == ["gh", "issue", "create", "--repo", "testuser/todos"]
+    assert command[command.index("--title") + 1] == "Buy milk"
+    assert command[command.index("--assignee") + 1] == "@me"
+    assert command[command.index("--label") + 1] == TODO_LABEL
+    body = command[command.index("--body") + 1]
     assert todo_target_from_body(body) is None
     assert body == '```json\n{\n  "workdash_todo_version": 1\n}\n```\n'
 

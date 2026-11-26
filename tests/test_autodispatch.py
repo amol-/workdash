@@ -42,9 +42,10 @@ def _issue_item(number: int) -> WorkItem:
     )
 
 
-def test_autodispatch_supervises_reminders_blocking_and_recovery(monkeypatch, tmp_path):
+def test_autodispatch_supervises_reminders_blocking_and_recovery(monkeypatch, tmp_path, capsys):
     from bdd.steps.autoclose import _install_supervision
     from bdd.steps.common import ensure_api_session
+    from workdash.workdash import main
 
     real_monotonic = time.monotonic
     state = {}
@@ -70,7 +71,13 @@ def test_autodispatch_supervises_reminders_blocking_and_recovery(monkeypatch, tm
             state["clock"]["now"] += 30
             session.autoclose.poll_once()
         assert state["sent"] == [(pane_id, instruction)] * 3
-        assert session.info()["autodispatch_sessions"][0]["status"] == "blocked"
+        info = session.info()
+        monkeypatch.setattr(
+            "workdash.workdash.WorkdashControlClient",
+            lambda *args, **kwargs: MagicMock(request=MagicMock(return_value=info)),
+        )
+        assert main(["info"]) == 0
+        assert f"Autodispatch {entry.id} blocked" in capsys.readouterr().out
         for _ in range(10):
             state["clock"]["now"] += 30
             session.autoclose.poll_once()
@@ -93,21 +100,29 @@ def test_dashboard_stops_only_selected_running_session(request, monkeypatch):
     session = autodispatch_state["session"]
     closed = MagicMock()
     monkeypatch.setattr("workdash.autodispatch.launcher.zellij.close_zellij_pane", closed)
-    first = session.start_autodispatch(scope="owner/first")["id"]
-    second = session.start_autodispatch(scope="owner/second")["id"]
+    session.work_items = [_issue_item(1)]
+    first = session.start_autodispatch(scope="owner/repo#ISSUE-1")["id"]
+    second = session.start_autodispatch(scope="owner/repo#ISSUE-2")["id"]
     wait_for(lambda: len(autodispatch_state["panes"]) == 2)
     wait_for(
         lambda: all(entry["stage"] == "developing" for entry in session.autodispatch_sessions())
     )
+    entries = {entry["id"]: entry for entry in session.autodispatch_sessions()}
+    for session_id in (first, second):
+        assert entries[session_id]["status"] == "running"
+        assert entries[session_id]["elapsed_seconds"] >= 0
 
     async def run():
-        app = WorkdashApp(session=session)
+        focused = MagicMock()
+        app = WorkdashApp(session=session, focus_callback=focused)
         async with app.run_test() as pilot:
-            await pilot.press("shift+tab", "down", "s")
+            await pilot.press("shift+tab", "down", "f")
+            focused.assert_called_once_with("terminal_2")
+            await pilot.press("s")
             await app._poll_autodispatch_progress()
             progress = app.query_one("#autodispatch-progress", Static).render().plain
-            assert "owner/first" in progress
-            assert "owner/second" not in progress
+            assert "owner/repo#1" in progress
+            assert "owner/repo#2" not in progress
             entries = {entry["id"]: entry for entry in session.autodispatch_sessions()}
             assert entries[first]["status"] == "running"
             assert entries[second]["status"] == "stopped"
@@ -117,11 +132,11 @@ def test_dashboard_stops_only_selected_running_session(request, monkeypatch):
     asyncio.run(run())
 
 
-def test_dashboard_toggles_automerge_for_selected_blocked_session(monkeypatch, tmp_path, caplog):
+def test_dashboard_toggles_automerge_for_selected_blocked_session(monkeypatch, tmp_path):
     import workdash.autoclose as autoclose_module
 
     state = {}
-    blocked_session(state, [], tmp_path, monkeypatch, caplog)
+    blocked_session(state, [], tmp_path, monkeypatch)
     session = state["api_session"]
 
     async def run():
@@ -367,6 +382,70 @@ def test_api_dispatches_real_ready_work_until_no_issues_remain(monkeypatch, tmp_
         session.stop_autodispatch_sessions()
 
 
+def test_autodispatch_uses_each_implementation_repository_group(monkeypatch):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/parent#1", state="CLOSED")
+    github.add_issue("owner/first#2", parent="owner/parent#1")
+    github.add_issue("owner/second#3", parent="owner/parent#1")
+    github.add_pull_request(
+        "owner/implementation#51", closes=("owner/second#3",), mergeable="CONFLICTING"
+    )
+    session = WorkdashSession(
+        config=WorkdashConfig(
+            github_username="testuser", agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}
+        ),
+        backend=MagicMock(github_client=GitHubClient()),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="workdash",
+    )
+    launches = []
+    panes = []
+
+    def code(**kwargs):
+        launches.append(kwargs)
+        panes.append({"id": len(launches)})
+        return {
+            "status": "launched",
+            "item_id": kwargs["target"],
+            "pane_id": f"terminal_{len(launches)}",
+            "session": "workdash",
+        }
+
+    monkeypatch.setattr(session, "code", code)
+    monkeypatch.setattr(session, "review", MagicMock(return_value={"status": "nothing_to_review"}))
+    monkeypatch.setattr(
+        "workdash.autodispatch.launcher.zellij.load_zellij_panes", lambda _: list(panes)
+    )
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
+
+    try:
+        session.start_autodispatch(scope="owner/parent#1")
+        wait_for(
+            lambda: (
+                bool(launches)
+                and session.autodispatch_sessions()[0]["selected_group"] == launches[0]["group"]
+            )
+        )
+        target = launches[0]["target"]
+        issue = github.issues[target.replace("#ISSUE-", "#")]
+        issue["state"] = "CLOSED"
+        panes.clear()
+        wait_for(
+            lambda: (
+                len(launches) == 2
+                and session.autodispatch_sessions()[0]["selected_group"] == launches[1]["group"]
+            )
+        )
+        assert {launch["target"]: launch["group"] for launch in launches} == {
+            "owner/first#ISSUE-2": "first",
+            "owner/second#ISSUE-3": "implementation",
+        }
+        assert session.autodispatch_sessions()[0]["group"] is None
+    finally:
+        session.stop_autodispatch_sessions()
+
+
 @pytest.mark.parametrize("targeted_todo", [False, True])
 def test_dashboard_refreshes_elapsed_time_and_shows_real_ci_dispatch(
     monkeypatch, tmp_path, targeted_todo
@@ -412,18 +491,34 @@ def test_dashboard_refreshes_elapsed_time_and_shows_real_ci_dispatch(
     )
     session.git = MagicMock()
     scope = "https://github.com/testuser/todos/issues/1" if targeted_todo else "owner/repo"
-    session.start_autodispatch(scope=scope)
+    entered, release = threading.Event(), threading.Event()
+    dispatch = session.dispatch_once
+
+    def hold_initial_check(**kwargs):
+        entered.set()
+        assert release.wait(5)
+        return dispatch(**kwargs)
+
+    if targeted_todo:
+        monkeypatch.setattr(session, "dispatch_once", hold_initial_check)
+    session.start_autodispatch(scope=scope, group="project" if targeted_todo else None)
     app = WorkdashApp(session=session)
 
     async def exercise():
         async with app.run_test(size=(120, 30)) as pilot:
+            if targeted_todo:
+                assert entered.wait(2)
+                app._update_autodispatch_progress()
+                rows = [strip.text for strip in app.screen._compositor.render_strips()]
+                assert any("project  testuser/todos#1  checking  1/" in row for row in rows), rows
+                release.set()
             deadline = time.monotonic() + 5
             initial = None
             while time.monotonic() < deadline:
                 rows = [strip.text for strip in app.screen._compositor.render_strips()]
                 row = next((row for row in rows if "fix ci" in row), "")
                 if targeted_todo and row:
-                    assert "testuser/todos#1" in row
+                    assert "project  testuser/todos#1  developing (fix ci)  1/" in row
                     assert "owner/repo#ISSUE-WT1" not in row
                 match = re.search(r"1/(\d+)s", row)
                 if match:
@@ -444,6 +539,7 @@ def test_dashboard_refreshes_elapsed_time_and_shows_real_ci_dispatch(
             "fix_ci",
         )
     finally:
+        release.set()
         session.stop_autodispatch_sessions()
         next(iter(session._autodispatch.values())).thread.join(timeout=3)
 
@@ -1667,7 +1763,7 @@ def test_autodispatch_waits_for_selected_pull_request_review(monkeypatch, tmp_pa
 
 
 @pytest.mark.parametrize(
-    "outcome", ["no_pr", "success", "empty", "failed", "failure", "unconfirmed"]
+    "outcome", ["no_pr", "success", "toggle_on", "empty", "failed", "failure", "unconfirmed"]
 )
 def test_autodispatch_real_review_controls_merge(monkeypatch, tmp_path, outcome):
     now = datetime.now(UTC)
@@ -1742,27 +1838,48 @@ def test_autodispatch_real_review_controls_merge(monkeypatch, tmp_path, outcome)
     def run_review(**kwargs):
         if outcome == "failed":
             raise RuntimeError("review failed")
-        if outcome in {"success", "failure", "unconfirmed"}:
-            marker = {
-                "success": "Review outcome: success",
-                "failure": "Review outcome: failure",
-                "unconfirmed": "Outcome: approved",
-            }[outcome]
+        if content := {
+            "success": "Review outcome: success\nInline comments: none",
+            "failure": "Review outcome: failure\nGitHub rejected the major finding.",
+            "unconfirmed": "Outcome: approved\nInline comments: none",
+        }.get("success" if outcome == "toggle_on" else outcome):
             Path(re.search(r"completion document at (\S+)", kwargs["prompt"]).group(1)).write_text(
-                f"{marker}\nInline comments: none"
+                content
             )
         return ""
 
     reviewer = MagicMock(side_effect=run_review)
     monkeypatch.setattr("workdash.agent_execution.executor", MagicMock(run_in_pane=reviewer))
-    monkeypatch.setattr("workdash.launcher.zellij", MagicMock(load_zellij_panes=lambda _: []))
+    toggle_on = outcome == "toggle_on"
+    panes = [{"id": 1, "title": "Coding"}] if toggle_on else []
+    monkeypatch.setattr(
+        "workdash.launcher.zellij", MagicMock(load_zellij_panes=lambda _: list(panes))
+    )
     monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.001)
-    session.start_autodispatch(scope="owner/repo", automerge=True)
+    if toggle_on:
+        monkeypatch.setattr(session, "prepare_autodispatch", lambda _: None)
+    session.start_autodispatch(
+        scope="owner/repo#ISSUE-1" if toggle_on else "owner/repo", automerge=not toggle_on
+    )
     entry = next(iter(session._autodispatch.values()))
-    entry.thread.join(timeout=3)
+    if toggle_on:
+
+        async def enable_automerge():
+            async with WorkdashApp(session=session).run_test() as pilot:
+                await pilot.press("m")
+                assert session.autodispatch_sessions()[0]["automerge"]
+
+        try:
+            wait_for(lambda: session.autodispatch_sessions()[0]["stage"] == "developing")
+            asyncio.run(enable_automerge())
+        finally:
+            panes.clear()
+            entry.thread.join(timeout=3)
+    else:
+        entry.thread.join(timeout=3)
     assert not entry.thread.is_alive()
     merge = session.backend.github_client.merge_pull_request
-    if outcome == "success":
+    if outcome in {"success", "toggle_on"}:
         assert entry.status == "finished"
         merge.assert_called_once_with("owner/repo", 51, head)
     else:
@@ -1773,6 +1890,8 @@ def test_autodispatch_real_review_controls_merge(monkeypatch, tmp_path, outcome)
         else:
             assert entry.status == "failed" and dispatch.call_count == 1
             assert reviewer.called
+            if outcome == "failure":
+                assert "review outcome not confirmed" in entry.error
 
 
 def test_autodispatch_review_feedback_cycle(monkeypatch, tmp_path):
@@ -2058,7 +2177,7 @@ def test_explicit_issue_does_not_dispatch_if_pane_close_is_unconfirmed(monkeypat
     dispatch.assert_not_called()
 
 
-def test_prepare_autodispatch_closes_agent_pane_in_a_pull_request_worktree(monkeypatch, tmp_path):
+def test_autodispatch_closes_pull_request_worktree_pane_before_dispatch(monkeypatch, tmp_path):
     from workdash.work_state import PullRequestWorkState
 
     item = _issue_item(1)
@@ -2117,13 +2236,24 @@ def test_prepare_autodispatch_closes_agent_pane_in_a_pull_request_worktree(monke
     monkeypatch.setattr(session, "_live_panes", lambda: list(panes))
     close = MagicMock(side_effect=lambda _session, _pane_id: panes.clear())
     monkeypatch.setattr("workdash.launcher.zellij.close_zellij_pane", close)
-    session.prepare_autodispatch("owner/repo#ISSUE-1")
+    panes_at_dispatch = []
+
+    def dispatch(**_):
+        panes_at_dispatch.append(list(panes))
+        return {"status": "no_ready_task"}
+
+    monkeypatch.setattr(session, "dispatch_once", dispatch)
+    started = session.start_autodispatch(scope="owner/repo#ISSUE-1")
+    session._autodispatch[started["id"]].thread.join(2)
     close.assert_called_once_with("workdash", "terminal_7")
     assert panes == []
+    assert panes_at_dispatch == [[]]
 
 
-@pytest.mark.parametrize("scope", ["owner/repo", "any", "owner/repo#PR-1"])
-def test_prepare_autodispatch_ignores_scopes_that_are_not_one_issue(monkeypatch, tmp_path, scope):
+@pytest.mark.parametrize("scope", ["owner/repo", "any", "owner/repo#PR-1", "owner/repo#ISSUE-2"])
+def test_prepare_autodispatch_leaves_panes_open_without_an_exact_ready_issue(
+    monkeypatch, tmp_path, scope
+):
     now = datetime.now(UTC)
     pull_request = WorkItem(
         kind=WorkItemKind.AUTHORED_PR,
@@ -2138,9 +2268,16 @@ def test_prepare_autodispatch_ignores_scopes_that_are_not_one_issue(monkeypatch,
     session = WorkdashSession(
         config=WorkdashConfig(),
         backend=MagicMock(),
-        work_items=[pull_request],
+        work_items=[pull_request, _issue_item(2)],
         suggestion_markers={},
         zellij_session="workdash",
+    )
+    monkeypatch.setattr(
+        session,
+        "_ready",
+        lambda target, *a, **kw: ScopedReadyWork(
+            [] if target == "owner/repo#ISSUE-2" else [ReadyWork(item=_issue_item(2))]
+        ),
     )
     monkeypatch.setattr("workdash.control.existing_worktree_path", lambda *a, **kw: str(tmp_path))
     monkeypatch.setattr(
@@ -2361,6 +2498,42 @@ def test_server_log_records_autoclose_decisions(monkeypatch, tmp_path):
     assert autoclose.level == level
 
 
+def test_server_log_records_background_dispatch_failure_without_raw_details(monkeypatch, tmp_path):
+    from workdash.control import WorkdashControlServer
+
+    log = tmp_path / "workdash.log"
+    monkeypatch.setattr("workdash.control.server_address", lambda: ("127.0.0.1", 0))
+    session = WorkdashSession(
+        config=WorkdashConfig(agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}),
+        backend=MagicMock(),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session="project",
+    )
+
+    def fail_dispatch(**_kwargs):
+        raise RuntimeError("Failed to gather work state") from subprocess.CalledProcessError(
+            4, ["gh", "api", "graphql"], stderr="gh: Not Found (HTTP 404) token=ghp_secret"
+        )
+
+    monkeypatch.setattr(session, "dispatch_once", fail_dispatch)
+    server = WorkdashControlServer(session)
+    server.start()
+    try:
+        started = session.start_autodispatch(scope="owner/repo")
+        wait_for(
+            lambda: session.autodispatch_status(started["id"])["session"]["status"] == "failed"
+        )
+    finally:
+        server.stop()
+    text = log.read_text()
+    assert "failed during dispatch" in text
+    assert re.search(r"RuntimeError at fail_dispatch:\d+", text)
+    assert "exit 4" in text
+    assert "HTTP 404" in text
+    assert "ghp_secret" not in text
+
+
 def test_server_log_records_request_failures(monkeypatch, tmp_path):
     import logging
 
@@ -2421,7 +2594,7 @@ def test_server_log_records_request_failures(monkeypatch, tmp_path):
             "owner/repo#ISSUE-42",
             True,
             "developing",
-            ["scope=owner/repo#42", "fix ci"],
+            ["group=project", "scope=owner/repo#42", "fix ci"],
             ["item="],
         ),
         (
@@ -3188,8 +3361,11 @@ def test_automerge_rereviews_head_when_needed(monkeypatch, change):
         owner, "owner/repo", None, None, automerge=change != "enabled_during_review"
     )
 
+    reviewed_heads = []
+
     def review(**kwargs):
         head = state.head_sha
+        reviewed_heads.append(head)
         if change == "enabled_during_review" and not kwargs["require_fresh"]:
             entry.automerge = True
             head = None
@@ -3198,6 +3374,9 @@ def test_automerge_rereviews_head_when_needed(monkeypatch, change):
         return {"status": "reviewed", "item_id": "owner/repo#PR-2", "head_sha": head}
 
     def merge(repo, number, head):
+        if change == "during_review":
+            assert reviewed_heads == ["old", "new"]
+            assert head == "new"
         if change == "merge_rejected" and head == "old":
             state.head_sha = "new"
             raise MergeHeadChangedError("SHA does not match (HTTP 409)")

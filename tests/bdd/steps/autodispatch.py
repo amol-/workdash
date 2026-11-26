@@ -1,25 +1,24 @@
 """Autodispatch behavior at the dispatch and pane boundaries."""
 
 import json
-import re
 import subprocess
 import threading
 import time
-from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from pytest_bdd import given, parsers, then, when
-from textual.widgets import Static
+from textual.widgets import DataTable, Static
+from webob import Request
 
 import workdash.control as control_module
 from gh_work_state_fake import install_fake_github
 from workdash.config import AgentConfig, WorkdashConfig
-from workdash.control import WorkdashControlError, WorkdashSession
+from workdash.control import WorkdashSession, _make_turbogears_app
 from workdash.github_client import GitHubClient
-from workdash.models import WorkItem, WorkItemKind, WorkItemType
+from workdash.models import WorkItemKind, WorkItemType
+from workdash.workdash import main
 
 from .common import install_zellij_agent_fakes, make_work_item, run_app
 from .triage import is_linked_issues_query, linked_issues_response
@@ -36,15 +35,11 @@ def autodispatch_state(monkeypatch):
     )
     session.config.configured_code_agents.return_value = ["pi"]
     session.config.configured_analyze_agents.return_value = ["pi"]
-    events = []
-    monkeypatch.setattr(
-        session, "review", lambda **kwargs: events.append(("review", kwargs["target"]))
-    )
+    monkeypatch.setattr(session, "review", lambda **_: {"status": "nothing_to_review"})
     calls = []
     panes = []
 
     def dispatch(*, scope, agent, group, before_launch, on_ready):
-        events.append(("dispatch", scope))
         calls.append((scope, group))
         if scope == "owner/empty":
             return {"status": "no_ready_task"}
@@ -55,19 +50,22 @@ def autodispatch_state(monkeypatch):
             "item_id": f"owner/repo#ISSUE-{len(calls)}",
             "pane_id": pane,
             "cwd": "/worktree",
+            "tab_name": group,
             "session": "workdash",
         }
 
     polled = threading.Event()
 
     def load_panes(_):
-        polled.set()
-        return list(panes)
+        snapshot = list(panes)
+        if threading.current_thread().name.startswith("autodispatch-"):
+            polled.set()
+        return snapshot
 
     monkeypatch.setattr(session, "dispatch_once", dispatch)
     monkeypatch.setattr("workdash.autodispatch.launcher.zellij.load_zellij_panes", load_panes)
     monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
-    yield {"session": session, "calls": calls, "panes": panes, "polled": polled, "events": events}
+    yield {"session": session, "calls": calls, "panes": panes, "polled": polled}
     session.stop_autodispatch_sessions()
 
 
@@ -79,195 +77,231 @@ def wait_for(predicate):
 
 
 @given("an autodispatch server with two ready issues")
-def server_two(autodispatch_state, monkeypatch):
-    session = autodispatch_state["session"]
-    dispatch = session.dispatch_once
+def server_two(dashboard_dispatch, scenario_state, monkeypatch, request):
+    session = scenario_state["dashboard_session"]
+    github = scenario_state["github"]
+    github.add_issue("owner/repo#1")
+    github.add_issue("owner/repo#2")
+    github.pull_requests.clear()
+    monkeypatch.setattr(
+        session.backend.github_client, "fetch_launch_context", lambda _: {"state": "OPEN"}
+    )
+    release = threading.Event()
 
-    def limited(**kwargs):
-        if len(autodispatch_state["calls"]) == 2:
-            autodispatch_state["calls"].append((kwargs["scope"], kwargs["group"]))
-            return {"status": "no_ready_task"}
-        return dispatch(**kwargs)
+    def review(*, target, **kwargs):
+        if target == "owner/repo#ISSUE-1":
+            assert release.wait(5)
+        return {"status": "nothing_to_review"}
 
-    monkeypatch.setattr(session, "dispatch_once", limited)
-
-
-@when("the user starts autodispatch in group `project`")
-def start(autodispatch_state):
-    autodispatch_state["id"] = autodispatch_state["session"].start_autodispatch(
-        scope="owner/repo", group="project"
-    )["id"]
-
-
-@then("the first issue is dispatched in group `project`")
-def first(autodispatch_state):
-    wait_for(lambda: len(autodispatch_state["calls"]) == 1)
-    assert autodispatch_state["calls"][0] == ("owner/repo", "project")
+    request.addfinalizer(release.set)
+    scenario_state["release_review"] = release
+    monkeypatch.setattr(session, "review", review)
+    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
+    _install_cli(monkeypatch, session)
 
 
-@when("its agent pane disappears")
-def pane_disappears(autodispatch_state):
-    wait_for(lambda: autodispatch_state["panes"])
-    autodispatch_state["panes"].clear()
+@when("the user runs `workdash autodispatch owner/repo --group project`")
+def start_project():
+    assert main(["autodispatch", "owner/repo", "--group", "project"]) == 0
 
 
-@then("the first issue is reviewed before the next dispatch")
-def first_reviewed(autodispatch_state):
-    wait_for(lambda: len(autodispatch_state["events"]) >= 3)
-    assert autodispatch_state["events"][:3] == [
-        ("dispatch", "owner/repo"),
-        ("review", "owner/repo#ISSUE-1"),
-        ("dispatch", "owner/repo"),
-    ]
+@then(parsers.parse("`workdash info` shows the {ordinal} issue developing in group `project`"))
+def developing_in_project(scenario_state, capsys, ordinal):
+    session = scenario_state["dashboard_session"]
+    number = {"first": 1, "second": 2}[ordinal]
+    wait_for(
+        lambda: (
+            (entry := session.autodispatch_sessions()[0])["stage"] == "developing"
+            and entry["current_item"] == f"owner/repo#ISSUE-{number}"
+        )
+    )
+    capsys.readouterr()
+    assert main(["info"]) == 0
+    output = capsys.readouterr().out
+    assert f"group=project scope=owner/repo item=owner/repo#{number} stage=developing" in output
+    assert "tab=project" in output
 
 
-@then("the second issue is dispatched in group `project`")
-def second(autodispatch_state):
-    wait_for(lambda: len(autodispatch_state["calls"]) == 2)
-    assert autodispatch_state["calls"][1] == ("owner/repo", "project")
+@when(parsers.parse("the {ordinal} agent pane exits"))
+def finish_issue(scenario_state, ordinal):
+    number = {"first": 1, "second": 2}[ordinal]
+    scenario_state["github"].issues[f"owner/repo#{number}"]["state"] = "CLOSED"
+    scenario_state["panes"].clear()
 
 
-@then("the autodispatch session finishes after no ready work remains")
-def finished(autodispatch_state):
-    session = autodispatch_state["session"]
+@then("`workdash info` shows the first issue being reviewed")
+def reviewing_first(scenario_state, capsys):
+    session = scenario_state["dashboard_session"]
+    wait_for(lambda: session.autodispatch_sessions()[0]["stage"] == "reviewing")
+    assert main(["info"]) == 0
+    assert "item=owner/repo#1 stage=reviewing" in capsys.readouterr().out
+
+
+@when("the review completes")
+def finish_review(scenario_state):
+    scenario_state["release_review"].set()
+
+
+@then("`workdash info` shows the session has finished")
+def session_finishes(scenario_state, capsys):
+    session = scenario_state["dashboard_session"]
     wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "finished")
-    assert len(autodispatch_state["calls"]) == 3
+    assert main(["info"]) == 0
+    assert "finished group=project scope=owner/repo" in capsys.readouterr().out
 
 
 @given("an autodispatch server with two independent running sessions")
-def independent(autodispatch_state):
+def independent(autodispatch_state, monkeypatch):
     session = autodispatch_state["session"]
-    autodispatch_state["ids"] = [
-        session.start_autodispatch(scope=scope, group=group)["id"]
-        for scope, group in [("owner/a", "a"), ("owner/b", "b")]
+    session.config.workdir = None
+    _install_cli(monkeypatch, session)
+    for scope, group in [("owner/a", "a"), ("owner/b", "b")]:
+        session.start_autodispatch(scope=scope, group=group)
+        wait_for(lambda: session.autodispatch_sessions()[-1]["stage"] == "developing")
+
+
+@when(
+    "the user runs `workdash info` to inspect autodispatch sessions",
+    target_fixture="autodispatch_info_output",
+)
+def run_info(capsys):
+    capsys.readouterr()
+    assert main(["info"]) == 0
+    return capsys.readouterr().out
+
+
+@then("both sessions show their group, scope and current task")
+def progress(autodispatch_state, autodispatch_info_output):
+    entries = [
+        line for line in autodispatch_info_output.splitlines() if line.startswith("Autodispatch ")
     ]
-    wait_for(
-        lambda: (
-            len(snapshots := session.autodispatch_sessions()) == 2
-            and all(entry["current_item"] for entry in snapshots)
-        )
-    )
+    assert len(entries) == 2, entries
+    first, second = entries
+    assert "running group=a scope=owner/a item=owner/repo#1" in first
+    assert "running group=b scope=owner/b item=owner/repo#2" in second
+    autodispatch_state["stop_id"] = first.split()[1]
 
 
-@when("the user inspects autodispatch progress")
-def inspect(autodispatch_state):
-    autodispatch_state["progress"] = autodispatch_state["session"].autodispatch_sessions()
-
-
-@then("both sessions show their group, target, current task and elapsed time")
-def progress(autodispatch_state):
-    sessions = autodispatch_state["progress"]
-    assert {entry["group"] for entry in sessions} == {"a", "b"}
-    assert {entry["scope"] for entry in sessions} == {"owner/a", "owner/b"}
-    assert all(entry["current_item"] and entry["elapsed_seconds"] >= 0 for entry in sessions)
-
-
-@when("the user stops one autodispatch session")
-def stop(autodispatch_state):
-    autodispatch_state["session"].stop_autodispatch(autodispatch_state["ids"][0])
+@when("the user runs `workdash autodispatch-stop` with one session's ID")
+def stop_one(autodispatch_state, capsys):
+    session_id = autodispatch_state["stop_id"]
+    assert main(["autodispatch-stop", session_id]) == 0
+    assert f"Autodispatch {session_id}: stopped" in capsys.readouterr().out
 
 
 @then("its agent pane remains open and the other session continues")
-def remains(autodispatch_state):
-    sessions = autodispatch_state["session"].autodispatch_sessions()
-    assert [entry["status"] for entry in sessions] == ["stopped", "running"]
-    assert len(autodispatch_state["panes"]) == 2
+def remains(autodispatch_state, capsys):
     panes = autodispatch_state["panes"]
-    stopped_pane = int(sessions[0]["current_item"].rsplit("-", 1)[1])
-    panes[:] = [pane for pane in panes if pane["id"] == stopped_pane]
-    wait_for(lambda: len(autodispatch_state["calls"]) >= 3)
-    wait_for(lambda: len(panes) == 2)
-    assert any(pane["id"] == stopped_pane for pane in panes)
-    panes[:] = [pane for pane in panes if pane["id"] != stopped_pane]
+    assert {pane["id"] for pane in panes} == {1, 2}
+    panes[:] = [pane for pane in panes if pane["id"] != 2]
+    session = autodispatch_state["session"]
+    wait_for(lambda: session.autodispatch_sessions()[-1]["current_item"] == "owner/repo#ISSUE-3")
+    assert {pane["id"] for pane in panes} == {1, 3}
+    assert main(["info"]) == 0
+    output = capsys.readouterr().out
+    assert f"Autodispatch {autodispatch_state['stop_id']} stopped" in output
+    assert "running group=b scope=owner/b item=owner/repo#3" in output
+    panes[:] = [pane for pane in panes if pane["id"] != 1]
     autodispatch_state["polled"].clear()
     assert autodispatch_state["polled"].wait(2)
-    assert autodispatch_state["calls"].count(("owner/a", "a")) == 1
-    assert autodispatch_state["calls"].count(("owner/b", "b")) == 2
-    assert [entry["status"] for entry in autodispatch_state["session"].autodispatch_sessions()] == [
-        "stopped",
-        "running",
-    ]
+    assert autodispatch_state["calls"] == [("owner/a", "a"), ("owner/b", "b"), ("owner/b", "b")]
 
 
-@given("an autodispatch server with ready issues in different implementation repositories")
-def cross_repo_server(scenario_state, monkeypatch):
-    github = install_fake_github(monkeypatch)
-    scenario_state["github"] = github
-    github.add_issue("owner/parent#1", state="CLOSED")
-    github.add_issue("owner/first#2", parent="owner/parent#1")
-    github.add_issue("owner/second#3", parent="owner/parent#1")
-    github.add_pull_request(
-        "owner/implementation#51", closes=("owner/second#3",), mergeable="CONFLICTING"
-    )
-    session = WorkdashSession(
-        config=WorkdashConfig(
-            github_username="testuser", agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}
-        ),
-        backend=MagicMock(github_client=GitHubClient()),
-        work_items=[],
-        suggestion_markers={},
-        zellij_session="workdash",
-    )
-    scenario_state["api_session"] = session
-    launches = []
-    panes = []
+@then("the failed session and its error are visible")
+def failure_visible(autodispatch_state, autodispatch_info_output):
+    output = autodispatch_info_output
+    assert "failed group=automatic scope=owner/repo#42" in output, repr(output)
+    assert autodispatch_state["failure"] in output
 
-    def code(**kwargs):
-        launches.append(kwargs)
-        panes.append({"id": len(launches)})
-        return {
-            "status": "launched",
-            "item_id": kwargs["target"],
-            "pane_id": f"terminal_{len(launches)}",
-            "session": "workdash",
-        }
 
-    monkeypatch.setattr(session, "code", code)
-    monkeypatch.setattr(session, "review", MagicMock(return_value={"status": "nothing_to_review"}))
-    monkeypatch.setattr("workdash.control.launcher.zellij.load_zellij_panes", lambda _: [])
+@when("the user resolves the failure and runs `workdash autodispatch` for the same scope")
+def restart_failed(autodispatch_state, monkeypatch, capsys):
+    session = autodispatch_state["session"]
     monkeypatch.setattr(
-        "workdash.autodispatch.launcher.zellij.load_zellij_panes", lambda _: list(panes)
+        session, "dispatch_once", MagicMock(return_value={"status": "no_ready_task"})
     )
-    monkeypatch.setattr("workdash.autodispatch._AUTODISPATCH_POLL_SECONDS", 0.01)
-    scenario_state.update(auto_launches=launches, auto_panes=panes)
+    assert main(["autodispatch", "owner/repo#42"]) == 0
+    assert "finished (owner/repo#42, automatic)" in capsys.readouterr().out
 
 
-@when("the user starts autodispatch without a group")
-def start_without_group(scenario_state):
-    scenario_state["api_session"].start_autodispatch(scope="owner/parent#1")
+@then("`workdash info` shows the replacement instead of the failure")
+def failure_removed(autodispatch_state, capsys):
+    assert main(["info"]) == 0
+    output = capsys.readouterr().out
+    assert "finished group=automatic scope=owner/repo#42" in output
+    assert autodispatch_state["failure"] not in output
+    assert output.count("Autodispatch ") == 1
 
 
-@then("each issue is dispatched in its implementation repository's group")
-def repository_groups(scenario_state):
-    launches = scenario_state["auto_launches"]
-    session = scenario_state["api_session"]
-    try:
-        wait_for(
-            lambda: (
-                bool(launches)
-                and session.autodispatch_sessions()[0]["selected_group"] == launches[0]["group"]
-            )
-        )
-        target = launches[0]["target"]
-        issue = scenario_state["github"].issues[target.replace("#ISSUE-", "#")]
-        issue["state"] = "CLOSED"
-        scenario_state["auto_panes"].clear()
-        wait_for(
-            lambda: (
-                len(launches) == 2
-                and session.autodispatch_sessions()[0]["selected_group"] == launches[1]["group"]
-            )
-        )
-        assert {launch["target"]: launch["group"] for launch in launches} == {
-            "owner/first#ISSUE-2": "first",
-            "owner/second#ISSUE-3": "implementation",
-        }
-        assert session.autodispatch_sessions()[0]["group"] is None
-    finally:
-        session.stop_autodispatch_sessions()
+@given("a coding agent is already working on ready issue `owner/repo#ISSUE-1`")
+def coding_agent_running(dashboard_dispatch, scenario_state, monkeypatch):
+    session = scenario_state["dashboard_session"]
+    github = scenario_state["github"]
+    github.add_issue("owner/repo#1")
+    github.pull_requests.clear()
+    monkeypatch.setattr(
+        session.backend.github_client, "fetch_launch_context", lambda _: {"state": "OPEN"}
+    )
+    worktree = session.config.workdir / "owner_repo_9"
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *a, **kw: str(worktree))
+    panes = scenario_state["panes"]
+    panes.extend(
+        [
+            {"id": 7, "title": f"code_{worktree.name}", "pane_cwd": str(worktree)},
+            {"id": 9, "title": "code_other"},
+        ]
+    )
+
+    def close(_session, pane_id):
+        panes[:] = [pane for pane in panes if f"terminal_{pane['id']}" != pane_id]
+
+    monkeypatch.setattr(control_module.launcher.zellij, "close_zellij_pane", close)
+    _install_cli(monkeypatch, session)
+
+
+@when("the user runs `workdash autodispatch owner/repo#ISSUE-1`")
+def start_for_issue():
+    assert main(["autodispatch", "owner/repo#ISSUE-1"]) == 0
+
+
+@then("the existing coding pane closes and autodispatch takes over the issue")
+def issue_taken_over(scenario_state, capsys):
+    session = scenario_state["dashboard_session"]
+    wait_for(lambda: session.autodispatch_sessions()[0]["stage"] == "developing")
+    capsys.readouterr()
+    assert main(["info"]) == 0
+    output = capsys.readouterr().out
+    assert "scope=owner/repo#1 stage=developing" in output
+    assert "terminal_7" not in output
+    assert {pane["id"] for pane in scenario_state["panes"]} == {9, 23}
+
+
+def _install_cli(monkeypatch, session):
+    app = _make_turbogears_app(session)
+
+    def request(endpoint, payload):
+        response = Request.blank(
+            f"/api/v0/{endpoint}",
+            method="POST",
+            content_type="application/json",
+            body=json.dumps(payload).encode(),
+        ).get_response(app)
+        assert response.status_int == 200, response.text
+        return json.loads(response.body)["result"]
+
+    monkeypatch.setattr(
+        "workdash.workdash.WorkdashControlClient", lambda *a, **kw: MagicMock(request=request)
+    )
 
 
 @given("an autodispatch session has failed")
+def failed_cli_session(autodispatch_state, monkeypatch):
+    failed_session(autodispatch_state, monkeypatch)
+    session = autodispatch_state["session"]
+    session.config.workdir = None
+    _install_cli(monkeypatch, session)
+
+
 def failed_session(autodispatch_state, monkeypatch):
     session = autodispatch_state["session"]
     autodispatch_state["failure"] = "dispatch failed: " + "x" * 200
@@ -279,90 +313,6 @@ def failed_session(autodispatch_state, monkeypatch):
     )
     session.start_autodispatch(scope="owner/repo#42")
     wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "failed")
-
-
-@then("the failure is visible in autodispatch progress")
-def failure_visible(autodispatch_state):
-    assert autodispatch_state["progress"][0]["error"] == autodispatch_state["failure"]
-    # `workdash info` reports the whole error the TUI collapses onto one truncated line.
-    [reported] = autodispatch_state["session"].info()["autodispatch_sessions"]
-    assert reported["error"] == autodispatch_state["failure"]
-
-
-@when("the user restarts autodispatch for the same scope")
-def restart_failed(autodispatch_state, monkeypatch):
-    session = autodispatch_state["session"]
-    monkeypatch.setattr(
-        session, "dispatch_once", MagicMock(return_value={"status": "no_ready_task"})
-    )
-    monkeypatch.setattr(session, "_require_item", lambda scope: make_work_item(number=42))
-    session.backend.github_client.open_issue_blockers.return_value = []
-    session.start_autodispatch(scope="owner/repo#ISSUE-42")
-
-
-@then("the old failure is no longer shown")
-def failure_removed(autodispatch_state):
-    assert all(
-        entry["status"] != "failed"
-        for entry in autodispatch_state["session"].autodispatch_sessions()
-    )
-
-
-@given("an autodispatch session for a targeted todo issue URL in group `project`")
-def progress_session(autodispatch_state, monkeypatch):
-    session = autodispatch_state["session"]
-    session.config.todo_repository = "owner/todos"
-    release = threading.Event()
-    autodispatch_state["release"] = release
-
-    def dispatch(**kwargs):
-        release.wait(2)
-        return {
-            "status": "launched",
-            "item_id": "owner/target#ISSUE-WT42",
-            "pane_id": "terminal_1",
-            "session": "workdash",
-            "group": "project",
-            "launch_reason": "fix_ci",
-        }
-
-    monkeypatch.setattr(session, "dispatch_once", dispatch)
-    autodispatch_state["panes"].append({"id": 1})
-    session.start_autodispatch(
-        scope="http://github.com/owner/todos/issues/42/comments?x=1#note", group="project"
-    )
-
-
-@when("the user views its progress while checking and developing")
-def view_progress(autodispatch_state):
-    import asyncio
-
-    from workdash.tui import WorkdashApp
-
-    session = autodispatch_state["session"]
-    app = WorkdashApp(work_items=[], session=session)
-
-    async def view():
-        async with app.run_test(size=(120, 30)):
-            checking = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
-            autodispatch_state["release"].set()
-            wait_for(lambda: session.autodispatch_sessions()[0]["stage"] == "developing")
-            app._update_autodispatch_progress()
-            return checking, "\n".join(
-                strip.text for strip in app.screen._compositor.render_strips()
-            )
-
-    autodispatch_state["visible_progress"] = asyncio.run(view())
-
-
-@then(
-    "the dashboard shows the group, stage, iteration and launch reason without repeating the issue"
-)
-def visible_progress(autodispatch_state):
-    checking, developing = autodispatch_state["visible_progress"]
-    assert "project  owner/todos#42  checking  1/" in checking
-    assert "project  owner/todos#42  developing (fix ci)  1/" in developing
-    assert "owner/target#ISSUE-WT42" not in developing
 
 
 @pytest.fixture
@@ -440,6 +390,12 @@ def dashboard_issue(dashboard_dispatch, scenario_state):
     scenario_state["dashboard_expected"] = "other/repo#ISSUE-3"
 
 
+@given("a ready issue selected in the dashboard and another item to triage")
+def dashboard_issue_and_triage_item(dashboard_dispatch, scenario_state):
+    dashboard_issue(dashboard_dispatch, scenario_state)
+    scenario_state["triage_item"] = make_work_item(number=4, title="Update docs")
+
+
 @given("the default coding agent cannot analyze but another agent can code and analyze")
 def compatible_agent(scenario_state):
     agents = scenario_state["dashboard_session"].config.agents
@@ -462,12 +418,6 @@ def dashboard_pr(dashboard_dispatch, scenario_state):
     scenario_state["dashboard_expected"] = "other/repo#ISSUE-3"
 
 
-@given("an authored pull request without a linked issue in the dashboard")
-def dashboard_pr_without_issue(dashboard_dispatch, scenario_state):
-    dashboard_pr(dashboard_dispatch, scenario_state)
-    scenario_state["github"].pull_requests["owner/repo#9"]["closes"] = ()
-
-
 @given("an authored pull request linked to an issue that is not ready")
 def dashboard_pr_not_ready(dashboard_dispatch, scenario_state):
     dashboard_pr(dashboard_dispatch, scenario_state)
@@ -484,48 +434,13 @@ def dashboard_blocked_issue(dashboard_dispatch, scenario_state):
     scenario_state["expect_no_ready"] = True
 
 
-@given(
-    "an authored pull request selected in the dashboard linked to issues in several repositories"
-)
-def dashboard_pr_several_issues(dashboard_dispatch, scenario_state):
-    github = scenario_state["github"]
-    github.add_issue("beta/repo#1")
-    github.add_issue("alpha/repo#9")
-    github.add_issue("alpha/repo#3")
-    github.pull_requests["owner/repo#9"]["closes"] = (
-        "beta/repo#1",
-        "alpha/repo#9",
-        "alpha/repo#3",
-    )
-    scenario_state["dashboard_item"] = make_work_item(
-        item_type=WorkItemType.PR, kind=WorkItemKind.AUTHORED_PR, number=9
-    )
-    scenario_state["dashboard_expected"] = "alpha/repo#ISSUE-3"
-
-
-@given("an authored pull request selected in the dashboard whose linked issues GitHub denies")
-def dashboard_pr_denied(dashboard_dispatch, scenario_state):
-    dashboard_pr(dashboard_dispatch, scenario_state)
-    scenario_state["linked_issue_lookup_denied"] = True
-
-
-@given(parsers.parse("a pull request of somebody else selected in the dashboard that is {kind}"))
-def dashboard_other_pr(dashboard_dispatch, scenario_state, kind):
-    kinds = {
-        "waiting for my review": WorkItemKind.REVIEW_REQUESTED_PR,
-        "in a tracked repository": WorkItemKind.TRACKED_PR,
-    }
-    scenario_state["dashboard_item"] = make_work_item(
-        item_type=WorkItemType.PR, kind=kinds[kind], number=9
-    )
-
-
 @when("the user presses d and chooses an autodispatch agent")
-@when("the user presses d to start autodispatch")
+@when("the user presses d, chooses agent 1, and uses / to find the other item once work begins")
 def dashboard_press_dispatch(scenario_state):
     session = scenario_state["dashboard_session"]
     item = scenario_state["dashboard_item"]
-    session.work_items = [item]
+    triage_item = scenario_state.get("triage_item")
+    session.work_items = [item] if triage_item is None else [item, triage_item]
 
     async def interact(app, pilot):
         footer = app.query_one("#status-footer", Static)
@@ -547,29 +462,55 @@ def dashboard_press_dispatch(scenario_state):
             app.query_one("#autodispatch-progress", Static).render().plain
         )
 
-    run_app(work_items=[item], session=session, interactions=interact)
+        if triage_item is not None:
+            progress = app.query_one("#autodispatch-progress", Static)
+            for _ in range(100):
+                if "developing" in progress.render().plain:
+                    break
+                await pilot.pause(0.02)
+            assert "developing" in progress.render().plain
+            await pilot.press("/", "d", "o", "c", "s", "enter")
+            table = app.query_one("#work-items", DataTable)
+            scenario_state["triage_titles"] = [
+                str(table.get_row_at(index)[2]).lstrip("* ") for index in range(table.row_count)
+            ]
+            scenario_state["progress_after_triage"] = progress.render().plain
+
+    run_app(work_items=session.work_items, session=session, interactions=interact)
 
 
-@when("the user cancels autodispatch agent selection")
+@then("the dashboard has announced the start and shows the other item while autodispatch continues")
+def dashboard_continues_triage(scenario_state):
+    assert scenario_state["dispatch_status"].startswith("Started autodispatch")
+    assert scenario_state["triage_titles"] == [scenario_state["triage_item"].title]
+    assert (
+        scenario_state["dashboard_expected"].replace("#ISSUE-", "#")
+        in scenario_state["progress_after_triage"]
+    )
+    assert "developing" in scenario_state["progress_after_triage"]
+
+
+@when("the user presses d and then Escape to cancel agent selection")
 def dashboard_cancel_dispatch(scenario_state):
     session = scenario_state["dashboard_session"]
     item = scenario_state["dashboard_item"]
     session.work_items = [item]
 
     async def interact(app, pilot):
-        await pilot.press("d", "escape")
+        await pilot.press("d")
+        assert app.screen is not app.screen_stack[0]
+        await pilot.press("escape")
+        assert app.query_one("#work-items", DataTable).has_focus
 
     run_app(work_items=[item], session=session, interactions=interact)
 
 
-@then("no autodispatch session starts")
+@then("the work table is available again and no autodispatch session starts")
 def dashboard_cancelled(scenario_state):
     assert scenario_state["dashboard_session"].autodispatch_sessions() == []
 
 
-@then("an autodispatch session launches that issue")
 @then("an autodispatch session launches that linked issue")
-@then("an autodispatch session launches the lowest linked issue")
 def dashboard_launched(scenario_state):
     session = scenario_state["dashboard_session"]
     wait_for(
@@ -610,26 +551,6 @@ def dashboard_blocked_by_dependency(scenario_state):
     assert not scenario_state.get("agent_launches")
 
 
-@then("the dashboard reports that the pull request has no linked issue and starts no session")
-def dashboard_no_linked_issue(scenario_state):
-    assert "without a linked issue" in scenario_state["dispatch_status"]
-    assert scenario_state["dashboard_session"].autodispatch_sessions() == []
-
-
-@then("the dashboard reports the linked issue lookup failure and starts no session")
-def dashboard_linked_issue_failure(scenario_state):
-    status = scenario_state["dispatch_status"]
-    assert status.startswith("Dispatch failed:"), status
-    assert "GitHub lookup for 'owner/repo#PR-9' failed: Could not resolve" in status, status
-    assert scenario_state["dashboard_session"].autodispatch_sessions() == []
-
-
-@then("the dashboard reports that dispatch is unavailable and starts no session")
-def dashboard_dispatch_unavailable(scenario_state):
-    assert "Dispatch is only available" in scenario_state["dispatch_status"]
-    assert scenario_state["dashboard_session"].autodispatch_sessions() == []
-
-
 @then("an autodispatch session starts for the selected issue")
 @then("an autodispatch session starts for the linked issue")
 def dashboard_session_started(scenario_state):
@@ -647,200 +568,80 @@ def dashboard_session_started(scenario_state):
     assert scenario_state.get("agent_launches", []) == []
 
 
-@when("the user's autodispatch session fails")
-def dashboard_failure(scenario_state, monkeypatch):
-    session = scenario_state["dashboard_session"]
-    item = scenario_state["dashboard_item"]
-    session.work_items = [item]
-    monkeypatch.setattr(
-        session, "dispatch_once", MagicMock(side_effect=RuntimeError("GitHub unavailable"))
-    )
-
-    async def interact(app, pilot):
-        await pilot.press("d", "1")
-        progress = app.query_one("#autodispatch-progress", Static)
-        footer = app.query_one("#status-footer", Static)
-
-        def reports_failure() -> bool:
-            return all(
-                "GitHub unavailable" in widget.render().plain for widget in (progress, footer)
-            )
-
-        # The footer keeps the dispatch action's "Started autodispatch" text until the
-        # next progress tick reports the failure, which can follow the error line.
-        for _ in range(150):
-            await pilot.pause(0.02)
-            if reports_failure():
-                break
-        scenario_state["failure_display"] = progress.render().plain
-        scenario_state["failure_footer"] = footer.render().plain
-
-    run_app(work_items=[item], session=session, interactions=interact)
-
-
-@then("the dashboard shows the failed session and its error")
-def dashboard_failure_visible(scenario_state):
-    assert "failed" in scenario_state["failure_display"].lower()
-    assert "GitHub unavailable" in scenario_state["failure_display"]
-    assert "failed" in scenario_state["failure_footer"].lower()
-    assert "GitHub unavailable" in scenario_state["failure_footer"]
-
-
-def _issue(number: int) -> WorkItem:
-    now = datetime.now(UTC)
-    return WorkItem(
-        kind=WorkItemKind.TRACKED_ISSUE,
-        item_type=WorkItemType.ISSUE,
-        repo="owner/repo",
-        number=number,
-        title="Fix the thing",
-        created_at=now,
-        updated_at=now,
-        url=f"https://github.com/owner/repo/issues/{number}",
-    )
-
-
-@given("a coding agent is already running for issue `owner/repo#ISSUE-1`")
-def coding_agent_running(scenario_state, monkeypatch, tmp_path):
-    scenario_state["github"] = install_fake_github(monkeypatch)
-    session = WorkdashSession(
-        config=WorkdashConfig(
-            github_username="testuser", agents={"pi": AgentConfig(launch="pi", analyze="pi -p")}
-        ),
-        backend=MagicMock(github_client=GitHubClient()),
-        work_items=[],
-        suggestion_markers={},
-        zellij_session="workdash",
-    )
-
-    def require_item(target):
-        if target != "owner/repo#ISSUE-1":
-            raise WorkdashControlError("invalid_target", target)
-        return _issue(1)
-
-    monkeypatch.setattr(session, "_require_item", require_item)
-    worktree = tmp_path / "repo"
-    worktree.mkdir()
-    monkeypatch.setattr("workdash.control.existing_worktree_path", lambda *a, **kw: str(worktree))
-    panes = [
-        {"id": 7, "title": f"code_{worktree.name}"},
-        {"id": 9, "title": "code_other"},
-    ]
-    monkeypatch.setattr(session, "_live_panes", lambda: list(panes))
-
-    def close_pane(_session, pane_id):
-        panes[:] = [pane for pane in panes if f"terminal_{pane['id']}" != pane_id]
-
-    close = MagicMock(side_effect=close_pane)
-    monkeypatch.setattr("workdash.launcher.zellij.close_zellij_pane", close)
-    scenario_state.update(agent_session=session, agent_panes=panes, close_pane=close, dispatched=[])
-
-    def dispatch(**_):
-        scenario_state["dispatched"].append(any(pane["id"] == 7 for pane in panes))
-        return {"status": "no_ready_task"}
-
-    monkeypatch.setattr(session, "dispatch_once", dispatch)
-
-
-@given("issue `owner/repo#ISSUE-1` has ready work")
-def issue_has_ready_work(scenario_state):
-    scenario_state["github"].add_issue("owner/repo#1", state="OPEN")
-
-
-@given("issue `owner/repo#ISSUE-1` has no ready work")
-def issue_has_no_ready_work(scenario_state):
-    scenario_state["github"].add_issue("owner/repo#1", state="CLOSED")
-
-
-@when("the user starts autodispatch for issue `owner/repo#ISSUE-1`")
-def start_for_issue(scenario_state):
-    session = scenario_state["agent_session"]
-    session.start_autodispatch(scope="owner/repo#ISSUE-1")
-    wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "finished")
-
-
-@then("that coding agent pane is closed before the issue is dispatched")
-def pane_closed_before_dispatch(scenario_state):
-    assert scenario_state["dispatched"] == [False]
-    assert [pane["id"] for pane in scenario_state["agent_panes"]] == [9]
-    scenario_state["close_pane"].assert_called_once_with("workdash", "terminal_7")
-
-
-@then("that coding agent pane stays open")
-def pane_stays_open(scenario_state):
-    assert [pane["id"] for pane in scenario_state["agent_panes"]] == [7, 9]
-    scenario_state["close_pane"].assert_not_called()
-
-
-@when("the user starts autodispatch for repository `owner/repo`")
-def start_for_repository(scenario_state):
-    session = scenario_state["agent_session"]
-    session.start_autodispatch(scope="owner/repo")
-    wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "finished")
-
-
 @given("an autodispatch session is running for `owner/repo`")
-def running_session(autodispatch_state):
+def running_session(autodispatch_state, monkeypatch):
     session = autodispatch_state["session"]
-    session.start_autodispatch(scope="owner/repo")
-    wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "running")
+    session.config.workdir = None
+    _install_cli(monkeypatch, session)
+    started = session.start_autodispatch(scope="owner/repo")
+    autodispatch_state["previous_id"] = started["id"]
+    wait_for(lambda: session.autodispatch_sessions()[0]["stage"] == "developing")
 
 
-@when("the user starts autodispatch again for `owner/repo`")
-def start_again(autodispatch_state):
-    session = autodispatch_state["session"]
-    [previous] = session.autodispatch_sessions()
-    autodispatch_state["previous"] = session._autodispatch[previous["id"]]
-    autodispatch_state["id"] = session.start_autodispatch(scope="owner/repo")["id"]
-
-
-@then("the previous session is stopped and replaced")
-def previous_replaced(autodispatch_state):
-    session = autodispatch_state["session"]
-    assert autodispatch_state["previous"].status == "stopped"
-    assert [entry["id"] for entry in session.autodispatch_sessions()] == [autodispatch_state["id"]]
-
-
-@given("an autodispatch session developing an issue in a selected group")
-def info_developing_session(monkeypatch):
-    client = MagicMock()
-    client.request.return_value = {
-        "session": "workdash",
-        "panes": [],
-        "autodispatch_sessions": [
-            {
-                "id": "session-1",
-                "status": "running",
-                "group": None,
-                "selected_group": "project",
-                "scope": "owner/repo",
-                "current_item": "owner/repo#ISSUE-42",
-                "stage": "developing",
-                "launch_reason": "fix_ci",
-                "iteration": 2,
-                "elapsed_seconds": 31,
-            }
-        ],
-    }
-    monkeypatch.setattr("workdash.workdash.WorkdashControlClient", lambda *a, **kw: client)
-
-
-@when("the user runs workdash info for that session")
-def run_info_for_session(capsys):
-    from workdash.workdash import main
-
-    assert main(["info"]) == 0
-
-
-@then("info shows the group, scope, current item, stage, launch reason, iteration and elapsed time")
-def info_shows_progress(capsys):
+@when("the user runs `workdash autodispatch owner/repo --group project` again")
+def start_again(autodispatch_state, capsys):
+    assert main(["autodispatch", "owner/repo", "--group", "project"]) == 0
     output = capsys.readouterr().out
-    for value in ("project", "owner/repo", "42", "developing", "fix ci", "2", "31s"):
-        assert value in output
+    assert "running (owner/repo, project)" in output
+    autodispatch_state["replacement_id"] = output.split()[1].removesuffix(":")
 
 
-@given("an autodispatch session with automerge enabled")
-def automerge_session(autodispatch_state, monkeypatch, *, enabled=True, scope="owner/repo"):
+@then("`workdash info` shows only the replacement session in group `project`")
+def previous_replaced(autodispatch_state, capsys):
+    replacement = autodispatch_state["replacement_id"]
+    assert replacement != autodispatch_state["previous_id"]
+    assert main(["info"]) == 0
+    output = capsys.readouterr().out
+    assert output.count("Autodispatch ") == 1
+    assert f"Autodispatch {replacement} running group=project scope=owner/repo" in output
+
+
+@given("ready work in `owner/repo` whose pull request will need a re-review")
+def rereview_needed(autodispatch_state, monkeypatch):
+    session = autodispatch_state["session"]
+    session.config.workdir = None
+    _install_cli(monkeypatch, session)
+    prepare_merge(autodispatch_state, monkeypatch)
+    session.backend.github_client.work_pull_request.return_value.changes_requested = True
+
+
+@when("the user runs `workdash autodispatch owner/repo --automerge`")
+def opt_into_automerge(autodispatch_state, capsys):
+    assert main(["autodispatch", "owner/repo", "--automerge"]) == 0
+    assert "running (owner/repo, automatic)" in capsys.readouterr().out
+    wait_for(lambda: bool(autodispatch_state["panes"]))
+
+
+@when("the completed pull request has been reviewed by Workdash")
+def finish_work_before_rereview(autodispatch_state):
+    session = autodispatch_state["session"]
+    autodispatch_state["panes"].clear()
+    wait_for(lambda: session.autodispatch_sessions()[0]["stage"] == "waiting")
+
+
+@then("the session waits without merging or dispatching again")
+def waiting_prevents_merge_and_dispatch(autodispatch_state, capsys):
+    assert main(["info"]) == 0
+    assert "running group=automatic scope=owner/repo item=owner/repo#1 stage=waiting" in (
+        capsys.readouterr().out
+    )
+    assert not autodispatch_state["merged"]
+    autodispatch_state["session"].dispatch_once.assert_called_once()
+
+
+@when("the reviewer approves the pull request")
+def reviewer_approves(autodispatch_state):
+    session = autodispatch_state["session"]
+    session.backend.github_client.work_pull_request.return_value.changes_requested = False
+    wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "finished")
+
+
+@then("the pull request is merged")
+def automerge_merged(autodispatch_state):
+    assert autodispatch_state["merged"] == {("owner/repo", 2)}
+
+
+def prepare_merge(autodispatch_state, monkeypatch):
     session = autodispatch_state["session"]
     github = session.backend.github_client
     merged = set()
@@ -861,8 +662,10 @@ def automerge_session(autodispatch_state, monkeypatch, *, enabled=True, scope="o
     monkeypatch.setattr(
         session,
         "dispatch_once",
-        lambda **kwargs: (
-            {"status": "no_ready_task"} if autodispatch_state["calls"] else dispatch(**kwargs)
+        MagicMock(
+            side_effect=lambda **kwargs: (
+                {"status": "no_ready_task"} if autodispatch_state["calls"] else dispatch(**kwargs)
+            )
         ),
     )
     session._require_item = MagicMock(
@@ -871,10 +674,6 @@ def automerge_session(autodispatch_state, monkeypatch, *, enabled=True, scope="o
 
     def review(**kwargs):
         head = github.work_pull_request.return_value.head_sha
-        autodispatch_state.setdefault("reviewed_heads", []).append(head)
-        if autodispatch_state.get("change_during_review"):
-            github.work_pull_request.return_value.head_sha = "new-head"
-            autodispatch_state["change_during_review"] = False
         return {
             "status": "reviewed",
             "item_id": "owner/repo#PR-2",
@@ -882,22 +681,15 @@ def automerge_session(autodispatch_state, monkeypatch, *, enabled=True, scope="o
             "head_sha": head,
         }
 
-    monkeypatch.setattr(session, "review", review)
-    session.start_autodispatch(scope=scope, automerge=enabled)
-    wait_for(lambda: bool(autodispatch_state["panes"]))
+    monkeypatch.setattr(session, "review", MagicMock(side_effect=review))
 
 
 @when("its completed pull request has been reviewed successfully")
 def automerge_reviewed(autodispatch_state):
+    session = autodispatch_state["session"]
     autodispatch_state["panes"].clear()
-    wait_for(
-        lambda: autodispatch_state["session"].autodispatch_sessions()[0]["status"] == "finished"
-    )
-
-
-@then("the pull request is merged")
-def automerge_merged(autodispatch_state):
-    assert autodispatch_state["merged"] == {("owner/repo", 2)}
+    wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "finished")
+    session.review.assert_called_once()
 
 
 @given("an autodispatch session for the selected dashboard work")
@@ -906,10 +698,12 @@ def dashboard_automerge(autodispatch_state, monkeypatch):
     item = make_work_item(item_type=WorkItemType.ISSUE, number=1)
     session.work_items = [item]
     autodispatch_state["item"] = item
-    automerge_session(autodispatch_state, monkeypatch, enabled=False, scope=f"{item.repo}#ISSUE-1")
+    prepare_merge(autodispatch_state, monkeypatch)
+    session.start_autodispatch(scope=f"{item.repo}#ISSUE-1")
+    wait_for(lambda: bool(autodispatch_state["panes"]))
 
 
-@when("the user toggles automerge")
+@when("the user presses m to turn automerge on and then m to turn it back off")
 def dashboard_toggle_automerge(autodispatch_state):
     session = autodispatch_state["session"]
 
@@ -946,7 +740,9 @@ def dashboard_different_sessions(autodispatch_state):
     autodispatch_state["ids"] = (first, second)
 
 
-@when("the user presses m with progress focused")
+@when(
+    "the user presses Shift+Tab, Down and m for the session in progress, then Tab and m for the work item"
+)
 def toggle_progress_automerge(autodispatch_state):
     async def interact(app, pilot):
         await pilot.press("shift+tab")
@@ -987,38 +783,30 @@ def progress_automerge_visible(autodispatch_state):
     assert entries[second]["automerge"]
     assert second in autodispatch_state["footer"]
     assert "enabled" in autodispatch_state["footer"]
-    assert first in autodispatch_state["table_footer"]
-
-
-@then("the command hint shows the selected session's automerge state")
-def progress_automerge_hint(autodispatch_state):
+    assert "(f)ocus" in autodispatch_state["hint_before"]
     assert "(m)erge off" not in autodispatch_state["hint_before"]
     assert "(m)erge" in autodispatch_state["hint_before"]
     assert "(m)erge off" in autodispatch_state["hint_after"]
     assert "(d)ispatch" not in autodispatch_state["hint_after"]
+
+
+@then("the dashboard identifies the work item's session after returning to the table")
+def work_item_automerge_visible(autodispatch_state):
+    first, _ = autodispatch_state["ids"]
+    assert first in autodispatch_state["table_footer"]
+    assert "enabled" in autodispatch_state["table_footer"]
+    assert "(f)ocus" not in autodispatch_state["table_hint"]
+    assert "(v)iew" in autodispatch_state["table_hint"]
     assert "(m)erge" in autodispatch_state["table_hint"]
     assert "(m)erge off" not in autodispatch_state["table_hint"]
 
 
-@when(parsers.parse("the user toggles automerge {times}"))
-def dashboard_toggle_for_merge(autodispatch_state, times):
-    async def interact(app, pilot):
-        for _ in range(1 if times == "once" else 2):
-            await pilot.press("m")
-
-    run_app(
-        work_items=[autodispatch_state["item"]],
-        session=autodispatch_state["session"],
-        interactions=interact,
-    )
+@then("the pull request is left open")
+def dashboard_merge_outcome(autodispatch_state):
+    assert not autodispatch_state["merged"]
 
 
-@then(parsers.parse("after toggling, the pull request is {outcome}"))
-def dashboard_merge_outcome(autodispatch_state, outcome):
-    assert autodispatch_state["merged"] == ({("owner/repo", 2)} if outcome == "merged" else set())
-
-
-@then("the dashboard reports and displays the new automerge state")
+@then("the dashboard reports and displays both changes")
 def dashboard_automerge_visible(autodispatch_state):
     assert "(m)erge" in autodispatch_state["command_off"]
     assert "(m)erge off" in autodispatch_state["command_on"]
@@ -1032,87 +820,8 @@ def dashboard_automerge_visible(autodispatch_state):
     assert not autodispatch_state["session"].autodispatch_sessions()[0]["automerge"]
 
 
-@when("the pull request changes during review")
-def automerge_head_changes(autodispatch_state):
-    session = autodispatch_state["session"]
-    autodispatch_state["change_during_review"] = True
-    autodispatch_state["panes"].clear()
-    wait_for(lambda: session.autodispatch_sessions()[0]["status"] in ("finished", "failed"))
-
-
-@then("the new head is reviewed before the pull request is merged")
-def automerge_head_reviewed(autodispatch_state):
-    assert autodispatch_state["reviewed_heads"] == ["head", "new-head"]
-    assert autodispatch_state["merged"] == {("owner/repo", 2)}
-
-
-@when("the review cannot post a major finding")
-def failed_review_posting(autodispatch_state, monkeypatch, tmp_path):
-    from workdash.review import review_pull_request
-
-    session = autodispatch_state["session"]
-    item = make_work_item(item_type=WorkItemType.PR, number=2)
-    git = MagicMock()
-    git.get_git_path.return_value = tmp_path / "exclude"
-
-    def agent(*, prompt, **kwargs):
-        Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-            "Review outcome: failure\nGitHub rejected the major finding."
-        )
-        return ""
-
-    monkeypatch.setattr("workdash.agent_execution.executor.run_in_pane", agent)
-    monkeypatch.setattr(
-        session,
-        "review",
-        lambda **kwargs: review_pull_request(
-            item,
-            context={},
-            cwd=str(tmp_path),
-            tokens=["pi"],
-            document=tmp_path / "review.md",
-            git=git,
-            zellij_session="s",
-            group=None,
-        ),
-    )
-    autodispatch_state["panes"].clear()
-    wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "failed")
-
-
-@then("the session fails without merging the pull request")
-def review_failure_prevents_merge(autodispatch_state):
-    assert (
-        "review outcome not confirmed"
-        in autodispatch_state["session"].autodispatch_sessions()[0]["error"]
-    )
-    assert not autodispatch_state["merged"]
-
-
-@when("a reviewer has requested changes and has been asked to review again")
-def reviewer_awaited(autodispatch_state):
-    session = autodispatch_state["session"]
-    session.backend.github_client.work_pull_request.return_value.changes_requested = True
-    autodispatch_state["panes"].clear()
-    wait_for(lambda: session.backend.github_client.work_pull_request.called)
-
-
-@then("the session waits without merging or dispatching again")
-def waiting_prevents_merge_and_dispatch(autodispatch_state):
-    assert autodispatch_state["session"].autodispatch_sessions()[0]["status"] == "running"
-    assert not autodispatch_state["merged"]
-    assert len(autodispatch_state["calls"]) == 1
-
-
-@when("the reviewer approves the pull request")
-def reviewer_approves(autodispatch_state):
-    session = autodispatch_state["session"]
-    session.backend.github_client.work_pull_request.return_value.changes_requested = False
-    wait_for(lambda: session.autodispatch_sessions()[0]["status"] == "finished")
-
-
-@given("an autodispatch session has blocked after three reminders without a pull request")
-def blocked_session(scenario_state, work_items, tmp_path, monkeypatch, caplog):
+@given("a blocked autodispatch session visible in dashboard progress")
+def blocked_session(scenario_state, work_items, tmp_path, monkeypatch):
     import workdash.autoclose as autoclose_module
     from workdash.autodispatch import _AutodispatchSession
 
@@ -1120,12 +829,12 @@ def blocked_session(scenario_state, work_items, tmp_path, monkeypatch, caplog):
 
     scenario_state["real_monotonic"] = autoclose_module.time.monotonic
     scenario_state["github"] = install_fake_github(monkeypatch)
-    _supervised_coding_pane_without_pull_request(
-        "owner/repo#42", scenario_state, work_items, tmp_path, monkeypatch, caplog
-    )
+    _supervised_coding_pane_without_pull_request(scenario_state, work_items, tmp_path, monkeypatch)
     session = scenario_state["api_session"]
     activity = _AutodispatchSession(session, "owner/repo", None, "pi")
     activity.pane = (session.zellij_session, scenario_state["supervised_pane_id"])
+    activity.stage = "developing"
+    activity.current_item = "owner/repo#ISSUE-42"
     session._autodispatch[activity.id] = activity
     scenario_state["work"] = tmp_path / "owner_repo_42" / "unpublished.txt"
     scenario_state["work"].write_text("keep this")
@@ -1133,50 +842,60 @@ def blocked_session(scenario_state, work_items, tmp_path, monkeypatch, caplog):
         scenario_state["clock"]["now"] += 30
         session.autoclose.poll_once()
     assert len(scenario_state["sent"]) == 3
-    assert session.info()["autodispatch_sessions"][0]["status"] == "blocked"
 
 
-@then("the blocked session is visible in info and on the dashboard")
-def blocked_visible(scenario_state, work_items, monkeypatch, capsys):
+@when("the user presses Shift+Tab and f, then types guidance directly into the focused agent pane")
+def guide_blocked_agent(scenario_state, work_items, monkeypatch):
     import workdash.autoclose as autoclose_module
-    from workdash.workdash import main
 
     session = scenario_state["api_session"]
-    client = MagicMock()
-    client.request.return_value = session.info()
-    monkeypatch.setattr("workdash.workdash.WorkdashControlClient", lambda *a, **kw: client)
-    assert main(["info"]) == 0
-    entry = client.request.return_value["autodispatch_sessions"][0]
-    assert f"Autodispatch {entry['id']} blocked" in capsys.readouterr().out
+    focus = MagicMock()
+    monkeypatch.setattr(control_module.launcher.zellij, "focus_zellij_pane", focus)
 
-    async def check(app, pilot):
-        assert "blocked" in app.query_one("#autodispatch-progress", Static).render().plain
+    async def interact(app, pilot):
+        progress = app.query_one("#autodispatch-progress", Static)
+        assert "blocked" in progress.render().plain
+        await pilot.press("shift+tab", "f")
+        pane_id = scenario_state["supervised_pane_id"]
+        footer = app.query_one("#status-footer", Static)
+        for _ in range(100):
+            if f"Focused pane {pane_id}" in footer.render().plain:
+                break
+            await pilot.pause(0.02)
+        assert f"Focused pane {pane_id}" in footer.render().plain
+        assert "blocked" in progress.render().plain
+        focus.assert_called_once_with(session.zellij_session, pane_id)
+
+        # Typing directly into Zellij is observed by Workdash only as changed pane content.
+        scenario_state["screen"] = "Please continue with the implementation.\n"
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                autoclose_module.time, "monotonic", lambda: scenario_state["clock"]["now"]
+            )
+            scenario_state["clock"]["now"] += 30
+            session.autoclose.poll_once()
+        await app._poll_autodispatch_progress()
+        scenario_state["resumed_progress"] = progress.render().plain
 
     with monkeypatch.context() as patch:
         patch.setattr(autoclose_module.time, "monotonic", scenario_state["real_monotonic"])
-        run_app(work_items=work_items, session=session, interactions=check)
+        run_app(
+            work_items=work_items,
+            session=session,
+            interactions=interact,
+            focus_callback=session.focus_pane,
+        )
 
 
-@when("its agent pane content changes")
-def blocked_pane_changes(scenario_state):
-    scenario_state["screen"] = "agent resumed work"
-    scenario_state["clock"]["now"] += 30
-    scenario_state["api_session"].autoclose.poll_once()
-
-
-@when("the user sends input to its agent pane through Workdash")
-def send_blocked_pane_input(scenario_state):
-    scenario_state["api_session"].pane_send(
-        pane_id=scenario_state["supervised_pane_id"], data="continue"
-    )
-
-
-@then("the session resumes running")
+@then("the dashboard shows that the session has resumed")
 def blocked_session_resumes(scenario_state):
-    assert scenario_state["api_session"].info()["autodispatch_sessions"][0]["status"] == "running"
+    progress = scenario_state["resumed_progress"]
+    assert "owner/repo#42" in progress
+    assert "developing" in progress
+    assert "blocked" not in progress
 
 
-@when("the user stops the blocked session from the dashboard")
+@when("the user presses Shift+Tab and s to stop the blocked session")
 def stop_blocked_session(scenario_state, work_items, monkeypatch):
     import workdash.autoclose as autoclose_module
 
@@ -1185,11 +904,16 @@ def stop_blocked_session(scenario_state, work_items, monkeypatch):
         assert "blocked" in progress.render().plain
         await pilot.press("shift+tab", "s")
         await app._poll_autodispatch_progress()
-        assert not app.query_one("#autodispatch-scroll").display
+        scenario_state["progress_visible"] = app.query_one("#autodispatch-scroll").display
 
     with monkeypatch.context() as patch:
         patch.setattr(autoclose_module.time, "monotonic", scenario_state["real_monotonic"])
         run_app(work_items=work_items, session=scenario_state["api_session"], interactions=stop)
+
+
+@then("the session disappears from progress")
+def stopped_session_disappears(scenario_state):
+    assert not scenario_state["progress_visible"]
 
 
 @then("its agent pane closes and its worktree is preserved")
@@ -1197,27 +921,6 @@ def blocked_pane_closed(scenario_state):
     assert scenario_state["closed"] == [scenario_state["supervised_pane_id"]]
     assert scenario_state["api_session"].info()["autodispatch_sessions"][0]["status"] == "stopped"
     assert scenario_state["work"].read_text() == "keep this"
-
-
-@when("the user focuses the selected progress session")
-def focus_progress_session(autodispatch_state):
-    focused = MagicMock()
-
-    async def interact(app, pilot):
-        await pilot.press("shift+tab", "down", "f")
-
-    run_app(
-        work_items=[autodispatch_state["item"]],
-        session=autodispatch_state["session"],
-        interactions=interact,
-        focus_callback=focused,
-    )
-    autodispatch_state["focused_pane"] = focused
-
-
-@then("the selected progress session's pane is focused")
-def selected_pane_focused(autodispatch_state):
-    autodispatch_state["focused_pane"].assert_called_once_with("terminal_2")
 
 
 @given("an autodispatch session is reviewing after its coding pane closes")
@@ -1239,7 +942,7 @@ def reviewing_after_pane_closes(autodispatch_state, monkeypatch, request):
     assert entered.wait(3)
 
 
-@when("the user focuses the selected review session")
+@when("the user presses Shift+Tab and f on the session in progress")
 def focus_review_session(autodispatch_state):
     focused = MagicMock()
 
@@ -1260,12 +963,12 @@ def review_pane_focused(autodispatch_state):
     autodispatch_state["focused_review"].assert_called_once_with("terminal_99")
 
 
-@given("a failed autodispatch session is selected in progress")
+@given("a failed autodispatch session is visible in progress")
 def failed_selected_in_progress(autodispatch_state, monkeypatch):
     failed_session(autodispatch_state, monkeypatch)
 
 
-@when("the user stops the selected progress session")
+@when("the user presses Shift+Tab and s on the failed session")
 def stop_selected_progress(autodispatch_state):
     async def interact(app, pilot):
         await pilot.press("shift+tab", "s")
@@ -1285,72 +988,3 @@ def failed_session_disappears(autodispatch_state):
     assert "Failed:" not in autodispatch_state["progress_after_stop"]
     assert "Failed:" not in autodispatch_state["progress_after_poll"]
     assert autodispatch_state["session"].autodispatch_sessions()[0]["status"] == "failed"
-
-
-@when("the user returns focus to the work table")
-def return_to_work_table(autodispatch_state):
-    async def interact(app, pilot):
-        await pilot.press("shift+tab", "down")
-        autodispatch_state["progress_hint"] = (
-            app.query_one("#command-footer", Static).render().plain
-        )
-        await pilot.press("tab")
-        autodispatch_state["restored_hint"] = (
-            app.query_one("#command-footer", Static).render().plain
-        )
-
-    run_app(
-        work_items=[autodispatch_state["item"]],
-        session=autodispatch_state["session"],
-        interactions=interact,
-    )
-
-
-@then("the work-item command bar is restored")
-def work_item_bar_restored(autodispatch_state):
-    assert "(f)ocus" in autodispatch_state["progress_hint"]
-    assert "(f)ocus" not in autodispatch_state["restored_hint"]
-    assert "(v)iew" in autodispatch_state["restored_hint"]
-    assert "(m)erge" in autodispatch_state["restored_hint"]
-
-
-@given("an issue blocked by an open issue in another repository")
-def cross_repo_blocker(dashboard_dispatch, scenario_state):
-    github = scenario_state["github"]
-    github.add_issue("another/repo#5")
-    github.issues["other/repo#3"]["blocked_by"] = ("another/repo#5",)
-
-
-@when("the user starts autodispatch for the issue with JSON output")
-def start_blocked_json(scenario_state, monkeypatch, capsys):
-    from webob import Request
-
-    from workdash.control import _make_turbogears_app
-    from workdash.workdash import main
-
-    app = _make_turbogears_app(scenario_state["dashboard_session"])
-
-    def request(endpoint, payload):
-        response = Request.blank(
-            f"/api/v0/{endpoint}",
-            method="POST",
-            content_type="application/json",
-            body=json.dumps(payload).encode(),
-        ).get_response(app)
-        assert response.status_int == 200
-        return json.loads(response.body)["result"]
-
-    monkeypatch.setattr(
-        "workdash.workdash.WorkdashControlClient",
-        lambda *args, **kwargs: MagicMock(request=request),
-    )
-    scenario_state["cli_exit"] = main(["autodispatch", "other/repo#3", "--json"])
-    scenario_state["cli_result"] = json.loads(capsys.readouterr().out)
-
-
-@then("the JSON result reports the blocking issue")
-def blocked_json_result(scenario_state):
-    assert scenario_state["cli_exit"] == 0
-    assert scenario_state["cli_result"]["status"] == "finished"
-    assert scenario_state["cli_result"]["outcome"] == "blocked by another/repo#5"
-    assert not scenario_state.get("agent_launches")

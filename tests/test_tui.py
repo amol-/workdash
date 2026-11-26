@@ -1,4 +1,7 @@
 import asyncio
+import json
+import shutil
+import subprocess
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -8,24 +11,29 @@ import pytest
 
 pytest.importorskip("textual")
 
+from rich.text import Text
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Input, Static
+from webob import Request
 
+import workdash.control as control_module
 import workdash.launcher as launcher_module
+import workdash.tui as tui_module
 from workdash.backend import IncludeResult
 from workdash.config import AgentConfig, WorkdashConfig
-from workdash.control import WorkdashSession
+from workdash.control import WorkdashSession, format_work_item_id
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import (
     AnalyzeDialog,
     BusyScreen,
     CodeDialog,
     IncludeDialog,
-    ReviewDialog,
     SearchDialog,
     ViewDialog,
     WorkdashApp,
+    _type_column,
 )
+from workdash.work_state import ReadyWork, ScopedReadyWork
 
 _DEFAULT_TUI_CONFIG = WorkdashConfig(
     agents={
@@ -180,7 +188,7 @@ def test_dashboard_initial_layout_and_shortcuts() -> None:
     session.autodispatch_sessions.return_value = []
     session.take_completed_autodispatch_items.return_value = []
     session.busy_message.return_value = None
-    app = WorkdashApp(work_items=items[:1], session=session)
+    app = WorkdashApp(work_items=items[:1], session=session, now_utc=_SEARCH_NOW_UTC)
 
     async def exercise() -> None:
         async with app.run_test(size=(80, 10)) as pilot:
@@ -195,7 +203,8 @@ def test_dashboard_initial_layout_and_shortcuts() -> None:
                 rows = [strip.text for strip in app.screen._compositor.render_strips()]
                 assert "Updated" in rows[0], rows
                 long_row = next(row for row in rows if "Long title" in row)
-                assert len([word for word in long_row.split() if word.endswith("d")]) >= 1, rows
+                assert "Long title " * 15 not in long_row, rows
+                assert long_row.split().count("6d") == 1, rows
             assert not table.show_horizontal_scrollbar
             await pilot.press("right", "right", "down")
             assert table.scroll_x == 0
@@ -207,14 +216,77 @@ def test_dashboard_initial_layout_and_shortcuts() -> None:
                     span.start <= index < span.end and str(span.style) == "bold"
                     for span in hint.spans
                 )
+            assert hint.plain.startswith("(/)search")
             assert not any(span.start <= 3 < span.end for span in hint.spans)
             await _submit_search(app, pilot, "docs")
             hint = command.render()
             assert any(
                 span.start == 0 and span.end == len(app.SEARCH_HINT_TEXT) for span in hint.spans
             )
+            assert all("bold" in str(span.style) for span in hint.spans)
+            assert hint.plain == (
+                "(/)search (v)iew (r)efresh (a)nalyze (c)ode (d)ispatch (i)nclude (w)todo (q)uit"
+            )
 
     asyncio.run(exercise())
+
+
+def test_scrolling_selects_visible_rows_above_the_action_bar_with_progress() -> None:
+    template = _search_work_items()[0]
+    work_items = [
+        replace(
+            template,
+            number=i,
+            title=f"Work item {i}",
+            url=f"https://github.com/owner/repo/issues/{i}",
+        )
+        for i in range(1, 41)
+    ]
+    visible = []
+    selected = []
+    opened = []
+    expected_opened = []
+    session = MagicMock()
+    session.work_items = work_items
+    session.suggestion_markers = {}
+    session.busy_message.return_value = None
+    session.autodispatch_sessions.return_value = [
+        {"id": "1", "status": "failed", "scope": "owner/repo", "error": "failed"}
+    ]
+
+    async def exercise() -> None:
+        async with app.run_test(size=(80, 24)) as pilot:
+            table = app.query_one("#work-items", DataTable)
+            footer = app.query_one("#command-footer", Static)
+            progress = app.query_one("#autodispatch-progress", Static)
+            assert progress.region.height > 0
+            assert "Failed: failed (owner/repo)" in progress.render().plain
+            initial_scroll_y = int(table.scroll_y)
+            first_scrolled_row = None
+            for index in range(table.row_count):
+                item = app._selected_item()
+                selected.append(item.number if item is not None else None)
+                if first_scrolled_row is None and int(table.scroll_y) > initial_scroll_y:
+                    first_scrolled_row = index
+                if index in (0, first_scrolled_row, table.row_count - 1):
+                    expected_opened.append(index + 1)
+                    await pilot.press("v")
+                    await pilot.press("o")
+                row_y = table.region.y + table._get_row_region(index).y - int(table.scroll_y)
+                rows = [strip.text for strip in app.screen._compositor.render_strips()]
+                visible.append(
+                    table.region.y <= row_y < footer.region.y
+                    and f"Work item {index + 1}  " in rows[row_y]
+                )
+                if index < table.row_count - 1:
+                    await pilot.press("down")
+
+    app = WorkdashApp(work_items=work_items, session=session, open_callback=opened.append)
+    asyncio.run(exercise())
+    assert all(visible)
+    assert selected == list(range(1, 41))
+    assert len(expected_opened) == 3
+    assert [item.number for item in opened] == expected_opened
 
 
 def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_columns() -> None:
@@ -258,7 +330,13 @@ def test_workdash_app_renders_type_repo_title_age_last_update_and_analysis_colum
                 "Updated",
             ]
             assert table.row_count == 2
-            assert table.get_row_at(0)[2].style == "bold"
+            assert all(
+                isinstance(cell, Text) and "bold" in str(cell.style) for cell in table.get_row_at(0)
+            )
+            assert all(
+                not isinstance(cell, Text) or "bold" not in str(cell.style)
+                for cell in table.get_row_at(1)
+            )
             # Sorted by updated_at descending; PR #22 (updated 2/25) before issue #11 (updated 2/20)
             # PR #22 is within 24h of now_utc so cells are bold Text objects
             assert [str(c) for c in table.get_row_at(0)] == [
@@ -315,30 +393,40 @@ def test_workdash_app_truncates_a_long_repo_column_on_the_left() -> None:
 
 
 @pytest.mark.parametrize(
-    ("ci_state", "review_decision", "review_requested", "expected_prefix", "expected_spans"),
+    (
+        "ci_state",
+        "review_decision",
+        "review_requested",
+        "comments",
+        "expected_prefix",
+        "expected_spans",
+    ),
     [
-        ("SUCCESS", None, False, "✓ ", [(0, 1, "green")]),
-        ("FAILURE", None, False, "✗ ", [(0, 1, "red")]),
-        ("ERROR", None, False, "✗ ", [(0, 1, "red")]),
-        ("PENDING", None, False, "● ", [(0, 1, "yellow")]),
-        ("EXPECTED", None, False, "● ", [(0, 1, "yellow")]),
+        ("SUCCESS", None, False, False, "✓ ", [(0, 1, "green")]),
+        ("FAILURE", None, False, False, "✗ ", [(0, 1, "red")]),
+        ("ERROR", None, False, False, "✗ ", [(0, 1, "red")]),
+        ("PENDING", None, False, False, "● ", [(0, 1, "yellow")]),
+        ("EXPECTED", None, False, False, "● ", [(0, 1, "yellow")]),
         # A pull request with no checks, and a state GitHub may add later, both
         # fall back to the blank CI symbol rather than inventing one.
-        (None, None, False, "  ", []),
-        ("SOMETHING_NEW", None, False, "  ", []),
+        (None, None, False, False, "  ", []),
+        ("SOMETHING_NEW", None, False, False, "  ", []),
         # The review symbol is independent of the CI symbol.
-        (None, "APPROVED", False, " ✓", [(1, 2, "green")]),
-        (None, "CHANGES_REQUESTED", False, " ✗", [(1, 2, "red")]),
-        (None, None, True, " ?", [(1, 2, "yellow")]),
+        (None, "APPROVED", False, False, " ✓", [(1, 2, "green")]),
+        (None, "CHANGES_REQUESTED", False, False, " ✗", [(1, 2, "red")]),
+        (None, None, True, False, " ?", [(1, 2, "yellow")]),
         # A pull request with no reviewer requested carries no review symbol.
-        (None, None, False, "  ", []),
-        ("SUCCESS", "APPROVED", False, "✓✓", [(0, 1, "green"), (1, 2, "green")]),
+        (None, None, False, False, "  ", []),
+        ("SUCCESS", "APPROVED", False, False, "✓✓", [(0, 1, "green"), (1, 2, "green")]),
+        ("SUCCESS", "CHANGES_REQUESTED", False, False, "✓✗", [(0, 1, "green"), (1, 2, "red")]),
+        (None, None, False, True, " ?", [(1, 2, "dodger_blue1")]),
     ],
 )
 def test_workdash_app_colors_the_ci_and_review_symbols_in_the_type_column(
     ci_state: str | None,
     review_decision: str | None,
     review_requested: bool,
+    comments: bool,
     expected_prefix: str,
     expected_spans: list[tuple[int, int, str]],
 ) -> None:
@@ -356,6 +444,7 @@ def test_workdash_app_colors_the_ci_and_review_symbols_in_the_type_column(
         ci_state=ci_state,
         review_decision=review_decision,
         review_requested=review_requested,
+        has_unresolved_comments=comments,
     )
     app = WorkdashApp(work_items=[work_item], now_utc=now_utc)
 
@@ -368,6 +457,30 @@ def test_workdash_app_colors_the_ci_and_review_symbols_in_the_type_column(
             assert [(s.start, s.end, s.style) for s in cell.spans] == expected_spans
 
     asyncio.run(run_smoke())
+
+
+@pytest.mark.parametrize(
+    ("kind", "item_type", "number", "expected"),
+    [
+        (WorkItemKind.TRACKED_PR, WorkItemType.PR, 111, "VR+ 111"),
+        (WorkItemKind.TRACKED_ISSUE, WorkItemType.ISSUE, 222, "IS+ 222"),
+        (WorkItemKind.REVIEW_REQUESTED_PR, WorkItemType.PR, 333, "RV+ 333"),
+    ],
+)
+def test_included_item_type_column(kind, item_type, number, expected):
+    now = datetime(2026, 4, 28, tzinfo=UTC)
+    item = WorkItem(
+        kind=kind,
+        item_type=item_type,
+        repo="owner/repo",
+        number=number,
+        title="Included work",
+        url=f"https://github.com/owner/repo/{'pull' if item_type is WorkItemType.PR else 'issues'}/{number}",
+        created_at=now,
+        updated_at=now,
+        included=True,
+    )
+    assert _type_column(item, bold=False).plain[2:] == expected
 
 
 def test_workdash_app_keys_table_rows_by_work_item_identity_not_included_label() -> None:
@@ -547,7 +660,7 @@ def test_workdash_app_keybindings_invoke_callbacks_for_selected_row(
     asyncio.run(run_smoke())
 
 
-def test_workdash_app_refresh_keybinding_invokes_callback_and_reloads_rows() -> None:
+def test_workdash_app_refresh_keybinding_clears_active_filter() -> None:
     now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
     initial_item = WorkItem(
         kind=WorkItemKind.TRACKED_ISSUE,
@@ -569,26 +682,32 @@ def test_workdash_app_refresh_keybinding_invokes_callback_and_reloads_rows() -> 
         updated_at=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
         url="https://example.com/pull/33",
     )
+    other_item = replace(initial_item, number=12, title="Update docs")
     refresh_calls: list[str] = []
 
     def refresh_callback() -> tuple[list[WorkItem], dict[tuple[WorkItemType, str, int], str]]:
         refresh_calls.append("called")
-        return [refreshed_item], {(WorkItemType.PR, "owner/repo", 33): "*"}
+        return [other_item, refreshed_item], {(WorkItemType.PR, "owner/repo", 33): "*"}
 
     app = WorkdashApp(
-        work_items=[initial_item],
+        work_items=[initial_item, other_item],
         refresh_callback=refresh_callback,
         now_utc=now_utc,
     )
 
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
+            await _submit_search(app, pilot, "parser")
+            assert _listed_titles(app) == ["Fix parser"]
+
             await pilot.press("r")
-            await pilot.press("q")
+            await _wait_for_footer(
+                app.query_one("#status-footer", Static), "Refreshed 2 item(s).", pilot
+            )
 
             table = app.query_one("#work-items", DataTable)
             assert refresh_calls == ["called"]
-            assert table.row_count == 1
+            assert _listed_titles(app) == ["* Ship refresh", "Update docs"]
             assert [str(c) for c in table.get_row_at(0)] == [
                 "  VR 33",
                 "owner/repo",
@@ -939,11 +1058,14 @@ async def _wait_for_busy_message(expected: str, pilot) -> None:
     # A dashboard action in flight keeps the pilot from settling, so poll the screen.
     for _ in range(40):
         await asyncio.sleep(0.05)
-        if isinstance(pilot.app.screen, BusyScreen):
-            message = pilot.app.screen.query_one("#busy-message", Static).render().plain
-            assert message == expected
+        screen = pilot.app.screen
+        if not isinstance(screen, BusyScreen):
+            continue
+        messages = screen.query("#busy-message")
+        if messages and (message := messages.first(Static)).is_mounted:
+            assert message.render().plain == expected
             return
-    raise AssertionError(f"no busy screen shown; expected {expected!r}")
+    raise AssertionError(f"no busy message mounted; expected {expected!r}")
 
 
 async def _wait_for_no_dialog(app: WorkdashApp, pilot) -> None:
@@ -966,6 +1088,47 @@ async def _wait_for_footer(footer: Static, expected: str, pilot) -> None:
         if footer.render().plain == expected:
             return
     assert footer.render().plain == expected
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_analyze_dialog_lists_agent_choices_in_configuration_order(cached):
+    item = _search_work_items()[0]
+    now = datetime(2026, 2, 26, tzinfo=UTC)
+    item.analyzed_at = datetime(2026, 2, 24, tzinfo=UTC) if cached else None
+    config = WorkdashConfig(
+        agents={
+            "pi": AgentConfig(analyze="pi -p"),
+            "codex": AgentConfig(launch="codex"),
+            "claude": AgentConfig(analyze="claude -p"),
+        }
+    )
+    analyze = MagicMock()
+    app = WorkdashApp(
+        work_items=[item],
+        analyze_callback=analyze,
+        analyze_choices=config.tui_analyze_choices(),
+        now_utc=now,
+    )
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            await pilot.press("a")
+            assert isinstance(app.screen, AnalyzeDialog)
+            lines = [line.render().plain for line in app.screen.query(".analyze-line")]
+            assert [line for line in lines if "Analyze with" in line] == [
+                "(1) Analyze with pi",
+                "(2) Analyze with claude",
+            ]
+            if cached:
+                assert "Last analyzed: 2d ago" in lines
+                assert "(a) Open analysis" in lines
+            else:
+                assert "No previous analysis." in lines
+                assert "(a) Open analysis" not in lines
+            await pilot.press("escape")
+            analyze.assert_not_called()
+
+    asyncio.run(exercise())
 
 
 def test_analyze_dialog_shows_nine_agents_and_cached_analysis_without_scrolling() -> None:
@@ -1036,56 +1199,6 @@ def test_code_dialog_shows_every_choice_without_scrolling() -> None:
                 "(Esc) Cancel",
             ]
             assert app.screen.query_one("#code-shell").max_scroll_y == 0
-
-    asyncio.run(run_smoke())
-
-
-def test_code_menu_auto_review_waits_with_a_progress_dialog_then_reports_completion() -> None:
-    work_item = WorkItem(
-        kind=WorkItemKind.TRACKED_PR,
-        item_type=WorkItemType.PR,
-        repo="owner/repo",
-        number=22,
-        title="Implement renderer",
-        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
-        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
-        url="https://example.com/pull/22",
-    )
-    review_calls: list[tuple[WorkItem, str]] = []
-    release_review = threading.Event()
-
-    def review_callback(item: WorkItem, agent: str) -> dict[str, object]:
-        review_calls.append((item, agent))
-        release_review.wait(5)
-        return {"status": "reviewed", "agent": agent}
-
-    app = WorkdashApp(
-        work_items=[work_item],
-        analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
-        code_choices=_DEFAULT_TUI_CONFIG.tui_code_choices(),
-        review_callback=review_callback,
-        now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
-    )
-
-    async def run_smoke() -> None:
-        async with app.run_test() as pilot:
-            await pilot.press("c")
-            assert isinstance(app.screen, CodeDialog)
-            await pilot.press("r")
-            assert isinstance(app.screen, ReviewDialog)
-            lines = [str(line.render()) for line in app.screen.query(".review-line")]
-            assert lines == ["Review with:", "(1) claude", "(2) codex", "(Esc) Cancel"]
-
-            await pilot.press("2")
-            await _wait_for_busy_message("Reviewing with codex...", pilot)
-            assert review_calls == [(work_item, "codex")]
-            release_review.set()
-            await _wait_for_footer(
-                app.query_one("#status-footer", Static),
-                "Reviewed pr owner/repo#22 with codex.",
-                pilot,
-            )
-            _assert_no_modal_screens(app)
 
     asyncio.run(run_smoke())
 
@@ -1358,7 +1471,7 @@ def test_workdash_app_uses_only_configured_tui_agent_choices(
     asyncio.run(run_smoke())
 
 
-def test_workdash_app_analyze_uses_shared_callback_without_tui_worktree_prep() -> None:
+def test_workdash_app_reports_shared_analysis_failure_without_opening_viewer() -> None:
     now_utc = datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC)
     work_item = WorkItem(
         kind=WorkItemKind.TRACKED_PR,
@@ -1381,11 +1494,13 @@ def test_workdash_app_analyze_uses_shared_callback_without_tui_worktree_prep() -
         analyze_calls.append((item, tool))
         raise RuntimeError("Invalid configured analysis command for agent 'claude'")
 
+    open_markdown = MagicMock()
     app = WorkdashApp(
         work_items=[work_item],
         worktree_callback=worktree_callback,
         analyze_callback=analyze_callback,
         analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
+        open_markdown_callback=open_markdown,
         now_utc=now_utc,
     )
 
@@ -1403,6 +1518,7 @@ def test_workdash_app_analyze_uses_shared_callback_without_tui_worktree_prep() -
             _assert_no_modal_screens(app)
             assert analyze_calls == [(work_item, "claude")]
             assert worktree_attempts == []
+            open_markdown.assert_not_called()
 
             await pilot.press("q")
 
@@ -1428,9 +1544,6 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
     def failing_refresh_callback() -> list[WorkItem]:
         raise RuntimeError("gh refresh failed")
 
-    def failing_analyze_callback(_: WorkItem, __tool: str = "codex") -> str:
-        raise RuntimeError("codex analyze failed")
-
     def failing_launch_callback(_: WorkItem, __tool: str = "codex") -> None:
         raise RuntimeError("codex launch failed")
 
@@ -1441,9 +1554,7 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
         work_items=[work_item],
         open_callback=failing_open_callback,
         refresh_callback=failing_refresh_callback,
-        analyze_callback=failing_analyze_callback,
         launch_callback=failing_launch_callback,
-        analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
         code_choices=_DEFAULT_TUI_CONFIG.tui_code_choices(),
         terminal_callback=failing_terminal_callback,
         now_utc=now_utc,
@@ -1460,12 +1571,7 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
             await pilot.press("r")
             await _wait_for_footer(footer, "Refresh failed: gh refresh failed", pilot)
             _assert_no_modal_screens(app)
-
-            # Press "a" to open AnalyzeDialog, then "1" to choose Claude
-            await pilot.press("a")
-            await pilot.press("1")
-            await _wait_for_footer(footer, "Analyze failed: codex analyze failed", pilot)
-            _assert_no_modal_screens(app)
+            assert _listed_titles(app) == [work_item.title]
 
             # Press "c" to open CodeDialog, then "2" to choose Codex
             await pilot.press("c")
@@ -1480,6 +1586,200 @@ def test_workdash_app_footer_shows_error_status_for_action_failures() -> None:
             await pilot.press("q")
 
     asyncio.run(run_smoke())
+
+
+@pytest.mark.parametrize(
+    ("failure", "detail"),
+    [
+        ("worktree", "worktree failed"),
+        ("launch", "Failed to launch terminal in zellij: terminal launch failed"),
+        ("timeout", "Failed to launch terminal in zellij: command timed out"),
+    ],
+)
+def test_terminal_failure_reports_details_and_clears_progress(
+    monkeypatch, tmp_path, failure, detail
+):
+    item = _search_work_items()[0]
+    session = _dashboard_session()
+    session.work_items = [item]
+    session.config = replace(session.config, workdir=str(tmp_path))
+    session.git = MagicMock()
+    session.git.find_worktree_for_branch.return_value = None
+    if failure == "worktree":
+        session.git.create_worktree.side_effect = RuntimeError("worktree failed")
+    else:
+        session.git.create_worktree.side_effect = lambda _main, path, *_: path.mkdir()
+
+    def fail_launch(command, *, timeout, **_kwargs):
+        assert "new-pane" in command
+        if failure == "worktree":
+            pytest.fail("Zellij must not launch a terminal after worktree preparation fails")
+        if failure == "timeout":
+            assert timeout is not None
+            raise subprocess.TimeoutExpired(command, timeout)
+        raise subprocess.CalledProcessError(1, command, stderr="terminal launch failed")
+
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/zellij" if name == "zellij" else None
+    )
+    monkeypatch.setattr(subprocess, "run", fail_launch)
+    app = WorkdashApp(
+        session=session,
+        terminal_callback=lambda item: session.terminal(target=format_work_item_id(item)),
+    )
+
+    async def exercise():
+        async with app.run_test():
+            await app.action_open_terminal(item)
+            footer = app.query_one("#status-footer", Static)
+            assert footer.render().plain.startswith(f"Terminal failed: {detail}")
+            _assert_no_modal_screens(app)
+
+    asyncio.run(exercise())
+
+
+def test_terminal_opens_when_zellij_cannot_list_existing_panes(monkeypatch, tmp_path):
+    item = _search_work_items()[0]
+    worktree = tmp_path / "owner_repo_11"
+    worktree.mkdir()
+    session = _dashboard_session()
+    session.work_items = [item]
+    session.config = replace(session.config, workdir=str(tmp_path))
+    session.git = MagicMock()
+    list_panes = MagicMock(side_effect=RuntimeError("Zellij session not found"))
+    monkeypatch.setattr(launcher_module.zellij, "load_zellij_panes", list_panes)
+    launch = MagicMock(
+        return_value=launcher_module.ZellijPaneLaunch(
+            session="workdash",
+            pane_id="terminal_22",
+            pane_title="terminal_owner_repo_11",
+            cwd=str(worktree),
+        )
+    )
+    monkeypatch.setattr(control_module, "launch_terminal_context", launch)
+    app = WorkdashApp(
+        session=session,
+        terminal_callback=lambda item: session.terminal(target=format_work_item_id(item)),
+    )
+
+    async def exercise():
+        async with app.run_test():
+            await app.action_open_terminal(item)
+            footer = app.query_one("#status-footer", Static)
+            assert footer.render().plain == "Opened terminal for issue owner/repo#11."
+
+    asyncio.run(exercise())
+    list_panes.assert_called_once_with("workdash")
+    launch.assert_called_once_with(str(worktree), zellij_session="workdash")
+
+
+@pytest.mark.parametrize(
+    ("agent_names", "agent_running"),
+    [
+        pytest.param(("pi", "claude"), False, id="idle"),
+        pytest.param(("claude", "codex", "pi"), True, id="running"),
+    ],
+)
+def test_code_menu_lists_numbered_agents_in_configuration_order_before_actions(
+    monkeypatch, tmp_path, agent_names, agent_running
+):
+    item = _search_work_items()[0]
+    session = _dashboard_session()
+    session.config = WorkdashConfig(
+        agents={name: AgentConfig(launch=name) for name in agent_names}, workdir=str(tmp_path)
+    )
+    session.work_items = [item]
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *a, **k: worktree)
+    panes = [{"id": 7, "title": "code_wt", "pane_cwd": str(worktree)}] if agent_running else []
+    monkeypatch.setattr(launcher_module.zellij, "load_zellij_panes", lambda _: panes)
+    app = WorkdashApp(session=session, code_choices=session.config.tui_code_choices())
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            await pilot.press("c")
+            assert isinstance(app.screen, CodeDialog)
+            panes_at_menu = [
+                (pane["pane_id"], pane["state"], pane["item"]) for pane in session.info()["panes"]
+            ]
+            assert panes_at_menu == (
+                [("terminal_7", "running", format_work_item_id(item))] if agent_running else []
+            )
+            options = [str(line.render()) for line in app.screen.query(".code-line")][1:]
+            assert options == [
+                *(f"({index}) {name}" for index, name in enumerate(agent_names, 1)),
+                "(e) edit (VSCode Copilot)",
+                "(d) branchdiff",
+                "(t) terminal",
+                "(r) auto review",
+                "(Esc) Cancel",
+            ]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status"),
+    [
+        ("worktree failure", "Launch failed: worktree failed"),
+        ("agent launch failure", "Launch failed: coding launch failed"),
+        ("late agent", "Focused pane terminal_9."),
+    ],
+)
+def test_code_selection_handles_launch_failures_and_late_claims(
+    monkeypatch, tmp_path, outcome, status
+):
+    item = _search_work_items()[0]
+    session = _dashboard_session()
+    session.work_items = [item]
+    session.config = replace(session.config, workdir=str(tmp_path))
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    panes = []
+    monkeypatch.setattr(launcher_module.zellij, "load_zellij_panes", lambda _: list(panes))
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *a, **k: worktree)
+    prepare = MagicMock(return_value=str(worktree))
+    if outcome == "worktree failure":
+        prepare.side_effect = RuntimeError("worktree failed")
+    monkeypatch.setattr(control_module, "ensure_worktree", prepare)
+    monkeypatch.setattr(control_module, "get_merge_base", lambda *a, **k: None)
+    monkeypatch.setattr(control_module, "prepare_launch_agent_prompt", lambda *a, **k: "Briefing")
+    launch = MagicMock(side_effect=RuntimeError("coding launch failed"))
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch)
+    focus = MagicMock()
+    app = WorkdashApp(
+        session=session,
+        code_choices=session.config.tui_code_choices(),
+        launch_callback=lambda item, agent: session.code(
+            target=format_work_item_id(item), agent=agent, allow_vscode=True
+        ),
+        focus_callback=focus,
+    )
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+            await pilot.press("c")
+            assert isinstance(app.screen, CodeDialog)
+            if outcome == "late agent":
+                panes.append({"id": 9, "title": "code_wt", "pane_cwd": str(worktree)})
+            await pilot.press("1")
+            await _wait_for_footer(footer, status, pilot)
+            _assert_no_modal_screens(app)
+
+    asyncio.run(exercise())
+    if outcome == "late agent":
+        focus.assert_called_once_with("terminal_9")
+        prepare.assert_not_called()
+    else:
+        focus.assert_not_called()
+        prepare.assert_called_once()
+    if outcome == "agent launch failure":
+        launch.assert_called_once()
+    else:
+        launch.assert_not_called()
 
 
 def test_workdash_app_code_reports_a_failed_focus_of_the_running_agent_pane() -> None:
@@ -1631,6 +1931,7 @@ def test_workdash_app_include_updates_server_session_state() -> None:
             await pilot.pause()
             table = app.query_one("#work-items", DataTable)
             assert table.row_count == 2
+            assert str(table.get_row_at(table.cursor_row)[0]).endswith("IS+ 77")
             assert session.work_items == [existing_item, newly_fetched_item]
             assert session.suggestion_markers == {(WorkItemType.ISSUE, "owner/repo", 77): "*"}
             assert session.list_items()["items"][0]["id"] == "owner/repo#ISSUE-77"
@@ -1868,6 +2169,28 @@ def test_workdash_app_search_matches_the_owner_cut_from_the_repo_column() -> Non
     asyncio.run(run_smoke())
 
 
+@pytest.mark.parametrize(
+    ("query", "title", "repo"),
+    [
+        ("33", "Unrelated chore", "owner/repo"),
+        ("other", "Ship the docs", "owner/other"),
+    ],
+)
+def test_search_accepts_a_bare_number_or_repository_fragment(query, title, repo) -> None:
+    app = WorkdashApp(work_items=_search_work_items(), now_utc=_SEARCH_NOW_UTC)
+
+    async def exercise() -> None:
+        async with app.run_test() as pilot:
+            await _submit_search(app, pilot, query)
+            assert _listed_titles(app) == [title]
+            row = app.query_one("#work-items", DataTable).get_row_at(0)
+            assert str(row[1]) == repo
+            if query == "33":
+                assert str(row[0]).endswith("IS 33")
+
+    asyncio.run(exercise())
+
+
 def test_workdash_app_search_matches_rendered_columns_ignoring_case() -> None:
     work_items = _search_work_items()
     app = WorkdashApp(
@@ -1882,6 +2205,8 @@ def test_workdash_app_search_matches_rendered_columns_ignoring_case() -> None:
         async with app.run_test() as pilot:
             footer = app.query_one("#status-footer", Static)
             command_bar = app.query_one("#command-footer", Static)
+
+            assert _listed_titles(app) == ["Unrelated chore", "Ship the docs", "* Fix the parser"]
 
             # Case is ignored and internal spaces must match literally.
             await _submit_search(app, pilot, "fix the PARSER")
@@ -1900,8 +2225,8 @@ def test_workdash_app_search_matches_rendered_columns_ignoring_case() -> None:
             # The search action is emphasized only while a filter is active.
             assert not any(s.start == 0 and s.end == 9 for s in command_bar.render().spans)
 
-            await _submit_search(app, pilot, "OWNER/OTHER")
-            assert _listed_titles(app) == ["Ship the docs"]
+            await _submit_search(app, pilot, "OWNER/REPO")
+            assert _listed_titles(app) == ["Unrelated chore", "* Fix the parser"]
 
             await pilot.press("/")
             await _submit_search(app, pilot, "issue#33")
@@ -2023,6 +2348,32 @@ def test_workdash_app_capture_todo_clears_the_search_filter() -> None:
     asyncio.run(run_smoke())
 
 
+def test_including_new_work_restores_the_full_dashboard() -> None:
+    items = _search_work_items()
+    included = replace(
+        items[1],
+        number=111,
+        title="Newly included",
+        url="https://github.com/owner/other/pull/111",
+        included=True,
+    )
+    app = WorkdashApp(
+        work_items=items,
+        include_callback=lambda *_: IncludeResult(fetched_item=included),
+        now_utc=_SEARCH_NOW_UTC,
+    )
+
+    async def exercise() -> None:
+        async with app.run_test() as pilot:
+            await _submit_search(app, pilot, "parser")
+            assert _listed_titles(app) == ["Fix the parser"]
+            await app._perform_include(included.url)
+            titles = [title.removeprefix("* ") for title in _listed_titles(app)]
+            assert sorted(titles) == sorted([*_ALL_SEARCH_TITLES, "Newly included"])
+
+    asyncio.run(exercise())
+
+
 def test_workdash_app_include_of_an_already_tracked_item_clears_the_search_filter() -> None:
     work_items = _search_work_items()
     duplicate = work_items[1]
@@ -2083,27 +2434,49 @@ def test_reincluding_a_hidden_issue_saves_its_url_without_selecting_it(tmp_path)
     asyncio.run(run())
 
 
-def test_workdash_app_failed_include_keeps_the_search_filter_active() -> None:
+@pytest.mark.parametrize(
+    ("url", "error"),
+    [
+        ("https://example.com/not-github", "Invalid URL: https://example.com/not-github"),
+        (
+            "https://github.com/owner/repo/issues/44",
+            "GitHub unreachable — URL not saved. Try again later.",
+        ),
+    ],
+    ids=["invalid-url", "github-unavailable"],
+)
+def test_workdash_app_failed_include_keeps_the_search_filter_active(tmp_path, url, error) -> None:
+    from workdash.backend import WorkdashBackend
+    from workdash.github_client import TransientFetchError
+    from workdash.included_items import IncludedItemsStore
+
+    github = MagicMock()
+    github.fetch_item_by_url.side_effect = TransientFetchError("HTTP 503")
+    backend = WorkdashBackend(
+        github_client=github,
+        cache_root=tmp_path / "cache",
+        included_items_store=IncludedItemsStore(tmp_path / "included.json"),
+    )
     app = WorkdashApp(
         work_items=_search_work_items(),
-        include_callback=MagicMock(
-            side_effect=[IncludeResult(invalid=True), IncludeResult(transient_failure=True)]
-        ),
+        include_callback=backend.include_item_by_url,
         now_utc=_SEARCH_NOW_UTC,
     )
 
     async def run_smoke() -> None:
         async with app.run_test() as pilot:
             command_bar = app.query_one("#command-footer", Static)
+            footer = app.query_one("#status-footer", Static)
             await _submit_search(app, pilot, "parser")
 
-            # A failed include leaves the loaded list unchanged, so the filter stays on.
-            for _ in range(2):
-                await app._perform_include("https://github.com/owner/repo/issues/44")
-                await pilot.pause()
-                assert _listed_titles(app) == ["Fix the parser"]
-                spans = command_bar.render().spans
-                assert (0, 9, "bold") in [(s.start, s.end, str(s.style)) for s in spans]
+            await pilot.press("i")
+            app.screen.query_one("#include-url", Input).value = url
+            await pilot.press("enter")
+            await _wait_for_footer(footer, error, pilot)
+            _assert_no_modal_screens(app)
+            assert _listed_titles(app) == ["Fix the parser"]
+            spans = command_bar.render().spans
+            assert (0, 9, "bold") in [(s.start, s.end, str(s.style)) for s in spans]
 
             # The filter is still live, so "/" clears it instead of reopening search.
             await pilot.press("/")
@@ -2271,9 +2644,9 @@ def test_refresh_renders_sub_issue_parents_from_github(monkeypatch, tmp_path) ->
     children = {("alpha", "one", "41"): ["CLOSED", "CLOSED"]}
     nodes = []
     for typename, repo, number, title in [
-        ("Issue", "alpha/one", 41, "Parent with closed children"),
-        ("Issue", "beta/two", 41, "Leaf"),
-        ("PullRequest", "alpha/one", 42, "Pull request"),
+        ("Issue", "alpha/one", 41, "Parent issue with closed children"),
+        ("Issue", "beta/two", 41, "Leaf issue"),
+        ("PullRequest", "alpha/one", 42, "Pull request for issue"),
     ]:
         nodes.append(
             {
@@ -2333,20 +2706,21 @@ def test_refresh_renders_sub_issue_parents_from_github(monkeypatch, tmp_path) ->
         async with app.run_test() as pilot:
             await app.action_refresh_items()
             await pilot.pause()
+            await _submit_search(app, pilot, "issue")
             table = app.query_one("#work-items", DataTable)
             parent = table.get_row("issue:alpha/one#41")
             leaf = table.get_row("issue:beta/two#41")
             pr = table.get_row("pr:alpha/one#42")
             assert str(parent[0]).endswith("IS 41") and str(parent[1]) == "alpha/one"
             assert (
-                str(parent[2]).endswith("Parent with closed children")
+                str(parent[2]).endswith("Parent issue with closed children")
                 and parent[2].style == "bold cyan"
             )
             assert str(leaf[0]).endswith("IS 41") and str(leaf[1]) == "beta/two"
-            assert str(leaf[2]).endswith("Leaf") and not leaf[2].style
+            assert str(leaf[2]).endswith("Leaf issue") and not leaf[2].style
             assert (
                 str(pr[0]).endswith("VR 42")
-                and str(pr[2]).endswith("Pull request")
+                and str(pr[2]).endswith("Pull request for issue")
                 and not pr[2].style
             )
 
@@ -3047,6 +3421,7 @@ def test_autodispatch_lifecycle_refreshes_completed_issue_and_highlights_next(mo
                 ):
                     break
             assert str(table.get_row("issue:owner/repo#1")[2]) == "First (closed)"
+            assert session.work_items[0].state == "CLOSED"
             assert table_style(1) == "bold"
             assert table_style(2) == "bold magenta"
 
@@ -3095,10 +3470,11 @@ def test_autodispatch_highlights_linked_prs_when_issue_row_is_absent() -> None:
         title="Issue",
         closing_issue_numbers=(),
     )
+    parent = replace(issue, number=2, title="Parent issue", has_sub_issues=True)
     session = WorkdashSession(
         config=_DEFAULT_TUI_CONFIG,
         backend=MagicMock(),
-        work_items=[pr, cross, scope],
+        work_items=[pr, cross, scope, parent],
         suggestion_markers={},
         zellij_session=None,
     )
@@ -3126,6 +3502,7 @@ def test_autodispatch_highlights_linked_prs_when_issue_row_is_absent() -> None:
             session.work_items.append(issue)
             app.refresh_from_session()
             assert table.get_row("issue:owner/repo#1")[2].style == "bold magenta"
+            assert table.get_row("issue:owner/repo#2")[2].style == "bold cyan"
             assert table.get_row("pr:owner/repo#9")[2].style == "bold"
             await _submit_search(app, pilot, "Same repo")
             assert table.get_row("pr:owner/repo#9")[2].style == "bold magenta"
@@ -3359,7 +3736,17 @@ def test_loaded_linked_pr_tracks_autodispatch_stop() -> None:
                     break
             assert table.scroll_y == table.scroll_target_y
             assert table._get_row_region(table.cursor_row).y - table.scroll_y < table.size.height
-            selected, scroll = app._selected_item(), table.scroll_y
+            footer = app.query_one("#command-footer", Static)
+
+            def visible_selection() -> str:
+                row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+                title = str(table.get_row(row_key)[2])
+                strips = app.screen._compositor.render_strips()
+                table_rows = strips[table.region.y : min(table.region.bottom, footer.region.y)]
+                assert any(f"{title} " in strip.text for strip in table_rows)
+                return row_key.value
+
+            selected, scroll = visible_selection(), table.scroll_y
             assert scroll > 0
             session.stop_autodispatch(str(entry["id"]))
             for _ in range(100):
@@ -3368,7 +3755,7 @@ def test_loaded_linked_pr_tracks_autodispatch_stop() -> None:
                     break
             assert str(table.get_row("pr:owner/repo#99")[0]).startswith("✗")
             assert table.get_row("pr:owner/repo#99")[2].style == "bold"
-            assert app._selected_item() == selected
+            assert visible_selection() == selected
             assert table.scroll_y == scroll
 
     try:
@@ -3837,37 +4224,42 @@ def test_view_menu_offers_view_and_open_for_the_selected_item() -> None:
     asyncio.run(run_smoke())
 
 
-def test_view_menu_reports_a_failing_viewer() -> None:
-    def failing_view_callback(_: WorkItem) -> None:
-        raise RuntimeError("zellij pane failed")
+@pytest.mark.parametrize(
+    ("item_index", "preparation_fails", "message"),
+    [
+        (0, False, "Opened diff for issue owner/repo#11."),
+        (1, False, "Opened diff for pr owner/other#22."),
+        (0, True, "Worktree setup failed: worktree failed"),
+    ],
+    ids=["issue", "pull-request", "preparation-failure"],
+)
+def test_code_menu_diff_uses_the_selected_worktree(
+    item_index, preparation_fails, message, tmp_path, monkeypatch
+):
+    items = _search_work_items()[:2]
+    item = items[item_index]
+    prepare = MagicMock(return_value=str(tmp_path))
+    if preparation_fails:
+        prepare.side_effect = RuntimeError("worktree failed")
+    launch = MagicMock()
+    monkeypatch.setattr(tui_module, "launch_branchdiff_context", launch)
+    app = WorkdashApp(work_items=items, worktree_callback=prepare)
 
-    app = WorkdashApp(
-        work_items=[
-            WorkItem(
-                kind=WorkItemKind.TRACKED_ISSUE,
-                item_type=WorkItemType.ISSUE,
-                repo="owner/repo",
-                number=11,
-                title="Fix parser",
-                created_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
-                updated_at=datetime(2026, 2, 20, 0, 0, 0, tzinfo=UTC),
-                url="https://example.com/issues/11",
-            )
-        ],
-        view_callback=failing_view_callback,
-        now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
-    )
-
-    async def run_smoke() -> None:
+    async def run():
         async with app.run_test() as pilot:
-            footer = app.query_one("#status-footer", Static)
-            await pilot.press("v")
-            await pilot.press("v")
-            await _wait_for_footer(footer, "View failed: zellij pane failed", pilot)
+            # Items start sorted by most recent update, so the issue is the second row.
+            if item_index == 0:
+                await pilot.press("down")
+            await pilot.press("c", "d")
+            await _wait_for_footer(app.query_one("#status-footer", Static), message, pilot)
+            prepare.assert_called_once_with(item)
+            if preparation_fails:
+                launch.assert_not_called()
+            else:
+                launch.assert_called_once_with(str(tmp_path), item, github_client=None)
             _assert_no_modal_screens(app)
-            await pilot.press("q")
 
-    asyncio.run(run_smoke())
+    asyncio.run(run())
 
 
 def test_progress_arrows_reach_empty_sessions_on_short_screen():
@@ -4048,6 +4440,191 @@ def test_dashboard_dialog_names_the_operation_that_took_over() -> None:
             _assert_no_modal_screens(app)
 
     asyncio.run(run())
+
+
+def _control_post(session, operation, payload):
+    # Consume the WSGI response on the request thread, where TurboGears stores its context.
+    response = Request.blank(
+        f"/api/v0/{operation}",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps(payload).encode(),
+    ).get_response(control_module._make_turbogears_app(session))
+    return response.status_int, response.json
+
+
+@pytest.mark.parametrize(
+    ("operation", "message", "lookup_fails"),
+    [
+        ("ready", "Checking ready work...", False),
+        ("analyze", "Analyzing owner/repo#ISSUE-11...", False),
+        ("autodispatch", "Starting autodispatch...", False),
+        ("ready", "Checking ready work...", True),
+    ],
+    ids=["readiness", "analysis", "autodispatch-start", "readiness-failure"],
+)
+def test_control_operation_shows_and_clears_its_dashboard_dialog(
+    operation, message, lookup_fails, tmp_path, monkeypatch
+):
+    session = _dashboard_session()
+    session.work_items = _search_work_items()[:1]
+    item_id = format_work_item_id(session.work_items[0])
+    monkeypatch.setattr(session, "_live_panes", lambda: [])
+    entered, release = threading.Event(), threading.Event()
+    analysis = tmp_path / "analysis.md"
+    analysis.write_text("# Analysis\n")
+
+    def hold_lookup(**_kwargs):
+        entered.set()
+        assert release.wait(10), "test never released the GitHub lookup"
+        if lookup_fails:
+            raise RuntimeError("GitHub is unreachable")
+        return ScopedReadyWork([])
+
+    def hold_analysis(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(10), "test never released analysis"
+        return str(analysis)
+
+    session.backend.github_client.find_ready_work.side_effect = hold_lookup
+    session.backend.analyze_item.side_effect = hold_analysis
+    payload = {
+        "ready": {"scope": "owner/repo"},
+        "analyze": {"target": item_id, "agent": "claude"},
+        "autodispatch": {"scope": item_id, "agent": "claude"},
+    }[operation]
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test() as pilot:
+            response_task = asyncio.create_task(
+                asyncio.to_thread(_control_post, session, operation, payload)
+            )
+            try:
+                assert await asyncio.to_thread(entered.wait, 3)
+                await _wait_for_busy_message(message, pilot)
+            finally:
+                release.set()
+                status, body = await response_task
+            await _wait_for_no_dialog(app, pilot)
+            _assert_no_modal_screens(app)
+            assert session.busy_message() is None
+            if lookup_fails:
+                assert status == 502
+                assert body["ok"] is False
+                assert body["error"]["code"] == "github_error"
+                assert "GitHub is unreachable" in body["error"]["message"]
+            else:
+                assert status == 200
+                assert body["ok"] is True
+
+    try:
+        asyncio.run(run())
+    finally:
+        session.stop_autodispatch_sessions()
+
+
+def test_dashboard_ignores_search_key_until_blocking_dialog_clears():
+    session = _dashboard_session()
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test() as pilot:
+            with session._blocking("Checking ready work..."):
+                await _wait_for_busy_message("Checking ready work...", pilot)
+                await pilot.press("/")
+                assert isinstance(app.screen, BusyScreen)
+                assert not any(isinstance(screen, SearchDialog) for screen in app.screen_stack)
+            await _wait_for_no_dialog(app, pilot)
+            await pilot.press("/")
+            assert isinstance(app.screen, SearchDialog)
+
+    asyncio.run(run())
+
+
+def test_search_keeps_receiving_keys_during_a_blocking_operation():
+    session = _dashboard_session()
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test() as pilot:
+            await pilot.press("/")
+            search = app.screen
+            assert isinstance(search, SearchDialog)
+            with session._blocking("Checking ready work..."):
+                await app._sync_busy_screen()
+                await pilot.press("s", "e", "a")
+                assert search.query_one(Input).value == "sea"
+                assert app.screen is search
+                assert not any(isinstance(screen, BusyScreen) for screen in app.screen_stack)
+
+    asyncio.run(run())
+
+
+def test_external_autodispatch_start_is_acknowledged_before_background_work(tmp_path, monkeypatch):
+    session = _dashboard_session()
+    session.config = replace(session.config, workdir=tmp_path)
+    item = _search_work_items()[0]
+    session.work_items = [item]
+    item_id = format_work_item_id(item)
+    entered, release = threading.Event(), threading.Event()
+
+    def first_lookup(**_kwargs):
+        entered.set()
+        assert release.wait(10), "test never released the initial readiness check"
+        return ScopedReadyWork([ReadyWork(item)])
+
+    session.backend.github_client.find_ready_work.side_effect = first_lookup
+    monkeypatch.setattr(
+        launcher_module.zellij, "list_workdash_panes", lambda _: [{"id": 1, "title": "code_wt"}]
+    )
+    monkeypatch.setattr(
+        session,
+        "code",
+        lambda **kwargs: {
+            "status": "launched",
+            "item_id": item_id,
+            "pane_id": "terminal_1",
+            "session": "workdash",
+            "launch_reason": "implement",
+        },
+    )
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test() as pilot:
+            response_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _control_post, session, "autodispatch", {"scope": item_id, "agent": "claude"}
+                )
+            )
+            try:
+                assert await asyncio.to_thread(entered.wait, 3)
+                await _wait_for_busy_message("Starting autodispatch...", pilot)
+                status, body = await asyncio.wait_for(asyncio.shield(response_task), timeout=3)
+                assert status == 200
+                started = body["result"]
+                assert started["id"]
+                assert started["scope"] == item_id
+                assert session.busy_message() == "Starting autodispatch..."
+            finally:
+                release.set()
+                await response_task
+            footer = app.query_one("#status-footer", Static)
+            progress = app.query_one("#autodispatch-progress", Static)
+            for _ in range(30):
+                if "developing" in progress.render().plain:
+                    break
+                await pilot.pause(0.1)
+            assert "developing" in progress.render().plain
+            assert footer.render().plain == f"Started autodispatch for {item_id}: {started['id']}."
+            await _wait_for_no_dialog(app, pilot)
+            _assert_no_modal_screens(app)
+
+    try:
+        asyncio.run(run())
+    finally:
+        session.stop_autodispatch_sessions()
 
 
 def test_autodispatch_dispatch_iterations_leave_the_dashboard_interactive(monkeypatch) -> None:

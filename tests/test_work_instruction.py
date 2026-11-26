@@ -215,11 +215,23 @@ def test_a_briefing_does_not_redirect_an_issue_to_a_merged_pull_request(monkeypa
     assert github.pull_requests["owner/repo#51"]["lookups"] == 1
 
 
-def test_implementation_instruction_proves_a_parent_goal_already_met_by_subissues():
-    text = render_work_instruction("implement", _item(WorkItemType.ISSUE, 7))
-    assert "verify" in text.lower()
-    assert "sub-issues" in text
-    assert "test" in text.lower()
+def test_implementation_instruction_proves_a_parent_goal_already_met_by_subissues(monkeypatch):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#7")
+    github.add_issue("owner/repo#8", parent="owner/repo#7", state="CLOSED")
+
+    target, text, action = autostart_briefing(
+        _item(WorkItemType.ISSUE, 7),
+        github_username="testuser",
+        todo_repository="testuser/todos",
+    )
+
+    assert (target.number, action) == (7, "implement")
+    assert "Continue the assigned issue https://github.com/owner/repo/issues/7." in text
+    assert (
+        "If sub-issues already fulfilled the issue goal, verify the described workflow and add a "
+        "test proving it works instead of reimplementing it."
+    ) in " ".join(text.split())
 
 
 @pytest.mark.parametrize("pr_state", ["OPEN", "MERGED"])

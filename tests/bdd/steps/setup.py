@@ -1,968 +1,506 @@
-"""Step definitions for the setup (configure wizard) feature."""
+"""Drive the setup CLI with scripted input and isolated executables."""
 
-from __future__ import annotations
-
-import http.client
+import fcntl
+import io
 import json
-import re
-import urllib.error
+import os
+import platform
+import pty
+import shlex
+import shutil
+import struct
+import subprocess
+import sys
+import tarfile
+import termios
+import time
 import urllib.request
+import zipfile
+from functools import partial
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from pytest_bdd import given, parsers, then, when
 
-import workdash.config as config_module
-import workdash.workdash as workdash_module
-from workdash.config import AgentConfig, WorkdashConfig, load_config
+from workdash import config, launcher, workdash
 
 
 @pytest.fixture
-def config_path(tmp_path: Path) -> Path:
-    return tmp_path / "config.json"
-
-
-@given("the user has no configuration file")
-def _no_config(scenario_state: dict[str, Any], config_path: Path) -> None:
-    assert not config_path.exists()
-    scenario_state["config_path"] = config_path
-    # A typical machine: claude is installed, so the wizard needs no custom agent.
-    scenario_state.setdefault(
-        "on_path_tools", {"zellij", "gh", config_module._default_open_command(), "claude"}
+def setup_cli(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    path = home / ".config" / "workdash" / "config.json"
+    path.parent.mkdir(parents=True)
+    bin_dir = tmp_path / "system-bin"
+    bin_dir.mkdir()
+    zellij = shutil.which("zellij")
+    monkeypatch.setenv("HOME", str(home))
+    for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.delenv("ENV", raising=False)
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1")
+    monkeypatch.setattr(workdash, "CONFIG_PATH", path)
+    monkeypatch.setattr(workdash, "load_config", partial(config.load_config, path))
+    monkeypatch.setattr(launcher, "_WORKDASH_LOCAL_BIN", path.parent / "bin")
+    monkeypatch.setattr(
+        workdash.WorkdashCommands, "interactive", lambda self: pytest.fail("unexpected dashboard")
     )
-    scenario_state.setdefault(
-        "input_responses",
-        [
-            "",  # open command default
-            "",  # viewer terminal default
-            "octocat",  # github username
-            "~/projects",  # workdir
-            "",  # todo repository default
-        ],
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda *a, **kw: pytest.fail("unexpected download")
     )
 
+    for command in ("zellij", "gh", "xdg-open", "open", "claude", "aider", "term-view"):
+        script = bin_dir / command
+        script.write_text(
+            f'#!/bin/sh\ncase "$*" in ("--version") echo "{command} test version";; (*) exit 1;; esac\n'
+        )
+        if command == "zellij":
+            script.write_text('#!/bin/sh\n[ "$*" = "list-sessions --no-formatting" ]\n')
+        elif command == "gh":
+            script.write_text(
+                '#!/bin/sh\ncase "$*" in ("--version") echo "gh test version";; '
+                '("auth status") exit 0;; (*) exit 1;; esac\n'
+            )
+        script.chmod(0o755)
 
-@given(parsers.parse('the user enters "{username}" as their GitHub username'))
-def _enter_github_username(scenario_state: dict[str, Any], username: str) -> None:
-    scenario_state["input_responses"][2] = username
+    prompts = []
+
+    def run(args, answers=(), *, cancel=False):
+        defaults = {
+            "Open command": "",
+            "Does the viewer require": "",
+            "Analysis viewer": "",
+            "Agents for analyze": "",
+            "Agents for code": "",
+            "GitHub username": "octocat",
+            "Work directory": "~/projects",
+            "Todo repository": "",
+        }
+        remaining = list(answers)
+        prompts.clear()
+
+        def reply(prompt):
+            print(prompt)
+            prompts.append(prompt)
+            if cancel:
+                raise KeyboardInterrupt
+            if remaining and prompt.startswith(remaining[0][0]):
+                _, answer = remaining.pop(0)
+                return "" if answer == "Enter" else answer
+            for label, answer in defaults.items():
+                if prompt.startswith(label):
+                    return answer
+            pytest.fail(f"Unexpected wizard prompt: {prompt!r}")
+
+        monkeypatch.setattr(workdash, "configure", partial(config.configure, path, input_fn=reply))
+        # Each invocation starts with the user's original PATH, not the previous preflight's.
+        with monkeypatch.context() as env:
+            env.setenv("PATH", str(bin_dir))
+            status = workdash.main(args)
+        captured = capsys.readouterr()
+        assert not remaining, (remaining, prompts, captured)
+        return status, captured.out + captured.err
+
+    return {"path": path, "bin": bin_dir, "run": run, "real_zellij": zellij, "prompts": prompts}
 
 
-@given('the user answers the GitHub username prompt with "@octocat" and then "octocat"')
-def _invalid_github_username_answer(scenario_state: dict[str, Any]) -> None:
-    scenario_state["input_responses"][2:3] = ["@octocat", "octocat"]
+@given("the user has no Workdash configuration")
+def no_config(setup_cli):
+    assert not setup_cli["path"].exists()
 
 
-@then("the wizard explains the GitHub username format")
-def _rejects_github_username(scenario_state: dict[str, Any]) -> None:
-    output = scenario_state["output"]
-    assert "Enter a GitHub username of 1–39 characters" in output
+@given("Claude is installed")
+def claude_is_installed(setup_cli):
+    assert (setup_cli["bin"] / "claude").is_file()
 
 
-@then(parsers.parse('the saved configuration keeps "{username}" as the GitHub username'))
-def _saved_github_username(scenario_state: dict[str, Any], username: str) -> None:
-    assert scenario_state["exit_code"] == 0
-    assert scenario_state["written_config"].github_username == username
+@given("no supported agent is installed")
+def remove_detectable_agents(setup_cli):
+    (setup_cli["bin"] / "claude").unlink()
 
 
-@then(parsers.parse('the wizard saves and reports "{selector}" as the default repository selector'))
-def _saved_default_selector(scenario_state: dict[str, Any], selector: str) -> None:
-    assert scenario_state["written_config"].repositories == (selector,)
-    assert f"Repositories set to: {selector}" in scenario_state["output"]
+@given("the saved URL opener is no longer installed")
+def unavailable_opener(setup_cli):
+    _save_existing_settings(setup_cli, open="removed-opener", open_needs_pane=None)
 
 
 @given(
-    parsers.parse(
-        'the user first leaves the repository selector blank, then enters "{bad}" and "{selector}"'
-    )
+    "the user has saved their settings except for the analysis viewer, work directory, and todo destination"
 )
-def _answer_repository_selector(scenario_state: dict[str, Any], bad: str, selector: str) -> None:
-    scenario_state["input_responses"][-1:-1] = ["", bad, selector]
-
-
-@then(
-    parsers.parse(
-        'the wizard asks for the repository selector again until it can save "{selector}"'
-    )
-)
-def _retries_repository_selector(scenario_state: dict[str, Any], selector: str) -> None:
-    prompts = scenario_state["prompts"]
-    assert sum(prompt.startswith("GitHub username") for prompt in prompts) == 1, prompts
-    assert sum(prompt.startswith("Repository selector") for prompt in prompts) == 3, prompts
-    assert "Enter a repository selector in owner/repo or owner/* form." in scenario_state["output"]
-    assert scenario_state["written_config"].repositories == (selector,)
-
-
-@given("another run saves a configuration while the user answers the wizard")
-def _another_run_saves_config(scenario_state: dict[str, Any]) -> None:
-    scenario_state["other_configuration"] = b'{"github_username": "other-user"}\n'
-
-
-@given(parsers.parse('the user answers the todo repository prompt with "{bad}" and then "{repo}"'))
-def _invalid_todo_repository_answer(scenario_state: dict[str, Any], bad: str, repo: str) -> None:
-    scenario_state["input_responses"][-1:] = [bad, repo]
-
-
-@given(
-    parsers.parse(
-        'the user first leaves the todo repository blank, then enters "{bad}" and "{repo}"'
-    )
-)
-def _answer_todo_repository_without_default(
-    scenario_state: dict[str, Any], bad: str, repo: str
-) -> None:
-    scenario_state["input_responses"][-1:] = ["", bad, repo]
-
-
-@given("a supported agent's command-line tool is on PATH")
-def _agent_on_path(scenario_state: dict[str, Any]) -> None:
-    scenario_state.setdefault("on_path_tools", set()).add("claude")
-
-
-@given("the command-line tools of Claude and pi are on PATH")
-def _claude_and_pi_on_path(scenario_state: dict[str, Any]) -> None:
-    scenario_state.setdefault("on_path_tools", set()).update({"claude", "pi"})
-
-
-@given("no supported agent's command-line tool is on PATH")
-def _no_agent_on_path(scenario_state: dict[str, Any]) -> None:
-    scenario_state.setdefault("on_path_tools", set()).difference_update({"claude", "codex", "pi"})
-    # The user has not answered any agent prompt yet; the wizard waits for them.
-    scenario_state["agent_answers"] = []
-
-
-@given("the user provides a GitHub username during configuration")
-def _user_provides_username(scenario_state: dict[str, Any]) -> None:
-    scenario_state.setdefault("input_responses", [])
-    scenario_state["provided_username"] = "octocat"
-
-
-@given("the configuration has no repositories selector")
-def _no_repositories_selector(scenario_state: dict[str, Any]) -> None:
-    scenario_state["repositories_empty"] = True
-
-
-@given("the user already has a partial configuration")
-def _partial_configuration(scenario_state: dict[str, Any], config_path: Path) -> None:
-    config_path.write_text(
-        json.dumps(
-            {
-                "github_username": "existing-user",
-                "open": "existing-open",
-                "open_needs_pane": False,
-                "agents": {
-                    "claude": {
-                        "analyze": "existing-claude-analyze",
-                        "launch": "existing-claude-launch",
-                    },
-                    "codex": {
-                        "analyze": "existing-codex-analyze",
-                        "launch": "existing-codex-launch",
-                    },
-                    "pi": {"analyze": "existing-pi-analyze", "launch": "existing-pi-launch"},
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    scenario_state["config_path"] = config_path
-    scenario_state["on_path_tools"] = {"zellij", "gh", "existing-open"}
-    # Only the workdir and the todo repository are still empty.
-    scenario_state["input_responses"] = ["~/src", ""]
-    scenario_state["prior_config"] = load_config(config_path)
-
-
-@given("the user submits empty answers for defaults and then provides a username")
-def _empty_defaults_then_username(scenario_state: dict[str, Any]) -> None:
-    scenario_state["on_path_tools"] = {
-        "zellij",
-        "gh",
-        config_module._default_open_command(),
-        "claude",
-    }
-    scenario_state["input_responses"] = [
-        "",  # viewer terminal default
-        "",  # open command default
-        "",  # username has no default, prompt again
-        "octocat",
-        "",  # workdir default
-        "",  # todo repository default
-    ]
-
-
-@given("the user accepts the default analysis viewer")
-def _default_analysis_viewer(scenario_state: dict[str, Any]) -> None:
-    scenario_state["analysis_answers"] = [""]
-
-
-@given("the user chooses a custom HTML analysis viewer requiring a terminal pane")
-def _custom_analysis_viewer(scenario_state: dict[str, Any]) -> None:
-    scenario_state["on_path_tools"].add("term-view")
-    scenario_state["analysis_answers"] = ["term-view --quiet", "html", "y"]
-
-
-@then("the saved analysis viewer uses Markdown in a terminal pane")
-def _default_analysis_saved(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["written_config"].analysis_viewer == {
-        "command": "workdash view",
-        "format": "markdown",
-        "needs_pane": True,
-    }
-
-
-@then("the saved analysis viewer uses that command and HTML in a terminal pane")
-def _custom_analysis_saved(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["written_config"].analysis_viewer == {
-        "command": "term-view --quiet",
-        "format": "html",
-        "needs_pane": True,
-    }
-
-
-@given("the platform opener is available")
-def _platform_opener_available(scenario_state: dict[str, Any]) -> None:
-    scenario_state.setdefault("on_path_tools", set()).add(config_module._default_open_command())
-
-
-@given("the user has a configured viewer whose executable is unavailable")
-def _unavailable_viewer(scenario_state: dict[str, Any], config_path: Path) -> None:
-    _partial_configuration(scenario_state, config_path)
-    raw = json.loads(config_path.read_text())
-    raw["open"] = "unavailable-viewer"
-    raw.pop("open_needs_pane")
-    raw["repositories"] = ["owner/repo"]
-    raw["workdir"] = "~/src"
-    raw["todo_repository"] = "existing-user/todos"
-    config_path.write_text(json.dumps(raw))
-    scenario_state["prior_config"] = load_config(config_path)
-    scenario_state["on_path_tools"].add("term-view")
-    scenario_state["input_responses"] = [
-        "",
-        "bad 'quote",
-        "unavailable-viewer",
-        "term-view --quiet",
-        "y",
-    ]
-
-
-@then("the wizard saves a working custom viewer and its terminal choice")
-def _custom_viewer_saved(scenario_state: dict[str, Any]) -> None:
-    written = scenario_state["written_config"]
-    assert written.open_command == "term-view --quiet"
-    assert written.open_needs_pane is True
-    assert sum("Open command" in prompt for prompt in scenario_state["prompts"]) == 4
-    assert "advanced viewer commands" in scenario_state["output"]
+def incomplete_settings(setup_cli):
+    _save_existing_settings(setup_cli, analysis_viewer=None, workdir="", todo_repository="")
 
 
 @given("the user already has a complete configuration with agents")
-def _configuration_with_agents(scenario_state: dict[str, Any], config_path: Path) -> None:
-    config_path.write_text(
-        json.dumps(
-            {
-                "github_username": "existing-user",
-                "open": "existing-open",
-                "open_needs_pane": False,
-                "analysis_viewer": {
-                    "command": "workdash view",
-                    "format": "markdown",
-                    "needs_pane": True,
-                },
-                "agents": {
-                    "pi": {"analyze": "pi -p", "launch": "pi"},
-                    "aider": {"analyze": "aider --yes", "launch": ""},
-                    "claude": {"analyze": "", "launch": "claude"},
-                },
-                "repositories": ["existing-user/*"],
-                "workdir": "~/src",
-                "todo_repository": "existing-user/todos",
-            }
-        ),
-        encoding="utf-8",
-    )
-    scenario_state["config_path"] = config_path
-    # codex is installed but must not be added to an already configured set of agents.
-    scenario_state["on_path_tools"] = {"zellij", "gh", "existing-open", "codex"}
-    scenario_state["input_responses"] = []
-    scenario_state["prior_config"] = load_config(config_path)
+def complete_settings(setup_cli):
+    _save_existing_settings(setup_cli)
 
 
-@given("Zellij is not installed on PATH")
-def _zellij_not_on_path(scenario_state: dict[str, Any]) -> None:
-    scenario_state.setdefault("on_path_tools", set()).discard("zellij")
-
-
-@given("the Zellij download stalls")
-def _zellij_download_stalls(
-    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    scenario_state["use_real_zellij_installer"] = True
-    monkeypatch.setattr(
-        urllib.request, "urlopen", MagicMock(side_effect=urllib.error.URLError("timed out"))
-    )
-
-
-@given("the Zellij download ends before all bytes arrive")
-def _zellij_download_incomplete(
-    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    scenario_state["use_real_zellij_installer"] = True
-    urlopen = MagicMock()
-    urlopen.return_value.__enter__.return_value.read.side_effect = http.client.IncompleteRead(
-        b"abc", 4
-    )
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
-
-
-@given("GitHub CLI is not installed on PATH")
-def _gh_not_on_path(scenario_state: dict[str, Any]) -> None:
-    scenario_state.setdefault("on_path_tools", set()).discard("gh")
-
-
-@given("the user presses Ctrl+C at the first wizard prompt")
-def _interrupt_wizard(scenario_state: dict[str, Any]) -> None:
-    scenario_state["interrupt_wizard"] = True
-
-
-class _UserHasNotAnswered(Exception):
-    """The wizard asked an agent question the scenario's user has not answered (yet)."""
-
-
-def _install_wizard_fakes(
-    scenario_state: dict[str, Any],
-    config_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> list[str]:
-    """Wire main's configure() call to the wizard fed by the scenario's answers."""
-    on_path_tools = scenario_state.get("on_path_tools", set())
-    responses = iter(scenario_state.get("input_responses", []))
-    # By default the user ends both agent sections without adding agents.
-    agent_answers = iter(scenario_state.get("agent_answers", ["", ""]))
-    prompts: list[str] = []
-    analysis_answers = iter(scenario_state.get("analysis_answers", [""]))
-
-    def input_fn(prompt: str) -> str:
-        prompts.append(prompt)
-        print(prompt)
-        if scenario_state.get("interrupt_wizard"):
-            raise KeyboardInterrupt
-        if prompt.startswith("Analysis viewer") or prompt.startswith(
-            ("Analysis format", "Does the analysis viewer")
-        ):
-            return next(analysis_answers)
-        if prompt.startswith("Todo repository") and "other_configuration" in scenario_state:
-            config_path.write_bytes(scenario_state["other_configuration"])
-        if prompt.startswith(("Agents for", "Agent name")):
-            try:
-                return next(agent_answers)
-            except StopIteration as exc:
-                raise _UserHasNotAnswered(prompt) from exc
-        try:
-            return next(responses)
-        except StopIteration as exc:
-            raise AssertionError(f"Unexpected prompt: {prompt!r}") from exc
-
-    def which_fn(cmd: str) -> str | None:
-        return f"/usr/bin/{cmd}" if cmd in on_path_tools else None
-
-    def install_zellij_fn() -> str:
-        return scenario_state.get("installed_zellij_binary", "/tmp/workdash-config/bin/zellij")
-
-    def install_gh_fn() -> str:
-        return scenario_state.get("installed_gh_binary", "/tmp/workdash-config/bin/gh")
-
-    use_real_zellij_installer = scenario_state.get("use_real_zellij_installer")
-    if use_real_zellij_installer:
-        monkeypatch.setattr(config_module.platform, "machine", lambda: "x86_64")
-        monkeypatch.setattr(config_module.platform, "system", lambda: "Linux")
-
-    # Route configure() through our fakes without altering production code.
-    monkeypatch.setattr(
-        workdash_module,
-        "configure",
-        lambda **kwargs: config_module.configure(
-            config_path,
-            **kwargs,
-            input_fn=input_fn,
-            which_fn=which_fn,
-            install_zellij_fn=None if use_real_zellij_installer else install_zellij_fn,
-            install_gh_fn=install_gh_fn,
-        ),
-    )
-    # Agents run through the user's shell, so the wizard checks programs with it: a
-    # private PATH holding only an `aider` executable keeps the check hermetic.
-    shell_bin = config_path.parent / "shell-bin"
-    shell_bin.mkdir(exist_ok=True)
-    (shell_bin / "aider").write_text("#!/bin/sh\n", encoding="utf-8")
-    (shell_bin / "aider").chmod(0o755)
-    monkeypatch.setenv("SHELL", "/bin/sh")
-    monkeypatch.delenv("ENV", raising=False)  # an interactive shell would source it
-    monkeypatch.setenv("PATH", str(shell_bin))
-    return prompts
-
-
-def _run_configure_with_fakes(
-    scenario_state: dict[str, Any],
-    config_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> WorkdashConfig:
-    prompts = _install_wizard_fakes(scenario_state, config_path, monkeypatch)
-    try:
-        scenario_state["exit_code"] = workdash_module.main(["--configure"])
-    except _UserHasNotAnswered:
-        scenario_state["exit_code"] = None
-    captured = capsys.readouterr()
-    scenario_state["output"] = captured.out
-    scenario_state["stderr"] = captured.err
-    scenario_state["prompts"] = prompts
-    written_config = load_config(config_path)
-    scenario_state["written_config"] = written_config
-    return written_config
-
-
-# The "--configure" invocation is routed through the shared triage
-# handler (triage._run_system_with_flag) which calls this helper when the
-# flag is "--configure".
-
-
-@when("the configuration wizard completes")
-def _wizard_completes(
-    scenario_state: dict[str, Any],
-    config_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    # Scenario S003: username is provided and repositories list is empty.
-    scenario_state.setdefault(
-        "on_path_tools", {"zellij", "gh", config_module._default_open_command(), "claude"}
-    )
-    scenario_state["input_responses"] = [
-        "",  # viewer terminal default
-        "",  # open command default
-        scenario_state["provided_username"],
-        "~/projects",
-        "",  # todo repository default
-    ]
-    _run_configure_with_fakes(scenario_state, config_path, monkeypatch, capsys)
-
-
-@then("the system prompts the user for each missing globally required field")
-def _prompts_for_missing(scenario_state: dict[str, Any]) -> None:
-    prompts = scenario_state["prompts"]
-    # Agent command prompts may also appear, but only these fields are globally required.
-    assert any("GitHub username" in prompt for prompt in prompts), prompts
-    assert any("Work directory" in prompt for prompt in prompts), prompts
-
-
-@then(parsers.parse('the system writes the collected values to "{path_template}"'))
-def _system_writes_values(
-    path_template: str,
-    scenario_state: dict[str, Any],
-    config_path: Path,
-) -> None:
-    # The scenario uses the canonical path template but we wrote to a tmp
-    # path to avoid touching real ~. Assert the wizard wrote a valid config
-    # at the location we passed in.
-    assert config_path.exists(), f"Configuration file was not created at {config_path}"
-    parsed = json.loads(config_path.read_text(encoding="utf-8"))
-    assert parsed["github_username"] == "octocat"
-    assert parsed["workdir"] == "~/projects"
-    assert path_template.endswith("config.json")
-
-
-@then("the system reports the saved configuration path")
-def _reports_saved_path(scenario_state: dict[str, Any], config_path: Path) -> None:
-    assert f"Configuration saved to {config_path}" in scenario_state["output"]
-
-
-@then("after reporting the saved configuration path, the wizard explains how to hide repositories")
-def _reports_repository_exclusion_hint(scenario_state: dict[str, Any], config_path: Path) -> None:
-    output = scenario_state["output"]
-    hint = (
-        'Hide repositories from the dashboard by adding "owner/repo" or "owner/*" '
-        f'entries to "excluded_repositories" in {config_path}.'
-    )
-    assert output.index(f"Configuration saved to {config_path}") < output.index(hint)
-
-
-@then("the system tells the user which Zellij binary was detected")
-def _tells_detected_zellij_binary(scenario_state: dict[str, Any]) -> None:
-    assert "Detected 'zellij' on PATH: /usr/bin/zellij" in scenario_state["output"]
-
-
-@then("the system installs Zellij under the workdash configuration directory")
-def _installs_zellij_under_config_dir(scenario_state: dict[str, Any]) -> None:
-    output = scenario_state["output"]
-    assert "Zellij is not on PATH. Installing a local Zellij binary from" in output
-    assert "To use a global Zellij instead" in output
-    assert "Installed Zellij to: /tmp/workdash-config/bin/zellij" in output
-
-
-@then("the system installs the GitHub CLI under the workdash configuration directory")
-def _installs_gh_under_config_dir(scenario_state: dict[str, Any]) -> None:
-    output = scenario_state["output"]
-    assert "GitHub CLI is not on PATH. Installing a local GitHub CLI binary from" in output
-    assert "To use a global GitHub CLI instead" in output
-    assert "Installed GitHub CLI to: /tmp/workdash-config/bin/gh" in output
-
-
-@then(parsers.parse('the repositories list contains "{template}"'))
-def _repos_contain_template(template: str, scenario_state: dict[str, Any]) -> None:
-    written = scenario_state["written_config"]
-    expected = template.replace("<username>", scenario_state["provided_username"])
-    assert expected in written.repositories, (expected, written.repositories)
-
-
-@then("the system tells the user what was set")
-def _tells_user_what_was_set(scenario_state: dict[str, Any]) -> None:
-    assert "Repositories set to" in scenario_state["output"]
-
-
-@then("the system only prompts for fields that were empty")
-def _only_prompts_empty(scenario_state: dict[str, Any]) -> None:
-    prompts = scenario_state["prompts"]
-    # The viewer, workdir and todo repository were empty.
-    assert len(prompts) == 3, prompts
-    assert "Analysis viewer" in prompts[0]
-    assert "Work directory" in prompts[1]
-    assert "Todo repository" in prompts[2]
-
-
-@then("previously set fields are preserved in the saved configuration")
-def _preserves_prior_fields(scenario_state: dict[str, Any]) -> None:
-    written = scenario_state["written_config"]
-    prior = scenario_state["prior_config"]
-    assert written.github_username == prior.github_username
-    assert written.agents == prior.agents
-
-
-@then("the system writes default values for configurable fields")
-def _writes_default_values(scenario_state: dict[str, Any]) -> None:
-    written = scenario_state["written_config"]
-    assert written.agents == {"claude": AgentConfig(analyze="claude -p", launch="claude")}
-    assert written.open_command == config_module._default_open_command()
-    assert written.workdir == "~/wrk"
-
-
-@then("submitting an empty open command stores the platform default")
-def _empty_open_command_stores_default(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["written_config"].open_command == config_module._default_open_command()
-    assert scenario_state["written_config"].open_needs_pane is False
-    assert any("Enter to accept" in prompt for prompt in scenario_state["prompts"])
-
-
-@then("the system prompts again for the GitHub username")
-def _prompts_again_for_username(scenario_state: dict[str, Any]) -> None:
-    prompts = scenario_state["prompts"]
-    assert sum("GitHub username" in prompt for prompt in prompts) == 2, prompts
-
-
-# -- Agents ------------------------------------------------------------------
-
-
-def _user_answers_agent_prompts(
-    scenario_state: dict[str, Any],
-    config_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    *answers: str,
-) -> None:
-    """Give the wizard more answers by replaying it from the start with every answer so far."""
-
-    scenario_state.setdefault("agent_answers", []).extend(answers)
-    config_path.unlink(missing_ok=True)
-    _run_configure_with_fakes(scenario_state, config_path, monkeypatch, capsys)
-
-
-def _section(output: str, title: str) -> str:
-    """The output printed for the section *title*, from its header to the next section's."""
-
-    parts = re.split(r"(?=Agents for \w+ \(at most)", output)
-    return next(part for part in parts if part.startswith(f"{title} (at most"))
-
-
-@when(parsers.parse("the user adds the analyze command `{command}` named `{name}`"))
-def _user_adds_analyze_command(
-    command: str,
-    name: str,
-    scenario_state: dict[str, Any],
-    config_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _user_answers_agent_prompts(scenario_state, config_path, monkeypatch, capsys, command, name)
-
-
-@when(parsers.parse("the user enters the analyze command `{command}`, which no program matches"))
-def _user_enters_unknown_analyze_command(
-    command: str,
-    scenario_state: dict[str, Any],
-    config_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _user_answers_agent_prompts(scenario_state, config_path, monkeypatch, capsys, command)
-
-
-@when("the user adds no more agents")
-@when("the user adds no agents")
-def _user_adds_no_agents(
-    scenario_state: dict[str, Any],
-    config_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _user_answers_agent_prompts(scenario_state, config_path, monkeypatch, capsys, "", "")
-
-
-@when(parsers.parse("the user adds {count:d} analyze commands"))
-def _user_adds_analyze_commands(
-    count: int,
-    scenario_state: dict[str, Any],
-    config_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    answers = [answer for number in range(count) for answer in ("aider --yes", f"aider-{number}")]
-    _user_answers_agent_prompts(scenario_state, config_path, monkeypatch, capsys, *answers)
-
-
-@then("the system tells the user which agents were detected")
-def _tells_detected_agents(scenario_state: dict[str, Any]) -> None:
-    assert "Detected 'claude' on PATH" in scenario_state["output"]
-
-
-@then("the system adds each detected agent with its default analyze and launch commands")
-def _adds_detected_agents_with_defaults(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["written_config"].agents == {
-        "claude": AgentConfig(analyze="claude -p", launch="claude")
-    }
-
-
-@then(parsers.parse('the system shows an "{title}" section listing `{first}` and `{second}`'))
-def _shows_section_listing_agents(
-    title: str, first: str, second: str, scenario_state: dict[str, Any]
-) -> None:
-    # The listing lines, not the header, whose example command also names an agent.
-    section = _section(scenario_state["output"], title)
-    for name in (first, second):
-        assert f"  {name}:" in section, section
-
-
-@then("each section states how many agents it accepts")
-def _sections_state_their_limits(scenario_state: dict[str, Any]) -> None:
-    output = scenario_state["output"]
-    assert "at most 9" in _section(output, "Agents for analyze")
-    assert "at most 9" in _section(output, "Agents for code")
-
-
-@then("each section asks for another command until the user answers with an empty line")
-def _sections_ask_until_empty_line(scenario_state: dict[str, Any]) -> None:
-    prompts = scenario_state["prompts"]
-    for title in ("Agents for analyze", "Agents for code"):
-        assert sum(prompt.startswith(title) for prompt in prompts) == 1, prompts
-    assert scenario_state["exit_code"] == 0
-
-
-@then("the saved configuration has an agent named `aider` with the analyze command `aider --yes`")
-def _saved_configuration_has_aider(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["written_config"].agents["aider"].analyze == "aider --yes"
-
-
-@then("that agent has no launch command")
-def _agent_has_no_launch_command(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["written_config"].agents["aider"].launch == ""
-
-
-@then(
-    "before asking for an agent command the system tells the user that the task prompt is "
-    "appended as the command's last argument"
+@given(
+    "the configuration still names `workdash mdview` as the analysis viewer",
+    target_fixture="settings_before_viewer_repair",
 )
-def _tells_prompt_is_appended(scenario_state: dict[str, Any]) -> None:
-    output = scenario_state["output"]
-    first_command_prompt = next(
-        prompt for prompt in scenario_state["prompts"] if prompt.startswith("Agents for")
+def retired_analysis_viewer(setup_cli):
+    _save_existing_settings(
+        setup_cli,
+        analysis_viewer={
+            "command": "workdash mdview",
+            "format": "markdown",
+            "needs_pane": True,
+        },
+        listens=[],
     )
-    notice = output.index("task prompt")
-    assert "last argument" in output[notice : notice + 200]
-    assert notice < output.index(first_command_prompt)
+    settings = json.loads(setup_cli["path"].read_text())
+    del settings["analysis_viewer"]
+    return settings
 
 
-@then("each section tells the user what kind of command it asks for, with an example")
-def _sections_say_what_they_ask_for(scenario_state: dict[str, Any]) -> None:
-    output = scenario_state["output"]
-    for title, purpose in (
-        ("Agents for analyze", "print the analysis"),
-        ("Agents for code", "interactive coding session"),
-    ):
-        header = _section(output, title).splitlines()[0]
-        assert purpose in header, header
-        assert re.search(r"e\.g\. \S+", header), header
+@given("the saved configuration is missing the analysis viewer")
+def missing_analysis_viewer(setup_cli):
+    _save_existing_settings(setup_cli, analysis_viewer=None)
 
 
-@then("the system tells the user that no supported agent was detected")
-def _tells_no_agent_was_detected(scenario_state: dict[str, Any]) -> None:
-    output = scenario_state["output"]
-    line = next(line for line in output.splitlines() if "No supported agent found" in line)
-    assert all(name in line for name in ("claude", "codex", "pi")), line
-    assert output.index(line) < output.index("At least one agent")
+@given("the user has a complete Workdash configuration but no installed Zellij")
+def existing_settings_without_zellij(setup_cli, monkeypatch):
+    _save_existing_settings(setup_cli)
+    _missing_dependency(setup_cli, monkeypatch, "zellij", real_zellij=True)
 
 
-@then("the system tells the user that at least one agent is required")
-def _tells_one_agent_is_required(scenario_state: dict[str, Any]) -> None:
-    assert "At least one agent is required" in scenario_state["output"]
+@given("Zellij is not on PATH for setup")
+def no_zellij(setup_cli, monkeypatch):
+    _missing_dependency(setup_cli, monkeypatch, "zellij")
 
 
-@then("the system asks for agents again")
-def _asks_for_agents_again(scenario_state: dict[str, Any]) -> None:
-    prompts = scenario_state["prompts"]
-    assert sum(prompt.startswith("Agents for analyze") for prompt in prompts) == 2, prompts
+@given("GitHub CLI is not on PATH for setup")
+def no_github_cli(setup_cli, monkeypatch):
+    _missing_dependency(setup_cli, monkeypatch, "gh")
 
 
-@then("no configuration is saved until an agent has been added")
-def _no_configuration_saved(scenario_state: dict[str, Any], config_path: Path) -> None:
-    assert not config_path.exists()
+@when(parsers.re(r"the user runs `workdash(?P<flags> --configure|)` and answers the wizard:"))
+def answer_wizard(setup_cli, flags, datatable):
+    status, setup_cli["output"] = setup_cli["run"](flags.split(), datatable[1:])
+    assert status == 0, setup_cli["output"]
 
 
-@then(parsers.parse("the system tells the user that `{program}` was not found"))
-def _tells_program_was_not_found(program: str, scenario_state: dict[str, Any]) -> None:
-    assert f"`{program}` was not found" in scenario_state["output"]
+@when("the user completes `workdash --configure`")
+def complete_explicit_setup(setup_cli):
+    status, setup_cli["output"] = setup_cli["run"](["--configure"])
+    assert status == 0, setup_cli["output"]
 
 
-@then("the system asks for the analyze command again")
-def _asks_for_analyze_command_again(scenario_state: dict[str, Any]) -> None:
-    prompts = scenario_state["prompts"]
-    assert sum(prompt.startswith("Agents for analyze") for prompt in prompts) == 2, prompts
-    assert prompts[-1].startswith("Agents for analyze"), prompts
+@when("the user completes the wizard started by `workdash`")
+def complete_automatic_setup(setup_cli):
+    status, setup_cli["output"] = setup_cli["run"]([])
+    assert status == 0, setup_cli["output"]
 
 
-@then("the system tells the user that the analyze section is full")
-def _tells_analyze_section_is_full(scenario_state: dict[str, Any]) -> None:
-    assert "section is full" in _section(scenario_state["output"], "Agents for analyze")
+@when("the user runs `workdash` and presses Ctrl+C at the first wizard prompt")
+def cancel_setup(setup_cli):
+    _, setup_cli["output"] = setup_cli["run"]([], cancel=True)
 
 
-@then("the system does not ask for another analyze command")
-def _does_not_ask_for_another_analyze_command(scenario_state: dict[str, Any]) -> None:
-    prompts = scenario_state["prompts"]
-    assert sum(prompt.startswith("Agents for analyze") for prompt in prompts) == 9, prompts
+@then("the wizard asks again for the required GitHub username")
+def asks_for_username_again(setup_cli):
+    assert "GitHub username is required." in setup_cli["output"]
+
+
+@then("the wizard saves the configuration to `~/.config/workdash/config.json`")
+def reports_saved_path(setup_cli):
+    assert f"Configuration saved to {setup_cli['path']}" in setup_cli["output"]
+    config.load_config(setup_cli["path"]).require_valid()
+
+
+@then(parsers.parse("the saved username is `{username}` and work directory is `{directory}`"))
+def saves_username_and_work_directory(setup_cli, username, directory):
+    saved = config.load_config(setup_cli["path"])
+    assert saved.github_username == username
+    assert saved.workdir == directory
+
+
+@then(parsers.parse("the suggested todo destination `{repo}` is saved"))
+@then(parsers.parse("the wizard saves `{repo}` as the todo destination"))
+def saves_todo_destination(setup_cli, repo):
+    assert config.load_config(setup_cli["path"]).todo_repository == repo
+
+
+@then("the wizard reports detecting Claude and saves a configuration with Claude")
+def saves_detected_claude(setup_cli):
+    assert "Detected 'claude' on PATH" in setup_cli["output"]
+    assert "claude" in config.load_config(setup_cli["path"]).agents
+
+
+@then("the wizard explains that an agent is required")
+def requires_an_agent(setup_cli):
+    assert "At least one agent is required" in setup_cli["output"]
+
+
+@then(parsers.parse("the wizard saves `{name}` as an analysis agent without a launch command"))
+def saves_analysis_agent(setup_cli, name):
+    agent = config.load_config(setup_cli["path"]).agents[name]
+    assert agent.analyze == "aider --yes"
+    assert agent.launch == ""
+
+
+@then("the wizard saves the replacement URL opener for use in a terminal")
+def saves_replacement_opener(setup_cli):
+    saved = config.load_config(setup_cli["path"])
+    assert saved.open_command == "term-view --quiet" and saved.open_needs_pane is True
+
+
+@then("the saved repositories are unchanged")
+def keeps_repositories(setup_cli):
+    assert config.load_config(setup_cli["path"]).repositories == ("owner/repo",)
+
+
+@then(parsers.parse("the wizard reports a usable local installation of {tool}"))
+def reports_installation(setup_cli, tool):
+    binary = setup_cli["path"].parent / "bin" / {"GitHub CLI": "gh", "Zellij": "zellij"}[tool]
+    assert f"Installed {tool} to: {binary}" in setup_cli["output"]
+    result = subprocess.run(
+        [binary, "--version"], capture_output=True, text=True, check=True, timeout=5
+    )
+    assert binary.name in result.stdout.lower()
+
+
+@then("the wizard asks only for the missing settings")
+def asks_only_for_missing_settings(setup_cli):
+    assert setup_cli["prompts"] == [
+        "Analysis viewer [workdash view]: ",
+        "Work directory [~/wrk]: ",
+        "Todo repository [octocat/todos]: ",
+    ]
 
 
 @then(
     parsers.parse(
-        'the system tells the user that agents can be added or edited later in "{path_template}"'
+        "the wizard saves `{directory}` as the work directory without changing the saved repositories"
     )
 )
-def _tells_agents_can_be_edited_later(
-    path_template: str, scenario_state: dict[str, Any], config_path: Path
-) -> None:
-    # The scenario names the canonical path; the wizard ran against a tmp path.
-    hint = next(line for line in scenario_state["output"].splitlines() if "edit 'agents'" in line)
-    assert str(config_path) in hint, hint
-    assert scenario_state["output"].index(hint) < scenario_state["output"].index("GitHub username")
+def saves_work_directory(setup_cli, directory):
+    assert config.load_config(setup_cli["path"]).workdir == directory
+    keeps_repositories(setup_cli)
 
 
-@then("the system saves the configuration without prompting")
-def _saves_without_prompting(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["exit_code"] == 0
-    assert scenario_state["prompts"] == []
-    assert "Agents for" not in scenario_state["output"]
+@then("the wizard saves the configuration without prompting")
+def saves_without_prompting(setup_cli):
+    reports_saved_path(setup_cli)
+    assert setup_cli["prompts"] == []
 
 
-@then("the saved configuration keeps the same agents in the same order")
-def _saved_configuration_keeps_agents_in_order(scenario_state: dict[str, Any]) -> None:
-    written = scenario_state["written_config"]
-    assert list(written.agents.items()) == list(scenario_state["prior_config"].agents.items())
-    assert list(written.agents) == ["pi", "aider", "claude"]
+@then("the wizard explains how to hide repositories from the dashboard")
+def reports_repository_exclusion_hint(setup_cli):
+    assert "Hide repositories from the dashboard" in setup_cli["output"]
+    assert "excluded_repositories" in setup_cli["output"]
 
 
-@given("the user has a configuration naming the removed Markdown viewer")
-def _existing_config_with_removed_viewer(scenario_state, config_path):
-    _configuration_with_agents(scenario_state, config_path)
-    raw = json.loads(config_path.read_text())
-    raw["analysis_viewer"] = {
-        "command": "workdash mdview",
+@then(parsers.parse("the wizard offers and saves `{command}` as the replacement"))
+def saves_default_analysis_viewer(setup_cli, command):
+    assert f"Analysis viewer [{command}]" in setup_cli["output"]
+    assert config.load_config(setup_cli["path"]).analysis_viewer == {
+        "command": command,
         "format": "markdown",
         "needs_pane": True,
     }
-    config_path.write_text(json.dumps(raw))
 
 
-@then("the wizard asks for the analysis viewer with the single view command default")
-def _wizard_asks_for_view_default(scenario_state):
-    assert scenario_state["prompts"] == ["Analysis viewer [workdash view]: "]
+@then("all other settings are unchanged")
+def keeps_settings_after_viewer_repair(setup_cli, settings_before_viewer_repair):
+    assert setup_cli["prompts"] == ["Analysis viewer [workdash view]: "]
+    saved = json.loads(setup_cli["path"].read_text())
+    del saved["analysis_viewer"]
+    assert saved == settings_before_viewer_repair
 
 
-@given("the user answers the analysis viewer prompt with the removed command")
-def _removed_analysis_viewer_answer(scenario_state: dict[str, Any]) -> None:
-    scenario_state["analysis_answers"] = ["workdash mdview", "workdash view"]
+@then("the wizard saves the custom HTML analysis viewer for use in a terminal")
+def saves_html_viewer(setup_cli):
+    viewer = config.load_config(setup_cli["path"]).analysis_viewer
+    assert viewer == {"command": "term-view --quiet", "format": "html", "needs_pane": True}
 
 
-@then("the wizard asks for the analysis viewer again")
-def _wizard_asks_for_view_again(scenario_state):
-    assert scenario_state["prompts"] == [
-        "Analysis viewer [workdash view]: ",
-        "Analysis viewer command (required): ",
-    ]
+@then("Workdash exits and asks the user to run `workdash` again to open the dashboard")
+def reports_relaunch(setup_cli):
+    assert "Run 'workdash' again to start the dashboard." in setup_cli["output"]
+    assert "Loading work items" not in setup_cli["output"]
 
 
-@given("the user has an existing configuration missing the analysis viewer")
-def _existing_config_without_analysis_viewer(scenario_state, config_path):
-    _configuration_with_agents(scenario_state, config_path)
-    raw = json.loads(config_path.read_text())
-    del raw["analysis_viewer"]
-    config_path.write_text(json.dumps(raw))
-    scenario_state["original_settings"] = raw
+@then(parsers.parse("the wizard saves `{selector}` to track and `{todo}` for todos"))
+def saves_managed_repositories(setup_cli, selector, todo):
+    saved = config.load_config(setup_cli["path"])
+    assert saved.repositories == (selector,)
+    assert saved.todo_repository == todo
 
 
-@when("the user starts Workdash and then runs the configuration wizard")
-def _start_then_configure(scenario_state, config_path, monkeypatch, capsys):
-    with monkeypatch.context() as patch:
-        patch.setenv("ZELLIJ", "0")
-        patch.setattr(workdash_module, "CONFIG_PATH", config_path)
-        patch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
-        patch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
-        scenario_state["startup_exit"] = workdash_module.main([])
-        captured = capsys.readouterr()
-        scenario_state["startup_output"] = captured.out + captured.err
-    _run_configure_with_fakes(scenario_state, config_path, monkeypatch, capsys)
+@then("the wizard asks for a todo repository in `owner/repo` form")
+def rejects_todo(setup_cli):
+    assert "Enter a todo repository in owner/repo form." in setup_cli["output"]
 
 
-@then("startup directs the user to run --configure")
-def _startup_directs_configure(scenario_state):
-    assert scenario_state["startup_exit"] != 0
-    assert "analysis_viewer" in scenario_state["startup_output"]
-    assert "--configure" in scenario_state["startup_output"]
+@then("Workdash reports that configuration was cancelled without saving it")
+def reports_cancellation(setup_cli):
+    assert "Configuration cancelled." in setup_cli["output"]
+    assert not setup_cli["path"].exists()
 
 
-@then("the wizard asks for an analysis viewer and saves the default")
-def _wizard_saves_default_viewer(scenario_state):
-    assert scenario_state["prompts"] == ["Analysis viewer [workdash view]: "]
-    _default_analysis_saved(scenario_state)
+@when("the user runs `workdash` to open the dashboard")
+def first_start(setup_cli):
+    status, setup_cli["output"] = setup_cli["run"]([])
+    assert status != 0, setup_cli["output"]
 
 
-@then("the other configuration settings are preserved")
-def _other_settings_preserved(scenario_state, config_path):
-    saved = json.loads(config_path.read_text())
-    for key, value in scenario_state["original_settings"].items():
-        assert saved[key] == value
+@then("Workdash reports the missing `analysis_viewer` setting")
+def reports_missing_analysis_viewer(setup_cli):
+    assert "analysis_viewer" in setup_cli["output"]
 
 
-@given("the user has a configuration file missing a required field")
-def _config_file_missing_required_field(scenario_state: dict[str, Any], config_path: Path) -> None:
-    config_path.write_text(json.dumps({"github_username": "octocat"}), encoding="utf-8")
-    scenario_state["config_path"] = config_path
-    scenario_state.setdefault(
-        "on_path_tools", {"zellij", "gh", config_module._default_open_command(), "claude"}
+@then("Workdash directs them to `workdash --configure`")
+def directs_to_setup(setup_cli):
+    assert "workdash --configure" in setup_cli["output"]
+
+
+def _missing_dependency(setup_cli, monkeypatch, command, *, real_zellij=False):
+    if real_zellij:
+        if not setup_cli["real_zellij"]:
+            pytest.skip("Zellij is not installed on the test host")
+        payload = Path(setup_cli["real_zellij"]).read_bytes()
+    else:
+        # The release service is faked, not the installation. This artifact can
+        # be executed after the real installer extracts and installs it.
+        payload = f'#!/bin/sh\n[ "$1" = --version ] || exit 1\necho "{command} fixture"\n'.encode()
+    (setup_cli["bin"] / command).unlink()
+
+    metadata_url = config.GH_LATEST_RELEASE_API_URL
+    asset_url = "https://example.test/gh-release"
+    archive = io.BytesIO()
+    if command == "gh" and platform.system() == "Darwin":
+        with zipfile.ZipFile(archive, "w") as release:
+            release.writestr("release/bin/gh", payload)
+    else:
+        with tarfile.open(fileobj=archive, mode="w:gz", compresslevel=1) as release:
+            member = tarfile.TarInfo(command)
+            member.size = len(payload)
+            release.addfile(member, io.BytesIO(payload))
+
+    def release_response(url, *, timeout):
+        if command == "gh" and url == metadata_url:
+            suffix, _ = config._gh_release_asset_patterns()
+            return io.BytesIO(
+                json.dumps(
+                    {"assets": [{"name": f"gh_fixture{suffix}", "browser_download_url": asset_url}]}
+                ).encode()
+            )
+        assert url == (asset_url if command == "gh" else config._zellij_release_url())
+        return io.BytesIO(archive.getvalue())
+
+    monkeypatch.setattr(urllib.request, "urlopen", release_response)
+
+
+def _save_existing_settings(setup_cli, **updates):
+    settings = {
+        "github_username": "octocat",
+        "open": "term-view",
+        "open_needs_pane": False,
+        "analysis_viewer": {"command": "workdash view", "format": "markdown", "needs_pane": True},
+        "repositories": ["owner/repo"],
+        "excluded_repositories": [],
+        "todo_repository": "octocat/todos",
+        "workdir": "~/projects",
+        "agents": {"claude": {"analyze": "claude -p", "launch": "claude"}},
+        **updates,
+    }
+    setup_cli["path"].write_text(
+        json.dumps({key: value for key, value in settings.items() if value is not None})
     )
 
 
-@when("the user starts the system")
-def _starts_the_system(
-    scenario_state: dict[str, Any],
-    config_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    prompts = _install_wizard_fakes(scenario_state, config_path, monkeypatch)
-    monkeypatch.setattr(workdash_module, "CONFIG_PATH", config_path)
-    monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
-    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
-    monkeypatch.setattr(
-        workdash_module,
-        "WorkdashBackend",
-        lambda *args, **kwargs: pytest.fail("startup loaded work items"),
-    )
-    monkeypatch.setenv("ZELLIJ", "0")
-    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
-    scenario_state["exit_code"] = workdash_module.main([])
-    captured = capsys.readouterr()
-    scenario_state["output"] = captured.out + captured.err
-    scenario_state["stderr"] = captured.err
-    scenario_state["prompts"] = prompts
-    scenario_state["written_config"] = load_config(config_path)
-
-
-@then("the system reports that setup was cancelled and exits with status 130")
-def _reports_cancelled_setup(scenario_state: dict[str, Any], config_path: Path) -> None:
-    assert scenario_state["exit_code"] == 130
-    assert scenario_state["stderr"].strip() == "Configuration cancelled."
-    assert scenario_state["prompts"]
-    assert not config_path.exists()
-
-
-@then("the other run's configuration is unchanged")
-def _other_configuration_unchanged(scenario_state: dict[str, Any], config_path: Path) -> None:
-    assert config_path.read_bytes() == scenario_state["other_configuration"]
-
-
-@then("the system reports that setup did not save the user's answers")
-def _reports_setup_collision(scenario_state: dict[str, Any], config_path: Path) -> None:
-    assert f"Configuration already exists at {config_path}" in scenario_state["stderr"]
-    assert "Your answers were not saved" in scenario_state["stderr"]
-    assert "Configuration saved" not in scenario_state["output"]
-
-
-@then('the wizard says the todo repository must be in "owner/repo" form and asks again')
-def _reprompts_for_todo_repository(scenario_state: dict[str, Any]) -> None:
-    assert "Enter a todo repository in owner/repo form." in scenario_state["output"]
-    assert scenario_state["prompts"].count("Todo repository [octocat/todos]: ") == 2
-
-
-@then("the wizard asks for the todo repository again without suggesting a default")
-def _reprompts_for_todo_without_default(scenario_state: dict[str, Any]) -> None:
-    prompts = [p for p in scenario_state["prompts"] if p.startswith("Todo repository")]
-    assert len(prompts) == 3, prompts
-    assert all("[" not in p for p in prompts), prompts
-    assert "Enter a todo repository in owner/repo form." in scenario_state["output"]
-
-
-@then(parsers.parse('the saved configuration uses "{repo}" as the todo repository'))
-def _saved_todo_repository(scenario_state: dict[str, Any], repo: str) -> None:
-    assert scenario_state["exit_code"] == 0
-    assert scenario_state["written_config"].require_valid().todo_repository == repo
-
-
-@then("the system reports that the Zellij download timed out")
-def _reports_zellij_download_timeout(scenario_state: dict[str, Any]) -> None:
-    stderr = scenario_state["stderr"]
-    assert "Error: Failed to download https://github.com/zellij-org/zellij/" in stderr
-    assert "timed out" in stderr
-
-
-@then(
-    "the system reports the incomplete Zellij download without a traceback and exits with status 1"
-)
-def _reports_incomplete_zellij_download(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["exit_code"] == 1
-    assert scenario_state["stderr"].strip() == (
-        "Error: Failed to download https://github.com/zellij-org/zellij/releases/latest/download/"
-        "zellij-x86_64-unknown-linux-musl.tar.gz: IncompleteRead(3 bytes read, 4 more expected)"
+@when("the user runs `workdash` to open the dashboard again")
+def relaunch_dashboard(setup_cli, tmp_path, request):
+    from test_zellij_integration import (
+        _cleanup_sessions,
+        _free_dashboard_address,
+        _private_socket_dir,
     )
 
+    if setup_cli["bin"].joinpath("zellij").exists():
+        if not setup_cli["real_zellij"]:
+            pytest.skip("Zellij is not installed on the test host")
+        zellij = setup_cli["bin"] / "zellij"
+        zellij.unlink()
+        shutil.copy2(setup_cli["real_zellij"], zellij)
+    else:
+        zellij = setup_cli["path"].parent / "bin" / "zellij"
+    dashboard_script = tmp_path / "dashboard.py"
+    dashboard_script.write_text(
+        "import sys\n"
+        "from datetime import UTC, datetime\n"
+        "from workdash.github_client import GitHubClient\n"
+        "from workdash.workdash import main\n"
+        "del sys.argv[0]\n"
+        "now = datetime.now(UTC).isoformat()\n"
+        "issue = dict(id=1, is_pull_request=False, "
+        "repo='owner/repo', number=1, title='Fix the issue', created_at=now, updated_at=now, "
+        "url='https://github.com/owner/repo/issues/1')\n"
+        "for method in ('list_open_authored_prs', 'list_open_review_requested_prs', "
+        "'list_open_reviewed_prs', 'list_open_assigned_issues', 'list_open_todo_issues'):\n"
+        "    setattr(GitHubClient, method, lambda *args, **kwargs: [])\n"
+        "def tracked(self, repositories, *args, **kwargs):\n"
+        "    return [issue] if repositories == 'repo:owner/repo' else []\n"
+        "GitHubClient.list_recent_tracked_items = tracked\n"
+        "raise SystemExit(main())\n"
+    )
+    # Workdash uses argv[0] to relaunch itself inside Zellij.
+    workdash_entrypoint = setup_cli["bin"] / "workdash"
+    workdash_entrypoint.write_text(
+        f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(dashboard_script))} "
+        '"$0" "$@"\n'
+    )
+    workdash_entrypoint.chmod(0o755)
+    sockets = _private_socket_dir()
+    request.addfinalizer(sockets.cleanup)
+    env = {
+        **os.environ,
+        "PATH": str(setup_cli["bin"]),
+        "PYTHONPATH": str(Path(workdash.__file__).resolve().parents[1]),
+        "TERM": "xterm-256color",
+        "WORKDASH_HOST": _free_dashboard_address(),
+        "ZELLIJ_SOCKET_DIR": sockets.name,
+        **{
+            f"XDG_{name.upper()}_HOME": str(tmp_path / name) for name in ("config", "cache", "data")
+        },
+    }
+    pid, fd = pty.fork()
+    if pid == 0:
+        try:
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+            os.execve(workdash_entrypoint, [str(workdash_entrypoint)], env)
+        except OSError as exc:
+            os.write(2, f"Could not launch {workdash_entrypoint}: {exc}\n".encode())
+        finally:
+            os._exit(127)
+    request.addfinalizer(lambda: _cleanup_sessions(zellij, env, [("workdash", pid, fd)]))
+    setup_cli["dashboard"] = (zellij, env, fd)
 
-@then("no configuration file is saved")
-def _no_configuration_saved(config_path: Path) -> None:
-    assert not config_path.exists()
 
-
-@then("the system does not tell the user that setup completed or to run it again")
-def _does_not_report_setup_success(scenario_state: dict[str, Any]) -> None:
-    assert "Configuration complete" not in scenario_state["output"]
-    assert "Run 'workdash' again" not in scenario_state["output"]
-
-
-@then("the system tells the user to run the system again")
-def _tells_to_run_again(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["exit_code"] == 0
-    assert "Run 'workdash' again to start the dashboard." in scenario_state["output"]
-
-
-@then("the system stops without starting the dashboard")
-def _stops_without_dashboard(scenario_state: dict[str, Any]) -> None:
-    assert "Loading work items" not in scenario_state["output"]
-
-
-@then("the system does not run the configuration wizard")
-def _does_not_run_wizard(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["prompts"] == []
+@then(parsers.parse('the dashboard shows the tracked issue "{title}"'))
+def shows_tracked_issue(setup_cli, title):
+    zellij, env, fd = setup_cli["dashboard"]
+    os.set_blocking(fd, False)
+    output = bytearray()
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        try:
+            output.extend(os.read(fd, 65536))
+        except BlockingIOError:
+            pass
+        except OSError:
+            pytest.fail(f"Workdash exited before opening the dashboard: {output[-2000:]!r}")
+        result = subprocess.run(
+            [zellij, "--session", "workdash", "action", "dump-screen"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and title in result.stdout:
+            return
+        time.sleep(0.1)
+    pytest.fail(f"No {title!r} on screen: {result.stdout}\n{result.stderr}\n{output[-2000:]!r}")

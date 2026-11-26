@@ -1,22 +1,36 @@
+import asyncio
 import base64
+import errno
+import http.client
+import io
 import json
 import os
 import re
 import shlex
+import socket
 import subprocess
 import threading
+import urllib.error
+import urllib.request
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
+from urllib.error import HTTPError
 
 import pytest
+from textual.widgets import DataTable, Static
 
+import workdash.backend as backend_module
 import workdash.config as config_module
 import workdash.control as control_module
 import workdash.github_client as github_client_module
 import workdash.workdash as workdash_module
+from view_fake import ISSUE_URL, fake_gh_view_run
+from workdash.backend import compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig, load_config, save_config
 from workdash.control import WorkdashSession, probe_dashboard_session
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
@@ -26,8 +40,6 @@ from zellij_pane_launch import mark_pane_started, pane_launch
 
 @pytest.fixture(autouse=True)
 def _fake_dashboard_server(monkeypatch):
-    from unittest.mock import MagicMock
-
     monkeypatch.setattr(workdash_module, "WorkdashControlServer", MagicMock())
 
 
@@ -89,49 +101,40 @@ def _issue(repo: str = "owner/repo", number: int = 1) -> WorkItem:
     )
 
 
-def test_main_prints_loading_message_before_tui_start(
+def test_main_loads_initial_table_without_a_zellij_binary(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    calls: dict[str, bool] = {"load": False, "run": False, "mouse": True}
+    item = _issue()
+    titles = []
 
-    class FakeBackend:
-        def __init__(self, config=None, **kwargs) -> None:
-            pass
+    def load_items(_backend, progress_callback=None):
+        assert progress_callback is not None
+        return [item], {}
 
-        def load_items(self, progress_callback=None):
-            assert progress_callback is not None
-            calls["load"] = True
-            return [], {}
+    def run_dashboard(app, *, mouse: bool) -> None:
+        assert mouse is False
+        assert capsys.readouterr().out.startswith("Loading work items from GitHub...\n")
 
-        def analyze_item(self, _item, tool="codex"):
-            return None
+        async def read_initial_table():
+            async with app.run_test() as pilot:
+                table = app.query_one("#work-items", DataTable)
+                titles.extend(str(table.get_row_at(i)[2]) for i in range(table.row_count))
+                await pilot.press("q")
 
-        def include_item_by_url(self, _url, _existing_identities):
-            return None
+        asyncio.run(read_initial_table())
 
-    class FakeApp:
-        def __init__(self, **kwargs) -> None:
-            assert kwargs["work_items"] == []
-            assert kwargs["suggestion_markers"] == {}
-
-        def run(self, *, mouse: bool) -> None:
-            calls["run"] = True
-            calls["mouse"] = mouse
-
-    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
-    _auth_status_succeeds(monkeypatch)
+    monkeypatch.setattr(
+        github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh" if cmd == "gh" else None
+    )
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
-    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
-    monkeypatch.setattr(workdash_module, "WorkdashApp", FakeApp)
+    monkeypatch.setattr(workdash_module.WorkdashBackend, "load_items", load_items)
+    monkeypatch.setattr(workdash_module.WorkdashApp, "run", run_dashboard)
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
 
-    exit_code = workdash_module.main([])
-
-    assert exit_code == 0
-    assert calls == {"load": True, "run": True, "mouse": False}
-    captured = capsys.readouterr()
-    assert captured.out.startswith("Loading work items from GitHub...\n")
+    assert workdash_module.main([]) == 0
+    assert titles == [item.title]
 
 
 @pytest.mark.parametrize("argv", [[], ["--session", "another-session"]])
@@ -172,11 +175,17 @@ def test_main_bare_interactive_uses_own_zellij_session_from_environment(
 
 
 @pytest.mark.parametrize(
-    "listeners",
-    [(), (("dashboard.lan", ("192.0.2.1",)), ("192.0.2.5", ("192.0.2.2", "192.0.2.3")))],
+    ("argv", "listeners"),
+    [
+        ([], ()),
+        ([], (("dashboard.lan", ("192.0.2.1",)), ("192.0.2.5", ("192.0.2.2", "192.0.2.3")))),
+        (["--persistent-pane", "--session", "workdash-main"], (("127.0.0.2", ("127.0.0.4",)),)),
+    ],
+    ids=["no-extra-listeners", "multiple-listeners", "reopened-dashboard"],
 )
 def test_main_server_refresh_before_tui_run_updates_session_and_repaints_when_running(
     monkeypatch: pytest.MonkeyPatch,
+    argv,
     listeners,
     tmp_path,
 ) -> None:
@@ -251,7 +260,16 @@ def test_main_server_refresh_before_tui_run_updates_session_and_repaints_when_ru
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
 
-    assert workdash_module.main([]) == 0
+    if argv:
+        shell = MagicMock(side_effect=SystemExit(0))
+        monkeypatch.setenv("SHELL", "/bin/sh")
+        monkeypatch.setattr(workdash_module.os, "execvp", shell)
+        with pytest.raises(SystemExit) as stopped:
+            workdash_module.main(argv)
+        assert stopped.value.code == 0
+        shell.assert_called_once_with("/bin/sh", ["/bin/sh", "-i"])
+    else:
+        assert workdash_module.main(argv) == 0
     assert captured["listeners"] == listeners
 
     assert captured["app_session"].items_changed_callback is not None
@@ -478,6 +496,140 @@ def test_main_passes_configured_agent_choices_and_separate_viewers_to_tui(
     ]
 
 
+@pytest.mark.parametrize(
+    ("key", "browser_needs_pane", "failure", "status"),
+    [
+        pytest.param("v", False, None, "Opened viewer for issue owner/repo#12.", id="document"),
+        pytest.param("o", False, None, "Opened issue owner/repo#12.", id="direct-browser"),
+        pytest.param("o", True, None, "Opened issue owner/repo#12.", id="terminal-browser"),
+        pytest.param("v", False, "zellij exploded", "View failed:", id="document-error"),
+        pytest.param("o", False, "cannot open display", "Open failed:", id="browser-error"),
+        pytest.param("o", False, "timeout", "Open failed:", id="browser-timeout"),
+    ],
+)
+def test_main_view_menu_reaches_the_launcher(
+    key, browser_needs_pane, failure, status, monkeypatch, tmp_path
+):
+    browser = 'term-copy --label "two words"'
+    url = f"{ISSUE_URL}?a=one&b=two"
+    needs_pane = key == "v" or browser_needs_pane
+    tools = {"gh": "/usr/bin/gh", "workdash": "/usr/bin/workdash"}
+    if needs_pane:
+        tools["zellij"] = "/usr/bin/zellij"
+    monkeypatch.setattr(github_client_module.shutil, "which", tools.get)
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-selected")
+    monkeypatch.setattr(backend_module, "_DEFAULT_INCLUDED_STORE_PATH", tmp_path / "included.json")
+    config = replace(_VALID_CONFIG, open_command=browser, open_needs_pane=browser_needs_pane)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
+
+    selected_issue = {
+        "__typename": "Issue",
+        "id": "ISSUE-12",
+        "number": 12,
+        "title": "Crash on startup",
+        "url": url,
+        "createdAt": "2026-02-20T00:00:00Z",
+        "updatedAt": "2026-02-25T10:00:00Z",
+        "state": "OPEN",
+        "repository": {"nameWithOwner": "owner/repo"},
+        "subIssuesSummary": {"total": 0},
+    }
+    first_issue = {
+        **selected_issue,
+        "id": "ISSUE-11",
+        "number": 11,
+        "title": "Update the docs",
+        "url": "https://github.com/owner/repo/issues/11",
+        "updatedAt": "2026-02-26T10:00:00Z",
+    }
+    gh_run = fake_gh_view_run(
+        {
+            "auth status": {},
+            "search prs": [],
+            "api graphql -f query={ assigned:": {"data": {"assigned": {"nodes": []}}},
+            "api graphql -f query={ tracked:": {
+                "data": {"tracked": {"nodes": [first_issue, selected_issue]}}
+            },
+            "api graphql -f query={ repository(": {
+                "data": {"repository": {"issues": {"nodes": []}}}
+            },
+        }
+    )
+    launches = []
+
+    def run_subprocess(command, **kwargs):
+        if Path(command[0]).name == "gh":
+            return gh_run(command, **kwargs)
+        launches.append(command)
+        if not needs_pane:
+            assert kwargs["timeout"] == 4
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        if failure:
+            raise subprocess.CalledProcessError(1, command, output="", stderr=failure)
+        mark_pane_started(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    expected_status = status
+    if failure:
+        details = failure
+        if failure == "timeout":
+            details = (
+                "command did not finish within 4 seconds. "
+                "Opening a browser may not be supported from this session."
+            )
+        command_name = "workdash view" if key == "v" else browser
+        expected_status = f"{status} Failed to open URL via {command_name}: {details}"
+
+    def run_dashboard(app, *, mouse):
+        async def drive_menu():
+            async with app.run_test() as pilot:
+                dashboard = app.screen
+                footer = dashboard.query_one("#status-footer", Static)
+                await pilot.press("down", "v")
+                labels = [widget.render().plain for widget in app.screen.query(Static)]
+                assert "(v) view" in labels and "(o) open" in labels
+                await pilot.press("escape")
+                assert list(app.screen_stack) == [dashboard]
+                assert not launches
+                await pilot.press("v", key)
+                for _ in range(60):
+                    if footer.render().plain == expected_status:
+                        break
+                    await asyncio.sleep(0.05)
+                assert footer.render().plain == expected_status
+                assert list(app.screen_stack) == [dashboard]
+
+        asyncio.run(drive_menu())
+
+    monkeypatch.setattr(subprocess, "run", run_subprocess)
+    monkeypatch.setattr(workdash_module.WorkdashApp, "run", run_dashboard)
+    assert workdash_module.main([]) == 0
+
+    (launch,) = launches
+    browser_argv = ["term-copy", "--label", "two words", url]
+    if needs_pane:
+        pane_args, viewer_argv = pane_launch(launch)
+        assert pane_args == [
+            tools["zellij"],
+            "--session",
+            "workdash-selected",
+            "action",
+            "new-pane",
+            *"-f -x 0 -y 0 --width 100% --height 100%".split(),
+            "--name",
+            "sh" if key == "v" else "term-copy",
+            "--close-on-exit",
+        ]
+        if key == "v":
+            assert viewer_argv[-3:] == [tools["workdash"], "view", url]
+        else:
+            assert viewer_argv == browser_argv
+    else:
+        assert launch == browser_argv
+
+
 def test_main_tui_analyze_callback_uses_worktree_and_backend(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -646,8 +798,51 @@ def test_main_tui_review_callback_waits_for_the_review_to_finish(
     ]
 
 
-def test_main_list_command_does_not_print_loading_message(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    ("items", "expected_stdout"),
+    [
+        pytest.param([], "No work items found.\n", id="empty"),
+        pytest.param(
+            [
+                {
+                    "id": "owner/repo#ISSUE-2",
+                    "display_type": "ISSUE",
+                    "updated_at": "2026-02-02T00:00:00+00:00",
+                    "title": "Fix parser",
+                    "suggested": True,
+                },
+                {
+                    "id": "owner/repo#PR-1",
+                    "display_type": "PR",
+                    "updated_at": "2026-02-01T00:00:00+00:00",
+                    "title": "Add logs",
+                },
+                {
+                    "id": "owner/repo#REVIEW-3",
+                    "display_type": "REVIEW",
+                    "updated_at": "2026-01-31T00:00:00+00:00",
+                    "title": "Review docs",
+                },
+                {
+                    "id": "owner/repo#CHECK-4",
+                    "display_type": "CHECK",
+                    "updated_at": "2026-01-30T00:00:00+00:00",
+                    "title": "Update README",
+                },
+            ],
+            "ISSUE   owner/repo#ISSUE-2       2026-02-02 * Fix parser\n"
+            "PR      owner/repo#PR-1          2026-02-01 Add logs\n"
+            "REVIEW  owner/repo#REVIEW-3      2026-01-31 Review docs\n"
+            "CHECK   owner/repo#CHECK-4       2026-01-30 Update README\n",
+            id="multiple-rows",
+        ),
+    ],
+)
+def test_main_list_command_prints_only_the_listing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    items: list[dict[str, str | bool]],
+    expected_stdout: str,
 ) -> None:
     class FakeControlClient:
         def __init__(self, host="127.0.0.1") -> None:
@@ -656,7 +851,7 @@ def test_main_list_command_does_not_print_loading_message(
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "list"
             assert payload == {"refresh": False}
-            return {"items": []}
+            return {"items": items}
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
     monkeypatch.setattr(
@@ -668,8 +863,7 @@ def test_main_list_command_does_not_print_loading_message(
     exit_code = workdash_module.main(["list"])
 
     assert exit_code == 0
-    captured = capsys.readouterr()
-    assert captured.out == "No work items found.\n"
+    assert capsys.readouterr().out == expected_stdout
 
 
 def test_main_list_json_hides_excluded_repositories_after_refresh(
@@ -699,25 +893,35 @@ def test_main_list_json_hides_excluded_repositories_after_refresh(
     assert [(row["id"], row["suggested"]) for row in rows] == [("team/current#ISSUE-2", False)]
 
 
-def test_print_server_backed_list_uses_display_type_without_changing_id(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _print_work_items_result(
-        {
-            "items": [
-                {
-                    "id": "owner/repo#PR-2",
-                    "display_type": "PR+",
-                    "updated_at": "2026-02-02T00:00:00+00:00",
-                    "title": "Included PR",
-                    "suggested": False,
-                }
-            ]
-        }
+@pytest.mark.parametrize(
+    ("kind", "item_type", "number", "included", "label", "item_id"),
+    [
+        (WorkItemKind.TRACKED_PR, WorkItemType.PR, 111, True, "CHECK+", "CHECK-111"),
+        (WorkItemKind.TRACKED_ISSUE, WorkItemType.ISSUE, 222, True, "ISSUE+", "ISSUE-222"),
+        (WorkItemKind.REVIEW_REQUESTED_PR, WorkItemType.PR, 333, True, "REVIEW+", "REVIEW-333"),
+        (WorkItemKind.AUTHORED_PR, WorkItemType.PR, 555, True, "PR+", "PR-555"),
+        (WorkItemKind.TRACKED_PR, WorkItemType.PR, 444, False, "CHECK", "CHECK-444"),
+    ],
+)
+def test_list_prints_included_suffix_by_item_id(
+    kind, item_type, number, included, label, item_id, capsys
+):
+    updated = datetime(2026, 4, 28, tzinfo=UTC)
+    item = WorkItem(
+        kind=kind,
+        item_type=item_type,
+        repo="owner/repo",
+        number=number,
+        title="Dashboard item",
+        url=f"https://github.com/owner/repo/{'pull' if item_type is WorkItemType.PR else 'issues'}/{number}",
+        created_at=updated,
+        updated_at=updated,
+        included=included,
     )
 
-    output_line = capsys.readouterr().out.strip()
-    assert output_line.startswith("PR+     owner/repo#PR-2")
+    _print_work_items_result(control_module._work_items_payload([item], {}))
+
+    assert capsys.readouterr().out.startswith(f"{label:7} owner/repo#{item_id} ")
 
 
 def test_main_exits_with_error_when_gh_is_not_installed(
@@ -759,6 +963,169 @@ def test_main_reports_a_failed_wizard_without_a_traceback(
     captured = capsys.readouterr()
     assert captured.err.startswith(f"Error: {failure}")
     assert "Run 'workdash' again" not in captured.out
+
+
+@pytest.mark.parametrize(
+    ("failure", "detail"),
+    [
+        (urllib.error.URLError("timed out"), "timed out"),
+        (http.client.IncompleteRead(b"abc", 4), "IncompleteRead(3 bytes read, 4 more expected)"),
+    ],
+    ids=["timeout", "incomplete"],
+)
+def test_automatic_setup_stops_when_the_dependency_download_fails(
+    tmp_path, monkeypatch, capsys, failure, detail
+):
+    path = tmp_path / "missing.json"
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", path)
+    monkeypatch.setattr(workdash_module.launcher, "_WORKDASH_LOCAL_BIN", tmp_path / "bin")
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(config_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(config_module.platform, "system", lambda: "Linux")
+    if isinstance(failure, http.client.IncompleteRead):
+        urlopen = MagicMock()
+        urlopen.return_value.__enter__.return_value.read.side_effect = failure
+    else:
+        urlopen = MagicMock(side_effect=failure)
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(workdash_module, "configure", partial(config_module.configure, path))
+    monkeypatch.setattr(
+        workdash_module.WorkdashCommands,
+        "interactive",
+        lambda self: pytest.fail("unexpected dashboard"),
+    )
+
+    assert workdash_module.main([]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.err.startswith(
+        "Error: Failed to download https://github.com/zellij-org/zellij/"
+    )
+    assert detail in captured.err
+    assert "Traceback" not in captured.err
+    assert not path.exists()
+    assert "Configuration complete" not in captured.out
+    assert "Run 'workdash' again" not in captured.out
+
+
+@pytest.mark.parametrize("args", [[], ["--configure"]], ids=["automatic", "explicit"])
+def test_cancelled_setup_exits_without_saving_or_reporting_success(
+    tmp_path, monkeypatch, capsys, args
+):
+    path = tmp_path / "missing.json"
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", path)
+    monkeypatch.setattr(workdash_module.launcher, "_WORKDASH_LOCAL_BIN", tmp_path / "bin")
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    def cancel(prompt):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        partial(
+            config_module.configure,
+            path,
+            input_fn=cancel,
+            which_fn=lambda command: f"/usr/bin/{command}",
+        ),
+    )
+    assert workdash_module.main(args) == 130
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "Configuration cancelled."
+    assert "Configuration complete" not in captured.out
+    assert "Run 'workdash' again" not in captured.out
+    assert not path.exists()
+
+
+def test_automatic_setup_does_not_report_success_if_another_run_saves_first(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "missing.json"
+    other_config = b'{"github_username": "other-user"}\n'
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", path)
+    monkeypatch.setattr(workdash_module.launcher, "_WORKDASH_LOCAL_BIN", tmp_path / "bin")
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    def answer(prompt):
+        if prompt.startswith("GitHub username"):
+            return "octocat"
+        if prompt.startswith("Todo repository"):
+            path.write_bytes(other_config)
+        return ""
+
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        partial(
+            config_module.configure,
+            path,
+            input_fn=answer,
+            which_fn=lambda command: f"/usr/bin/{command}",
+        ),
+    )
+
+    assert workdash_module.main([]) == 1
+    captured = capsys.readouterr()
+    assert path.read_bytes() == other_config
+    assert f"Configuration already exists at {path}" in captured.err
+    assert "Your answers were not saved" in captured.err
+    assert "Configuration saved" not in captured.out
+    assert "Configuration complete" not in captured.out
+    assert "Run 'workdash' again" not in captured.out
+
+
+def test_relaunch_hands_repaired_setup_to_the_new_local_zellij(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "config.json"
+    repaired = replace(_VALID_CONFIG, open_command="/bin/sh")
+    save_config(replace(repaired, analysis_viewer=None), path)
+    local_zellij = tmp_path / "bin" / "zellij"
+    gh = tmp_path / "gh"
+    gh.write_text('#!/bin/sh\n[ "$*" = "auth status" ]\n')
+    gh.chmod(0o755)
+
+    def install_zellij():
+        local_zellij.parent.mkdir()
+        local_zellij.write_text('#!/bin/sh\n[ "$*" = "list-sessions --no-formatting" ]\n')
+        local_zellij.chmod(0o755)
+        return str(local_zellij)
+
+    launcher = workdash_module.launcher
+    monkeypatch.setattr(launcher, "_WORKDASH_LOCAL_BIN", local_zellij.parent)
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1")
+    load = MagicMock(wraps=partial(load_config, path))
+    monkeypatch.setattr(workdash_module, "load_config", load)
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        partial(
+            config_module.configure,
+            path,
+            input_fn=lambda prompt: "",
+            install_zellij_fn=install_zellij,
+        ),
+    )
+    launch = MagicMock(side_effect=SystemExit(0))
+    monkeypatch.setattr(launcher.os, "execvp", launch)
+
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert workdash_module.main([]) == 1
+    assert "Run 'workdash --configure'" in capsys.readouterr().err
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert workdash_module.main(["--configure"]) == 0
+    assert load_config(path) == repaired
+    launch.assert_not_called()
+
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with pytest.raises(SystemExit, match="^0$"):
+        workdash_module.main([])
+
+    load.assert_called_once_with()
+    launch.assert_called_once()
+    executable, argv = launch.call_args.args
+    Path(argv[2]).unlink()
+    assert executable == argv[0] == str(local_zellij)
+    assert argv[1] == "--layout"
 
 
 def test_main_runs_configuration_when_the_config_file_is_missing(
@@ -918,106 +1285,104 @@ def test_main_reports_a_dangling_config_symlink_without_running_the_wizard(
     assert not config_path.exists()
 
 
+@pytest.mark.parametrize(
+    ("config", "missing"),
+    [
+        (WorkdashConfig(), ("github_username", "repositories", "workdir")),
+        (replace(_VALID_CONFIG, agents={}), ("agents",)),
+    ],
+    ids=["incomplete", "no-agents"],
+)
 def test_main_exits_with_error_when_config_incomplete(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    config: WorkdashConfig,
+    missing: tuple[str, ...],
 ) -> None:
     monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
     _auth_status_succeeds(monkeypatch)
-    monkeypatch.setattr(workdash_module, "load_config", lambda: WorkdashConfig())
+    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
 
-    exit_code = workdash_module.main([])
+    assert workdash_module.main([]) == 1
 
-    assert exit_code == 1
-    captured = capsys.readouterr()
-    assert "missing configuration fields" in captured.err
-    assert "--configure" in captured.err
+    error = capsys.readouterr().err
+    prefix = "Error: missing configuration fields: "
+    fields = next(
+        line.removeprefix(prefix) for line in error.splitlines() if line.startswith(prefix)
+    )
+    assert set(missing) <= set(fields.split(", "))
+    if missing == ("agents",):
+        assert fields == "agents"
+    assert "--configure" in error
 
 
-@pytest.mark.parametrize("command", ["", "   ", "open 'broken"])
-def test_main_rejects_missing_or_malformed_viewer_before_zellij_wrapping(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], command: str
-) -> None:
-    config = replace(_VALID_CONFIG, open_command=command)
-
-    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
-    _auth_status_succeeds(monkeypatch)
-    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
-    monkeypatch.setattr(
-        workdash_module,
-        "WorkdashBackend",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("backend should not load invalid runtime config")
+@pytest.mark.parametrize(
+    ("config", "diagnostic"),
+    [
+        (replace(_VALID_CONFIG, open_command=""), "missing configuration fields: open"),
+        (replace(_VALID_CONFIG, open_command="   "), "missing configuration fields: open"),
+        (
+            replace(_VALID_CONFIG, open_command="open 'broken"),
+            "invalid configuration fields: open: No closing quotation",
         ),
-    )
-    monkeypatch.setattr(
-        workdash_module.launcher.zellij,
-        "exec_zellij_wrapped_workdash",
-        lambda _argv, preflight: preflight(),
-    )
-    monkeypatch.delenv("ZELLIJ", raising=False)
+        (
+            replace(
+                _VALID_CONFIG,
+                agents={**_VALID_CONFIG.agents, "pi": AgentConfig(launch="pi 'broken")},
+            ),
+            "invalid configuration fields: agents.pi.launch: No closing quotation",
+        ),
+    ],
+    ids=["no-opener", "blank-opener", "malformed-opener", "malformed-agent"],
+)
+def test_main_rejects_invalid_commands_before_zellij_wrapping(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    config: WorkdashConfig,
+    diagnostic: str,
+) -> None:
+    def run(command, **kwargs):
+        assert command in [
+            ["/usr/bin/gh", "auth", "status"],
+            ["/usr/bin/zellij", "list-sessions", "--no-formatting"],
+        ]
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
+    execvp = MagicMock()
+    backend = MagicMock()
+    monkeypatch.setattr(os, "execvp", execvp)
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", backend)
 
     assert workdash_module.main([]) == 1
-    captured = capsys.readouterr()
-    assert "open" in captured.err
-    if command.strip():
-        assert "No closing quotation" in captured.err
-    else:
-        assert "missing configuration fields: open" in captured.err
-    assert "workdash --configure" in captured.err
 
-
-@pytest.mark.parametrize("argv", [[]])
-def test_main_exits_with_config_guidance_when_startup_config_command_is_malformed(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
-) -> None:
-    config = WorkdashConfig(
-        github_username="testuser",
-        open_command="xdg-open",
-        agents={
-            "codex": AgentConfig(analyze="codex exec", launch="codex"),
-            "claude": AgentConfig(analyze="claude -p", launch="claude"),
-            "pi": AgentConfig(launch="pi 'broken"),
-        },
-        repositories=("owner/repo",),
-        workdir="~/wrk",
-        todo_repository="testuser/todos",
-    )
-
-    class FakeBackend:
-        def __init__(self, config=None, **kwargs) -> None:  # pragma: no cover - should not run
-            raise AssertionError("backend should not load invalid runtime config")
-
-    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
-    _auth_status_succeeds(monkeypatch)
-    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
-    monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
-    monkeypatch.setattr(
-        workdash_module.launcher.zellij,
-        "exec_zellij_wrapped_workdash",
-        lambda _argv, preflight: preflight(),
-    )
-    monkeypatch.delenv("ZELLIJ", raising=False)
-
-    exit_code = workdash_module.main(argv)
-
-    assert exit_code == 1
-    captured = capsys.readouterr()
-    assert "invalid configuration fields" in captured.err
-    assert "agents.pi.launch" in captured.err
-    assert "workdash --configure" in captured.err
+    execvp.assert_not_called()
+    backend.assert_not_called()
+    error = capsys.readouterr().err
+    assert diagnostic in error
+    assert "workdash --configure" in error
+    assert "Traceback" not in error
 
 
 @pytest.mark.parametrize(
     ("argv", "expected_endpoint", "expected_payload"),
     [
         (["list"], "list", {"refresh": False}),
+        (["list", "--json"], "list", {"refresh": False}),
         (["list", "--refresh"], "list", {"refresh": True}),
         (["info"], "info", {"panes": "work"}),
         (["ready", "any"], "ready", {"scope": "any"}),
         (["ready", "owner/repo#42", "--json"], "ready", {"scope": "owner/repo#42"}),
-        (["terminal", "owner/repo#ISSUE-1"], "terminal", {"target": "owner/repo#ISSUE-1"}),
+        (["ready", "owner/repo", "--json"], "ready", {"scope": "owner/repo"}),
+        (
+            ["terminal", "owner/repo#ISSUE-1", "--json"],
+            "terminal",
+            {"target": "owner/repo#ISSUE-1"},
+        ),
         (
             ["todo", "Fix it", "--target", "owner/repo"],
             "todo",
@@ -1100,6 +1465,39 @@ def test_main_server_backed_commands_are_pure_http_clients(
         "issue_id": "owner/repo#ISSUE-42",
     }
 
+    repository_ready_item = {
+        "id": "owner/repo#ISSUE-1",
+        "type": "issue",
+        "title": "Implement the parser",
+        "url": "https://github.com/owner/repo/issues/1",
+        "action": "implement",
+        "reasons": ["implement"],
+        "issue_id": "owner/repo#ISSUE-1",
+    }
+    if argv == ["ready", "owner/repo", "--json"]:
+        monkeypatch.setenv("PATH", str(tmp_path))
+        ready_item = repository_ready_item
+
+    list_result = {
+        "items": [
+            {
+                "id": "owner/repo#ISSUE-42",
+                "type": "issue",
+                "display_type": "ISSUE",
+                "kind": "tracked_issue",
+                "repo": "owner/repo",
+                "number": 42,
+                "title": "Fix parser",
+                "url": "https://github.com/owner/repo/issues/42",
+                "created_at": "2026-02-01T00:00:00+00:00",
+                "updated_at": "2026-02-02T00:00:00+00:00",
+                "suggested": True,
+                "analysis_available": False,
+                "analysis_url": None,
+            }
+        ]
+    }
+
     class FakeControlClient:
         def __init__(self, selected_host="127.0.0.1") -> None:
             assert selected_host == host
@@ -1107,7 +1505,7 @@ def test_main_server_backed_commands_are_pure_http_clients(
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             requests.append((endpoint, dict(payload or {})))
             if endpoint == "list":
-                return {"items": []}
+                return list_result if "--json" in argv else {"items": []}
             if endpoint == "info":
                 return {"session": "workdash", "panes": []}
             if endpoint == "ready":
@@ -1181,6 +1579,14 @@ def test_main_server_backed_commands_are_pure_http_clients(
         lambda _argv: (_ for _ in ()).throw(AssertionError("unexpected Zellij wrapper")),
     )
 
+    def unexpected_app(*args, **kwargs):
+        pytest.fail("Server-backed commands must not start the TUI")
+
+    monkeypatch.setattr(workdash_module, "WorkdashApp", unexpected_app)
+
+    if expected_endpoint in {"info", "code"}:
+        monkeypatch.setenv("PATH", str(tmp_path))
+
     if environment_host is None:
         monkeypatch.delenv("WORKDASH_HOST", raising=False)
     else:
@@ -1189,7 +1595,10 @@ def test_main_server_backed_commands_are_pure_http_clients(
     command = host_args + argv if host_position == "before" else argv + host_args
     assert workdash_module.main(command) == 0
 
-    output = capsys.readouterr().out
+    output, stderr = capsys.readouterr()
+    if expected_endpoint == "info":
+        assert "Session: workdash" in output
+        assert "gh CLI" not in output + stderr
     if expected_endpoint == "analyze":
         analysis_url = next(
             line.removeprefix("Analysis URL: ")
@@ -1198,14 +1607,24 @@ def test_main_server_backed_commands_are_pure_http_clients(
         )
         assert analysis_url == "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis"
     assert requests == [(expected_endpoint, expected_payload)]
+    if expected_endpoint == "list" and "--json" in argv:
+        assert json.loads(output) == list_result
     if expected_endpoint == "ready" and "--json" in argv:
-        assert json.loads(output)["items"] == [ready_item]
+        assert json.loads(output) == {"scope": expected_payload["scope"], "items": [ready_item]}
     elif expected_endpoint == "ready":
         assert output == (
             "PR    owner/repo#PR-51             address_review       Fix the parser "
             "https://github.com/owner/repo/pull/51 [address_review,fix_ci] "
             "(issue owner/repo#ISSUE-42)\n"
         )
+    if expected_endpoint == "terminal":
+        assert json.loads(output) == {
+            "item_id": "owner/repo#ISSUE-1",
+            "session": "workdash",
+            "cwd": "/tmp/wt",
+            "pane_title": "terminal_owner_repo_1",
+            "pane_id": "terminal_1",
+        }
     if expected_endpoint == "todo" and "--json" in argv:
         assert json.loads(output) == {
             "item_id": "owner/repo#ISSUE-WT1",
@@ -1225,28 +1644,64 @@ def test_main_server_backed_commands_are_pure_http_clients(
         ["code", "owner/repo#ISSUE-1"],
         ["read", "terminal_23"],
         ["write", "terminal_23", "continue"],
+        ["terminal", "owner/repo#ISSUE-1"],
+        ["todo", "Fix the flaky test"],
     ],
 )
 def test_main_server_backed_command_reports_unreachable_server(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
 ) -> None:
-    class FakeControlClient:
-        def __init__(self, host="127.0.0.1") -> None:
-            assert host == "127.0.0.1"
-
-        def request(self, endpoint: str, payload: dict[str, object] | None = None):
-            raise workdash_module.WorkdashControlError(
-                "server_unreachable",
-                "No Workdash server is reachable at 127.0.0.1:8765. Start one with `workdash`.",
-            )
-
-    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+    refuse_connection = MagicMock(side_effect=ConnectionRefusedError)
+    monkeypatch.setattr("urllib.request.urlopen", refuse_connection)
+    monkeypatch.delenv("WORKDASH_HOST", raising=False)
 
     assert workdash_module.main(argv) == 1
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "workdash" in captured.err
+    assert (
+        "No Workdash server is reachable at 127.0.0.1:8765. Start one with `workdash`."
+        in captured.err
+    )
+    refuse_connection.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "scope, status, code, message",
+    [
+        ("owner/repo#404", 404, "unknown_item", "No accessible issue matches 'owner/repo#404'."),
+        ("owner/repo#PR-51", 400, "unsupported_item_type", "Ready requires an issue, not a PR."),
+        ("not a scope", 400, "invalid_target", "'not a scope' is not a supported scope."),
+        (
+            "owner/repo",
+            502,
+            "github_error",
+            "GitHub lookup for 'owner/repo' failed: HTTP 502: Bad Gateway",
+        ),
+        ("owner/repo", 503, "zellij_unavailable", "Failed to list Zellij panes"),
+    ],
+    ids=["missing-issue", "pull-request", "malformed-scope", "github-outage", "zellij-outage"],
+)
+def test_ready_cli_forwards_scope_and_reports_server_error(
+    monkeypatch, capsys, scope, status, code, message
+):
+    monkeypatch.delenv("WORKDASH_HOST", raising=False)
+    address = "dashboard.example:9876"
+    requests = []
+
+    def respond_with_error(request, *, timeout):
+        requests.append((request.get_method(), request.full_url, json.loads(request.data)))
+        body = json.dumps({"ok": False, "error": {"code": code, "message": message}})
+        raise HTTPError(request.full_url, status, "Request failed", {}, io.BytesIO(body.encode()))
+
+    monkeypatch.setattr("urllib.request.urlopen", respond_with_error)
+
+    assert workdash_module.main(["ready", scope, "--json", "--host", address]) == 1
+
+    assert requests == [("POST", f"http://{address}/api/v0/ready", {"scope": scope})]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"Error: Workdash server at {address}: {message}\n"
 
 
 def test_unreachable_server_reports_startup_guidance():
@@ -1274,7 +1729,7 @@ def test_main_analyze_human_output_formats_server_response(
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "analyze"
-            assert payload == {"target": "owner/repo#ISSUE-1", "agent": None}
+            assert payload == {"target": "owner/repo#ISSUE-1", "agent": None, "group": "epic"}
             return {
                 "item_id": "owner/repo#ISSUE-1",
                 "path": "/server/cache/analysis.md",
@@ -1291,7 +1746,7 @@ def test_main_analyze_human_output_formats_server_response(
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
 
-    assert workdash_module.main(["analyze", "owner/repo#ISSUE-1"]) == 0
+    assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--group", "epic"]) == 0
 
     output = capsys.readouterr().out
     analysis_url = next(
@@ -1355,6 +1810,7 @@ def test_main_analyze_json_reports_the_same_server_analysis_url_twice(
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "analyze"
+            assert payload == {"target": "owner/repo#ISSUE-1", "agent": "codex"}
             return {
                 "item_id": "owner/repo#ISSUE-1",
                 "path": "/server/cache/analysis.md",
@@ -1369,17 +1825,26 @@ def test_main_analyze_json_reports_the_same_server_analysis_url_twice(
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
 
-    assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--json"]) == 0
+    assert (
+        workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--agent", "codex", "--json"]) == 0
+    )
     first_payload = json.loads(capsys.readouterr().out)
-    assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--json"]) == 0
+    assert (
+        workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--agent", "codex", "--json"]) == 0
+    )
     second_payload = json.loads(capsys.readouterr().out)
 
-    assert "path" not in first_payload
-    assert "file_content" not in first_payload
-    assert "file_name" not in first_payload
-    assert "content_type" not in first_payload
-    assert first_payload == second_payload
-    assert first_payload["url"] == "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis"
+    assert (
+        first_payload
+        == second_payload
+        == {
+            "item_id": "owner/repo#ISSUE-1",
+            "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
+            "agent": "codex",
+            "cache_used": False,
+            "status": "generated",
+        }
+    )
 
 
 @pytest.mark.parametrize(
@@ -1424,34 +1889,82 @@ def test_main_analyze_reports_invalid_content_response(
     assert "Traceback" not in captured.err
 
 
-def test_main_analyze_reports_server_error(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    class FakeControlClient:
-        def __init__(self, host="127.0.0.1") -> None:
-            assert host == "127.0.0.1"
+@pytest.mark.parametrize(
+    ("argv", "endpoint", "payload", "code", "message"),
+    [
+        (
+            ["analyze", "owner/repo#ISSUE-1", "--agent", "vscode"],
+            "analyze",
+            {"target": "owner/repo#ISSUE-1", "agent": "vscode"},
+            "unknown_agent",
+            "Agent 'vscode' is not configured.",
+        ),
+        (
+            ["analyze", "owner/repo#ISSUE-1", "--agent", "pi"],
+            "analyze",
+            {"target": "owner/repo#ISSUE-1", "agent": "pi"},
+            "unsupported_agent",
+            "Agent 'pi' cannot analyze: it has no analyze command.",
+        ),
+        (
+            ["code", "owner/repo#ISSUE-1", "--agent", "aider"],
+            "code",
+            {"target": "owner/repo#ISSUE-1", "agent": "aider"},
+            "unsupported_agent",
+            "Agent 'aider' cannot code: it has no launch command.",
+        ),
+        (
+            ["terminal", "owner/repo#ISSUE-99", "--json"],
+            "terminal",
+            {"target": "owner/repo#ISSUE-99"},
+            "unknown_item",
+            "No accessible GitHub issue or pull request matches 'owner/repo#ISSUE-99'.",
+        ),
+    ],
+)
+def test_main_item_command_reports_server_error(
+    monkeypatch, capsys, argv, endpoint, payload, code, message
+):
+    client = MagicMock()
+    client.request.side_effect = workdash_module.WorkdashControlError(code, message)
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", MagicMock(return_value=client))
 
-        def request(self, endpoint: str, payload: dict[str, object] | None = None):
-            raise workdash_module.WorkdashControlError(
-                "unknown_agent", "Agent 'vscode' is not configured."
-            )
+    assert workdash_module.main(argv) == 1
 
-    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
-
-    assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--agent", "vscode"]) == 1
-
+    client.request.assert_called_once_with(endpoint, payload)
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "Agent 'vscode' is not configured" in captured.err
+    assert captured.err == f"Error: {message}\n"
+
+
+@pytest.mark.parametrize(
+    "target", ["https://gitlab.com/owner/repo.git", "https://codeberg.org/owner/repo.git"]
+)
+def test_main_todo_forwards_git_url_target_unchanged(monkeypatch, capsys, target):
+    client = MagicMock()
+    client.request.return_value = {
+        "item_id": "owner/repo#ISSUE-WT110",
+        "todo_repository": "testuser/todos",
+        "target": target,
+        "url": "https://github.com/testuser/todos/issues/110",
+    }
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", MagicMock(return_value=client))
+
+    assert workdash_module.main(["todo", "Fix the flaky test", "--target", target]) == 0
+
+    client.request.assert_called_once_with("todo", {"text": "Fix the flaky test", "target": target})
+    assert {
+        "Item: owner/repo#ISSUE-WT110",
+        "Issue: https://github.com/testuser/todos/issues/110",
+    } <= set(capsys.readouterr().out.splitlines())
 
 
 @pytest.mark.parametrize(
     ("arguments", "expected_payload", "result", "expected_lines"),
     [
         (
-            ["code", "owner/repo#ISSUE-1", "--agent", "pi"],
-            {"target": "owner/repo#ISSUE-1", "agent": "pi"},
+            ["code", "owner/repo#ISSUE-1", "--agent", "pi", *flags],
+            {"target": "owner/repo#ISSUE-1", "agent": "pi", **mode},
             {
                 "status": "launched",
                 "item_id": "owner/repo#ISSUE-1",
@@ -1471,7 +1984,10 @@ def test_main_analyze_reports_server_error(
                 "Pane title: code_wt",
                 "Pane id: terminal_7",
             ],
-        ),
+        )
+        for flags, mode in [([], {}), (["--autostart"], {"autostart": True})]
+    ]
+    + [
         (
             ["code", "owner/repo#ISSUE-1", "--agent", "pi", "--autoclose"],
             {
@@ -1563,12 +2079,14 @@ def test_main_code_json_outputs_server_response(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     response = {
+        "status": "launched",
         "item_id": "owner/repo#ISSUE-1",
         "session": "workdash-main",
         "agent": "codex",
         "cwd": "/tmp/owner_repo_1",
         "pane_title": "code_owner_repo_1",
         "pane_id": "terminal_23",
+        "tab_name": None,
     }
 
     class FakeControlClient:
@@ -1604,6 +2122,8 @@ def test_main_code_reports_server_error_before_local_worktree(
             assert host == "127.0.0.1"
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
+            assert endpoint == "code"
+            assert payload == {"target": "owner/repo#ISSUE-1", "agent": "vscode"}
             raise workdash_module.WorkdashControlError(
                 "unknown_agent",
                 "Agent 'vscode' is not configured.",
@@ -1616,17 +2136,18 @@ def test_main_code_reports_server_error_before_local_worktree(
         lambda _workdir, _item: (_ for _ in ()).throw(AssertionError("unexpected worktree")),
     )
 
-    assert workdash_module.main(["code", "owner/repo#ISSUE-1", "--agent", "vscode"]) == 1
+    assert workdash_module.main(["code", "owner/repo#ISSUE-1", "--agent", "vscode", "--json"]) == 1
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "Agent 'vscode' is not configured." in captured.err
-    assert "vscode" in captured.err
+    assert captured.err == "Error: Agent 'vscode' is not configured.\n"
 
 
+@pytest.mark.parametrize("content", ["visible output\nnext", "visible output\nnext\n"])
 def test_main_read_human_output_prints_pane_content(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    content: str,
 ) -> None:
     class FakeControlClient:
         def __init__(self, host="127.0.0.1") -> None:
@@ -1635,13 +2156,13 @@ def test_main_read_human_output_prints_pane_content(
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "pane/content"
             assert payload == {"pane_id": "terminal_23", "full": False}
-            return {"pane_id": "terminal_23", "content": "agent output\nnext", "full": False}
+            return {"pane_id": "terminal_23", "content": content, "full": False}
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
 
     assert workdash_module.main(["read", "terminal_23"]) == 0
 
-    assert capsys.readouterr().out == "agent output\nnext\n"
+    assert capsys.readouterr().out == "visible output\nnext\n"
 
 
 def test_main_read_json_outputs_server_response(
@@ -1676,19 +2197,21 @@ def test_main_write_human_output_confirms_accepted_input(
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "pane/send"
-            assert payload == {"pane_id": "terminal_23", "data": "continue", "raw": False}
+            assert payload == {"pane_id": "terminal_23", "data": "sample text", "raw": False}
             return {"pane_id": "terminal_23", "raw": False, "accepted": True}
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
 
-    assert workdash_module.main(["write", "terminal_23", "continue"]) == 0
+    assert workdash_module.main(["write", "terminal_23", "sample text"]) == 0
 
     assert capsys.readouterr().out == "Accepted input for terminal_23 (raw: no).\n"
 
 
+@pytest.mark.parametrize("mode", ["--raw", "--no-enter"])
 def test_main_write_json_outputs_server_response(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    mode: str,
 ) -> None:
     response = {"pane_id": "terminal_23", "raw": True, "accepted": True}
 
@@ -1698,72 +2221,107 @@ def test_main_write_json_outputs_server_response(
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "pane/send"
-            assert payload == {"pane_id": "terminal_23", "data": "continue", "raw": True}
+            assert payload == {"pane_id": "terminal_23", "data": "sample text", "raw": True}
             return response
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
 
-    assert workdash_module.main(["write", "terminal_23", "continue", "--no-enter", "--json"]) == 0
+    assert workdash_module.main(["write", "terminal_23", "sample text", mode, "--json"]) == 0
 
     assert json.loads(capsys.readouterr().out) == response
 
 
-def test_main_info_human_output_formats_server_response(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+@pytest.mark.parametrize("json_output", [False, True], ids=["human", "json"])
+def test_main_close_reports_accepted_pane(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], json_output: bool
 ) -> None:
-    class FakeControlClient:
-        def __init__(self, host="127.0.0.1") -> None:
-            assert host == "127.0.0.1"
+    response = {"pane_id": "terminal_26", "accepted": True}
+    client = MagicMock()
+    client.request.return_value = response
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", lambda host: client)
 
-        def request(self, endpoint: str, payload: dict[str, object] | None = None):
-            assert endpoint == "info"
-            assert payload == {"panes": "work"}
-            return {
-                "session": "workdash",
-                "panes": [
-                    {
-                        "kind": "agent",
-                        "pane_id": "terminal_1",
-                        "title": "code_owner_repo_1",
-                        "cwd": "/tmp/wt",
-                        "command": "pi",
-                        "tab_name": "work",
-                        "state": "running",
-                        "item": "owner/repo#ISSUE-1",
-                    }
-                ],
+    assert workdash_module.main(["close", "terminal_26", *(["--json"] if json_output else [])]) == 0
+
+    client.request.assert_called_once_with("pane/close", {"pane_id": "terminal_26"})
+    output = capsys.readouterr().out
+    if json_output:
+        assert json.loads(output) == response
+    else:
+        assert output == "Accepted close for terminal_26.\n"
+
+
+def test_main_info_human_output_formats_server_response(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = MagicMock()
+    client.request.return_value = {
+        "session": "workdash",
+        "panes": [
+            {
+                "kind": kind,
+                "pane_id": pane_id,
+                "title": title,
+                "cwd": "/tmp/wt",
+                "command": command,
+                "tab_name": "work",
+                "state": "Running",
+                "item": "owner/repo#ISSUE-1",
             }
-
-    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+            for kind, pane_id, title, command in (
+                ("agent", "terminal_1", "code_owner_repo_1", "pi"),
+                ("terminal", "terminal_2", "terminal_owner_repo_1", "bash"),
+            )
+        ],
+    }
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", lambda host: client)
 
     assert workdash_module.main(["info"]) == 0
 
-    output = capsys.readouterr().out
-    assert "Session: workdash" in output
-    assert "item=owner/repo#ISSUE-1" in output
-    assert "code_owner_repo_1" in output
+    client.request.assert_called_once_with("info", {"panes": "work"})
+    assert capsys.readouterr().out.splitlines() == [
+        "Session: workdash",
+        "agent    terminal_1 code_owner_repo_1 cwd=/tmp/wt command=pi tab=work "
+        "state=Running item=owner/repo#ISSUE-1",
+        "terminal terminal_2 terminal_owner_repo_1 cwd=/tmp/wt command=bash tab=work "
+        "state=Running item=owner/repo#ISSUE-1",
+    ]
 
 
+@pytest.mark.parametrize(
+    ("argv", "panes"),
+    [
+        (["info", "--json"], "work"),
+        (["--json", "info"], "work"),
+        (["info", "--all", "--json"], "all"),
+    ],
+)
 def test_main_info_json_outputs_server_response(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str], panes: str
 ) -> None:
-    response = {"session": "workdash", "panes": []}
+    response = {
+        "session": "workdash",
+        "panes": [
+            {
+                "session": "workdash",
+                "tab_id": 7,
+                "tab_name": "work",
+                "pane_id": "terminal_1",
+                "title": "code_owner_repo_1",
+                "cwd": "/tmp/wt",
+                "command": "pi",
+                "kind": "agent",
+                "state": "running",
+                "item": "owner/repo#ISSUE-1",
+            },
+        ],
+    }
+    client = MagicMock()
+    client.request.return_value = response
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", lambda host: client)
 
-    class FakeControlClient:
-        def __init__(self, host="127.0.0.1") -> None:
-            assert host == "127.0.0.1"
+    assert workdash_module.main(argv) == 0
 
-        def request(self, endpoint: str, payload: dict[str, object] | None = None):
-            assert endpoint == "info"
-            assert payload == {"panes": "work"}
-            return response
-
-    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
-
-    assert workdash_module.main(["--json", "info"]) == 0
-
+    client.request.assert_called_once_with("info", {"panes": panes})
     assert json.loads(capsys.readouterr().out) == response
 
 
@@ -1888,14 +2446,24 @@ def test_main_reports_gh_authentication_failure_before_invalid_config_json(
     ) in captured.err
 
 
+@pytest.mark.parametrize("gh_installed", [False, True], ids=["missing-gh", "expired-auth"])
 def test_main_outside_zellij_checks_gh_before_replacing_process(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    gh_installed,
 ) -> None:
     wrapper_calls: list[object] = []
 
     monkeypatch.delenv("ZELLIJ", raising=False)
-    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(
+        github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh" if gh_installed else None
+    )
+    if gh_installed:
+        monkeypatch.setattr(
+            github_client_module.subprocess,
+            "run",
+            MagicMock(side_effect=subprocess.CalledProcessError(1, ["gh", "auth", "status"])),
+        )
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setattr(
         workdash_module.launcher.zellij,
@@ -1907,7 +2475,9 @@ def test_main_outside_zellij_checks_gh_before_replacing_process(
 
     assert exit_code == 1
     assert wrapper_calls == []
-    assert "gh CLI is not installed" in capsys.readouterr().err
+    assert (
+        "gh CLI is not authenticated" if gh_installed else "gh CLI is not installed"
+    ) in capsys.readouterr().err
 
 
 def test_main_outside_zellij_reports_missing_zellij(
@@ -1944,6 +2514,209 @@ def test_main_preserves_a_zellij_wrapper_error_when_config_access_is_denied(
 
     assert workdash_module.main([]) == 1
     assert capsys.readouterr().err == "Error: Failed to list Zellij sessions\n"
+
+
+@pytest.fixture
+def startup_zellij(monkeypatch):
+    launcher = workdash_module.launcher
+    monkeypatch.setattr(
+        launcher.shutil, "which", lambda command: "/usr/bin/zellij" if command == "zellij" else None
+    )
+    monkeypatch.setattr(launcher.time, "sleep", lambda seconds: None)
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:9999")
+    monkeypatch.setattr(
+        workdash_module.WorkdashApp, "run", lambda *args, **kwargs: pytest.fail("dashboard started")
+    )
+    execvp = MagicMock(side_effect=SystemExit(0))
+    monkeypatch.setattr(launcher.os, "execvp", execvp)
+    sessions = MagicMock(return_value="project [Created now]\n")
+
+    def run(command, **kwargs):
+        assert command == ["/usr/bin/zellij", "list-sessions", "--no-formatting"]
+        return subprocess.CompletedProcess(command, 0, sessions(), "")
+
+    monkeypatch.setattr(launcher.subprocess, "run", run)
+    return sessions, execvp
+
+
+@pytest.fixture
+def deny_startup_config_access(monkeypatch, tmp_path):
+    config_path = workdash_module.CONFIG_PATH
+    lstat, path_open = Path.lstat, Path.open
+
+    def denied_lstat(path):
+        if path == config_path:
+            raise PermissionError("Permission denied")
+        return lstat(path)
+
+    def denied_open(path, *args, **kwargs):
+        if path == config_path or path.is_relative_to(tmp_path / "sessions"):
+            raise PermissionError("Permission denied")
+        return path_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", denied_lstat)
+    monkeypatch.setattr(Path, "open", denied_open)
+
+
+@pytest.mark.parametrize("config_state", ["invalid-json", "access-denied", "missing"])
+def test_main_attaches_to_running_dashboard_without_usable_config(
+    monkeypatch, capsys, request, startup_zellij, config_state
+):
+    _, execvp = startup_zellij
+    config_path = workdash_module.CONFIG_PATH
+    if config_state == "invalid-json":
+        config_path.write_text("{invalid json", encoding="utf-8")
+    elif config_state == "access-denied":
+        request.getfixturevalue("deny_startup_config_access")
+    else:
+        config_path.unlink()
+
+    probe = MagicMock(return_value="project")
+    monkeypatch.setattr(control_module, "probe_dashboard_session", probe)
+    wizard = MagicMock()
+    auth = MagicMock()
+    monkeypatch.setattr(workdash_module, "configure", wizard)
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", auth)
+
+    with pytest.raises(SystemExit) as exit_info:
+        workdash_module.main(["--session", "project"])
+
+    assert exit_info.value.code == 0
+    probe.assert_called_once_with("127.0.0.1:9999")
+    execvp.assert_called_once_with("/usr/bin/zellij", ["/usr/bin/zellij", "attach", "project"])
+    wizard.assert_not_called()
+    auth.assert_not_called()
+    captured = capsys.readouterr()
+    assert "options are ignored. Attaching..." in captured.out
+    assert not captured.err
+    if config_state == "missing":
+        assert not config_path.exists()
+
+
+def test_main_outside_zellij_reports_invalid_config_json(monkeypatch, capsys, startup_zellij):
+    _, execvp = startup_zellij
+    config_path = workdash_module.CONFIG_PATH
+    config_path.write_text("{invalid json", encoding="utf-8")
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: load_config(config_path))
+
+    assert workdash_module.main([]) == 1
+
+    captured = capsys.readouterr()
+    (line,) = (captured.out + captured.err).splitlines()
+    assert line.startswith(f"Error: Configuration at {config_path} is not valid JSON:")
+    execvp.assert_not_called()
+
+
+@pytest.mark.parametrize("zellij_available", [True, False], ids=["no-dashboard", "no-zellij"])
+def test_main_outside_zellij_reports_denied_config_access(
+    monkeypatch, capsys, startup_zellij, deny_startup_config_access, zellij_available
+):
+    sessions, execvp = startup_zellij
+    wizard = MagicMock()
+    monkeypatch.setattr(workdash_module, "configure", wizard)
+    if not zellij_available:
+        monkeypatch.setattr(workdash_module.launcher.shutil, "which", lambda command: None)
+
+    assert workdash_module.main(["--session", "project"] if zellij_available else []) == 1
+
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert captured.err == (
+        f"Error: Cannot inspect configuration at {workdash_module.CONFIG_PATH}: Permission denied\n"
+    )
+    assert sessions.call_count == int(zellij_available)
+    execvp.assert_not_called()
+    wizard.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "address_state", ["different-session", "indeterminate", "version-mismatch"]
+)
+def test_main_refuses_to_start_at_an_unusable_dashboard_address(
+    monkeypatch, capsys, startup_zellij, address_state
+):
+    _, execvp = startup_zellij
+    address = "127.0.0.1:9999"
+    if address_state == "different-session":
+        monkeypatch.setattr(control_module, "probe_dashboard_session", lambda address: "other")
+    else:
+        monkeypatch.setattr(control_module, "probe_dashboard_session", probe_dashboard_session)
+        if address_state == "indeterminate":
+            status, code, message = 404, "not_found", "No such endpoint."
+        else:
+            status, code, message = (
+                403,
+                "version_mismatch",
+                "Workdash client version differs from dashboard version; restart the dashboard.",
+            )
+
+        def urlopen(request, *, timeout):
+            assert request.full_url == f"http://{address}/api/v0/info"
+            body = json.dumps({"ok": False, "error": {"code": code, "message": message}})
+            raise HTTPError(request.full_url, status, message, {}, io.BytesIO(body.encode()))
+
+        monkeypatch.setattr(control_module.urllib.request, "urlopen", urlopen)
+
+    assert workdash_module.main(["--session", "project"]) == 1
+
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert address in captured.err
+    if address_state == "different-session":
+        assert "'other'" in captured.err
+    elif address_state == "indeterminate":
+        assert "Cannot tell whether a Workdash dashboard is running" in captured.err
+    else:
+        assert "version" in captured.err and "restart the dashboard" in captured.err
+        assert "Cannot tell" not in captured.err
+    execvp.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "location, local_session, served_session",
+    [
+        pytest.param("outside", "running", "other", id="other-dashboard-outside-zellij"),
+        pytest.param("inside", "running", "other", id="other-dashboard-inside-zellij"),
+        pytest.param("outside", "missing", "project", id="no-local-session"),
+        pytest.param("outside", "exited", "project", id="exited-local-session"),
+    ],
+)
+def test_main_runs_first_time_setup_when_it_cannot_attach(
+    monkeypatch, capsys, startup_zellij, location, local_session, served_session
+):
+    sessions, execvp = startup_zellij
+    config_path = workdash_module.CONFIG_PATH
+    config_path.unlink()
+    if location == "inside":
+        monkeypatch.setenv("ZELLIJ", "0")
+        monkeypatch.setenv("ZELLIJ_SESSION_NAME", "current")
+        monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
+    if local_session == "missing":
+        sessions.return_value = ""
+    elif local_session == "exited":
+        sessions.return_value = "project [Created now] (EXITED - attach to resurrect)\n"
+    probe = MagicMock(return_value=served_session)
+    monkeypatch.setattr(control_module, "probe_dashboard_session", probe)
+
+    def configure(*, github_client, create_only):
+        assert create_only
+        save_config(_VALID_CONFIG, config_path)
+
+    monkeypatch.setattr(workdash_module, "configure", configure)
+
+    assert workdash_module.main(["--session", "project"]) == 0
+
+    assert load_config(config_path) == _VALID_CONFIG
+    captured = capsys.readouterr()
+    assert "Run 'workdash' again to start the dashboard." in captured.out
+    assert not captured.err
+    if local_session == "running":
+        probe.assert_called_once_with("127.0.0.1:9999")
+    else:
+        probe.assert_not_called()
+    assert sessions.call_count == int(location == "outside")
+    execvp.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -2171,6 +2944,7 @@ def test_print_work_items_uses_review_label_for_review_requested_pr(
 
     output_line = capsys.readouterr().out.strip()
     assert output_line.startswith("REVIEW")
+    assert "owner/repo#REVIEW-9" in output_line
 
 
 @pytest.mark.parametrize(
@@ -2237,6 +3011,24 @@ def test_all_clients_accept_host_on_either_side(monkeypatch, args):
     )
 
 
+def test_main_show_config_json_reports_agents_and_default_server(monkeypatch, capsys):
+    monkeypatch.delenv("WORKDASH_HOST", raising=False)
+    config = replace(
+        _VALID_CONFIG,
+        agents={
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
+            "pi": AgentConfig(launch="pi"),
+        },
+    )
+    monkeypatch.setattr(workdash_module, "load_config", lambda: config)
+
+    assert workdash_module.main(["show-config", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "agents": {"analyze": ["codex"], "code": ["codex", "pi"]},
+        "server": {"host": "127.0.0.1", "port": 8765},
+    }
+
+
 def test_address_validation_and_host_only_default(monkeypatch, capsys):
     monkeypatch.delenv("WORKDASH_HOST", raising=False)
     assert control_module.server_address() == ("127.0.0.1", 8765)
@@ -2288,9 +3080,92 @@ def test_host_is_rejected_for_nonclient_commands(monkeypatch, capsys, args):
     assert "--host" in message and "client" in message
 
 
-def test_server_inside_zellij_requires_current_session_name(monkeypatch, capsys):
-    from unittest.mock import MagicMock
+def test_startup_serves_each_dashboard_with_its_own_state_and_session(monkeypatch):
+    with socket.socket() as first, socket.socket() as second:
+        first.bind(("127.0.0.1", 0))
+        second.bind(("127.0.0.1", 0))
+        addresses = [f"127.0.0.1:{sock.getsockname()[1]}" for sock in (first, second)]
+    names = ["workdash-one", "demo"]
+    items = [[replace(_issue(number=i), title=f"Issue {i}")] for i in (1, 2)]
+    markers = [compute_suggestion_markers(rows) for rows in items]
+    dashboards = []
 
+    class Dashboard:
+        def __init__(self, **kwargs):
+            dashboards.append(kwargs)
+
+        def run(self, *, mouse):
+            if len(dashboards) == 1:
+                with monkeypatch.context() as other:
+                    other.setenv("ZELLIJ_SESSION_NAME", names[1])
+                    other.setenv("WORKDASH_HOST", addresses[1])
+                    assert workdash_module.main([]) == 0
+                return
+
+            for index, (address, name, dashboard) in enumerate(zip(addresses, names, dashboards)):
+                session = dashboard["session"]
+                assert dashboard["work_items"] is session.work_items
+                assert dashboard["suggestion_markers"] is session.suggestion_markers
+                assert session.suggestion_markers == markers[index]
+                client = control_module.WorkdashControlClient(address)
+                assert client.request("info", {"panes": "none"})["session"] == name
+                assert [row["title"] for row in client.request("list")["items"]] == [
+                    items[index][0].title
+                ]
+
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", names[0])
+    monkeypatch.setenv("WORKDASH_HOST", addresses[0])
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    monkeypatch.setattr(
+        workdash_module.launcher.zellij, "list_workdash_sessions", lambda: [names[0]]
+    )
+    monkeypatch.setattr(
+        workdash_module.launcher.zellij,
+        "exec_zellij_wrapped_workdash",
+        lambda *args, **kwargs: pytest.fail("inside Zellij, do not wrap or attach"),
+    )
+    loads = iter(zip(items, markers))
+    backend = SimpleNamespace(load_items=lambda **kwargs: next(loads))
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", lambda **kwargs: backend)
+    monkeypatch.setattr(
+        workdash_module, "WorkdashControlServer", control_module.WorkdashControlServer
+    )
+    monkeypatch.setattr(workdash_module, "WorkdashApp", Dashboard)
+
+    assert workdash_module.main([]) == 0
+    assert len(dashboards) == 2
+
+
+def test_startup_reports_an_occupied_server_address_before_running_tui(monkeypatch, capsys):
+    def bind_occupied(host, port, app):
+        assert (host, port) == ("127.0.0.1", 18765)
+        raise OSError(errno.EADDRINUSE, os.strerror(errno.EADDRINUSE))
+
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-test")
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:18765")
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
+    monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
+    backend = SimpleNamespace(load_items=lambda **kwargs: ([], {}))
+    monkeypatch.setattr(workdash_module, "WorkdashBackend", lambda **kwargs: backend)
+    app = MagicMock()
+    monkeypatch.setattr(workdash_module, "WorkdashApp", app)
+    monkeypatch.setattr(
+        workdash_module, "WorkdashControlServer", control_module.WorkdashControlServer
+    )
+    monkeypatch.setattr(control_module, "make_server", bind_occupied)
+
+    assert workdash_module.main([]) != 0
+    error = capsys.readouterr().err
+    assert "Cannot bind Workdash server at 127.0.0.1:18765" in error
+    assert os.strerror(errno.EADDRINUSE) in error
+    assert "WORKDASH_HOST" in error
+    app.return_value.run.assert_not_called()
+
+
+def test_server_inside_zellij_requires_current_session_name(monkeypatch, capsys):
     backend = MagicMock()
     backend.load_items.return_value = ([], {})
     monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
@@ -2621,19 +3496,24 @@ def test_the_dashboard_record_makes_the_next_start_attach(monkeypatch, capsys) -
     assert DashboardRecords().load("project") is None
 
 
-def test_main_inside_zellij_leaves_a_running_dashboard_alone(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(github_client_module.shutil, "which", lambda cmd: "/usr/bin/gh")
-    _auth_status_succeeds(monkeypatch)
+@pytest.mark.parametrize("config_missing", [False, True], ids=["configured", "config-moved-aside"])
+def test_main_inside_zellij_leaves_a_running_dashboard_alone(
+    monkeypatch, capsys, config_missing
+) -> None:
+    config_path = workdash_module.CONFIG_PATH
+    if config_missing:
+        config_path.unlink()
+    auth = MagicMock(return_value=None)
+    wizard = MagicMock()
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", auth)
+    monkeypatch.setattr(workdash_module, "configure", wizard)
     monkeypatch.setattr(workdash_module, "load_config", lambda: _VALID_CONFIG)
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "project")
     monkeypatch.setenv("ZELLIJ_PANE_ID", "3")
-
-    def dashboard_is_running(session):
-        assert session == "project"
-        return True
-
-    monkeypatch.setattr(workdash_module.launcher, "dashboard_is_running", dashboard_is_running)
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:9999")
+    probe = MagicMock(return_value="project")
+    monkeypatch.setattr(control_module, "probe_dashboard_session", probe)
     monkeypatch.setattr(
         workdash_module.launcher.zellij,
         "name_dashboard_pane",
@@ -2643,8 +3523,19 @@ def test_main_inside_zellij_leaves_a_running_dashboard_alone(monkeypatch, capsys
         workdash_module, "WorkdashApp", lambda **kwargs: pytest.fail("the dashboard must not start")
     )
 
-    assert workdash_module.main([]) == 0
+    monkeypatch.setattr(
+        workdash_module.launcher.zellij,
+        "exec_zellij_wrapped_workdash",
+        lambda *args, **kwargs: pytest.fail("inside Zellij, do not wrap or attach"),
+    )
+
+    assert workdash_module.main(["--refresh"]) == 0
     assert "options are ignored" in capsys.readouterr().out
+    probe.assert_called_once_with("127.0.0.1:9999")
+    wizard.assert_not_called()
+    if config_missing:
+        auth.assert_not_called()
+        assert not config_path.exists()
 
 
 def test_todo_close_json_uses_server(monkeypatch, capsys):

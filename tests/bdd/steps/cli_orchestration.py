@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import json
 import subprocess
 from contextlib import nullcontext
 from pathlib import Path
@@ -17,23 +15,16 @@ import workdash.github_client as github_client_module
 from gh_work_state_fake import failure, install_fake_github
 from workdash.backend import compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
-from workdash.control import WorkdashControlError
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
-from workdash.repo_worktree import worktree_path
 
-from .common import NOW_UTC, install_zellij_agent_fakes, make_work_item, set_session_items
+from .common import NOW_UTC, ensure_api_session, install_zellij_agent_fakes, make_work_item
 
 
-def _cli_config(
-    workdir: str,
-    *,
-    codex_analyze: str = "codex exec",
-    codex_launch: str = "codex",
-) -> WorkdashConfig:
+def _cli_config(workdir: str) -> WorkdashConfig:
     return WorkdashConfig(
         github_username="testuser",
         agents={
-            "codex": AgentConfig(analyze=codex_analyze, launch=codex_launch),
+            "codex": AgentConfig(analyze="codex exec", launch="codex"),
             "claude": AgentConfig(analyze="claude -p", launch="claude"),
             "pi": AgentConfig(launch="pi"),
         },
@@ -55,22 +46,7 @@ def _run_workdash(
     import workdash.workdash as workdash_module
 
     workdir = scenario_state.get("workdir", "/tmp/workdash-bdd")
-    if scenario_state.get("only_codex_analyze_configured"):
-        config = WorkdashConfig(
-            github_username="testuser",
-            agents={
-                "codex": AgentConfig(analyze=scenario_state.get("codex_analyze", "codex exec")),
-            },
-            repositories=("owner/repo",),
-            workdir=workdir,
-            todo_repository="testuser/todos",
-        )
-    else:
-        config = _cli_config(
-            workdir,
-            codex_analyze=scenario_state.get("codex_analyze", "codex exec"),
-            codex_launch=scenario_state.get("codex_launch", "codex"),
-        )
+    config = _cli_config(workdir)
     items = list(scenario_state.get("work_items", []))
     markers = compute_suggestion_markers(items)
     real_backend_class = workdash_module.WorkdashBackend
@@ -100,9 +76,7 @@ def _run_workdash(
                 raise AssertionError("scenario must set analysis_path from tmp_path")
             analysis_path = Path(scenario_state["analysis_path"])
             analysis_path.parent.mkdir(parents=True, exist_ok=True)
-            analysis_path.write_text(
-                scenario_state.get("analysis_content", "analysis body\n"), encoding="utf-8"
-            )
+            analysis_path.write_text("analysis body\n", encoding="utf-8")
             return str(analysis_path)
 
     github_run = subprocess.run
@@ -137,25 +111,19 @@ def _run_workdash(
         class FakeControlClient:
             def __init__(self, host="127.0.0.1") -> None:
                 assert host == (argv[argv.index("--host") + 1] if "--host" in argv else "127.0.0.1")
-                scenario_state["client_host"] = host
 
             def request(
                 self, endpoint: str, payload: dict[str, object] | None = None
             ) -> dict[str, object]:
                 payload = payload or {}
-                scenario_state.setdefault("control_requests", []).append(
-                    {"endpoint": endpoint, "payload": dict(payload)}
-                )
                 if endpoint == "info":
                     return scenario_state["api_session"].info(panes=payload.get("panes", "work"))
                 if endpoint == "analyze":
-                    result = scenario_state["api_session"].analyze(
+                    return scenario_state["api_session"].analyze(
                         target=payload["target"],
                         agent=payload.get("agent"),
                         group=payload.get("group"),
                     )
-                    scenario_state["last_control_result"] = result
-                    return result
                 if endpoint == "code":
                     return scenario_state["api_session"].code(
                         target=payload["target"],
@@ -164,13 +132,6 @@ def _run_workdash(
                         group=payload.get("group"),
                         autoclose=payload.get("autoclose", False),
                     )
-                if endpoint == "review":
-                    return {
-                        "status": "started",
-                        "item_id": payload["target"],
-                        "agent": payload.get("agent") or "codex",
-                        "document_path": "/tmp/review.md",
-                    }
                 if endpoint == "dispatch":
                     return scenario_state["api_session"].dispatch_once(
                         scope=payload["scope"],
@@ -182,21 +143,11 @@ def _run_workdash(
                         target=payload["target"],
                     )
                 if endpoint == "ready":
-                    try:
-                        return scenario_state["api_session"].ready(scope=payload["scope"])
-                    except WorkdashControlError as error:
-                        scenario_state["control_error_code"] = error.code
-                        raise
+                    return scenario_state["api_session"].ready(scope=payload["scope"])
                 if endpoint == "pane/content":
                     return scenario_state["api_session"].pane_content(
                         pane_id=payload["pane_id"],
                         full=bool(payload.get("full", False)),
-                    )
-                if endpoint == "pane/send":
-                    return scenario_state["api_session"].pane_send(
-                        pane_id=payload["pane_id"],
-                        data=payload["data"],
-                        raw=bool(payload.get("raw", False)),
                     )
                 if endpoint == "pane/close":
                     return scenario_state["api_session"].pane_close(
@@ -234,37 +185,21 @@ def _run_workdash(
                 )
             ),
         )
-        monkeypatch.setattr(
-            control_module.launcher.zellij,
-            "dump_zellij_pane",
-            lambda session, pane_id, *, full=False: (
-                scenario_state.setdefault("pane_content_calls", []).append((session, pane_id, full))
-                or scenario_state.get("pane_content", "pane text\n")
-            ),
-        )
+        if "pane_content" in scenario_state:
 
-        def fake_send_zellij_pane_input(session, pane_id, data, *, raw=False):
-            scenario_state.setdefault("pane_send_calls", []).append((session, pane_id, data, raw))
+            def dump_pane(_session, pane_id, *, full=False):
+                return scenario_state["pane_content"][pane_id]
 
-        def fake_close_zellij_pane(session, pane_id):
-            scenario_state.setdefault("pane_close_calls", []).append((session, pane_id))
+            monkeypatch.setattr(control_module.launcher.zellij, "dump_zellij_pane", dump_pane)
 
-        monkeypatch.setattr(
-            control_module.launcher.zellij, "send_zellij_pane_input", fake_send_zellij_pane_input
-        )
-        monkeypatch.setattr(
-            control_module.launcher.zellij, "close_zellij_pane", fake_close_zellij_pane
-        )
+        def close_pane(_session, pane_id):
+            panes = scenario_state["panes"]
+            panes.remove(next(pane for pane in panes if f"terminal_{pane['id']}" == pane_id))
+
+        monkeypatch.setattr(control_module.launcher.zellij, "close_zellij_pane", close_pane)
 
     monkeypatch.setattr(github_client_module.subprocess, "run", fake_run)
-    if scenario_state.get("client_missing_tools"):
-        monkeypatch.setattr(
-            workdash_module.GitHubClient,
-            "check_authentication",
-            lambda self: (_ for _ in ()).throw(AssertionError("unexpected GitHub preflight")),
-        )
-    else:
-        monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: config)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(
@@ -315,9 +250,9 @@ def _run_workdash(
         if real_worktree
         else lambda workdir, item, **_kwargs: (
             scenario_state.setdefault("ensure_calls", []).append((workdir, item))
-            or scenario_state.get("pr_worktrees", {}).get(
-                item.number, (str(Path(workdir) / "owner_repo_1"),)
-            )[0]
+            or scenario_state.get("pr_worktree_paths", {}).get(
+                item.number, str(Path(workdir) / "owner_repo_1")
+            )
         ),
     )
     monkeypatch.setattr(
@@ -336,26 +271,6 @@ def _run_workdash(
     scenario_state["stdout"] = captured.out
     scenario_state["stderr"] = captured.err
     scenario_state["output"] = captured.out + captured.err
-
-
-def _seed_info_item(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> tuple[WorkItem, str]:
-    scenario_state.setdefault("workdir", str(tmp_path / "wrk"))
-    item = make_work_item(
-        item_type=WorkItemType.ISSUE,
-        kind=WorkItemKind.ASSIGNED_ISSUE,
-        number=1,
-        title="Fix the issue",
-        created_at=NOW_UTC,
-        updated_at=NOW_UTC,
-    )
-    work_items[:] = [item]
-    scenario_state["work_items"] = list(work_items)
-    path = worktree_path(scenario_state["workdir"], item.repo, item.number)
-    path.mkdir(parents=True, exist_ok=True)
-    scenario_state.setdefault("git_origins", {})[str(path)] = item.repo
-    return item, str(path)
 
 
 @given("exactly one active Workdash-owned Zellij session exists")
@@ -378,214 +293,34 @@ def _a_workdash_session(scenario_state: dict[str, Any]) -> None:
     scenario_state["sessions"] = ["workdash-main"]
 
 
-@given("that session has a `code_owner_repo_1` pane in a known worktree")
-def _session_has_agent_pane(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    _item, cwd = _seed_info_item(scenario_state, work_items, tmp_path)
+@given("that session has an agent and a terminal for `owner/repo#ISSUE-1`")
+def _session_has_work_panes(scenario_state: dict[str, Any], tmp_path: Path) -> None:
+    cwd = str(tmp_path / "wrk" / "owner_repo_1")
     scenario_state["known_worktree_path"] = cwd
-    scenario_state.setdefault("panes", []).append(
-        {
-            "id": 1,
-            "title": "code_owner_repo_1",
-            "pane_cwd": cwd,
-            "pane_command": "pi",
-            "tab_id": 7,
-            "tab_name": "work",
-            "state": "Running",
-            "exited": False,
-        }
-    )
+    scenario_state["panes"] = [
+        {"id": 1, "title": "code_owner_repo_1", "pane_cwd": cwd, "pane_command": "pi"},
+        {"id": 2, "title": "terminal_owner_repo_1", "pane_cwd": cwd, "pane_command": "bash"},
+    ]
 
 
-@given(
-    "that session has an agent pane in the worktree of the issue an authored pull request closes"
-)
-def _session_has_agent_pane_in_the_linked_issue_worktree(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    # No `known_worktree_path`: the real worktree lookup must recognize the
-    # issue-numbered directory as the pull request's checkout.
-    scenario_state["workdir"] = str(tmp_path / "wrk")
-    item = make_work_item(
-        item_type=WorkItemType.PR,
-        kind=WorkItemKind.AUTHORED_PR,
-        number=42149,
-        title="Implement the issue",
-        created_at=NOW_UTC,
-        updated_at=NOW_UTC,
-    )
-    item.closing_issue_numbers = (41830,)
-    work_items[:] = [item]
-    set_session_items(scenario_state, work_items)
-    cwd = worktree_path(scenario_state["workdir"], item.repo, 41830)
-    cwd.mkdir(parents=True, exist_ok=True)
-    scenario_state.setdefault("git_origins", {})[str(cwd)] = item.repo
-    scenario_state.setdefault("panes", []).append(
-        {
-            "id": 1,
-            "title": "code_owner_repo_41830",
-            "pane_cwd": str(cwd),
-            "pane_command": "pi",
-            "tab_id": 7,
-            "tab_name": "work",
-            "state": "Running",
-            "exited": False,
-        }
-    )
-
-
-@given("that session has a `terminal_owner_repo_1` pane in the same known worktree")
-def _session_has_terminal_pane(scenario_state: dict[str, Any]) -> None:
-    cwd = scenario_state["panes"][0]["pane_cwd"]
+@given("the user has an ordinary shell in the `scratch` tab")
+def _session_has_ordinary_shell(scenario_state: dict[str, Any]) -> None:
     scenario_state["panes"].append(
-        {
-            "id": 2,
-            "title": "terminal_owner_repo_1",
-            "pane_cwd": cwd,
-            "terminal_command": "bash",
-            "tab_id": 7,
-            "tab_name": "work",
-            "state": "Running",
-            "exited": False,
-        }
+        {"id": 11, "title": "shell", "tab_name": "scratch", "pane_command": "bash"}
     )
 
 
-@given("that session has Workdash terminal-backed panes")
-def _session_has_terminal_backed_panes(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    _item, cwd = _seed_info_item(scenario_state, work_items, tmp_path)
-    scenario_state["known_worktree_path"] = cwd
+@given('a work terminal `terminal_23` displays "Local checks finished."')
+def _work_terminal_has_output(scenario_state: dict[str, Any]) -> None:
+    scenario_state["panes"] = [{"id": 23, "title": "terminal_owner_repo_1"}]
+    scenario_state["pane_content"] = {"terminal_23": "Local checks finished.\n"}
+
+
+@given("work terminals `terminal_26` and `terminal_27` are open")
+def _work_terminals_are_open(scenario_state: dict[str, Any]) -> None:
     scenario_state["panes"] = [
-        {
-            "id": 3,
-            "title": "code_owner_repo_1",
-            "pane_cwd": cwd,
-            "pane_command": "codex",
-            "tab_id": 8,
-            "tab_name": "agents",
-        },
-        {
-            "id": 4,
-            "title": "terminal_owner_repo_1",
-            "pane_cwd": cwd,
-            "terminal_command": "bash",
-            "tab_id": 8,
-            "tab_name": "agents",
-        },
-    ]
-
-
-@given("that session has ordinary live, exited, held, and plugin panes")
-def _session_has_ordinary_live_exited_held_and_plugin_panes(
-    scenario_state: dict[str, Any],
-) -> None:
-    cwd = scenario_state["panes"][0]["pane_cwd"]
-    scenario_state["panes"].extend(
-        [
-            {
-                "id": 11,
-                "title": "shell",
-                "pane_cwd": cwd,
-                "pane_command": "bash",
-                "tab_id": 11,
-                "tab_name": "scratch",
-                "state": "Running",
-                "exited": False,
-                "is_plugin": False,
-            },
-            {
-                "id": 12,
-                "title": "old-shell",
-                "pane_cwd": cwd,
-                "state": "Exited",
-                "exited": True,
-            },
-            {
-                "id": 13,
-                "title": "held-shell",
-                "pane_cwd": cwd,
-                "state": "Exited",
-                "exited": False,
-                "is_held": True,
-            },
-            {
-                "id": 14,
-                "title": "status",
-                "pane_cwd": cwd,
-                "is_plugin": True,
-            },
-        ]
-    )
-
-
-@given("that session has an agent pane in a known worktree with an unmatched launch title")
-def _session_has_unmapped_pane(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    _, cwd = _seed_info_item(scenario_state, work_items, tmp_path)
-    scenario_state["panes"] = [
-        {
-            "id": 5,
-            "title": "code_unknown",
-            "pane_cwd": cwd,
-            "pane_command": "pi",
-            "tab_id": 9,
-            "tab_name": "scratch",
-            "state": "Running",
-        }
-    ]
-
-
-@given("that session has live, exited, and held Workdash terminal-backed panes")
-def _session_has_live_exited_and_held_panes(
-    scenario_state: dict[str, Any], work_items: list[WorkItem], tmp_path: Path
-) -> None:
-    _item, cwd = _seed_info_item(scenario_state, work_items, tmp_path)
-    scenario_state["panes"] = [
-        {
-            "id": 6,
-            "title": "code_owner_repo_1",
-            "pane_cwd": cwd,
-            "pane_command": "codex",
-            "tab_id": 10,
-            "tab_name": "agents",
-            "state": "Running",
-            "exited": False,
-        },
-        {
-            "id": 7,
-            "title": "code_owner_repo_2",
-            "pane_cwd": cwd,
-            "pane_command": "codex",
-            "tab_id": 10,
-            "tab_name": "agents",
-            "state": "Exited",
-            "exited": True,
-        },
-        {
-            "id": 8,
-            "title": "terminal_owner_repo_3",
-            "pane_cwd": cwd,
-            "terminal_command": "bash",
-            "tab_id": 10,
-            "tab_name": "agents",
-            "state": "Exited",
-            "exited": True,
-        },
-        {
-            "id": 9,
-            "title": "terminal_owner_repo_4",
-            "pane_cwd": cwd,
-            "terminal_command": "bash",
-            "tab_id": 10,
-            "tab_name": "agents",
-            "state": "Exited",
-            "exited": False,
-            "is_held": True,
-        },
+        {"id": 26, "title": "terminal_owner_repo_1"},
+        {"id": 27, "title": "terminal_owner_repo_2"},
     ]
 
 
@@ -614,16 +349,6 @@ def _current_items_include_assigned_issue(
     _current_items_include_uncached_issue(scenario_state, work_items, tmp_path)
 
 
-@given("only the Codex analyze command is configured")
-def _only_codex_analyze_command_is_configured(scenario_state: dict[str, Any]) -> None:
-    scenario_state["only_codex_analyze_configured"] = True
-
-
-@given("the generated analysis content is returned by the server")
-def _generated_analysis_content_is_returned_by_server(scenario_state: dict[str, Any]) -> None:
-    scenario_state["analysis_content"] = "analysis body\n"
-
-
 @when("the user runs `workdash info`")
 def _run_info(
     scenario_state: dict[str, Any],
@@ -633,55 +358,36 @@ def _run_info(
     _run_workdash(["info"], scenario_state, monkeypatch, capsys)
 
 
-@when("the user runs `workdash info --json`")
-def _run_info_json(
+@when("the user runs `workdash info --all`")
+def _run_info_all(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _run_workdash(["info", "--json"], scenario_state, monkeypatch, capsys)
+    _run_workdash(["info", "--all"], scenario_state, monkeypatch, capsys)
 
 
-@when("the user runs `workdash --json info`")
-def _run_top_level_json_info(
+@when("the user starts `workdash` and retries `workdash info`")
+def _retry_info_after_startup(
     scenario_state: dict[str, Any],
+    work_items: list[WorkItem],
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _run_workdash(["--json", "info"], scenario_state, monkeypatch, capsys)
+    # Model the dashboard becoming available; startup itself has its own journeys.
+    ensure_api_session(scenario_state, work_items, tmp_path)
+    _run_workdash(["info"], scenario_state, monkeypatch, capsys)
 
 
-@when("the user runs `workdash info --all --json`")
-def _run_info_all_json(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_workdash(["info", "--all", "--json"], scenario_state, monkeypatch, capsys)
-
-
-@when("the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`")
-def _run_analyze_json(
+@when("the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex`")
+def _run_analyze(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _run_workdash(
-        ["analyze", "owner/repo#ISSUE-1", "--agent", "codex", "--json"],
-        scenario_state,
-        monkeypatch,
-        capsys,
-    )
-
-
-@when("the user runs `workdash code owner/repo#ISSUE-1 --agent codex --json`")
-def _run_code_json(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_workdash(
-        ["code", "owner/repo#ISSUE-1", "--agent", "codex", "--json"],
+        ["analyze", "owner/repo#ISSUE-1", "--agent", "codex"],
         scenario_state,
         monkeypatch,
         capsys,
@@ -702,86 +408,19 @@ def _run_analyze_unknown_issue_json(
     )
 
 
-@when("the user runs `workdash code owner/repo#ISSUE-1 --agent vscode --json`")
-def _run_code_vscode_json(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_workdash(
-        ["code", "owner/repo#ISSUE-1", "--agent", "vscode", "--json"],
-        scenario_state,
-        monkeypatch,
-        capsys,
-    )
-
-
-@when(parsers.parse("the user runs `workdash {action:w} owner/repo#ISSUE-1 --agent {agent:w}`"))
+@when(parsers.parse("the user runs `workdash {action:w} {target} --agent {agent:w}`"))
 def _run_action_with_agent(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     action: str,
+    target: str,
     agent: str,
 ) -> None:
+    if action == "code" and scenario_state.get("github_lookup_installed"):
+        scenario_state["real_launch_context"] = True
     _run_workdash(
-        [action, "owner/repo#ISSUE-1", "--agent", agent],
-        scenario_state,
-        monkeypatch,
-        capsys,
-    )
-
-
-@when("the user runs `workdash analyze owner/repo#ISSUE-1 --group epic --json`")
-def _run_analyze_group_json(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_workdash(
-        ["analyze", "owner/repo#ISSUE-1", "--group", "epic", "--json"],
-        scenario_state,
-        monkeypatch,
-        capsys,
-    )
-
-
-@when("the user runs `workdash review owner/repo#PR-2 --group epic --json`")
-def _run_review_group_json(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_workdash(
-        ["review", "owner/repo#PR-2", "--group", "epic", "--json"],
-        scenario_state,
-        monkeypatch,
-        capsys,
-    )
-
-
-@then(parsers.parse("the command asks the server to analyze in tab `{group}`"))
-def _analyze_in_tab(group: str, scenario_state: dict[str, Any]) -> None:
-    request = scenario_state["control_requests"][-1]
-    assert request["endpoint"] == "analyze"
-    assert request["payload"]["group"] == group
-
-
-@then(parsers.parse("the command asks the server to review in tab `{group}`"))
-def _review_in_tab(group: str, scenario_state: dict[str, Any]) -> None:
-    request = scenario_state["control_requests"][-1]
-    assert request["endpoint"] == "review"
-    assert request["payload"]["group"] == group
-
-
-@when("the user runs `workdash terminal owner/repo#ISSUE-1 --json`")
-def _run_terminal_json(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_workdash(
-        ["terminal", "owner/repo#ISSUE-1", "--json"],
+        [action, target, "--agent", agent],
         scenario_state,
         monkeypatch,
         capsys,
@@ -802,20 +441,6 @@ def _run_terminal(
     )
 
 
-@when("the user runs `workdash terminal owner/repo#ISSUE-99 --json`")
-def _run_terminal_unknown_json(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_workdash(
-        ["terminal", "owner/repo#ISSUE-99", "--json"],
-        scenario_state,
-        monkeypatch,
-        capsys,
-    )
-
-
 @when("the user runs `workdash read terminal_23`")
 def _run_read(
     scenario_state: dict[str, Any],
@@ -823,38 +448,6 @@ def _run_read(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _run_workdash(["read", "terminal_23"], scenario_state, monkeypatch, capsys)
-
-
-@when("the user runs `workdash read terminal_23 --full --json`")
-def _run_read_full_json(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_workdash(["read", "terminal_23", "--full", "--json"], scenario_state, monkeypatch, capsys)
-
-
-@when('the user runs `workdash write terminal_23 "continue"`')
-def _run_write(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_workdash(["write", "terminal_23", "continue"], scenario_state, monkeypatch, capsys)
-
-
-@when('the user runs `workdash write terminal_23 "continue" --raw --json`')
-def _run_write_raw_json(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_workdash(
-        ["write", "terminal_23", "continue", "--raw", "--json"],
-        scenario_state,
-        monkeypatch,
-        capsys,
-    )
 
 
 @when("the user runs `workdash close terminal_26`")
@@ -866,13 +459,20 @@ def _run_close(
     _run_workdash(["close", "terminal_26"], scenario_state, monkeypatch, capsys)
 
 
-@when("the user runs `workdash close terminal_26 --json`")
-def _run_close_json(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_workdash(["close", "terminal_26", "--json"], scenario_state, monkeypatch, capsys)
+@then(
+    "the listing identifies `terminal_1` as the agent and `terminal_2` as the terminal "
+    "for `owner/repo#ISSUE-1`"
+)
+def _listing_identifies_work_panes(scenario_state: dict[str, Any]) -> None:
+    lines = scenario_state["stdout"].splitlines()
+    assert any(
+        line.split()[:2] == ["agent", "terminal_1"] and "item=owner/repo#ISSUE-1" in line
+        for line in lines
+    )
+    assert any(
+        line.split()[:2] == ["terminal", "terminal_2"] and "item=owner/repo#ISSUE-1" in line
+        for line in lines
+    )
 
 
 @given("authored pull request `owner/repo#50` has a branch but no linked issue")
@@ -952,27 +552,32 @@ def _old_checkout_left_untouched(scenario_state):
     )
 
 
-@when("the user runs an orchestration command")
-@when("the user runs a server-backed orchestration command")
-def _run_orchestration_command(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_workdash(["info"], scenario_state, monkeypatch, capsys)
+@then("the command tells the user to start it with `workdash`")
+def _info_guides_startup(scenario_state: dict[str, Any]) -> None:
+    assert "Start one with `workdash`." in scenario_state["stderr"]
 
 
-@then("the command requests pane information from the local Workdash server")
-def _requests_pane_information(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("control_requests") == [
-        {"endpoint": "info", "payload": {"panes": "work"}}
-    ]
+@then("the listing identifies the shell in `scratch` as `terminal_11`")
+def _listing_identifies_shell(scenario_state: dict[str, Any]) -> None:
+    assert any(
+        "terminal_11 shell " in line and "tab=scratch" in line
+        for line in scenario_state["stdout"].splitlines()
+    )
 
 
-@then("the command requests analysis from the local Workdash server")
-def _requests_analysis(scenario_state: dict[str, Any]) -> None:
-    control_requests = scenario_state.get("control_requests", [])
-    assert any(req["endpoint"] == "analyze" for req in control_requests)
+@then(parsers.parse("the listing shows `{pane_id}`"))
+def _listing_shows_pane(pane_id: str, scenario_state: dict[str, Any]) -> None:
+    assert pane_id in scenario_state["stdout"].split()
+
+
+@then(parsers.parse("the listing does not show `{pane_id}`"))
+def _listing_does_not_show_pane(pane_id: str, scenario_state: dict[str, Any]) -> None:
+    assert pane_id not in scenario_state["stdout"].split()
+
+
+@then('the command displays "Local checks finished."')
+def _displays_local_check_output(scenario_state: dict[str, Any]) -> None:
+    assert "Local checks finished." in scenario_state["stdout"]
 
 
 @then("the system reports the Workdash session name")
@@ -981,66 +586,10 @@ def _reports_session_name(scenario_state: dict[str, Any]) -> None:
     assert "Session: workdash-main" in scenario_state["stdout"]
 
 
-@then(
-    "the system reports the agent pane with its Zellij pane identifier, title, cwd, command, "
-    "tab, and state"
-)
-def _reports_agent_pane(scenario_state: dict[str, Any]) -> None:
-    output = scenario_state["stdout"]
-    assert "agent" in output
-    assert "terminal_1" in output
-    assert "code_owner_repo_1" in output
-    assert f"cwd={scenario_state['panes'][0]['pane_cwd']}" in output
-    assert "command=pi" in output
-    assert "tab=work" in output
-    assert "state=Running" in output
-
-
-@then(
-    "the system reports the terminal pane with its Zellij pane identifier, title, cwd, command, "
-    "tab, and state"
-)
-def _reports_terminal_pane(scenario_state: dict[str, Any]) -> None:
-    output = scenario_state["stdout"]
-    assert "terminal" in output
-    assert "terminal_2" in output
-    assert "terminal_owner_repo_1" in output
-    assert f"cwd={scenario_state['panes'][1]['pane_cwd']}" in output
-    assert "command=bash" in output
-    assert "tab=work" in output
-    assert "state=Running" in output
-
-
-@then("the pane is mapped to that authored pull request")
-def _pane_mapped_to_authored_pull_request(scenario_state: dict[str, Any]) -> None:
-    assert "item=owner/repo#PR-42149" in scenario_state["stdout"], scenario_state["stdout"]
-
-
-@then("both panes are mapped to the matching Workdash item")
-def _both_panes_mapped(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["stdout"].count("item=owner/repo#ISSUE-1") == 2
-
-
 @then("the system does not choose a session")
 def _does_not_choose_session(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["exit_code"] != 0
     assert "Session:" not in scenario_state["stdout"]
-
-
-@then("the command reports that `workdash` must be running")
-def _reports_server_required(scenario_state: dict[str, Any]) -> None:
-    assert "No Workdash server is reachable" in scenario_state["stderr"]
-    assert "workdash" in scenario_state["stderr"]
-
-
-@then("the command exits with a non-zero status")
-def _exits_non_zero(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["exit_code"] != 0
-
-
-@then("the system reports that the work item is unknown")
-def _reports_unknown_item(scenario_state: dict[str, Any]) -> None:
-    assert "No accessible GitHub issue or pull request matches" in scenario_state["stderr"]
 
 
 @then("the system lists the candidate Workdash-owned sessions")
@@ -1055,111 +604,12 @@ def _asks_for_session(scenario_state: dict[str, Any]) -> None:
     assert "--session" in scenario_state["output"]
 
 
-@then("the system returns JSON pane records")
-def _returns_json_panes(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["exit_code"] == 0, scenario_state
-    payload = json.loads(scenario_state["stdout"])
-    scenario_state["json_payload"] = payload
-    assert payload["session"] == "workdash-main"
-    assert isinstance(payload.get("panes"), list)
-    assert payload["panes"]
-
-
-@then(
-    "each record includes the session, tab, pane identifier, title, cwd, command, pane kind, "
-    "state, and mapped item when known"
-)
-def _json_panes_have_contract(scenario_state: dict[str, Any]) -> None:
-    required = {
-        "session",
-        "tab_id",
-        "tab_name",
-        "pane_id",
-        "title",
-        "cwd",
-        "command",
-        "kind",
-        "state",
-        "item",
-    }
-    for record in scenario_state["json_payload"]["panes"]:
-        assert required <= set(record), record
-        assert record["state"] == "running"
-        assert record["item"] == "owner/repo#ISSUE-1"
-
-
-@then("the system reports the raw pane information")
-def _reports_raw_pane_information(scenario_state: dict[str, Any]) -> None:
-    payload = json.loads(scenario_state["stdout"])
-    scenario_state["json_payload"] = payload
-    pane = payload["panes"][0]
-    assert pane["pane_id"] == "terminal_5"
-    assert pane["title"] == "code_unknown"
-    assert pane["cwd"] == scenario_state["panes"][0]["pane_cwd"]
-    assert pane["command"] == "pi"
-    assert pane["state"] == "Running"
-
-
-@then("the pane item mapping is marked unknown")
-def _pane_mapping_unknown(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["json_payload"]["panes"][0]["item"] == "unknown"
-
-
-@then("the system does not report exited or held panes")
-def _does_not_report_exited_or_held_panes(scenario_state: dict[str, Any]) -> None:
-    payload = scenario_state["json_payload"]
-    assert [pane["title"] for pane in payload["panes"]] == ["code_owner_repo_1"]
-
-
-@then("the system reports the ordinary live pane as unknown kind with raw pane information")
-def _reports_ordinary_live_pane_as_unknown(scenario_state: dict[str, Any]) -> None:
-    payload = scenario_state["json_payload"]
-    shell = next(pane for pane in payload["panes"] if pane["title"] == "shell")
-    assert shell["pane_id"] == "terminal_11"
-    assert shell["kind"] == "unknown"
-    assert shell["item"] == "unknown"
-    assert shell["cwd"] == scenario_state["panes"][0]["pane_cwd"]
-    assert shell["command"] == "bash"
-    assert shell["tab_name"] == "scratch"
-
-
-@then("the system does not report exited, held, or plugin panes")
-def _does_not_report_exited_held_or_plugin_panes(scenario_state: dict[str, Any]) -> None:
-    titles = [pane["title"] for pane in scenario_state["json_payload"]["panes"]]
-    assert "old-shell" not in titles
-    assert "held-shell" not in titles
-    assert "status" not in titles
-
-
 @then("the system analyzes the current item with the selected configured agent")
 def _analyzes_with_selected_agent(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["exit_code"] == 0, scenario_state
     item = scenario_state["work_items"][0]
     assert scenario_state["analyze_calls"] == [(item, "cached"), (item, "codex")]
     assert scenario_state["ensure_calls"] == [(scenario_state["workdir"], item)]
-
-
-@then("the server analysis response includes markdown content as base64 with a file name")
-def _server_analysis_response_includes_content(scenario_state: dict[str, Any]) -> None:
-    result = scenario_state["last_control_result"]
-    assert result["content_type"] == "text/markdown"
-    assert result["file_name"] == Path(scenario_state["analysis_path"]).name
-    assert base64.b64decode(result["file_content"]) == scenario_state.get(
-        "analysis_content", "analysis body\n"
-    ).encode("utf-8")
-    assert "content_encoding" not in result
-
-
-@then("the system returns JSON with the item ID, selected agent, analysis URL, and cache status")
-def _returns_analyze_json(scenario_state: dict[str, Any]) -> None:
-    payload = json.loads(scenario_state["stdout"])
-    assert payload == {
-        "item_id": "owner/repo#ISSUE-1",
-        "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
-        "agent": "codex",
-        "cache_used": False,
-        "status": "generated",
-    }
 
 
 @then("the system launches code for the current item with the selected configured agent")
@@ -1177,39 +627,24 @@ def _launches_code_with_selected_agent(scenario_state: dict[str, Any]) -> None:
     ]
 
 
-@then(
-    "the system returns JSON with status `launched`, the item ID, selected agent, selected "
-    "session, cwd, pane title, and pane ID"
-)
-def _returns_code_json(scenario_state: dict[str, Any]) -> None:
-    payload = json.loads(scenario_state["stdout"])
-    assert payload == {
-        "status": "launched",
-        "item_id": "owner/repo#ISSUE-1",
-        "session": "workdash-main",
-        "agent": "codex",
-        "cwd": str(Path(scenario_state["workdir"]) / "owner_repo_1"),
-        "pane_title": "code_owner_repo_1",
-        "pane_id": "terminal_23",
-        "tab_name": None,
-    }
+@then("the command shows the Markdown report link for `owner/repo#ISSUE-1` from `codex`")
+def _reports_markdown_link(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state["stderr"]
+    assert {
+        "Item: owner/repo#ISSUE-1",
+        "Agent: codex",
+        "Analysis URL: http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
+    } <= set(scenario_state["stdout"].splitlines())
 
 
-@then("the system returns JSON with the item ID, session, cwd, pane title, and pane ID")
-def _returns_terminal_json(scenario_state: dict[str, Any]) -> None:
-    payload = json.loads(scenario_state["stdout"])
-    assert payload == {
-        "item_id": "owner/repo#ISSUE-1",
-        "session": "workdash-main",
-        "cwd": str(Path(scenario_state["workdir"]) / "owner_repo_1"),
-        "pane_title": "terminal_owner_repo_1",
-        "pane_id": "terminal_23",
-    }
-
-
-@then(parsers.parse('the system reports "{message}"'))
-def _reports_error_message(scenario_state: dict[str, Any], message: str) -> None:
-    assert f"Error: {message}" in scenario_state["stderr"]
+@then("the command identifies the new shell's pane and checkout for `owner/repo#ISSUE-1`")
+def _identifies_shell_and_checkout(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state["stderr"]
+    assert {
+        "Item: owner/repo#ISSUE-1",
+        f"Cwd: {Path(scenario_state['workdir']) / 'owner_repo_1'}",
+        "Pane id: terminal_23",
+    } <= set(scenario_state["stdout"].splitlines())
 
 
 @then("the system reports that an active Workdash-owned Zellij session is required")
@@ -1218,302 +653,120 @@ def _reports_session_required(scenario_state: dict[str, Any]) -> None:
     assert "required" in scenario_state["output"]
 
 
-@given("`workdash show-config` reports only `codex` as an analysis agent")
-def _show_config_reports_only_codex_analyze(scenario_state: dict[str, Any]) -> None:
-    config = WorkdashConfig(
-        github_username="testuser",
-        agents={
-            "codex": AgentConfig(analyze="codex exec"),
-        },
-        repositories=("owner/repo",),
-        workdir=scenario_state.get("workdir", "/tmp/workdash-bdd"),
-        todo_repository="testuser/todos",
-    )
-    scenario_state["api_session"].config = config
-
-
-@given(
-    "the configured agents are `pi` with only a launch command "
-    "and `aider` with only an analyze command"
-)
-def _configured_agents_pi_launch_only_aider_analyze_only(scenario_state: dict[str, Any]) -> None:
-    scenario_state["api_session"].config = WorkdashConfig(
-        github_username="testuser",
-        agents={
-            "pi": AgentConfig(launch="pi"),
-            "aider": AgentConfig(analyze="aider --message"),
-        },
-        repositories=("owner/repo",),
-        workdir=scenario_state.get("workdir", "/tmp/workdash-bdd"),
-        todo_repository="testuser/todos",
-    )
-
-
 @given("the current Workdash items do not include `owner/repo#ISSUE-99`")
 def _current_items_do_not_include_issue_99(scenario_state: dict[str, Any]) -> None:
     assert all(item.number != 99 for item in scenario_state.get("work_items", []))
 
 
-@given("the client process cannot find GitHub CLI or Zellij on PATH")
-def _client_process_cannot_find_github_or_zellij(scenario_state: dict[str, Any]) -> None:
-    scenario_state["client_missing_tools"] = True
+@given("pull request #51 has an existing worktree on branch `pr-branch`")
+def _pr_worktree(scenario_state, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = subprocess.run
+    run(["git", "init", "-q", str(repo)], check=True)
+    run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+        check=True,
+    )
+    path = str(Path(scenario_state["api_session"].config.workdir) / "owner_repo_51")
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    run(["git", "-C", str(repo), "worktree", "add", "-qb", "pr-branch", path], check=True)
+    scenario_state["pr_worktrees"] = {51: (path, "pr-branch", "owner/repo")}
+    scenario_state["pr_worktree_paths"] = {51: path}
 
 
-@then(
-    "the command requests pane information from the local Workdash server with ordinary panes included"
-)
-def _requests_pane_information_with_ordinary_panes(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("control_requests") == [
-        {"endpoint": "info", "payload": {"panes": "all"}}
-    ]
-
-
-@then("the command requests code launch from the local Workdash server")
-def _requests_code_launch(scenario_state: dict[str, Any]) -> None:
-    control_requests = scenario_state.get("control_requests", [])
-    assert any(req["endpoint"] == "code" for req in control_requests)
-
-
-@when("the user runs `workdash code owner/repo#ISSUE-42 --agent pi --autoclose`")
-def _run_code_with_autoclose(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+@when(parsers.parse("the user runs `workdash code {target} --agent pi --autostart`"))
+def _start_autonomous_code(target, scenario_state, monkeypatch, capsys):
+    scenario_state["real_launch_context"] = True
     _run_workdash(
-        ["code", "owner/repo#ISSUE-42", "--agent", "pi", "--autoclose"],
-        scenario_state,
-        monkeypatch,
-        capsys,
+        ["code", target, "--agent", "pi", "--autostart"], scenario_state, monkeypatch, capsys
     )
 
 
-@when("the user runs `workdash code owner/repo#ISSUE-1 --autostart`")
-def _run_code_with_autostart_option(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_workdash(
-        ["code", "owner/repo#ISSUE-1", "--autostart"], scenario_state, monkeypatch, capsys
-    )
+@then(parsers.parse("the command reports that pi launched in a pane for `{item_id}`"))
+def _reports_launched_agent(item_id: str, scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0
+    lines = scenario_state["stdout"].splitlines()
+    assert {"Status: launched", f"Item: {item_id}", "Agent: pi"} <= set(lines)
+    assert any(line.startswith("Pane id: terminal_") for line in lines)
 
 
-@then("the command asks for neither autostart nor autoclose")
-def _asks_for_neither_autostart_nor_autoclose(scenario_state: dict[str, Any]) -> None:
-    [request] = scenario_state["control_requests"]
-    assert request["endpoint"] == "code"
-    assert "autostart" not in request["payload"]
-    assert "autoclose" not in request["payload"]
+@then("the command shows the existing pull request checkout as the pane's working directory")
+def _reports_pull_request_checkout(scenario_state: dict[str, Any]) -> None:
+    path, _branch, _repo = scenario_state["pr_worktrees"][51]
+    assert f"Cwd: {path}" in scenario_state["stdout"].splitlines()
 
 
-@then("the command asks for autostart without autoclose")
-def _asks_for_autostart_without_autoclose(scenario_state: dict[str, Any]) -> None:
-    [request] = scenario_state["control_requests"]
-    assert request["endpoint"] == "code"
-    assert request["payload"]["autostart"] is True
-    assert "autoclose" not in request["payload"]
+@then("the agent is asked to start implementing without routine confirmation")
+def _starts_implementation(scenario_state):
+    [(_, prompt, _, _)] = scenario_state["agent_launches"]
+    assert "start implementing without asking for routine confirmation" in " ".join(prompt.split())
 
 
-@then("the command asks the server to code with autostart and autoclose enabled")
-def _asks_server_to_code_with_autostart_and_autoclose(scenario_state: dict[str, Any]) -> None:
-    [request] = scenario_state["control_requests"]
-    assert request["endpoint"] == "code"
-    assert (request["payload"]["autostart"], request["payload"]["autoclose"]) == (True, True)
-
-
-@then("the command requests terminal launch from the local Workdash server")
-def _requests_terminal_launch(scenario_state: dict[str, Any]) -> None:
-    control_requests = scenario_state.get("control_requests", [])
-    assert any(req["endpoint"] == "terminal" for req in control_requests)
-
-
-@then("the command requests pane content from the local Workdash server")
-def _requests_pane_content(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("control_requests") == [
-        {"endpoint": "pane/content", "payload": {"pane_id": "terminal_23", "full": False}}
-    ]
-
-
-@then("the command requests full pane content from the local Workdash server")
-def _requests_full_pane_content(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("control_requests") == [
-        {"endpoint": "pane/content", "payload": {"pane_id": "terminal_23", "full": True}}
-    ]
-
-
-@then("the command sends pane input through the local Workdash server")
-def _sends_pane_input(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("control_requests") == [
-        {
-            "endpoint": "pane/send",
-            "payload": {"pane_id": "terminal_23", "data": "continue", "raw": False},
-        }
-    ]
-
-
-@then("the command sends raw pane input through the local Workdash server")
-def _sends_raw_pane_input(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("control_requests") == [
-        {
-            "endpoint": "pane/send",
-            "payload": {"pane_id": "terminal_23", "data": "continue", "raw": True},
-        }
-    ]
-
-
-@then("the system prints the pane text for direct agent use")
-def _prints_pane_text(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["stdout"] == scenario_state.get("pane_content", "pane text\n")
-
-
-@then("the system returns JSON with the pane ID, content, and full flag")
-def _returns_pane_content_json(scenario_state: dict[str, Any]) -> None:
-    assert json.loads(scenario_state["stdout"]) == {
-        "pane_id": "terminal_23",
-        "content": scenario_state.get("pane_content", "pane text\n"),
-        "full": True,
-    }
-
-
-@then("the system confirms that the pane input was accepted")
-def _confirms_pane_input_accepted(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["stdout"] == "Accepted input for terminal_23 (raw: no).\n"
-
-
-@then("the system returns JSON with the pane ID, raw flag, and accepted status")
-def _returns_pane_send_json(scenario_state: dict[str, Any]) -> None:
-    assert json.loads(scenario_state["stdout"]) == {
-        "pane_id": "terminal_23",
-        "raw": True,
-        "accepted": True,
-    }
-
-
-@then("the command requests pane close from the local Workdash server")
-def _requests_pane_close(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("control_requests") == [
-        {"endpoint": "pane/close", "payload": {"pane_id": "terminal_26"}}
-    ]
-
-
-@then("the system confirms that the pane close was accepted")
+@then("the command confirms that it accepted the close")
 def _confirms_pane_close_accepted(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["stdout"] == "Accepted close for terminal_26.\n"
 
 
-@then("the system returns JSON with the pane ID and accepted status")
-def _returns_pane_close_json(scenario_state: dict[str, Any]) -> None:
-    assert json.loads(scenario_state["stdout"]) == {
-        "pane_id": "terminal_26",
-        "accepted": True,
-    }
-
-
-@then(
-    "the system returns JSON with the item ID, selected agent, analysis URL, cache status, "
-    "and no server file or content fields"
-)
-def _returns_analyze_json_with_url(scenario_state: dict[str, Any]) -> None:
-    payload = json.loads(scenario_state["stdout"])
-    assert payload == {
-        "item_id": "owner/repo#ISSUE-1",
-        "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
-        "agent": "codex",
-        "cache_used": False,
-        "status": "generated",
-    }
-    assert "file_content" not in payload
-    assert "file_name" not in payload
-    assert "content_type" not in payload
-    assert "path" not in payload
-
-
-@then("the command still sends the request to the local Workdash server")
-def _still_sends_request_to_server(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("control_requests"), scenario_state
-
-
-@then("the command formats the server response")
-def _formats_server_response(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["exit_code"] == 0, scenario_state
-    assert "Session: workdash-main" in scenario_state["stdout"]
-
-
-@then("the system reports that the work item is unknown")
-def _reports_unknown_work_item(scenario_state: dict[str, Any]) -> None:
-    assert "No accessible GitHub issue or pull request matches" in scenario_state["stderr"]
-    assert "owner/repo#ISSUE-99" in scenario_state["stderr"]
-
-
-@then(parsers.parse("the command connects to host `{host}`"))
-def _command_connects_to_host(host: str, scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["client_host"] == host
-
-
-@when(parsers.parse("the user runs `workdash --host 127.0.0.1:9001 {command}`"))
-def _run_host_with_nonclient(command, scenario_state, capsys):
-    import workdash.workdash as cli
-
-    with pytest.raises(SystemExit) as error:
-        cli.main(["--host", "127.0.0.1:9001", command])
-    scenario_state["exit_code"] = error.value.code
-    scenario_state["host_error"] = capsys.readouterr().err
-
-
-@then("the command rejects `--host` as a client-only option")
-def _host_option_rejected(scenario_state):
-    assert "--host" in scenario_state["host_error"]
-    assert "client" in scenario_state["host_error"]
-
-
-@when("the user runs `workdash code owner/repo#99 --agent pi --host dashboard.lan --json`")
-def _run_remote_code_json(
+@when("the user runs `workdash code owner/repo#99 --agent pi --host dashboard.lan`")
+def _run_remote_code(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _run_workdash(
-        ["code", "owner/repo#99", "--agent", "pi", "--host", "dashboard.lan", "--json"],
+        ["code", "owner/repo#99", "--agent", "pi", "--host", "dashboard.lan"],
         scenario_state,
         monkeypatch,
         capsys,
     )
 
 
-@then(
-    parsers.parse(
-        "the system returns JSON with status `launched` for `{item_id}` and the new pane ID"
-    )
-)
-def _returns_launched_json(item_id: str, scenario_state: dict[str, Any]) -> None:
-    payload = json.loads(scenario_state["stdout"])
+@then("the command shows the new pane for `owner/repo#ISSUE-99` running `pi`")
+def _shows_new_pane_for_unlisted_issue(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state["stderr"]
     [launched_pane] = scenario_state["panes"]
-    assert (payload["status"], payload["item_id"], payload["pane_id"]) == (
-        "launched",
-        item_id,
-        f"terminal_{launched_pane['id']}",
-    )
+    assert {
+        "Status: launched",
+        "Item: owner/repo#ISSUE-99",
+        "Agent: pi",
+        f"Pane id: terminal_{launched_pane['id']}",
+    } <= set(scenario_state["stdout"].splitlines())
 
 
-@then("the system prints status `already_running` and the running pane ID")
-def _prints_already_running(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["exit_code"] == 0, scenario_state
-    assert "Status: already_running" in scenario_state["stdout"]
-    assert "Agent: -" in scenario_state["stdout"]
-    assert "Pane id: terminal_7" in scenario_state["stdout"]
+@then("the command shows that pane `terminal_7` is already running for `owner/repo#ISSUE-1`")
+def _shows_running_pane(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state["stderr"]
+    assert {
+        "Status: already_running",
+        "Item: owner/repo#ISSUE-1",
+        "Pane id: terminal_7",
+    } <= set(scenario_state["stdout"].splitlines())
 
 
-@when("the user runs `workdash code owner/repo#ISSUE-1 --group epic --host dashboard.lan --json`")
+@when("the user runs `workdash code owner/repo#ISSUE-1 --group epic --host dashboard.lan`")
 def _run_grouped_code(scenario_state, monkeypatch, capsys):
     _run_workdash(
-        ["code", "owner/repo#ISSUE-1", "--group", "epic", "--host", "dashboard.lan", "--json"],
+        ["code", "owner/repo#ISSUE-1", "--group", "epic", "--host", "dashboard.lan"],
         scenario_state,
         monkeypatch,
         capsys,
     )
 
 
-@then("the result reports the agent in tab `epic`")
-def _grouped_code_result(scenario_state):
-    assert json.loads(scenario_state["stdout"])["tab_name"] == "epic"
+@then("the command reports a new agent in tab `epic`")
+def _reports_new_agent_in_tab(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state["stderr"]
+    assert {"Status: launched", "Tab: epic"} <= set(scenario_state["stdout"].splitlines())

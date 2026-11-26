@@ -1,24 +1,33 @@
-"""Step definitions for worktree feature scenarios.
-
-Covers issue-worktree, pr-worktree, worktree-layout and worktree-reuse.
-Real behaviour under test lives in ``workdash.repo_worktree.ensure_worktree``;
-only ``subprocess.run`` is faked to avoid invoking real git/gh binaries.
-"""
+"""Dashboard worktree journeys and the legacy Git fake used by todo and analysis."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import shutil
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 from pytest_bdd import given, parsers, then, when
+from textual.widgets import Static
 
-from workdash.models import WorkItem, WorkItemKind, WorkItemType
-from workdash.repo_worktree import ensure_worktree
+from gh_work_state_fake import AFTER_PUSH, comment, install_fake_github, thread
+from workdash.backend import WorkdashBackend
+from workdash.control import WorkdashSession, format_work_item_id
+from workdash.models import WorkItemKind, WorkItemType
+from workdash.tui import CodeDialog
+from zellij_pane_launch import mark_pane_started
 
-from .common import make_work_item
+from .common import (
+    install_zellij_agent_fakes,
+    make_valid_config,
+    make_work_item,
+    modal_screen_names,
+    run_app,
+)
 
 
 def _install_fake_git(
@@ -26,9 +35,6 @@ def _install_fake_git(
     monkeypatch: pytest.MonkeyPatch,
     *,
     workdir: Path,
-    head_repo_owner: str = "owner",
-    head_repo_name: str = "repo",
-    head_ref: str = "feature-branch",
     existing_worktrees: dict[str, str] | None = None,
 ) -> None:
     """Patch ``subprocess.run`` with a recorder that simulates git/gh.
@@ -39,13 +45,9 @@ def _install_fake_git(
     """
 
     recorded: list[list[str]] = []
-    head_info = json.dumps(
-        {
-            "headRefName": head_ref,
-            "headRepository": {"name": head_repo_name},
-            "headRepositoryOwner": {"login": head_repo_owner},
-        }
-    )
+    cloned_repositories: dict[Path, str] = {}
+    target_source = scenario_state.get("target_source", {})
+    source_repository = scenario_state["todo_item"].todo_target if target_source else None
     existing = existing_worktrees or {}
 
     def _porcelain() -> str:
@@ -60,15 +62,11 @@ def _install_fake_git(
         cmd = args[0]
         recorded.append(list(cmd))
         if cmd[:3] == ["gh", "issue", "develop"]:
-            if scenario_state.get("linked_branch_available"):
-                scenario_state["github_linked_branch"] = cmd[cmd.index("--name") + 1]
-                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
             raise subprocess.CalledProcessError(1, cmd)
-        if cmd[:3] == ["gh", "pr", "view"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout=head_info, stderr="")
         if cmd[:3] == ["gh", "repo", "clone"] or cmd[:2] == ["git", "clone"]:
             target = Path(cmd[-1])
             target.mkdir(parents=True, exist_ok=True)
+            cloned_repositories[target] = cmd[-2]
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd == ["git", "rev-parse", "--show-toplevel"]:
             return subprocess.CompletedProcess(cmd, 0, stdout=str(kwargs["cwd"]), stderr="")
@@ -76,7 +74,7 @@ def _install_fake_git(
             origin = scenario_state.get("origin_url") or (
                 scenario_state["todo_item"].todo_target
                 if "todo_item" in scenario_state
-                else f"https://github.com/{head_repo_owner}/{head_repo_name}.git"
+                else "https://github.com/owner/repo.git"
             )
             if ":" not in origin:
                 origin = f"https://github.com/{origin}.git"
@@ -86,13 +84,7 @@ def _install_fake_git(
                 cmd, 0, stdout="ref: refs/heads/main\tHEAD\nabc123\tHEAD\n", stderr=""
             )
         if cmd[:2] == ["git", "ls-remote"]:
-            branch = cmd[-1].removeprefix("refs/heads/")
-            return subprocess.CompletedProcess(
-                cmd,
-                0 if scenario_state.get("github_linked_branch") == branch else 2,
-                stdout="",
-                stderr="",
-            )
+            return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="")
         if cmd[:2] == ["git", "fetch"] or cmd[:4] == ["git", "remote", "set-head", "origin"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd == ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]:
@@ -124,10 +116,13 @@ def _install_fake_git(
             else:
                 wt_path = Path(cmd[3])
             wt_path.mkdir(parents=True, exist_ok=True)
-            for name, content in scenario_state.get("target_source", {}).items():
-                source = wt_path / name
-                source.parent.mkdir(parents=True, exist_ok=True)
-                source.write_text(content)
+            if source_repository is not None and (
+                cloned_repositories.get(kwargs.get("cwd")) == source_repository
+            ):
+                for name, content in target_source.items():
+                    source = wt_path / name
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_text(content)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[:3] == ["git", "worktree", "remove"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -143,451 +138,345 @@ def _install_fake_git(
     scenario_state["_recorded_git_calls"] = recorded
 
 
-# --------------------------------------------------------------------------
-# F-WORKTREES-ISSUE
-# --------------------------------------------------------------------------
+_ISSUE_BODY = "Keep the existing keyboard shortcuts."
+_DEFAULT_CODE = "current project code\n"
+_PR_CODE = "proposed project code\n"
+_LOCAL_EDIT = "my draft notes\n"
+_REMOTE_EDIT = "new project code from upstream\n"
 
 
-@given("the user needs a worktree for an issue")
-def _user_needs_issue_worktree(
-    scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    item = make_work_item(
-        item_type=WorkItemType.ISSUE,
-        kind=WorkItemKind.ASSIGNED_ISSUE,
-        repo="owner/repo",
-        number=42,
-        title="Issue work",
+@pytest.fixture
+def worktree_remote(tmp_path, monkeypatch, scenario_state):
+    """Use a local Git origin; only the GitHub and Zellij boundaries are simulated."""
+    remote = tmp_path / "remote"
+    url = "https://github.com/owner/repo.git"
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{remote}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", url)
+    _git(tmp_path, "init", "-b", "main", str(remote))
+    _git(remote, "config", "user.name", "Test User")
+    _git(remote, "config", "user.email", "test@example.com")
+    (remote / "source.py").write_text(_DEFAULT_CODE)
+    (remote / "notes.txt").write_text("initial notes\n")
+    _git(remote, "add", ".")
+    _git(remote, "commit", "-m", "Default branch code")
+
+    install_zellij_agent_fakes(scenario_state, monkeypatch)
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/zellij" if name == "zellij" else None
     )
-    scenario_state["work_item"] = item
-    scenario_state["workdir"] = tmp_path
-    _install_fake_git(scenario_state, monkeypatch, workdir=tmp_path)
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    run = subprocess.run
+
+    def external_command(command, **kwargs):
+        match command[:3]:
+            case ["gh", "repo", "clone"]:
+                assert command[3] == "owner/repo"
+                return run(["git", "clone", url, command[4]], **kwargs)
+            case ["gh", "issue", "develop"]:
+                _, _, _, _, _, repo, _, branch = command
+                assert repo == "owner/repo"
+                _git(remote, "branch", branch, "main")
+                payload = ""
+            case ["gh", "issue", "view"]:
+                item = scenario_state["dashboard_item"]
+                assert command[3:6] == [str(item.number), "--repo", item.repo]
+                payload = json.dumps(
+                    dict(number=item.number, title=item.title, url=item.url, body=_ISSUE_BODY)
+                )
+            case ["gh", "pr", "view"]:
+                assert command[3:6] == ["73", "--repo", "owner/repo"]
+                if "headRepositoryOwner" in command[-1]:
+                    payload = json.dumps(
+                        dict(
+                            headRefName=scenario_state["pr_branch"],
+                            headRepository={"name": "repo"},
+                            headRepositoryOwner={"login": "owner"},
+                        )
+                    )
+                else:
+                    payload = json.dumps({"body": "Proposed keyboard shortcut changes."})
+            case ["gh", "api", "graphql"] if "closedByPullRequestsReferences" in command[4]:
+                connection = {"nodes": [], "pageInfo": {"hasNextPage": False}}
+                issue = {"closedByPullRequestsReferences": connection}
+                payload = json.dumps({"data": {"repository": {"issue": issue}}})
+            case ["gh", "api", "graphql"] if command[4].startswith("query={ p0:"):
+                pull_request = {"closingIssuesReferences": {"nodes": []}}
+                payload = json.dumps({"data": {"p0": {"pullRequest": pull_request}}})
+            case ["gh", "api", "graphql"] if "reviewThreads" in command[4]:
+                discussion = {
+                    "closingIssuesReferences": {"nodes": []},
+                    "reviewThreads": {"nodes": []},
+                }
+                payload = json.dumps({"data": {"repository": {"pullRequest": discussion}}})
+            case _ if Path(command[0]).name == "zellij":
+                assert "new-pane" in command, command
+                cwd = command[command.index("--cwd") + 1]
+                scenario_state["terminal_cwd"] = Path(cwd)
+                scenario_state["panes"].append(
+                    {"id": 22, "title": f"terminal_{Path(cwd).name}", "pane_cwd": cwd}
+                )
+                mark_pane_started(command, "22")
+                payload = ""
+            case _:
+                assert command[0] == "git", command
+                return run(command, **kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout=payload, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", external_command)
+    return remote
 
 
-@given("GitHub can create a linked issue branch")
-def _linked_branch_available(scenario_state: dict[str, Any]) -> None:
-    scenario_state["linked_branch_available"] = True
+@given("an issue is selected for a repository I have not cloned")
+def _select_new_issue(scenario_state, worktree_remote):
+    scenario_state["dashboard_item"] = make_work_item(number=42, title="Keyboard shortcuts")
 
 
-@given("GitHub cannot create a linked issue branch")
-def _linked_branch_unavailable(scenario_state: dict[str, Any]) -> None:
-    scenario_state["linked_branch_available"] = False
-
-
-@then("the issue branch is linked on GitHub and tracked locally")
-def _linked_issue_branch(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["github_linked_branch"] == "issue-42"
-    assert Path(scenario_state["worktree_path"]).is_dir()
-    calls = scenario_state["_recorded_git_calls"]
-    assert ["gh", "issue", "develop", "42", "--repo", "owner/repo", "--name", "issue-42"] in calls
-    assert any(
-        cmd[:5] == ["git", "worktree", "add", "-b", "issue-42"] and cmd[-1] == "origin/issue-42"
-        for cmd in calls
-    )
-    assert ["git", "config", "branch.issue-42.remote", "origin"] in calls
-    assert ["git", "config", "branch.issue-42.merge", "refs/heads/issue-42"] in calls
-
-
-@then("the issue branch is local and starts from the default branch")
-def _local_issue_branch(scenario_state: dict[str, Any]) -> None:
-    calls = scenario_state["_recorded_git_calls"]
-    assert ["gh", "issue", "develop", "42", "--repo", "owner/repo", "--name", "issue-42"] in calls
-    assert any(
-        cmd[:5] == ["git", "worktree", "add", "-b", "issue-42"] and cmd[-1] == "origin/HEAD"
-        for cmd in calls
-    )
-
-
-@when("the system prepares the worktree")
-def _system_prepares_worktree(scenario_state: dict[str, Any]) -> None:
-    workdir = scenario_state["workdir"]
-    item = scenario_state["work_item"]
-    scenario_state["worktree_path"] = ensure_worktree(str(workdir), item)
-
-
-@then(parsers.parse('the worktree is checked out on a branch named "{branch_template}"'))
-def _worktree_on_named_branch(branch_template: str, scenario_state: dict[str, Any]) -> None:
-    item: WorkItem = scenario_state["work_item"]
-    expected = branch_template.replace("<number>", str(item.number))
-    recorded = scenario_state["_recorded_git_calls"]
-    add_cmd = next(cmd for cmd in recorded if cmd[:3] == ["git", "worktree", "add"])
-    assert expected in add_cmd, (expected, add_cmd)
-
-
-@then("that branch was created from the repository's current default branch")
-def _branch_from_default(scenario_state: dict[str, Any]) -> None:
-    recorded = scenario_state["_recorded_git_calls"]
-    add_cmd = next(cmd for cmd in recorded if cmd[:3] == ["git", "worktree", "add"])
-    assert "origin/HEAD" in add_cmd, add_cmd
-    assert any(cmd[:4] == ["git", "fetch", "--prune", "origin"] for cmd in recorded), (
-        "expected git fetch origin before branch creation"
-    )
-
-
-# --------------------------------------------------------------------------
-# F-WORKTREES-PR
-# --------------------------------------------------------------------------
-
-
-@given("the user needs a worktree for a pull request")
-def _user_needs_pr_worktree(
-    scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    item = make_work_item(
-        item_type=WorkItemType.PR,
-        kind=WorkItemKind.AUTHORED_PR,
-        repo="owner/repo",
-        number=42,
-        title="PR work",
-    )
-    scenario_state["work_item"] = item
-    scenario_state["workdir"] = tmp_path
-    _install_fake_git(scenario_state, monkeypatch, workdir=tmp_path)
-
-
-@then("the worktree is checked out on the pull request's head branch")
-def _worktree_on_head_branch(scenario_state: dict[str, Any]) -> None:
-    recorded = scenario_state["_recorded_git_calls"]
-    add_cmd = next(cmd for cmd in recorded if cmd[:3] == ["git", "worktree", "add"])
-    assert "feature-branch" in add_cmd, add_cmd
-    assert "origin/feature-branch" in add_cmd, add_cmd
-
-
-@given("the user needs a worktree for an authored pull request that closes an issue")
-def _user_needs_worktree_for_pr_closing_an_issue(
-    scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    item = make_work_item(
-        item_type=WorkItemType.PR,
-        kind=WorkItemKind.AUTHORED_PR,
-        repo="owner/repo",
-        number=42149,
-        title="Implement the issue",
-    )
-    item.closing_issue_numbers = (41830,)
-    scenario_state["work_item"] = item
-    scenario_state["workdir"] = tmp_path
-    _install_fake_git(scenario_state, monkeypatch, workdir=tmp_path)
-
-
-@then("the worktree directory is named after the issue the pull request closes")
-def _worktree_named_after_linked_issue(scenario_state: dict[str, Any]) -> None:
-    item: WorkItem = scenario_state["work_item"]
-    assert item.closing_issue_numbers
-    assert (
-        Path(scenario_state["worktree_path"]).name == f"owner_repo_{item.closing_issue_numbers[0]}"
+@given("a pull request by another author is selected")
+def _select_pr_for_review(scenario_state, worktree_remote):
+    scenario_state["pr_branch"] = "contribution"
+    _git(worktree_remote, "switch", "-c", "contribution")
+    (worktree_remote / "source.py").write_text(_PR_CODE)
+    _git(worktree_remote, "commit", "-am", "Proposed changes")
+    _git(worktree_remote, "switch", "main")
+    scenario_state["dashboard_item"] = make_work_item(
+        number=73, item_type=WorkItemType.PR, kind=WorkItemKind.TRACKED_PR
     )
 
 
-@given("the user already has a worktree opened from an issue")
-def _user_already_has_an_issue_worktree(
-    scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    (tmp_path / "owner_repo").mkdir()
-    (tmp_path / "owner_repo_41830").mkdir()
-    scenario_state["workdir"] = tmp_path
-    scenario_state["_pre_existing_worktree"] = tmp_path / "owner_repo_41830"
-
-    def fake_run(*args, **kwargs):
-        cmd = args[0]
-        if cmd == ["git", "rev-parse", "--show-toplevel"]:
-            return subprocess.CompletedProcess(
-                cmd, 0, stdout=f"{Path(kwargs['cwd']).resolve()}\n", stderr=""
-            )
-        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
-            return subprocess.CompletedProcess(
-                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
-            )
-        if cmd[:2] == ["git", "pull"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        raise AssertionError(f"Unexpected command in linked issue reuse scenario: {cmd}")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-
-@given("the user authored a pull request that closes that issue")
-def _user_authored_a_pr_closing_that_issue(scenario_state: dict[str, Any]) -> None:
-    item = make_work_item(
-        item_type=WorkItemType.PR,
-        kind=WorkItemKind.AUTHORED_PR,
-        repo="owner/repo",
-        number=42149,
-        title="Implement the issue",
-    )
-    item.closing_issue_numbers = (41830,)
-    scenario_state["work_item"] = item
-
-
-@given(
-    "the user already has a worktree opened from the higher-numbered of two issues a pull request closes"
-)
-def _user_already_has_a_worktree_for_the_higher_closing_issue(
-    scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    (tmp_path / "owner_repo").mkdir()
-    (tmp_path / "owner_repo_41999").mkdir()
-    scenario_state["workdir"] = tmp_path
-    scenario_state["_pre_existing_worktree"] = tmp_path / "owner_repo_41999"
-
-    def fake_run(*args, **kwargs):
-        cmd = args[0]
-        if cmd == ["git", "rev-parse", "--show-toplevel"]:
-            return subprocess.CompletedProcess(
-                cmd, 0, stdout=f"{Path(kwargs['cwd']).resolve()}\n", stderr=""
-            )
-        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
-            return subprocess.CompletedProcess(
-                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
-            )
-        if cmd[:2] == ["git", "pull"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        raise AssertionError(f"Unexpected command in closing-issues reuse scenario: {cmd}")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-
-@given("the user authored a pull request that closes both issues")
-def _user_authored_a_pr_closing_both_issues(scenario_state: dict[str, Any]) -> None:
-    item = make_work_item(
-        item_type=WorkItemType.PR,
-        kind=WorkItemKind.AUTHORED_PR,
-        repo="owner/repo",
-        number=42149,
-        title="Implement both issues",
-    )
-    item.closing_issue_numbers = (41830, 41999)
-    scenario_state["work_item"] = item
-
-
-@given("the pull request originates in a fork of the upstream repository")
-def _pr_originates_in_fork(
-    scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    item = make_work_item(
-        item_type=WorkItemType.PR,
-        kind=WorkItemKind.AUTHORED_PR,
-        repo="owner/repo",
-        number=42,
-        title="Fork PR",
-    )
-    scenario_state["work_item"] = item
-    scenario_state["workdir"] = tmp_path
-    _install_fake_git(
-        scenario_state,
-        monkeypatch,
-        workdir=tmp_path,
-        head_repo_owner="contributor",
-        head_repo_name="repo",
+@given("my own pull request is selected on the dashboard")
+def _select_authored_pr(scenario_state, worktree_remote):
+    _select_pr_for_review(scenario_state, worktree_remote)
+    scenario_state["dashboard_item"] = replace(
+        scenario_state["dashboard_item"], kind=WorkItemKind.AUTHORED_PR
     )
 
 
-@then("the worktree is backed by a clone of the fork's repository")
-def _clone_from_fork(scenario_state: dict[str, Any]) -> None:
-    recorded = scenario_state["_recorded_git_calls"]
-    clone_cmd = next(cmd for cmd in recorded if cmd[:3] == ["gh", "repo", "clone"])
-    assert "contributor/repo" in clone_cmd, clone_cmd
+@given("my selected issue has a running coding agent")
+def _start_agent(scenario_state, worktree_remote, tmp_path, monkeypatch):
+    _select_new_issue(scenario_state, worktree_remote)
+    _open_from_code_menu("1", scenario_state, tmp_path, monkeypatch)
+    assert len(scenario_state["agent_launches"]) == 1
+    [pane] = scenario_state["panes"]
+    scenario_state["running_agent"] = f"terminal_{pane['id']}"
+    scenario_state["agent_launches"].clear()
 
 
-@then("the fork worktree has an upstream remote for the pull request's base repository")
-def _fork_worktree_has_upstream_remote(scenario_state: dict[str, Any]) -> None:
-    recorded = scenario_state["_recorded_git_calls"]
-    assert ["git", "remote", "add", "upstream", "https://github.com/owner/repo.git"] in recorded
-    assert ["git", "fetch", "--prune", "upstream"] in recorded
+@given("I started work from an issue and left local changes in its checkout")
+@given("I closed the terminal for an issue after making local edits")
+def _leave_issue_work(scenario_state, worktree_remote, tmp_path, monkeypatch):
+    _select_new_issue(scenario_state, worktree_remote)
+    _open_from_code_menu("t", scenario_state, tmp_path, monkeypatch)
+    checkout = scenario_state.pop("terminal_cwd")
+    (checkout / "notes.txt").write_text(_LOCAL_EDIT)
+    scenario_state["original_checkout"] = checkout
+    scenario_state["panes"].clear()  # The user has exited the previous shell.
 
 
-# --------------------------------------------------------------------------
-# F-WORKTREES-LAYOUT
-# --------------------------------------------------------------------------
-
-
-@given("the repository has never been used on this machine")
-def _repo_never_used(
-    scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    item = make_work_item(
-        item_type=WorkItemType.ISSUE,
-        kind=WorkItemKind.ASSIGNED_ISSUE,
-        repo="owner/repo",
-        number=7,
-        title="Fresh issue",
-    )
-    scenario_state["work_item"] = item
-    scenario_state["workdir"] = tmp_path
-    _install_fake_git(scenario_state, monkeypatch, workdir=tmp_path)
-
-
-@given("a pull request comes from a fork of the upstream repository")
-def _pr_from_fork_layout(
-    scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    item = make_work_item(
-        item_type=WorkItemType.PR,
-        kind=WorkItemKind.AUTHORED_PR,
-        repo="owner/repo",
-        number=55,
-        title="Fork layout PR",
-    )
-    scenario_state["work_item"] = item
-    scenario_state["workdir"] = tmp_path
-    _install_fake_git(
-        scenario_state,
-        monkeypatch,
-        workdir=tmp_path,
-        head_repo_owner="contributor",
-        head_repo_name="forked-repo",
+@given("my authored pull request closes the issue and has review feedback")
+def _add_linked_pr_feedback(scenario_state, monkeypatch):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42", body=_ISSUE_BODY)
+    github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#42",),
+        threads=[
+            thread(comment("reviewer", created=AFTER_PUSH) | {"body": "Add a regression test"})
+            | {"path": "src/app.py", "line": 7}
+        ],
     )
 
 
-@given("several work items already have prepared worktrees")
-def _other_worktrees_exist(
-    scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Pre-create two sibling worktrees so we can later assert they remain.
-    (tmp_path / "owner_repo").mkdir()
-    (tmp_path / "owner_repo_1").mkdir()
-    (tmp_path / "owner_repo_1" / "marker.txt").write_text("one")
-    (tmp_path / "owner_repo_2").mkdir()
-    (tmp_path / "owner_repo_2" / "marker.txt").write_text("two")
-    scenario_state["_preexisting_worktrees"] = [
-        tmp_path / "owner_repo_1",
-        tmp_path / "owner_repo_2",
+@given("my pull request from that branch now replaces the issue on the dashboard")
+def _authored_pr_replaces_issue(scenario_state, worktree_remote):
+    issue = scenario_state["dashboard_item"]
+    branch = _git(scenario_state["original_checkout"], "branch", "--show-current")
+    scenario_state["pr_branch"] = branch
+    _git(worktree_remote, "switch", branch)
+    (worktree_remote / "source.py").write_text(_PR_CODE)
+    _git(worktree_remote, "commit", "-am", "First implementation")
+    _git(worktree_remote, "switch", "main")
+    pr = make_work_item(number=73, item_type=WorkItemType.PR, kind=WorkItemKind.AUTHORED_PR)
+    pr.closing_issue_numbers = (issue.number,)
+    scenario_state["dashboard_item"] = pr
+
+
+@given("a new commit is available on its branch that does not conflict with my edits")
+def _publish_new_code(worktree_remote):
+    _git(worktree_remote, "switch", "issue-42")
+    (worktree_remote / "source.py").write_text(_REMOTE_EDIT)
+    _git(worktree_remote, "commit", "-am", "Upstream changes")
+    _git(worktree_remote, "switch", "main")
+
+
+@when(parsers.parse('I press "c" and choose "{choice}" from the code menu'))
+def _open_from_code_menu(choice, scenario_state, tmp_path, monkeypatch):
+    item = scenario_state["dashboard_item"]
+    config = replace(make_valid_config(), workdir=str(tmp_path / "work"))
+    backend = WorkdashBackend(config=config, cache_root=tmp_path / "cache")
+    monkeypatch.setattr(backend.github_client, "work_pull_request", lambda *_args, **_kwargs: None)
+    session = WorkdashSession(
+        config=config,
+        backend=backend,
+        work_items=[item],
+        suggestion_markers={},
+        zellij_session="workdash-main",
+    )
+
+    async def interactions(app, pilot):
+        footer = app.query_one("#status-footer", Static)
+        await pilot.press("c", choice)
+        async with asyncio.timeout(5):
+            while not (status := footer.render().plain).startswith(
+                ("Launched", "Opened terminal", "Focused", "Launch failed", "Terminal failed")
+            ):
+                await asyncio.sleep(0.01)
+        scenario_state["worktree_status"] = status
+
+    run_app(
+        config=config,
+        work_items=[item],
+        session=session,
+        interactions=interactions,
+        launch_callback=lambda item, agent: session.code(
+            target=format_work_item_id(item), agent=agent, allow_vscode=True
+        ),
+        terminal_callback=lambda item: session.terminal(target=format_work_item_id(item)),
+        focus_callback=scenario_state.setdefault("focused_panes", []).append,
+    )
+    if choice == "t":
+        assert scenario_state["worktree_status"] == (
+            f"Opened terminal for {item.item_type.value} {item.repo}#{item.number}."
+        )
+
+
+@then("the chosen coding agent opens with the repository's current default-branch code")
+def _agent_starts_with_default_code(scenario_state, worktree_remote):
+    [(cwd, _, command, _)] = scenario_state["agent_launches"]
+    assert command == ["claude"]
+    path = Path(cwd)
+    assert (path / "source.py").read_text() == _DEFAULT_CODE
+    assert _git(path, "rev-parse", "HEAD") == _git(worktree_remote, "rev-parse", "main")
+
+
+@then("the agent is preloaded with the issue's GitHub context")
+def _agent_sees_issue(scenario_state):
+    item = scenario_state["dashboard_item"]
+    [(_, prompt, _, _)] = scenario_state["agent_launches"]
+    for context in (item.repo, str(item.number), item.url, _ISSUE_BODY):
+        assert context in prompt
+
+
+@then("the TUI reports that the session was launched for that issue")
+def _agent_launch_reported(scenario_state):
+    status = scenario_state["worktree_status"]
+    assert status == "Launched claude for issue owner/repo#42.", status
+
+
+@then("the agent is asked to propose a plan rather than start implementation")
+def _agent_starts_plan_first(scenario_state):
+    [(_, prompt, _, _)] = scenario_state["agent_launches"]
+    assert "Propose a concrete implementation plan" in prompt
+    assert "Do not start implementing code yet." in prompt
+    assert "AUTOSTART:" not in prompt
+
+
+@then("the agent opens in my existing issue checkout")
+def _agent_opens_in_issue_checkout(scenario_state):
+    assert scenario_state["worktree_status"].startswith("Launched"), scenario_state[
+        "worktree_status"
     ]
-    item = make_work_item(
-        item_type=WorkItemType.ISSUE,
-        kind=WorkItemKind.ASSIGNED_ISSUE,
-        repo="owner/repo",
-        number=3,
-        title="New issue",
+    [(cwd, _, _, _)] = scenario_state["agent_launches"]
+    assert Path(cwd) == scenario_state["original_checkout"]
+    assert (Path(cwd) / "notes.txt").read_text() == _LOCAL_EDIT
+
+
+@then("the agent is asked to plan how to build on the pull request and address its review feedback")
+def _agent_plans_linked_pr_work(scenario_state):
+    _agent_starts_plan_first(scenario_state)
+    [(_, prompt, _, _)] = scenario_state["agent_launches"]
+    assert "build on the work already done instead of starting over" in prompt
+    assert "Add a regression test" in prompt
+
+
+@then("the coding agent opens on my pull request's branch to plan how to build on my changes")
+@then(
+    "the coding agent opens on the pull request's branch to discuss review findings, not to implement changes"
+)
+def _agent_opens_on_pr_branch(scenario_state):
+    assert scenario_state["worktree_status"].startswith("Launched"), scenario_state[
+        "worktree_status"
+    ]
+    [(cwd, prompt, command, _)] = scenario_state["agent_launches"]
+    assert command == ["claude"]
+    assert _git(cwd, "branch", "--show-current") == scenario_state["pr_branch"]
+    assert (Path(cwd) / "source.py").read_text() == _PR_CODE
+    if scenario_state["dashboard_item"].kind == WorkItemKind.AUTHORED_PR:
+        assert "Propose a concrete implementation plan" in prompt
+        assert "build on them instead of starting the work over" in prompt
+    else:
+        assert "Discuss review findings, risks, and open questions for the author." in prompt
+        assert "Do not start implementing code changes." in prompt
+
+
+@then("I return to the running agent's pane without starting a new agent")
+def _return_to_running_agent(scenario_state):
+    pane_id = scenario_state["running_agent"]
+    assert scenario_state["focused_panes"] == [pane_id]
+    assert f"Focused pane {pane_id}" in scenario_state["worktree_status"]
+    assert scenario_state["agent_launches"] == []
+
+
+@when('I press "c" and then Esc in the code menu')
+def _cancel_code_menu(scenario_state):
+    async def interactions(app, pilot):
+        await pilot.press("c")
+        assert isinstance(app.screen, CodeDialog)
+        await pilot.press("escape")
+        scenario_state["cancelled_code_menu"] = not modal_screen_names(app)
+
+    def unexpected_launch(item, tool):
+        pytest.fail(f"Unexpected launch of {tool} for {item}")
+
+    def unexpected_prepare(item):
+        pytest.fail(f"Unexpected worktree preparation for {item}")
+
+    run_app(
+        work_items=[scenario_state["dashboard_item"]],
+        launch_callback=unexpected_launch,
+        worktree_callback=unexpected_prepare,
+        interactions=interactions,
     )
-    scenario_state["work_item"] = item
-    scenario_state["workdir"] = tmp_path
-    _install_fake_git(scenario_state, monkeypatch, workdir=tmp_path)
 
 
-@when("the user triggers an action that needs the worktree")
-def _user_triggers_action_needing_worktree(scenario_state: dict[str, Any]) -> None:
-    workdir = scenario_state["workdir"]
-    item = scenario_state["work_item"]
-    scenario_state["worktree_path"] = ensure_worktree(str(workdir), item)
+@then("I return to the dashboard without starting an agent or preparing a checkout")
+def _code_menu_cancelled(scenario_state):
+    assert scenario_state["cancelled_code_menu"]
 
 
-@when("the user triggers an action that prepares a new worktree")
-def _user_triggers_action_preparing_new(scenario_state: dict[str, Any]) -> None:
-    _user_triggers_action_needing_worktree(scenario_state)
+@then("the terminal opens on the pull request's branch with its proposed changes")
+def _terminal_has_pr_changes(scenario_state, worktree_remote):
+    cwd = scenario_state["terminal_cwd"]
+    assert _git(cwd, "branch", "--show-current") == "contribution"
+    assert _git(cwd, "rev-parse", "HEAD") == _git(worktree_remote, "rev-parse", "contribution")
+    assert (cwd / "source.py").read_text() == _PR_CODE
 
 
-@then(parsers.parse('the system clones the repository into "{template}"'))
-def _clone_into_templated_path(template: str, scenario_state: dict[str, Any]) -> None:
-    workdir = scenario_state["workdir"]
-    expected = Path(
-        template.replace("<workdir>", str(workdir))
-        .replace("<owner>", "owner")
-        .replace("<repo>", "repo")
-    )
-    assert expected.is_dir(), f"Expected clone path {expected} to exist after clone"
+@then("the terminal opens in the same checkout with my local changes")
+def _same_checkout_with_local_edits(scenario_state):
+    checkout = scenario_state["terminal_cwd"]
+    assert checkout == scenario_state["original_checkout"]
+    assert (checkout / "notes.txt").read_text() == _LOCAL_EDIT
 
 
-@then("a worktree for the work item is created alongside it")
-def _worktree_alongside(scenario_state: dict[str, Any]) -> None:
-    workdir = scenario_state["workdir"]
-    item: WorkItem = scenario_state["work_item"]
-    expected = workdir / f"owner_repo_{item.number}"
-    assert expected.is_dir(), f"Expected worktree {expected} to exist"
+@then("the latest remote changes are visible in the checkout")
+def _checkout_has_updated_code(scenario_state):
+    assert (scenario_state["terminal_cwd"] / "source.py").read_text() == _REMOTE_EDIT
 
 
-@then("the worktree directory is named after the fork's owner and repository")
-def _worktree_named_after_fork(scenario_state: dict[str, Any]) -> None:
-    wt_path = Path(scenario_state["worktree_path"])
-    assert wt_path.name.startswith("contributor_forked-repo_"), wt_path
-    assert wt_path.is_dir()
-
-
-@then("the new worktree is created")
-def _new_worktree_created(scenario_state: dict[str, Any]) -> None:
-    wt_path = Path(scenario_state["worktree_path"])
-    assert wt_path.is_dir(), wt_path
-
-
-@then("the existing worktrees remain untouched")
-def _existing_worktrees_untouched(scenario_state: dict[str, Any]) -> None:
-    for pre_existing in scenario_state["_preexisting_worktrees"]:
-        assert pre_existing.is_dir()
-        assert (pre_existing / "marker.txt").read_text() in {"one", "two"}
-
-
-# --------------------------------------------------------------------------
-# F-WORKTREES-REUSE
-# --------------------------------------------------------------------------
-
-
-@given("the work item already has a prepared worktree")
-def _work_item_has_worktree(
-    scenario_state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    item = make_work_item(
-        item_type=WorkItemType.PR,
-        kind=WorkItemKind.AUTHORED_PR,
-        repo="owner/repo",
-        number=9,
-        title="Reuse PR",
-    )
-    (tmp_path / "owner_repo").mkdir()
-    wt_dir = tmp_path / "owner_repo_9"
-    wt_dir.mkdir()
-    (wt_dir / "local_marker.txt").write_text("preserved")
-    scenario_state["work_item"] = item
-    scenario_state["workdir"] = tmp_path
-    scenario_state["_pre_existing_worktree"] = wt_dir
-    scenario_state["_pull_failed"] = False
-
-    pull_behavior = {"fail": False}
-    recorded: list[list[str]] = []
-
-    def fake_run(*args, **kwargs):
-        cmd = args[0]
-        recorded.append(list(cmd))
-        if cmd == ["git", "rev-parse", "--show-toplevel"]:
-            return subprocess.CompletedProcess(
-                cmd, 0, stdout=f"{Path(kwargs['cwd']).resolve()}\n", stderr=""
-            )
-        if cmd == ["git", "config", "--local", "--get", "remote.origin.url"]:
-            return subprocess.CompletedProcess(
-                cmd, 0, stdout="https://github.com/owner/repo.git\n", stderr=""
-            )
-        if cmd[:2] == ["git", "pull"]:
-            if pull_behavior["fail"]:
-                raise subprocess.CalledProcessError(1, cmd, stderr="diverged")
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        raise AssertionError(f"Unexpected command in reuse scenario: {cmd}")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    scenario_state["_pull_behavior"] = pull_behavior
-    scenario_state["_recorded_git_calls"] = recorded
-
-
-@given("the remote has new commits that can be fast-forwarded")
-def _remote_has_ff_commits(scenario_state: dict[str, Any]) -> None:
-    scenario_state["_pull_behavior"]["fail"] = False
-
-
-@given("local work in the worktree diverges from the remote")
-def _local_work_diverges(scenario_state: dict[str, Any]) -> None:
-    scenario_state["_pull_behavior"]["fail"] = True
-
-
-@then("the same worktree is returned to the user")
-def _same_worktree_returned(scenario_state: dict[str, Any]) -> None:
-    returned = Path(scenario_state["worktree_path"])
-    assert returned == scenario_state["_pre_existing_worktree"]
-
-
-@then("the worktree is updated to the latest remote state")
-def _worktree_updated(scenario_state: dict[str, Any]) -> None:
-    recorded = scenario_state["_recorded_git_calls"]
-    assert any(cmd[:3] == ["git", "pull", "--ff-only"] for cmd in recorded)
-
-
-@then("the local work is not discarded")
-def _local_work_preserved(scenario_state: dict[str, Any]) -> None:
-    wt_dir = scenario_state["_pre_existing_worktree"]
-    assert (wt_dir / "local_marker.txt").read_text() == "preserved"
+def _git(cwd, *args):
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()

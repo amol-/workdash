@@ -57,13 +57,21 @@ def test_render_accepts_every_field_requested_from_gh(fields: str) -> None:
 
 
 def test_render_includes_linked_issues_and_unresolved_review_threads() -> None:
+    linked_issue = {
+        **_STRUCTURED_VALUES["linkedIssues"][0],
+        "comments": [{**_COMMENT, "body": "Issue repro details"}],
+    }
     rendered = render_github_context(
-        {key: _STRUCTURED_VALUES[key] for key in ("linkedIssues", "unresolvedReviewThreads")},
+        {
+            "linkedIssues": [linked_issue],
+            "unresolvedReviewThreads": _STRUCTURED_VALUES["unresolvedReviewThreads"],
+        },
         WorkItemType.PR,
     )
 
     assert '<linkedIssue number="7" repository="other/repo">' in rendered
     assert "Do the thing" in rendered
+    assert ">Issue repro details</comment>" in rendered
     assert '<thread path="a.py" line="3">' in rendered
     assert '<comment author="bob" createdAt="2026-02-01T00:00:00Z">a comment</comment>' in rendered
 
@@ -219,7 +227,7 @@ def test_render_never_marks_a_deleted_author_as_the_item_author() -> None:
 
 @pytest.mark.parametrize(
     "reason",
-    ["SPAM", "abuse", "OFF_TOPIC", "off-topic", "Duplicate"],
+    ["SPAM", "spam", "abuse", "OFF_TOPIC", "off-topic", "Duplicate"],
 )
 def test_render_skips_comments_minimized_as_noise_in_every_list(reason: str) -> None:
     kept = {**_COMMENT, "body": "kept"}
