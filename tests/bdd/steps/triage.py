@@ -573,7 +573,6 @@ def _tui_open_with_items(work_items: list[WorkItem]) -> None:
         )
 
 
-@when(parsers.parse('the user chooses "{key}" from the code menu'))
 @when(parsers.parse('the user presses "{key}"'))
 def _user_presses_key(
     key: str,
@@ -591,15 +590,6 @@ def _user_presses_key(
         coding.run_code_dialog_scenario(scenario_state, work_items, monkeypatch, tmp_path)
     elif key == "/":
         _run_search_clear_scenario(scenario_state, work_items)
-    elif key == "d":
-        from . import branchdiff as branchdiff_mod
-
-        branchdiff_mod.run_branchdiff_tui_scenario(
-            scenario_state,
-            work_items,
-            monkeypatch,
-            tmp_path,
-        )
     else:
         raise AssertionError(f"Unhandled key press in BDD step: {key!r}")
 

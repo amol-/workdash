@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -17,11 +18,11 @@ from pytest_bdd import given, parsers, then, when
 
 import workdash.branchdiff as branchdiff_module
 import workdash.launcher as launcher
-from workdash.models import WorkItem, WorkItemKind, WorkItemType
+from workdash.models import WorkItemKind, WorkItemType
 from workdash.workdash import main as workdash_main
 from zellij_pane_launch import mark_pane_started, pane_launch
 
-from .common import make_work_item, modal_screen_names, run_app
+from .common import make_work_item, run_app
 
 
 @given("the default branch has the old renderer and my checkout has the new renderer")
@@ -227,195 +228,94 @@ def _git_repo_with_upstream(
     scenario_state["repo_path"] = repo_path
 
 
-@given("the TUI has a pull request work item selected")
-def _tui_has_pull_request_selected(
-    scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
-) -> None:
-    """Select a pull request row for branchdiff launch scenarios."""
-    if not work_items:
-        work_items.append(
-            make_work_item(
-                item_type=WorkItemType.PR,
-                kind=WorkItemKind.AUTHORED_PR,
-                number=9,
-                title="Branchdiff PR",
-                url="https://github.com/owner/repo/pull/9",
-            )
+@given("the selected pull request updates the renderer on a release branch")
+def _renderer_pull_request(scenario_state, tmp_path, monkeypatch):
+    # Give the default branch a different renderer so comparing against it cannot pass.
+    with monkeypatch.context() as checkout:
+        _renderer_branch(scenario_state, tmp_path, checkout)
+        _release_renderer(scenario_state)
+        subprocess.run(["git", "commit", "-qam", "Update the renderer"], check=True)
+        subprocess.run(
+            ["git", "update-ref", "refs/remotes/origin/release/2026", "release"], check=True
         )
-    scenario_state.setdefault("selected_item", work_items[0])
+    scenario_state["diff_item"] = make_work_item(
+        item_type=WorkItemType.PR, kind=WorkItemKind.AUTHORED_PR, number=9, title="Update renderer"
+    )
 
 
-@given(parsers.parse('GitHub reports the PR base branch "{base_branch}"'))
-def _github_reports_pr_base_branch(base_branch: str, scenario_state: dict[str, Any]) -> None:
-    scenario_state["branchdiff_pr_base_branch"] = base_branch
+@when("I press c and then d to open branchdiff")
+def _open_pull_request_diff(scenario_state, monkeypatch):
+    panes = []
+    real_run = subprocess.run
 
-
-@given("the worktree for that item exists")
-def _worktree_for_item_exists(scenario_state: dict[str, Any]) -> None:
-    scenario_state["worktree_exists"] = True
-
-
-@then("Workdash has prepared the worktree for the selected item")
-def _workdash_prepared_worktree_for_selected_item(scenario_state: dict[str, Any]) -> None:
-    selected_item = scenario_state["selected_item"]
-    assert scenario_state.get("branchdiff_worktree_calls") == [selected_item]
-
-
-@then("Workdash asks GitHub for that PR's base branch")
-def _workdash_asks_github_for_pr_base_branch(scenario_state: dict[str, Any]) -> None:
-    selected_item = scenario_state["selected_item"]
-    assert scenario_state.get("branchdiff_gh_commands") == [
-        [
-            "gh",
-            "pr",
-            "view",
-            str(selected_item.number),
-            "--repo",
-            selected_item.repo,
-            "--json",
-            "baseRefName,headRepository,headRepositoryOwner",
-        ]
-    ]
-
-
-@then("GitHub is not queried for a PR base branch")
-def _github_is_not_queried_for_pr_base_branch(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("branchdiff_gh_commands") == []
-
-
-@then("a new zellij pane opens")
-def _new_zellij_pane_opens(scenario_state: dict[str, Any]) -> None:
-    commands = scenario_state.get("branchdiff_zellij_commands", [])
-    assert len(commands) == 1, commands
-    command = commands[0]
-    assert Path(command[0]).name == "zellij"
-    assert command[1:3] == ["action", "new-pane"]
-
-
-@then('the pane runs "workdash branchdiff" in the worktree directory')
-def _pane_runs_branchdiff_in_worktree(scenario_state: dict[str, Any]) -> None:
-    _assert_branchdiff_pane_command(scenario_state, "workdash branchdiff")
-
-
-@then(
-    parsers.parse('the pane runs "workdash branchdiff {target_branch}" in the worktree directory')
-)
-def _pane_runs_branchdiff_with_target_in_worktree(
-    target_branch: str,
-    scenario_state: dict[str, Any],
-) -> None:
-    _assert_branchdiff_pane_command(scenario_state, f"workdash branchdiff {target_branch}")
-
-
-def _assert_branchdiff_pane_command(scenario_state: dict[str, Any], shell_text: str) -> None:
-    zellij_arguments, pane_command = pane_launch(scenario_state["branchdiff_zellij_commands"][0])
-    cwd_index = zellij_arguments.index("--cwd")
-    assert zellij_arguments[cwd_index : cwd_index + 2] == [
-        "--cwd",
-        scenario_state["branchdiff_worktree_path"],
-    ]
-    assert pane_command == ["/bin/bash", "-ic", shell_text]
-
-
-@then("the diff viewer displays the PR changes")
-def _diff_viewer_displays_pr_changes(scenario_state: dict[str, Any]) -> None:
-    command_text = " ".join(scenario_state.get("branchdiff_zellij_commands", [[]])[0])
-    assert "workdash branchdiff" in command_text
-
-
-@then("the TUI reports that the diff viewer was opened")
-def _tui_reports_diff_viewer_opened(scenario_state: dict[str, Any]) -> None:
-    assert "Opened diff for pr owner/repo#9." in scenario_state["branchdiff_status"]
-
-
-@then("no diff viewer pane is opened")
-def _no_diff_viewer_pane_opened(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("branchdiff_zellij_commands") == []
-
-
-@then("no progress overlay remains")
-def _no_progress_overlay_remains(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("modal_screen_names") == []
-
-
-def run_branchdiff_tui_scenario(
-    scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Drive pressing 'd' in the TUI and record worktree + zellij calls."""
-    import workdash.launcher as launcher_module
-
-    zellij_commands: list[list[str]] = []
-    gh_commands: list[list[str]] = []
-    worktree_calls: list[WorkItem] = []
-    captured: dict[str, Any] = {}
-    worktree_path = tmp_path / "wt"
-    worktree_path.mkdir(exist_ok=True)
-
-    def fake_which(name: str) -> str | None:
-        if name == "zellij":
-            return f"/usr/bin/{name}"
-        return None
-
-    def fake_run(*args, **kwargs):
-        command = args[0]
+    def run(command, *args, **kwargs):
         if command[:3] == ["gh", "pr", "view"]:
-            gh_commands.append(command)
             return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
+                command,
+                0,
                 stdout=json.dumps(
                     {
-                        "baseRefName": scenario_state.get("branchdiff_pr_base_branch", "main"),
+                        "baseRefName": "release/2026",
                         "headRepository": {"name": "repo"},
                         "headRepositoryOwner": {"login": "owner"},
                     }
                 ),
-                stderr="",
             )
-        zellij_commands.append(command)
-        mark_pane_started(command, "23")
-        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+        if command[0] == "/test/zellij":
+            assert command[1:3] == ["action", "new-pane"], command
+            panes.append(pane_launch(command))
+            mark_pane_started(command)
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return real_run(command, *args, **kwargs)
 
-    def worktree_callback(item: WorkItem) -> str:
-        if scenario_state.get("worktree_fails"):
-            raise RuntimeError("worktree failed")
-        worktree_calls.append(item)
-        return str(worktree_path)
-
-    monkeypatch.setenv("SHELL", "/bin/bash")
+    item = scenario_state["diff_item"]
+    checkout = scenario_state["renderer"].parent
     monkeypatch.setenv("ZELLIJ", "0")
-    monkeypatch.setattr(launcher_module.shutil, "which", fake_which)
-    monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/test/zellij")
+    monkeypatch.setattr(subprocess, "run", run)
 
-    async def interactions(app, pilot) -> None:
+    async def interactions(app, pilot):
         await pilot.press("c", "d")
         for _ in range(40):
-            await pilot.pause()
-            status = app.query_one("#status-footer").render().plain
-            if (
-                zellij_commands
-                or "Worktree setup failed" in status
-                or "Failed to open diff" in status
-            ):
+            if panes:
                 break
-        captured["status"] = app.query_one("#status-footer").render().plain
-        captured["modal_screen_names"] = modal_screen_names(app)
+            await pilot.pause(0.05)
+        assert panes, app.query_one("#status-footer").render().plain
 
-    run_app(
-        work_items=list(work_items),
-        worktree_callback=worktree_callback,
-        interactions=interactions,
-    )
-    scenario_state["branchdiff_worktree_calls"] = worktree_calls
-    scenario_state["branchdiff_worktree_path"] = str(worktree_path)
-    scenario_state["branchdiff_gh_commands"] = gh_commands
-    scenario_state["branchdiff_zellij_commands"] = zellij_commands
-    scenario_state["branchdiff_status"] = captured["status"]
-    scenario_state["modal_screen_names"] = captured["modal_screen_names"]
+    run_app(work_items=[item], worktree_callback=lambda _: str(checkout), interactions=interactions)
+
+    # Stand in for Zellij executing the captured command, not for the diff viewer.
+    [(options, command)] = panes
+    monkeypatch.chdir(options[options.index("--cwd") + 1])
+    monkeypatch.delenv("ZELLIJ_PANE_ID", raising=False)
+    monkeypatch.setenv("COLORTERM", "truecolor")
+
+    def capture_viewer(app):
+        async def capture():
+            async with app.run_test(size=(100, 20)) as pilot:
+                for _ in range(40):
+                    screen = _screen_text(app)
+                    if "new renderer" in screen:
+                        break
+                    await pilot.pause(0.05)
+                scenario_state["pr_diff_screen"] = screen
+
+        asyncio.run(capture())
+
+    monkeypatch.setattr(branchdiff_module.BranchDiffApp, "run", capture_viewer)
+    executable, *args = shlex.split(command[-1])
+    assert executable == "workdash"
+    assert workdash_main(args) == 0
+
+
+@then("the new diff pane shows the release renderer and the proposed renderer side by side")
+def _see_pull_request_diff(scenario_state):
+    screen = scenario_state["pr_diff_screen"]
+    assert "renderer.txt" in screen
+    assert any(
+        "release renderer" in row and "new renderer" in row for row in screen.splitlines()
+    ), screen
+    assert "old renderer" not in screen
 
 
 # -- Fixtures ---------------------------------------------------------------

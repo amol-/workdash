@@ -105,12 +105,6 @@ Feature: Automatically dispatch ready work
     When the user stops the blocked session from the dashboard
     Then its agent pane closes and its worktree is preserved
 
-  @id:F-AUTODISPATCH-S013
-  Scenario: Start autodispatch from an issue in the dashboard
-    Given a ready issue selected in the dashboard
-    When the user presses d and chooses an autodispatch agent
-    Then an autodispatch session launches that issue
-
   @id:F-AUTODISPATCH-S009
   Scenario: Choose an agent that can both code and review
     Given a ready issue selected in the dashboard

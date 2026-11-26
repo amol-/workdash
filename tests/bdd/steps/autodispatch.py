@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from pytest_bdd import given, parsers, then, when
-from textual.widgets import Static
+from textual.widgets import DataTable, Static
 
 import workdash.control as control_module
 from gh_work_state_fake import install_fake_github
@@ -440,6 +440,12 @@ def dashboard_issue(dashboard_dispatch, scenario_state):
     scenario_state["dashboard_expected"] = "other/repo#ISSUE-3"
 
 
+@given("a ready issue selected in the dashboard and another item to triage")
+def dashboard_issue_and_triage_item(dashboard_dispatch, scenario_state):
+    dashboard_issue(dashboard_dispatch, scenario_state)
+    scenario_state["triage_item"] = make_work_item(number=4, title="Update docs")
+
+
 @given("the default coding agent cannot analyze but another agent can code and analyze")
 def compatible_agent(scenario_state):
     agents = scenario_state["dashboard_session"].config.agents
@@ -522,10 +528,12 @@ def dashboard_other_pr(dashboard_dispatch, scenario_state, kind):
 
 @when("the user presses d and chooses an autodispatch agent")
 @when("the user presses d to start autodispatch")
+@when("the user presses d, chooses agent 1, and uses / to find the other item once work begins")
 def dashboard_press_dispatch(scenario_state):
     session = scenario_state["dashboard_session"]
     item = scenario_state["dashboard_item"]
-    session.work_items = [item]
+    triage_item = scenario_state.get("triage_item")
+    session.work_items = [item] if triage_item is None else [item, triage_item]
 
     async def interact(app, pilot):
         footer = app.query_one("#status-footer", Static)
@@ -547,7 +555,32 @@ def dashboard_press_dispatch(scenario_state):
             app.query_one("#autodispatch-progress", Static).render().plain
         )
 
-    run_app(work_items=[item], session=session, interactions=interact)
+        if triage_item is not None:
+            progress = app.query_one("#autodispatch-progress", Static)
+            for _ in range(100):
+                if "developing" in progress.render().plain:
+                    break
+                await pilot.pause(0.02)
+            assert "developing" in progress.render().plain
+            await pilot.press("/", "d", "o", "c", "s", "enter")
+            table = app.query_one("#work-items", DataTable)
+            scenario_state["triage_titles"] = [
+                str(table.get_row_at(index)[2]).lstrip("* ") for index in range(table.row_count)
+            ]
+            scenario_state["progress_after_triage"] = progress.render().plain
+
+    run_app(work_items=session.work_items, session=session, interactions=interact)
+
+
+@then("the dashboard has announced the start and shows the other item while autodispatch continues")
+def dashboard_continues_triage(scenario_state):
+    assert scenario_state["dispatch_status"].startswith("Started autodispatch")
+    assert scenario_state["triage_titles"] == [scenario_state["triage_item"].title]
+    assert (
+        scenario_state["dashboard_expected"].replace("#ISSUE-", "#")
+        in scenario_state["progress_after_triage"]
+    )
+    assert "developing" in scenario_state["progress_after_triage"]
 
 
 @when("the user cancels autodispatch agent selection")

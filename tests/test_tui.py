@@ -1,4 +1,5 @@
 import asyncio
+import json
 import shutil
 import subprocess
 import threading
@@ -13,9 +14,11 @@ pytest.importorskip("textual")
 from rich.text import Text
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Input, Static
+from webob import Request
 
 import workdash.control as control_module
 import workdash.launcher as launcher_module
+import workdash.tui as tui_module
 from workdash.backend import IncludeResult
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashSession, format_work_item_id
@@ -30,6 +33,7 @@ from workdash.tui import (
     WorkdashApp,
     _type_column,
 )
+from workdash.work_state import ReadyWork, ScopedReadyWork
 
 _DEFAULT_TUI_CONFIG = WorkdashConfig(
     agents={
@@ -1054,11 +1058,14 @@ async def _wait_for_busy_message(expected: str, pilot) -> None:
     # A dashboard action in flight keeps the pilot from settling, so poll the screen.
     for _ in range(40):
         await asyncio.sleep(0.05)
-        if isinstance(pilot.app.screen, BusyScreen):
-            message = pilot.app.screen.query_one("#busy-message", Static).render().plain
-            assert message == expected
+        screen = pilot.app.screen
+        if not isinstance(screen, BusyScreen):
+            continue
+        messages = screen.query("#busy-message")
+        if messages and (message := messages.first(Static)).is_mounted:
+            assert message.render().plain == expected
             return
-    raise AssertionError(f"no busy screen shown; expected {expected!r}")
+    raise AssertionError(f"no busy message mounted; expected {expected!r}")
 
 
 async def _wait_for_no_dialog(app: WorkdashApp, pilot) -> None:
@@ -4087,6 +4094,44 @@ def test_view_menu_offers_view_and_open_for_the_selected_item() -> None:
     asyncio.run(run_smoke())
 
 
+@pytest.mark.parametrize(
+    ("item_index", "preparation_fails", "message"),
+    [
+        (0, False, "Opened diff for issue owner/repo#11."),
+        (1, False, "Opened diff for pr owner/other#22."),
+        (0, True, "Worktree setup failed: worktree failed"),
+    ],
+    ids=["issue", "pull-request", "preparation-failure"],
+)
+def test_code_menu_diff_uses_the_selected_worktree(
+    item_index, preparation_fails, message, tmp_path, monkeypatch
+):
+    items = _search_work_items()[:2]
+    item = items[item_index]
+    prepare = MagicMock(return_value=str(tmp_path))
+    if preparation_fails:
+        prepare.side_effect = RuntimeError("worktree failed")
+    launch = MagicMock()
+    monkeypatch.setattr(tui_module, "launch_branchdiff_context", launch)
+    app = WorkdashApp(work_items=items, worktree_callback=prepare)
+
+    async def run():
+        async with app.run_test() as pilot:
+            # Items start sorted by most recent update, so the issue is the second row.
+            if item_index == 0:
+                await pilot.press("down")
+            await pilot.press("c", "d")
+            await _wait_for_footer(app.query_one("#status-footer", Static), message, pilot)
+            prepare.assert_called_once_with(item)
+            if preparation_fails:
+                launch.assert_not_called()
+            else:
+                launch.assert_called_once_with(str(tmp_path), item, github_client=None)
+            _assert_no_modal_screens(app)
+
+    asyncio.run(run())
+
+
 def test_progress_arrows_reach_empty_sessions_on_short_screen():
     session = MagicMock()
     session.config = _DEFAULT_TUI_CONFIG
@@ -4265,6 +4310,191 @@ def test_dashboard_dialog_names_the_operation_that_took_over() -> None:
             _assert_no_modal_screens(app)
 
     asyncio.run(run())
+
+
+def _control_post(session, operation, payload):
+    # Consume the WSGI response on the request thread, where TurboGears stores its context.
+    response = Request.blank(
+        f"/api/v0/{operation}",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps(payload).encode(),
+    ).get_response(control_module._make_turbogears_app(session))
+    return response.status_int, response.json
+
+
+@pytest.mark.parametrize(
+    ("operation", "message", "lookup_fails"),
+    [
+        ("ready", "Checking ready work...", False),
+        ("analyze", "Analyzing owner/repo#ISSUE-11...", False),
+        ("autodispatch", "Starting autodispatch...", False),
+        ("ready", "Checking ready work...", True),
+    ],
+    ids=["readiness", "analysis", "autodispatch-start", "readiness-failure"],
+)
+def test_control_operation_shows_and_clears_its_dashboard_dialog(
+    operation, message, lookup_fails, tmp_path, monkeypatch
+):
+    session = _dashboard_session()
+    session.work_items = _search_work_items()[:1]
+    item_id = format_work_item_id(session.work_items[0])
+    monkeypatch.setattr(session, "_live_panes", lambda: [])
+    entered, release = threading.Event(), threading.Event()
+    analysis = tmp_path / "analysis.md"
+    analysis.write_text("# Analysis\n")
+
+    def hold_lookup(**_kwargs):
+        entered.set()
+        assert release.wait(10), "test never released the GitHub lookup"
+        if lookup_fails:
+            raise RuntimeError("GitHub is unreachable")
+        return ScopedReadyWork([])
+
+    def hold_analysis(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(10), "test never released analysis"
+        return str(analysis)
+
+    session.backend.github_client.find_ready_work.side_effect = hold_lookup
+    session.backend.analyze_item.side_effect = hold_analysis
+    payload = {
+        "ready": {"scope": "owner/repo"},
+        "analyze": {"target": item_id, "agent": "claude"},
+        "autodispatch": {"scope": item_id, "agent": "claude"},
+    }[operation]
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test() as pilot:
+            response_task = asyncio.create_task(
+                asyncio.to_thread(_control_post, session, operation, payload)
+            )
+            try:
+                assert await asyncio.to_thread(entered.wait, 3)
+                await _wait_for_busy_message(message, pilot)
+            finally:
+                release.set()
+                status, body = await response_task
+            await _wait_for_no_dialog(app, pilot)
+            _assert_no_modal_screens(app)
+            assert session.busy_message() is None
+            if lookup_fails:
+                assert status == 502
+                assert body["ok"] is False
+                assert body["error"]["code"] == "github_error"
+                assert "GitHub is unreachable" in body["error"]["message"]
+            else:
+                assert status == 200
+                assert body["ok"] is True
+
+    try:
+        asyncio.run(run())
+    finally:
+        session.stop_autodispatch_sessions()
+
+
+def test_dashboard_ignores_search_key_until_blocking_dialog_clears():
+    session = _dashboard_session()
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test() as pilot:
+            with session._blocking("Checking ready work..."):
+                await _wait_for_busy_message("Checking ready work...", pilot)
+                await pilot.press("/")
+                assert isinstance(app.screen, BusyScreen)
+                assert not any(isinstance(screen, SearchDialog) for screen in app.screen_stack)
+            await _wait_for_no_dialog(app, pilot)
+            await pilot.press("/")
+            assert isinstance(app.screen, SearchDialog)
+
+    asyncio.run(run())
+
+
+def test_search_keeps_receiving_keys_during_a_blocking_operation():
+    session = _dashboard_session()
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test() as pilot:
+            await pilot.press("/")
+            search = app.screen
+            assert isinstance(search, SearchDialog)
+            with session._blocking("Checking ready work..."):
+                await app._sync_busy_screen()
+                await pilot.press("s", "e", "a")
+                assert search.query_one(Input).value == "sea"
+                assert app.screen is search
+                assert not any(isinstance(screen, BusyScreen) for screen in app.screen_stack)
+
+    asyncio.run(run())
+
+
+def test_external_autodispatch_start_is_acknowledged_before_background_work(tmp_path, monkeypatch):
+    session = _dashboard_session()
+    session.config = replace(session.config, workdir=tmp_path)
+    item = _search_work_items()[0]
+    session.work_items = [item]
+    item_id = format_work_item_id(item)
+    entered, release = threading.Event(), threading.Event()
+
+    def first_lookup(**_kwargs):
+        entered.set()
+        assert release.wait(10), "test never released the initial readiness check"
+        return ScopedReadyWork([ReadyWork(item)])
+
+    session.backend.github_client.find_ready_work.side_effect = first_lookup
+    monkeypatch.setattr(
+        launcher_module.zellij, "list_workdash_panes", lambda _: [{"id": 1, "title": "code_wt"}]
+    )
+    monkeypatch.setattr(
+        session,
+        "code",
+        lambda **kwargs: {
+            "status": "launched",
+            "item_id": item_id,
+            "pane_id": "terminal_1",
+            "session": "workdash",
+            "launch_reason": "implement",
+        },
+    )
+    app = WorkdashApp(session=session)
+
+    async def run():
+        async with app.run_test() as pilot:
+            response_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _control_post, session, "autodispatch", {"scope": item_id, "agent": "claude"}
+                )
+            )
+            try:
+                assert await asyncio.to_thread(entered.wait, 3)
+                await _wait_for_busy_message("Starting autodispatch...", pilot)
+                status, body = await asyncio.wait_for(asyncio.shield(response_task), timeout=3)
+                assert status == 200
+                started = body["result"]
+                assert started["id"]
+                assert started["scope"] == item_id
+                assert session.busy_message() == "Starting autodispatch..."
+            finally:
+                release.set()
+                await response_task
+            footer = app.query_one("#status-footer", Static)
+            progress = app.query_one("#autodispatch-progress", Static)
+            for _ in range(30):
+                if "developing" in progress.render().plain:
+                    break
+                await pilot.pause(0.1)
+            assert "developing" in progress.render().plain
+            assert footer.render().plain == f"Started autodispatch for {item_id}: {started['id']}."
+            await _wait_for_no_dialog(app, pilot)
+            _assert_no_modal_screens(app)
+
+    try:
+        asyncio.run(run())
+    finally:
+        session.stop_autodispatch_sessions()
 
 
 def test_autodispatch_dispatch_iterations_leave_the_dashboard_interactive(monkeypatch) -> None:

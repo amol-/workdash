@@ -1008,7 +1008,20 @@ def test_launch_branchdiff_context_targets_origin_for_same_repo_pr(
     assert captured[0][1]["check"] is True
     assert captured[0][1]["capture_output"] is True
     assert captured[0][1]["text"] is True
-    assert captured[1][0][-1] == "workdash branchdiff origin/release/2026"
+    assert len(captured) == 2
+    assert pane_launch(captured[1][0]) == (
+        [
+            "/usr/bin/zellij",
+            "action",
+            "new-pane",
+            "--name",
+            "diff_amol-_repoze.who_52",
+            "--cwd",
+            "/tmp/amol-_repoze.who_52",
+            "--close-on-exit",
+        ],
+        ["/bin/bash", "-ic", "workdash branchdiff origin/release/2026"],
+    )
 
 
 def test_launch_branchdiff_context_targets_upstream_for_fork_pr(
