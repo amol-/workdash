@@ -1584,7 +1584,7 @@ def test_main_server_backed_commands_are_pure_http_clients(
 
     monkeypatch.setattr(workdash_module, "WorkdashApp", unexpected_app)
 
-    if expected_endpoint == "info":
+    if expected_endpoint in {"info", "code"}:
         monkeypatch.setenv("PATH", str(tmp_path))
 
     if environment_host is None:
@@ -1907,6 +1907,13 @@ def test_main_analyze_reports_invalid_content_response(
             "Agent 'pi' cannot analyze: it has no analyze command.",
         ),
         (
+            ["code", "owner/repo#ISSUE-1", "--agent", "aider"],
+            "code",
+            {"target": "owner/repo#ISSUE-1", "agent": "aider"},
+            "unsupported_agent",
+            "Agent 'aider' cannot code: it has no launch command.",
+        ),
+        (
             ["terminal", "owner/repo#ISSUE-99", "--json"],
             "terminal",
             {"target": "owner/repo#ISSUE-99"},
@@ -2072,12 +2079,14 @@ def test_main_code_json_outputs_server_response(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     response = {
+        "status": "launched",
         "item_id": "owner/repo#ISSUE-1",
         "session": "workdash-main",
         "agent": "codex",
         "cwd": "/tmp/owner_repo_1",
         "pane_title": "code_owner_repo_1",
         "pane_id": "terminal_23",
+        "tab_name": None,
     }
 
     class FakeControlClient:
@@ -2113,6 +2122,8 @@ def test_main_code_reports_server_error_before_local_worktree(
             assert host == "127.0.0.1"
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
+            assert endpoint == "code"
+            assert payload == {"target": "owner/repo#ISSUE-1", "agent": "vscode"}
             raise workdash_module.WorkdashControlError(
                 "unknown_agent",
                 "Agent 'vscode' is not configured.",
@@ -2125,12 +2136,11 @@ def test_main_code_reports_server_error_before_local_worktree(
         lambda _workdir, _item: (_ for _ in ()).throw(AssertionError("unexpected worktree")),
     )
 
-    assert workdash_module.main(["code", "owner/repo#ISSUE-1", "--agent", "vscode"]) == 1
+    assert workdash_module.main(["code", "owner/repo#ISSUE-1", "--agent", "vscode", "--json"]) == 1
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "Agent 'vscode' is not configured." in captured.err
-    assert "vscode" in captured.err
+    assert captured.err == "Error: Agent 'vscode' is not configured.\n"
 
 
 @pytest.mark.parametrize("content", ["visible output\nnext", "visible output\nnext\n"])

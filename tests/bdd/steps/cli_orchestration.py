@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 from contextlib import nullcontext
 from pathlib import Path
@@ -112,15 +111,11 @@ def _run_workdash(
         class FakeControlClient:
             def __init__(self, host="127.0.0.1") -> None:
                 assert host == (argv[argv.index("--host") + 1] if "--host" in argv else "127.0.0.1")
-                scenario_state["client_host"] = host
 
             def request(
                 self, endpoint: str, payload: dict[str, object] | None = None
             ) -> dict[str, object]:
                 payload = payload or {}
-                scenario_state.setdefault("control_requests", []).append(
-                    {"endpoint": endpoint, "payload": dict(payload)}
-                )
                 if endpoint == "info":
                     return scenario_state["api_session"].info(panes=payload.get("panes", "work"))
                 if endpoint == "analyze":
@@ -204,14 +199,7 @@ def _run_workdash(
         monkeypatch.setattr(control_module.launcher.zellij, "close_zellij_pane", close_pane)
 
     monkeypatch.setattr(github_client_module.subprocess, "run", fake_run)
-    if scenario_state.get("client_missing_tools"):
-        monkeypatch.setattr(
-            workdash_module.GitHubClient,
-            "check_authentication",
-            lambda self: (_ for _ in ()).throw(AssertionError("unexpected GitHub preflight")),
-        )
-    else:
-        monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
+    monkeypatch.setattr(workdash_module.GitHubClient, "check_authentication", lambda self: None)
     monkeypatch.setattr(workdash_module, "load_config", lambda: config)
     monkeypatch.setattr(workdash_module, "WorkdashBackend", FakeBackend)
     monkeypatch.setattr(
@@ -406,20 +394,6 @@ def _run_analyze(
     )
 
 
-@when("the user runs `workdash code owner/repo#ISSUE-1 --agent codex --json`")
-def _run_code_json(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_workdash(
-        ["code", "owner/repo#ISSUE-1", "--agent", "codex", "--json"],
-        scenario_state,
-        monkeypatch,
-        capsys,
-    )
-
-
 @when("the user runs `workdash analyze owner/repo#ISSUE-99 --agent codex --json`")
 def _run_analyze_unknown_issue_json(
     scenario_state: dict[str, Any],
@@ -428,20 +402,6 @@ def _run_analyze_unknown_issue_json(
 ) -> None:
     _run_workdash(
         ["analyze", "owner/repo#ISSUE-99", "--agent", "codex", "--json"],
-        scenario_state,
-        monkeypatch,
-        capsys,
-    )
-
-
-@when("the user runs `workdash code owner/repo#ISSUE-1 --agent vscode --json`")
-def _run_code_vscode_json(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_workdash(
-        ["code", "owner/repo#ISSUE-1", "--agent", "vscode", "--json"],
         scenario_state,
         monkeypatch,
         capsys,
@@ -632,11 +592,6 @@ def _does_not_choose_session(scenario_state: dict[str, Any]) -> None:
     assert "Session:" not in scenario_state["stdout"]
 
 
-@then("the command exits with a non-zero status")
-def _exits_non_zero(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["exit_code"] != 0
-
-
 @then("the system lists the candidate Workdash-owned sessions")
 def _lists_candidate_sessions(scenario_state: dict[str, Any]) -> None:
     output = scenario_state["output"]
@@ -672,24 +627,6 @@ def _launches_code_with_selected_agent(scenario_state: dict[str, Any]) -> None:
     ]
 
 
-@then(
-    "the system returns JSON with status `launched`, the item ID, selected agent, selected "
-    "session, cwd, pane title, and pane ID"
-)
-def _returns_code_json(scenario_state: dict[str, Any]) -> None:
-    payload = json.loads(scenario_state["stdout"])
-    assert payload == {
-        "status": "launched",
-        "item_id": "owner/repo#ISSUE-1",
-        "session": "workdash-main",
-        "agent": "codex",
-        "cwd": str(Path(scenario_state["workdir"]) / "owner_repo_1"),
-        "pane_title": "code_owner_repo_1",
-        "pane_id": "terminal_23",
-        "tab_name": None,
-    }
-
-
 @then("the command shows the Markdown report link for `owner/repo#ISSUE-1` from `codex`")
 def _reports_markdown_link(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["exit_code"] == 0, scenario_state["stderr"]
@@ -710,48 +647,15 @@ def _identifies_shell_and_checkout(scenario_state: dict[str, Any]) -> None:
     } <= set(scenario_state["stdout"].splitlines())
 
 
-@then(parsers.parse('the system reports "{message}"'))
-def _reports_error_message(scenario_state: dict[str, Any], message: str) -> None:
-    assert f"Error: {message}" in scenario_state["stderr"]
-
-
 @then("the system reports that an active Workdash-owned Zellij session is required")
 def _reports_session_required(scenario_state: dict[str, Any]) -> None:
     assert "active Workdash-owned Zellij session" in scenario_state["output"]
     assert "required" in scenario_state["output"]
 
 
-@given(
-    "the configured agents are `pi` with only a launch command "
-    "and `aider` with only an analyze command"
-)
-def _configured_agents_pi_launch_only_aider_analyze_only(scenario_state: dict[str, Any]) -> None:
-    scenario_state["api_session"].config = WorkdashConfig(
-        github_username="testuser",
-        agents={
-            "pi": AgentConfig(launch="pi"),
-            "aider": AgentConfig(analyze="aider --message"),
-        },
-        repositories=("owner/repo",),
-        workdir=scenario_state.get("workdir", "/tmp/workdash-bdd"),
-        todo_repository="testuser/todos",
-    )
-
-
 @given("the current Workdash items do not include `owner/repo#ISSUE-99`")
 def _current_items_do_not_include_issue_99(scenario_state: dict[str, Any]) -> None:
     assert all(item.number != 99 for item in scenario_state.get("work_items", []))
-
-
-@given("the client process cannot find GitHub CLI or Zellij on PATH")
-def _client_process_cannot_find_github_or_zellij(scenario_state: dict[str, Any]) -> None:
-    scenario_state["client_missing_tools"] = True
-
-
-@then("the command requests code launch from the local Workdash server")
-def _requests_code_launch(scenario_state: dict[str, Any]) -> None:
-    control_requests = scenario_state.get("control_requests", [])
-    assert any(req["endpoint"] == "code" for req in control_requests)
 
 
 @given("pull request #51 has an existing worktree on branch `pr-branch`")
@@ -816,58 +720,53 @@ def _confirms_pane_close_accepted(scenario_state: dict[str, Any]) -> None:
     assert scenario_state["stdout"] == "Accepted close for terminal_26.\n"
 
 
-@then(parsers.parse("the command connects to host `{host}`"))
-def _command_connects_to_host(host: str, scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["client_host"] == host
-
-
-@when("the user runs `workdash code owner/repo#99 --agent pi --host dashboard.lan --json`")
-def _run_remote_code_json(
+@when("the user runs `workdash code owner/repo#99 --agent pi --host dashboard.lan`")
+def _run_remote_code(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _run_workdash(
-        ["code", "owner/repo#99", "--agent", "pi", "--host", "dashboard.lan", "--json"],
+        ["code", "owner/repo#99", "--agent", "pi", "--host", "dashboard.lan"],
         scenario_state,
         monkeypatch,
         capsys,
     )
 
 
-@then(
-    parsers.parse(
-        "the system returns JSON with status `launched` for `{item_id}` and the new pane ID"
-    )
-)
-def _returns_launched_json(item_id: str, scenario_state: dict[str, Any]) -> None:
-    payload = json.loads(scenario_state["stdout"])
+@then("the command shows the new pane for `owner/repo#ISSUE-99` running `pi`")
+def _shows_new_pane_for_unlisted_issue(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state["stderr"]
     [launched_pane] = scenario_state["panes"]
-    assert (payload["status"], payload["item_id"], payload["pane_id"]) == (
-        "launched",
-        item_id,
-        f"terminal_{launched_pane['id']}",
-    )
+    assert {
+        "Status: launched",
+        "Item: owner/repo#ISSUE-99",
+        "Agent: pi",
+        f"Pane id: terminal_{launched_pane['id']}",
+    } <= set(scenario_state["stdout"].splitlines())
 
 
-@then("the system prints status `already_running` and the running pane ID")
-def _prints_already_running(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["exit_code"] == 0, scenario_state
-    assert "Status: already_running" in scenario_state["stdout"]
-    assert "Agent: -" in scenario_state["stdout"]
-    assert "Pane id: terminal_7" in scenario_state["stdout"]
+@then("the command shows that pane `terminal_7` is already running for `owner/repo#ISSUE-1`")
+def _shows_running_pane(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state["stderr"]
+    assert {
+        "Status: already_running",
+        "Item: owner/repo#ISSUE-1",
+        "Pane id: terminal_7",
+    } <= set(scenario_state["stdout"].splitlines())
 
 
-@when("the user runs `workdash code owner/repo#ISSUE-1 --group epic --host dashboard.lan --json`")
+@when("the user runs `workdash code owner/repo#ISSUE-1 --group epic --host dashboard.lan`")
 def _run_grouped_code(scenario_state, monkeypatch, capsys):
     _run_workdash(
-        ["code", "owner/repo#ISSUE-1", "--group", "epic", "--host", "dashboard.lan", "--json"],
+        ["code", "owner/repo#ISSUE-1", "--group", "epic", "--host", "dashboard.lan"],
         scenario_state,
         monkeypatch,
         capsys,
     )
 
 
-@then("the result reports the agent in tab `epic`")
-def _grouped_code_result(scenario_state):
-    assert json.loads(scenario_state["stdout"])["tab_name"] == "epic"
+@then("the command reports a new agent in tab `epic`")
+def _reports_new_agent_in_tab(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0, scenario_state["stderr"]
+    assert {"Status: launched", "Tab: epic"} <= set(scenario_state["stdout"].splitlines())
