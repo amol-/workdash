@@ -308,9 +308,9 @@ def _run_workdash(
         if real_worktree
         else lambda workdir, item, **_kwargs: (
             scenario_state.setdefault("ensure_calls", []).append((workdir, item))
-            or scenario_state.get("pr_worktrees", {}).get(
-                item.number, (str(Path(workdir) / "owner_repo_1"),)
-            )[0]
+            or scenario_state.get("pr_worktree_paths", {}).get(
+                item.number, str(Path(workdir) / "owner_repo_1")
+            )
         ),
     )
     monkeypatch.setattr(
@@ -1247,6 +1247,35 @@ def _requests_pane_information_with_ordinary_panes(scenario_state: dict[str, Any
 def _requests_code_launch(scenario_state: dict[str, Any]) -> None:
     control_requests = scenario_state.get("control_requests", [])
     assert any(req["endpoint"] == "code" for req in control_requests)
+
+
+@given("pull request #51 has an existing worktree on branch `pr-branch`")
+def _pr_worktree(scenario_state, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = subprocess.run
+    run(["git", "init", "-q", str(repo)], check=True)
+    run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+        check=True,
+    )
+    path = str(Path(scenario_state["api_session"].config.workdir) / "owner_repo_51")
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    run(["git", "-C", str(repo), "worktree", "add", "-qb", "pr-branch", path], check=True)
+    scenario_state["pr_worktrees"] = {51: (path, "pr-branch", "owner/repo")}
+    scenario_state["pr_worktree_paths"] = {51: path}
 
 
 @when(parsers.parse("the user runs `workdash code {target} --agent pi --autostart`"))

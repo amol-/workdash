@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from importlib.metadata import version
 from pathlib import Path
-from threading import Event, Thread
+from threading import Barrier, Event, Thread
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
@@ -4325,6 +4325,135 @@ def test_dispatch_revalidates_and_retries_claimed_candidate(monkeypatch, tmp_pat
     )
 
 
+def test_dispatch_racing_callers_launch_distinct_issues(monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    for number in (1, 2):
+        github.add_issue(f"owner/repo#{number}")
+    panes = []
+    session, _, _, launch = _coding_session(monkeypatch, tmp_path, panes)
+    session.config = replace(session.config, github_username="testuser")
+
+    def checkout(_workdir, item, **kwargs):
+        path = tmp_path / f"owner_repo_{item.number}"
+        path.mkdir(exist_ok=True)
+        return path
+
+    def start(repo, *_args, **kwargs):
+        number = int(Path(repo).name.rsplit("_", 1)[1])
+        title = f"code_{Path(repo).name}"
+        panes.append({"id": number, "title": title, "pane_cwd": repo})
+        return SimpleNamespace(
+            pane_id=f"terminal_{number}",
+            pane_title=title,
+            cwd=repo,
+            session=kwargs["zellij_session"],
+        )
+
+    monkeypatch.setattr(control_module, "existing_worktree_path", checkout)
+    monkeypatch.setattr(control_module, "ensure_worktree", lambda *a, **kw: str(checkout(*a, **kw)))
+    launch.side_effect = start
+    ready = session._ready
+    selected = Barrier(2)
+
+    def synchronize_selection(scope, *args, **kwargs):
+        result = ready(scope, *args, **kwargs)
+        if scope == "owner/repo":
+            assert [work.item.number for work in result.items] == [1, 2]
+            selected.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(session, "_ready", synchronize_selection)
+    app = control_module._make_turbogears_app(session)
+
+    def dispatch_request():
+        request = Request.blank(
+            "/api/v0/dispatch",
+            method="POST",
+            content_type="application/json",
+            body=b'{"scope":"owner/repo"}',
+        )
+        response = request.get_response(app)
+        assert response.status_int == 200
+        return json.loads(response.text)["result"]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        calls = [pool.submit(dispatch_request) for _ in range(2)]
+        results = [call.result(timeout=10) for call in calls]
+
+    assert {(r["status"], r["issue_id"], r["pane_id"]) for r in results} == {
+        ("launched", "owner/repo#ISSUE-1", "terminal_1"),
+        ("launched", "owner/repo#ISSUE-2", "terminal_2"),
+    }
+    assert launch.call_count == 2
+
+
+def test_dispatch_skips_waiting_and_others_pull_requests(monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    github.add_issue("owner/repo#43")
+    github.add_pull_request("owner/repo#51", closes=("owner/repo#42",))
+    github.add_pull_request(
+        "owner/repo#52",
+        closes=("owner/repo#43",),
+        author="other",
+        checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+    )
+    session, _, _, launch = _coding_session(monkeypatch, tmp_path, [])
+    session.config = replace(session.config, github_username="testuser")
+
+    assert session.dispatch_once(scope="owner/repo")["status"] == "no_ready_task"
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("fault", "message", "launches"),
+    [
+        ("github", "GitHub lookup", 0),
+        ("zellij", "Cannot check for running coding agents", 0),
+        ("unconfirmed", "its pane did not appear", 1),
+    ],
+)
+def test_dispatch_cli_reports_failures_without_trying_another_launch(
+    monkeypatch, tmp_path, capsys, fault, message, launches
+):
+    import workdash.workdash as cli
+
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_issue("owner/repo#2")
+    session, _, ensure, launch = _coding_session(monkeypatch, tmp_path, [])
+    session.config = replace(session.config, github_username="testuser")
+    monkeypatch.setattr(
+        control_module,
+        "existing_worktree_path",
+        lambda workdir, item, **kwargs: Path(workdir) / f"owner_repo_{item.number}",
+    )
+    ensure.side_effect = lambda workdir, item, **kwargs: str(
+        Path(workdir) / f"owner_repo_{item.number}"
+    )
+    if fault == "github":
+        github.failures["ReadyRepositoryIssues"] = failure("HTTP 502")
+    elif fault == "zellij":
+        monkeypatch.setattr(
+            control_module.launcher.zellij,
+            "load_zellij_panes",
+            MagicMock(side_effect=RuntimeError("pane listing failed")),
+        )
+    else:
+        launch.side_effect = None  # The launch returned a pane ID, but it never becomes visible.
+        launch.return_value = SimpleNamespace(pane_id="terminal_30", pane_title="code_owner_repo_1")
+    client = MagicMock()
+    client.request.side_effect = lambda _endpoint, payload: session.dispatch_once(**payload)
+    monkeypatch.setattr(cli, "WorkdashControlClient", MagicMock(return_value=client))
+
+    assert cli.main(["dispatch", "owner/repo", "--json"]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.startswith("Error: ") and message in err
+    assert "no_ready_task" not in err and '"launched"' not in err
+    assert launch.call_count == launches
+
+
 def test_dispatch_skips_claim_before_checking_launch_limit(monkeypatch, tmp_path):
     panes = [{"id": 5, "title": "code_owner_repo_1", "pane_cwd": str(tmp_path / "owner_repo_1")}]
     session, _worktree, _ensure, launch = _coding_session(monkeypatch, tmp_path, panes)
@@ -4397,11 +4526,32 @@ def test_remote_dispatch_cli_through_http(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("WORKDASH_HOST", f"127.0.0.1:{port}")
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
-    session, _, _, launch = _coding_session(monkeypatch, tmp_path, [])
+    panes = []
+    session, _, _, launch = _coding_session(monkeypatch, tmp_path, panes)
     session.config = replace(session.config, github_username="testuser")
+    start = launch.side_effect
+
+    def start_in_group(*args, **kwargs):
+        pane = start(*args, **kwargs)
+        panes[-1]["tab_name"] = kwargs["group"]
+        return pane
+
+    launch.side_effect = start_in_group
     server = control_module.WorkdashControlServer(session)
     server.start()
     host = f"127.0.0.1:{port}"
+    monkeypatch.setenv("WORKDASH_HOST", "invalid default address")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(
+        cli.GitHubClient,
+        "check_authentication",
+        MagicMock(side_effect=AssertionError("unexpected client GitHub preflight")),
+    )
+    monkeypatch.setattr(
+        launcher_module,
+        "_resolve_zellij_binary",
+        MagicMock(side_effect=AssertionError("unexpected local Zellij lookup")),
+    )
     try:
         assert (
             cli.main(["dispatch", "owner/repo", "--host", host, "--agent", "missing", "--json"])
@@ -4436,8 +4586,10 @@ def test_remote_dispatch_cli_through_http(monkeypatch, tmp_path, capsys):
             "pi",
             "epic",
         )
-        assert result["pane_id"] == "terminal_30"
+        assert result["tab_name"] == "epic"
+        assert result["pane_id"] == f"terminal_{panes[0]['id']}"
         assert result["autoclose_enabled"] is True
+        assert (result["session"], result["pane_id"]) in session.autoclose._panes
         assert launch.call_count == 1
     finally:
         server.stop()
@@ -4448,19 +4600,22 @@ def test_remote_dispatch_cli_through_http(monkeypatch, tmp_path, capsys):
     assert error.value.code == "server_unreachable"
 
 
-def test_dispatch_launches_and_supervises_selected_issue(monkeypatch, tmp_path):
+@pytest.mark.parametrize("closed_subissue", [False, True], ids=["unstarted", "parent"])
+def test_dispatch_launches_and_supervises_selected_issue(monkeypatch, tmp_path, closed_subissue):
     github = install_fake_github(monkeypatch)
-    github.add_issue("owner/repo#1")
+    github.add_issue("owner/repo#42")
+    if closed_subissue:
+        github.add_issue("owner/repo#43", parent="owner/repo#42", state="CLOSED")
     session, _, _, launch = _coding_session(monkeypatch, tmp_path, [])
     session.config = replace(
         session.config, github_username="testuser", todo_repository="testuser/todos"
     )
 
-    result = session.dispatch_once(scope="owner/repo", agent="pi")
+    result = session.dispatch_once(scope="owner/repo#42", agent="pi")
 
     assert (result["status"], result["issue_id"], result["action"]) == (
         "launched",
-        "owner/repo#ISSUE-1",
+        "owner/repo#ISSUE-42",
         "implement",
     )
     assert result["pane_id"] == "terminal_30"
@@ -4468,7 +4623,14 @@ def test_dispatch_launches_and_supervises_selected_issue(monkeypatch, tmp_path):
     assert launch.call_count == 1
     assert launch.call_args.kwargs["group"] == "repo"
     assert ("workdash-main", "terminal_30") in session.autoclose._panes
-    assert "AUTOSTART: IMPLEMENT" in _launched_prompt(launch)
+    prompt = _launched_prompt(launch)
+    assert "AUTOSTART: IMPLEMENT" in prompt
+    assert "https://github.com/owner/repo/issues/42" in prompt
+    if closed_subissue:
+        assert (
+            "If sub-issues already fulfilled the issue goal, verify the described workflow "
+            "and add a test proving it works instead of reimplementing it."
+        ) in prompt
 
 
 @pytest.mark.parametrize("target", ["owner/other", "https://github.com/owner/other.git"])
@@ -5035,7 +5197,8 @@ def test_dispatch_checks_out_pull_request_head_branch(monkeypatch, tmp_path):
     )
 
 
-def test_dispatch_rechecks_conflict_before_launch(monkeypatch, tmp_path):
+@pytest.mark.parametrize("scope", ["owner/repo", "owner/repo#1"])
+def test_dispatch_rechecks_conflict_before_launch(monkeypatch, tmp_path, scope):
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
     pr = github.add_pull_request("owner/repo#51", closes=("owner/repo#1",), mergeable="CONFLICTING")
@@ -5052,11 +5215,210 @@ def test_dispatch_rechecks_conflict_before_launch(monkeypatch, tmp_path):
     launch = MagicMock()
     monkeypatch.setattr(session, "code", launch)
 
-    assert session.dispatch_once(scope="owner/repo") == {
+    assert session.dispatch_once(scope=scope) == {
         "status": "no_ready_task",
-        "scope": "owner/repo",
+        "scope": scope,
     }
     launch.assert_not_called()
+
+
+@pytest.mark.parametrize("all_reasons", [False, True], ids=["failed-ci", "all-reasons"])
+def test_dispatch_resumes_existing_pr_and_passes_its_reasons_to_the_agent(
+    monkeypatch, tmp_path, all_reasons
+):
+    import workdash.repo_worktree as repo_worktree
+
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    github.add_issue("owner/repo#42", created="2026-01-02T00:00:00Z")
+    github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#42",),
+        checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+        **(
+            {
+                "mergeable": "CONFLICTING",
+                "threads": [thread(comment("reviewer", created=AFTER_PUSH))],
+            }
+            if all_reasons
+            else {}
+        ),
+    )
+    panes = []
+    session, _, _, launch, _ = _authored_session(monkeypatch, tmp_path, panes)
+    main = tmp_path / "owner_repo"
+    path = tmp_path / "owner_repo_51"
+    branch = "fix-ci-51"
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")
+    subprocess.run(["git", "init", "-qb", "main", str(main)], check=True)
+    git = ["git", "-C", str(main)]
+    subprocess.run(
+        [
+            *git,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [*git, "remote", "add", "origin", "https://github.com/owner/repo.git"], check=True
+    )
+    subprocess.run([*git, "update-ref", f"refs/remotes/origin/{branch}", "HEAD"], check=True)
+    subprocess.run(
+        [*git, "worktree", "add", "-q", "--track", "-b", branch, str(path), f"origin/{branch}"],
+        check=True,
+    )
+    monkeypatch.setattr(
+        control_module, "existing_worktree_path", repo_worktree.existing_worktree_path
+    )
+    monkeypatch.setattr(control_module, "ensure_worktree", repo_worktree.ensure_worktree)
+    monkeypatch.setattr(GitHelper, "pull_ff_only", lambda *_: None)
+    session.git = GitHelper()
+    session.backend.github_client.fetch_worktree_head.side_effect = lambda item: (
+        f"fix-ci-{item.number}",
+        item.repo,
+    )
+    scope = "owner/repo#42" if all_reasons else "owner/repo"
+    if not all_reasons:
+        assert [item["id"] for item in session.ready(scope=scope)["items"]] == [
+            "owner/repo#ISSUE-42",
+            "owner/repo#ISSUE-1",
+        ]
+
+    result = session.dispatch_once(scope=scope, agent="pi")
+
+    expected = ["address_review", "fix_merge_conflicts", "fix_ci"] if all_reasons else ["fix_ci"]
+    assert (result["status"], result["issue_id"], result["action"], result["reasons"]) == (
+        "launched",
+        "owner/repo#ISSUE-42",
+        expected[0],
+        expected,
+    )
+    assert result["pane_id"] == f"terminal_{panes[0]['id']}"
+    assert result["autoclose_enabled"] is True
+    assert (result["session"], result["pane_id"]) in session.autoclose._panes
+    launch.assert_called_once()
+    assert result["pr_id"] == "owner/repo#PR-51"
+    assert launch.call_args.args[0] == panes[0]["pane_cwd"] == result["cwd"] == str(path)
+    assert (
+        subprocess.check_output(["git", "branch", "--show-current"], cwd=path, text=True).strip()
+        == branch
+    )
+    prompt = _launched_prompt(launch)
+    if all_reasons:
+        assert (
+            prompt.index("https://github.com/comment/")
+            < prompt.index("confirmed merge conflicts")
+            < prompt.index("failing checks: tests")
+        )
+        assert list(github.pull_requests) == ["owner/repo#51"]
+    else:
+        [state] = session.backend.github_client.evaluate_pull_requests(
+            [("owner/repo", 51)],
+            github_username=session.config.github_username,
+            todo_repository=session.config.todo_repository,
+        )
+        assert state.action == "fix_ci"
+        assert render_work_instruction(state.action, state) in prompt
+
+
+def test_dispatch_groups_nested_descendant_by_its_own_repository(monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/parent#42", state="CLOSED")
+    github.add_issue("owner/parent#43", parent="owner/parent#42")
+    github.add_issue("owner/child#7", parent="owner/parent#43")
+    github.add_issue("owner/parent#50")
+    session, _, ensure, launch = _coding_session(monkeypatch, tmp_path, [])
+    session.config = replace(session.config, github_username="testuser")
+
+    result = session.dispatch_once(scope="owner/parent#42")
+
+    assert (result["status"], result["issue_id"], result["pane_id"], result["group"]) == (
+        "launched",
+        "owner/child#ISSUE-7",
+        "terminal_30",
+        "child",
+    )
+    launch.assert_called_once()
+    assert launch.call_args.kwargs["group"] == "child"
+    ensure.assert_called_once()
+    item = ensure.call_args.args[1]
+    assert (item.repo, item.number) == ("owner/child", 7)
+
+
+def test_dispatch_briefs_review_wait_when_conflict_disappears_after_revalidation(
+    monkeypatch, tmp_path
+):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    pr = github.add_pull_request("owner/repo#51", closes=("owner/repo#1",), mergeable="CONFLICTING")
+    session, _, _, launch, _ = _authored_session(monkeypatch, tmp_path)
+    ready = session._ready
+
+    def resolve_after_recheck(scope, *args, **kwargs):
+        result = ready(scope, *args, **kwargs)
+        if scope == "owner/repo#ISSUE-1":
+            pr["mergeable"] = "MERGEABLE"
+        return result
+
+    monkeypatch.setattr(session, "_ready", resolve_after_recheck)
+    result = session.dispatch_once(scope="owner/repo#1")
+
+    assert (result["status"], result["issue_id"], result["pane_id"]) == (
+        "launched",
+        "owner/repo#ISSUE-1",
+        "terminal_30",
+    )
+    assert result["action"] == "fix_merge_conflicts"
+    launch.assert_called_once()
+    prompt = _launched_prompt(launch)
+    assert "https://github.com/owner/repo/pull/51" in prompt
+    assert "waiting for human review" in prompt
+    assert "cannot merge cleanly" not in prompt
+    assert "AUTOSTART: IMPLEMENT" not in prompt
+    assert result["autoclose_enabled"] is True
+    assert (result["session"], result["pane_id"]) in session.autoclose._panes
+
+
+def test_dispatch_retries_a_transient_github_launch_context_read(monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    session, _, _, launch = _coding_session(monkeypatch, tmp_path, [])
+    session.config = replace(session.config, github_username="testuser")
+    monkeypatch.setattr(
+        control_module, "prepare_launch_agent_prompt", launcher_module.prepare_launch_agent_prompt
+    )
+    run = subprocess.run
+    responses = iter([failure("HTTP 502"), {"state": "OPEN", "title": "Fix the thing"}])
+    reads = []
+
+    def flaky(command, *args, **kwargs):
+        if command[:3] != ["gh", "issue", "view"]:
+            return run(command, *args, **kwargs)
+        reads.append(command[:4])
+        response = next(responses)
+        if isinstance(response, subprocess.CalledProcessError):
+            raise response
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(response))
+
+    monkeypatch.setattr(subprocess, "run", flaky)
+    result = session.dispatch_once(scope="owner/repo")
+
+    assert (result["status"], result["issue_id"], result["action"], result["pane_id"]) == (
+        "launched",
+        "owner/repo#ISSUE-42",
+        "implement",
+        "terminal_30",
+    )
+    assert reads == [["gh", "issue", "view", "42"]] * 2
+    launch.assert_called_once()
+    assert "https://github.com/owner/repo/issues/42" in _launched_prompt(launch)
 
 
 def test_dispatch_uses_cross_repo_pr_for_default_group(monkeypatch, tmp_path):
