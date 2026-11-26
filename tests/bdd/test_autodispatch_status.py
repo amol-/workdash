@@ -2,7 +2,9 @@
 
 import asyncio
 import re
+import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,10 +13,52 @@ import pytest
 from textual.widgets import Static
 
 from gh_work_state_fake import HEAD_SHA
+from workdash.models import WorkItemKind, WorkItemType
 from workdash.tui import WorkdashApp
 
 from .steps.autodispatch import dashboard_dispatch  # noqa: F401
 from .steps.common import make_work_item
+
+
+@pytest.mark.usefixtures("dashboard_dispatch")
+def test_dashboard_reports_a_session_failure_after_start(scenario_state, monkeypatch):
+    session = scenario_state["dashboard_session"]
+    session.work_items = [make_work_item(repo="other/repo", number=3)]
+    release = threading.Event()
+
+    def fail_after_start(*, on_ready, **kwargs):
+        on_ready()
+        assert release.wait(5)
+        raise RuntimeError("GitHub unavailable")
+
+    monkeypatch.setattr(session, "dispatch_once", fail_after_start)
+
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            await pilot.press("d", "1")
+            progress = app.query_one("#autodispatch-progress", Static)
+            footer = app.query_one("#status-footer", Static)
+
+            def reports_failure() -> bool:
+                return all(
+                    "GitHub unavailable" in widget.render().plain for widget in (progress, footer)
+                )
+
+            release.set()
+            for _ in range(150):
+                await pilot.pause(0.02)
+                if reports_failure():
+                    break
+            assert reports_failure()
+            assert "failed" in progress.render().plain.lower()
+            assert "failed" in footer.render().plain.lower()
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
 
 
 @pytest.mark.usefixtures("dashboard_dispatch")
@@ -209,6 +253,122 @@ def test_dashboard_selects_agent_or_cancels(scenario_state, monkeypatch, tmp_pat
             assert "merge conflicts" in scenario_state["agent_launches"][1][1]
 
     asyncio.run(exercise())
+
+
+@pytest.mark.usefixtures("dashboard_dispatch")
+@pytest.mark.parametrize(
+    ("kind", "linked_issues", "keys", "message"),
+    [
+        (WorkItemKind.AUTHORED_PR, "missing", ("d", "1"), "without a linked issue"),
+        (
+            WorkItemKind.AUTHORED_PR,
+            "denied",
+            ("d", "1"),
+            "Dispatch failed: GitHub lookup for 'owner/repo#PR-9' failed: Could not resolve",
+        ),
+        (WorkItemKind.REVIEW_REQUESTED_PR, None, ("d",), "Dispatch is only available"),
+        (WorkItemKind.TRACKED_PR, None, ("d",), "Dispatch is only available"),
+    ],
+)
+def test_dashboard_reports_why_a_pull_request_cannot_dispatch(
+    scenario_state, kind, linked_issues, keys, message
+):
+    session = scenario_state["dashboard_session"]
+    session.work_items = [make_work_item(item_type=WorkItemType.PR, kind=kind, number=9)]
+    if linked_issues == "missing":
+        scenario_state["github"].pull_requests["owner/repo#9"]["closes"] = ()
+    elif linked_issues == "denied":
+        scenario_state["linked_issue_lookup_denied"] = True
+    app = WorkdashApp(session=session)
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            await pilot.press(*keys)
+            footer = app.query_one("#status-footer", Static)
+            for _ in range(100):
+                if message in footer.render().plain:
+                    break
+                await pilot.pause(0.02)
+            assert message in footer.render().plain
+            assert session.autodispatch_sessions() == []
+            assert not scenario_state.get("agent_launches")
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.usefixtures("dashboard_dispatch")
+@pytest.mark.parametrize("ready", [True, False])
+def test_autodispatch_scopes_authored_pr_to_lowest_linked_issue(scenario_state, ready):
+    session = scenario_state["dashboard_session"]
+    github = scenario_state["github"]
+    github.add_issue("beta/repo#1")
+    github.add_issue("alpha/repo#9")
+    github.add_issue("alpha/repo#3", state="OPEN" if ready else "CLOSED")
+    github.pull_requests["owner/repo#9"]["closes"] = ("beta/repo#1", "alpha/repo#9", "alpha/repo#3")
+    item = make_work_item(item_type=WorkItemType.PR, kind=WorkItemKind.AUTHORED_PR, number=9)
+
+    started = session.start_autodispatch_for_item(item)
+    assert started["scope"] == "alpha/repo#ISSUE-3"
+    deadline = time.monotonic() + 2
+    while not (entry := session.autodispatch_sessions()[0])["initial_check_complete"]:
+        assert time.monotonic() < deadline, entry
+        time.sleep(0.01)
+    if ready:
+        while entry["stage"] != "developing":
+            assert entry["status"] == "running" and time.monotonic() < deadline, entry
+            time.sleep(0.01)
+            entry = session.autodispatch_sessions()[0]
+        assert entry["current_item"] == "alpha/repo#ISSUE-3"
+        assert len(scenario_state["agent_launches"]) == 1
+    else:
+        assert entry["status"] == "finished", entry
+        assert entry["current_item"] is None
+        assert not scenario_state.get("agent_launches")
+
+
+@pytest.mark.usefixtures("dashboard_dispatch")
+def test_cli_start_json_reports_cross_repository_blocker_without_zellij(
+    scenario_state, monkeypatch, capsys
+):
+    import json
+    from unittest.mock import MagicMock
+
+    from webob import Request
+
+    from workdash.control import _make_turbogears_app
+    from workdash.workdash import main
+
+    github = scenario_state["github"]
+    github.add_issue("another/repo#5")
+    github.issues["other/repo#3"]["blocked_by"] = ("another/repo#5",)
+    app = _make_turbogears_app(scenario_state["dashboard_session"])
+
+    def request(endpoint, payload):
+        response = Request.blank(
+            f"/api/v0/{endpoint}",
+            method="POST",
+            content_type="application/json",
+            body=json.dumps(payload).encode(),
+        ).get_response(app)
+        assert response.status_int == 200
+        return json.loads(response.body)["result"]
+
+    which = shutil.which
+    monkeypatch.setattr(
+        shutil, "which", lambda name, *a, **kw: None if name == "zellij" else which(name, *a, **kw)
+    )
+    for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(
+        "workdash.workdash.WorkdashControlClient",
+        lambda *args, **kwargs: MagicMock(request=request),
+    )
+
+    assert main(["autodispatch", "other/repo#3", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "finished"
+    assert result["outcome"] == "blocked by another/repo#5"
+    assert not scenario_state.get("agent_launches")
 
 
 @pytest.mark.usefixtures("dashboard_dispatch")
