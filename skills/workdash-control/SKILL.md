@@ -44,6 +44,22 @@ can access on GitHub, even one `list` does not show: a Workdash item ID,
 does not add it to `list`. Use a PR ID or URL for a pull request: `owner/repo#123`
 naming a pull request fails with `unsupported_item_type`.
 
+## Birdview
+
+`workdash birdview` produces a shareable snapshot of autodispatch, other running
+agents, open pull requests, and recent dashboard items without fetching GitHub data
+or reading panes. Use the reported pane ID with `workdash read PANE_ID` to inspect
+an agent on demand.
+
+```bash
+workdash birdview                         # Telegram Markdown, top 5 per section
+workdash birdview --top 10 --format markdown
+workdash birdview --format json --host dashboard.lan
+```
+
+Formats are `telegram` (default), `markdown`, and `json`. `--host` connects to an
+existing remote Workdash server.
+
 ## Autodispatch sessions
 
 ```bash
