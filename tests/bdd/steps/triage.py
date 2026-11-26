@@ -513,20 +513,6 @@ def _dashboard_has_work_items(scenario_state: dict[str, Any], work_items: list[W
     _dashboard_has_item_types(scenario_state, work_items)
 
 
-@when('the user runs the system with "--configure"')
-def _run_configure(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    from . import setup as setup_mod
-
-    config_path = scenario_state.get("config_path") or (tmp_path / "config.json")
-    scenario_state["config_path"] = config_path
-    setup_mod._run_configure_with_fakes(scenario_state, config_path, monkeypatch, capsys)
-
-
 @given(parsers.parse('a new issue titled "{title}" is available on GitHub'))
 def _new_github_issue(
     title: str, scenario_state: dict[str, Any], work_items: list[WorkItem]

@@ -28,7 +28,7 @@ from gh_todo_fake import (
 )
 from gh_work_state_fake import install_fake_github, todo_body
 from workdash.backend import WorkdashBackend
-from workdash.config import AgentConfig, load_config
+from workdash.config import AgentConfig
 from workdash.control import format_work_item_id
 from workdash.github_client import GitHubClient, todo_target_from_body
 from workdash.included_items import IncludedItemsStore
@@ -531,27 +531,6 @@ def _choose_todo_analysis(scenario_state, monkeypatch, tmp_path):
 def _opened_target_analysis(scenario_state):
     assert "cards are stored by suit" in scenario_state["opened_analysis"]
     assert "find the missing ace" in scenario_state["opened_analysis"]
-
-
-# ----- F-SETUP-CONFIGURE-S009 -----
-
-
-@given("the configuration has no todo repository")
-def _configuration_has_no_todo_repository(config_path: Path) -> None:
-    assert load_config(config_path).todo_repository == ""
-
-
-@then(parsers.parse('the system prompts for the todo repository with the default "{template}"'))
-def _prompts_for_todo_repository(template: str, scenario_state: dict[str, Any]) -> None:
-    expected = template.replace("<username>", scenario_state["provided_username"])
-    prompts = scenario_state["prompts"]
-    assert any(f"Todo repository [{expected}]" in prompt for prompt in prompts), prompts
-
-
-@then(parsers.parse('submitting an empty response stores "{template}"'))
-def _empty_response_stores_todo_repository(template: str, scenario_state: dict[str, Any]) -> None:
-    expected = template.replace("<username>", scenario_state["provided_username"])
-    assert scenario_state["written_config"].todo_repository == expected
 
 
 # ----- F-CLI-ORCHESTRATION-S024/S025 -----

@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import errno
+import http.client
 import io
 import json
 import os
@@ -9,9 +10,12 @@ import shlex
 import socket
 import subprocess
 import threading
+import urllib.error
+import urllib.request
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -959,6 +963,169 @@ def test_main_reports_a_failed_wizard_without_a_traceback(
     captured = capsys.readouterr()
     assert captured.err.startswith(f"Error: {failure}")
     assert "Run 'workdash' again" not in captured.out
+
+
+@pytest.mark.parametrize(
+    ("failure", "detail"),
+    [
+        (urllib.error.URLError("timed out"), "timed out"),
+        (http.client.IncompleteRead(b"abc", 4), "IncompleteRead(3 bytes read, 4 more expected)"),
+    ],
+    ids=["timeout", "incomplete"],
+)
+def test_automatic_setup_stops_when_the_dependency_download_fails(
+    tmp_path, monkeypatch, capsys, failure, detail
+):
+    path = tmp_path / "missing.json"
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", path)
+    monkeypatch.setattr(workdash_module.launcher, "_WORKDASH_LOCAL_BIN", tmp_path / "bin")
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(config_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(config_module.platform, "system", lambda: "Linux")
+    if isinstance(failure, http.client.IncompleteRead):
+        urlopen = MagicMock()
+        urlopen.return_value.__enter__.return_value.read.side_effect = failure
+    else:
+        urlopen = MagicMock(side_effect=failure)
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(workdash_module, "configure", partial(config_module.configure, path))
+    monkeypatch.setattr(
+        workdash_module.WorkdashCommands,
+        "interactive",
+        lambda self: pytest.fail("unexpected dashboard"),
+    )
+
+    assert workdash_module.main([]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.err.startswith(
+        "Error: Failed to download https://github.com/zellij-org/zellij/"
+    )
+    assert detail in captured.err
+    assert "Traceback" not in captured.err
+    assert not path.exists()
+    assert "Configuration complete" not in captured.out
+    assert "Run 'workdash' again" not in captured.out
+
+
+@pytest.mark.parametrize("args", [[], ["--configure"]], ids=["automatic", "explicit"])
+def test_cancelled_setup_exits_without_saving_or_reporting_success(
+    tmp_path, monkeypatch, capsys, args
+):
+    path = tmp_path / "missing.json"
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", path)
+    monkeypatch.setattr(workdash_module.launcher, "_WORKDASH_LOCAL_BIN", tmp_path / "bin")
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    def cancel(prompt):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        partial(
+            config_module.configure,
+            path,
+            input_fn=cancel,
+            which_fn=lambda command: f"/usr/bin/{command}",
+        ),
+    )
+    assert workdash_module.main(args) == 130
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "Configuration cancelled."
+    assert "Configuration complete" not in captured.out
+    assert "Run 'workdash' again" not in captured.out
+    assert not path.exists()
+
+
+def test_automatic_setup_does_not_report_success_if_another_run_saves_first(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "missing.json"
+    other_config = b'{"github_username": "other-user"}\n'
+    monkeypatch.setattr(workdash_module, "CONFIG_PATH", path)
+    monkeypatch.setattr(workdash_module.launcher, "_WORKDASH_LOCAL_BIN", tmp_path / "bin")
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    def answer(prompt):
+        if prompt.startswith("GitHub username"):
+            return "octocat"
+        if prompt.startswith("Todo repository"):
+            path.write_bytes(other_config)
+        return ""
+
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        partial(
+            config_module.configure,
+            path,
+            input_fn=answer,
+            which_fn=lambda command: f"/usr/bin/{command}",
+        ),
+    )
+
+    assert workdash_module.main([]) == 1
+    captured = capsys.readouterr()
+    assert path.read_bytes() == other_config
+    assert f"Configuration already exists at {path}" in captured.err
+    assert "Your answers were not saved" in captured.err
+    assert "Configuration saved" not in captured.out
+    assert "Configuration complete" not in captured.out
+    assert "Run 'workdash' again" not in captured.out
+
+
+def test_relaunch_hands_repaired_setup_to_the_new_local_zellij(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "config.json"
+    repaired = replace(_VALID_CONFIG, open_command="/bin/sh")
+    save_config(replace(repaired, analysis_viewer=None), path)
+    local_zellij = tmp_path / "bin" / "zellij"
+    gh = tmp_path / "gh"
+    gh.write_text('#!/bin/sh\n[ "$*" = "auth status" ]\n')
+    gh.chmod(0o755)
+
+    def install_zellij():
+        local_zellij.parent.mkdir()
+        local_zellij.write_text('#!/bin/sh\n[ "$*" = "list-sessions --no-formatting" ]\n')
+        local_zellij.chmod(0o755)
+        return str(local_zellij)
+
+    launcher = workdash_module.launcher
+    monkeypatch.setattr(launcher, "_WORKDASH_LOCAL_BIN", local_zellij.parent)
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1")
+    load = MagicMock(wraps=partial(load_config, path))
+    monkeypatch.setattr(workdash_module, "load_config", load)
+    monkeypatch.setattr(
+        workdash_module,
+        "configure",
+        partial(
+            config_module.configure,
+            path,
+            input_fn=lambda prompt: "",
+            install_zellij_fn=install_zellij,
+        ),
+    )
+    launch = MagicMock(side_effect=SystemExit(0))
+    monkeypatch.setattr(launcher.os, "execvp", launch)
+
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert workdash_module.main([]) == 1
+    assert "Run 'workdash --configure'" in capsys.readouterr().err
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert workdash_module.main(["--configure"]) == 0
+    assert load_config(path) == repaired
+    launch.assert_not_called()
+
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with pytest.raises(SystemExit, match="^0$"):
+        workdash_module.main([])
+
+    load.assert_called_once_with()
+    launch.assert_called_once()
+    executable, argv = launch.call_args.args
+    Path(argv[2]).unlink()
+    assert executable == argv[0] == str(local_zellij)
+    assert argv[1] == "--layout"
 
 
 def test_main_runs_configuration_when_the_config_file_is_missing(

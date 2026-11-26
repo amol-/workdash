@@ -100,7 +100,7 @@ for _step_module in (
             "valid_config",
             "autodispatch_state",
             "dashboard_dispatch",
-            "config_path",
+            "setup_cli",
             "worktree_remote",
             "include_backend",
         }:

@@ -24,16 +24,6 @@ from test_zellij_integration import (
 from workdash.config import AgentConfig, WorkdashConfig, save_config
 
 
-@given("Zellij is installed on PATH")
-def _zellij_installed(scenario_state):
-    scenario_state.setdefault("on_path_tools", set()).add("zellij")
-
-
-@then("the system tells the user to run the configuration wizard")
-def _tells_run_wizard(scenario_state):
-    assert "--configure" in scenario_state["output"]
-
-
 @given("the GitHub CLI is installed but not authenticated")
 def _gh_unauthenticated(scenario_state):
     scenario_state["gh_unauthenticated"] = True
