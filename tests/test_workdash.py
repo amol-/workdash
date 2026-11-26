@@ -1377,6 +1377,7 @@ def test_main_rejects_invalid_commands_before_zellij_wrapping(
         (["info"], "info", {"panes": "work"}),
         (["ready", "any"], "ready", {"scope": "any"}),
         (["ready", "owner/repo#42", "--json"], "ready", {"scope": "owner/repo#42"}),
+        (["ready", "owner/repo", "--json"], "ready", {"scope": "owner/repo"}),
         (["terminal", "owner/repo#ISSUE-1"], "terminal", {"target": "owner/repo#ISSUE-1"}),
         (
             ["todo", "Fix it", "--target", "owner/repo"],
@@ -1459,6 +1460,19 @@ def test_main_server_backed_commands_are_pure_http_clients(
         "reasons": ["address_review", "fix_ci"],
         "issue_id": "owner/repo#ISSUE-42",
     }
+
+    repository_ready_item = {
+        "id": "owner/repo#ISSUE-1",
+        "type": "issue",
+        "title": "Implement the parser",
+        "url": "https://github.com/owner/repo/issues/1",
+        "action": "implement",
+        "reasons": ["implement"],
+        "issue_id": "owner/repo#ISSUE-1",
+    }
+    if argv == ["ready", "owner/repo", "--json"]:
+        monkeypatch.setenv("PATH", str(tmp_path))
+        ready_item = repository_ready_item
 
     list_result = {
         "items": [
@@ -1588,7 +1602,7 @@ def test_main_server_backed_commands_are_pure_http_clients(
     if expected_endpoint == "list" and "--json" in argv:
         assert json.loads(output) == list_result
     if expected_endpoint == "ready" and "--json" in argv:
-        assert json.loads(output)["items"] == [ready_item]
+        assert json.loads(output) == {"scope": expected_payload["scope"], "items": [ready_item]}
     elif expected_endpoint == "ready":
         assert output == (
             "PR    owner/repo#PR-51             address_review       Fix the parser "
@@ -1619,7 +1633,10 @@ def test_main_server_backed_commands_are_pure_http_clients(
 def test_main_server_backed_command_reports_unreachable_server(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
 ) -> None:
-    def refuse_connection(_request, *, timeout):
+    requests = []
+
+    def refuse_connection(request, *, timeout):
+        requests.append(request)
         raise ConnectionRefusedError
 
     monkeypatch.setattr("urllib.request.urlopen", refuse_connection)
@@ -1629,6 +1646,47 @@ def test_main_server_backed_command_reports_unreachable_server(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "Start one with `workdash`." in captured.err
+    if argv[0] == "ready":
+        assert requests
+        assert "No Workdash server is reachable at 127.0.0.1:8765" in captured.err
+
+
+@pytest.mark.parametrize(
+    "scope, status, code, message",
+    [
+        ("owner/repo#404", 404, "unknown_item", "No accessible issue matches 'owner/repo#404'."),
+        ("owner/repo#PR-51", 400, "unsupported_item_type", "Ready requires an issue, not a PR."),
+        ("not a scope", 400, "invalid_target", "'not a scope' is not a supported scope."),
+        (
+            "owner/repo",
+            502,
+            "github_error",
+            "GitHub lookup for 'owner/repo' failed: HTTP 502: Bad Gateway",
+        ),
+        ("owner/repo", 503, "zellij_unavailable", "Failed to list Zellij panes"),
+    ],
+    ids=["missing-issue", "pull-request", "malformed-scope", "github-outage", "zellij-outage"],
+)
+def test_ready_cli_forwards_scope_and_reports_server_error(
+    monkeypatch, capsys, scope, status, code, message
+):
+    monkeypatch.delenv("WORKDASH_HOST", raising=False)
+    address = "dashboard.example:9876"
+    requests = []
+
+    def respond_with_error(request, *, timeout):
+        requests.append((request.get_method(), request.full_url, json.loads(request.data)))
+        body = json.dumps({"ok": False, "error": {"code": code, "message": message}})
+        raise HTTPError(request.full_url, status, "Request failed", {}, io.BytesIO(body.encode()))
+
+    monkeypatch.setattr("urllib.request.urlopen", respond_with_error)
+
+    assert workdash_module.main(["ready", scope, "--json", "--host", address]) == 1
+
+    assert requests == [("POST", f"http://{address}/api/v0/ready", {"scope": scope})]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"Error: Workdash server at {address}: {message}\n"
 
 
 def test_unreachable_server_reports_startup_guidance():

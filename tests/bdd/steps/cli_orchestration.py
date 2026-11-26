@@ -17,7 +17,6 @@ import workdash.github_client as github_client_module
 from gh_work_state_fake import failure, install_fake_github
 from workdash.backend import compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
-from workdash.control import WorkdashControlError
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.repo_worktree import worktree_path
 
@@ -175,11 +174,7 @@ def _run_workdash(
                         target=payload["target"],
                     )
                 if endpoint == "ready":
-                    try:
-                        return scenario_state["api_session"].ready(scope=payload["scope"])
-                    except WorkdashControlError as error:
-                        scenario_state["control_error_code"] = error.code
-                        raise
+                    return scenario_state["api_session"].ready(scope=payload["scope"])
                 if endpoint == "pane/content":
                     return scenario_state["api_session"].pane_content(
                         pane_id=payload["pane_id"],

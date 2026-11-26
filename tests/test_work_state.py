@@ -17,6 +17,7 @@ from gh_work_state_fake import (
     status_context,
     thread,
 )
+from workdash.control import format_work_item_id
 from workdash.github_client import _PULL_REQUESTS_PER_QUERY, GitHubClient
 from workdash.models import WorkItemKind
 
@@ -60,7 +61,8 @@ def _evaluate(*refs: str):
 @pytest.mark.parametrize(
     ("checks", "rulesets", "protection", "expected"),
     [
-        ([], [], "unprotected", ("no_checks", ())),
+        pytest.param([], [], "unprotected", ("no_checks", ()), id="no-checks-required"),
+        pytest.param([], ["build"], "unprotected", ("unknown", ()), id="absent-required-check"),
         (
             [check_run("tests"), status_context("lint", "SUCCESS")],
             [],
@@ -78,7 +80,7 @@ def _evaluate(*refs: str):
         ([], [], ["build"], ("unknown", ())),
         ([check_run("build")], [], ["build", "deploy"], ("unknown", ())),
         ([check_run("build")], ["build"], None, ("passing", ())),
-        ([], "unreadable", "unprotected", ("unknown", ())),
+        pytest.param([], "unreadable", "unprotected", ("unknown", ()), id="unreadable-ruleset"),
         ([], [], "unreadable", ("unknown", ())),
         (
             [check_run("a", "FAILURE"), check_run("b", None, status="QUEUED")],
@@ -157,7 +159,8 @@ def test_ci_status_of_the_current_head(monkeypatch, checks, rulesets, protection
     [state] = _evaluate()
 
     assert (state.ci_status, state.failing_checks) == expected
-    assert ("fix_ci" in state.reasons) == (expected[0] == "failing")
+    assert state.reasons == (("fix_ci",) if expected[0] == "failing" else ())
+    assert state.ready == (expected[0] == "failing")
 
 
 def test_ci_status_is_unknown_when_github_lists_an_older_commit_than_the_head(monkeypatch) -> None:
@@ -169,6 +172,30 @@ def test_ci_status_is_unknown_when_github_lists_an_older_commit_than_the_head(mo
     [state] = _evaluate()
 
     assert (state.ci_status, state.ready) == ("unknown", False)
+
+
+@pytest.mark.parametrize(
+    "new_check, expected_ci, reasons",
+    [
+        (check_run("tests", None, status="IN_PROGRESS"), "pending", ()),
+        (check_run("tests"), "passing", ()),
+        (check_run("tests", "FAILURE"), "failing", ("fix_ci",)),
+    ],
+    ids=["pending", "passing", "failing"],
+)
+def test_ci_uses_the_replacement_head(monkeypatch, new_check, expected_ci, reasons):
+    github = install_fake_github(monkeypatch)
+    github.add_pull_request(
+        PR,
+        head=HEAD_SHA,
+        checks={OLD_HEAD_SHA: [check_run("old tests", "FAILURE")], HEAD_SHA: [new_check]},
+    )
+
+    [state] = _evaluate()
+
+    assert (state.head_sha, state.ci_status, state.reasons) == (HEAD_SHA, expected_ci, reasons)
+    assert state.ready is bool(reasons)
+    assert state.failing_checks == (("tests",) if reasons else ())
 
 
 def test_ci_status_reads_every_page_of_checks_of_the_current_head(monkeypatch) -> None:
@@ -198,23 +225,45 @@ def test_required_checks_are_read_once_per_base_branch(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("answers", "mergeability", "lookups"),
+    ("answers", "fields", "mergeability", "lookups"),
     [
-        (["UNKNOWN", "CONFLICTING"], "conflicting", 2),
-        (["UNKNOWN", "UNKNOWN"], "unknown", 2),
-        (["MERGEABLE"], "mergeable", 1),
+        (["UNKNOWN", "CONFLICTING"], {}, "conflicting", 2),
+        (["UNKNOWN", "UNKNOWN"], {}, "unknown", 2),
+        (["MERGEABLE"], {}, "mergeable", 1),
+        pytest.param(
+            ["CONFLICTING"],
+            {
+                "review_decision": "APPROVED",
+                "reviews": [review("reviewer", "APPROVED", created=AFTER_PUSH)],
+            },
+            "conflicting",
+            1,
+            id="approved-passing-ci",
+        ),
+        pytest.param(
+            ["CONFLICTING"],
+            {
+                "review_decision": "APPROVED",
+                "reviews": [review("reviewer", "APPROVED", created=AFTER_PUSH)],
+                "checks": {HEAD_SHA: [check_run("tests", None, status="IN_PROGRESS")]},
+            },
+            "conflicting",
+            1,
+            id="approved-pending-ci",
+        ),
     ],
 )
-def test_mergeability_is_asked_again_once_while_github_computes_it(
-    monkeypatch, answers, mergeability, lookups
+def test_mergeability_classifies_conflicts_and_retries_unknown_answers(
+    monkeypatch, answers, fields, mergeability, lookups
 ) -> None:
     github = install_fake_github(monkeypatch)
-    github.add_pull_request(PR, mergeable=answers)
+    github.add_pull_request(PR, mergeable=answers, **fields)
 
     [state] = _evaluate()
 
     assert state.mergeability == mergeability
-    assert ("fix_merge_conflicts" in state.reasons) == (mergeability == "conflicting")
+    assert state.ready == (mergeability == "conflicting")
+    assert state.reasons == (("fix_merge_conflicts",) if state.ready else ())
     assert github.pull_requests[PR]["lookups"] == lookups
 
 
@@ -251,6 +300,26 @@ def test_pull_requests_beyond_one_query_are_evaluated_like_the_first(monkeypatch
     ("fields", "kinds"),
     [
         ({"comments": [comment("reviewer", created=AFTER_PUSH)]}, []),
+        pytest.param(
+            {"comments": [comment("reviewer", created=BEFORE_PUSH)]}, [], id="old-reviewer-comment"
+        ),
+        pytest.param(
+            {"comments": [comment("coverage-report[bot]", created=AFTER_PUSH)]},
+            [],
+            id="bot-comment",
+        ),
+        pytest.param(
+            {"comments": [comment("testuser", created=AFTER_PUSH)]}, [], id="author-reply"
+        ),
+        pytest.param(
+            {
+                "reviews": [
+                    review("reviewer", "DISMISSED", created=AFTER_PUSH, body="Please rework this.")
+                ]
+            },
+            [],
+            id="dismissed-verdict",
+        ),
         (
             {
                 "author": "other",
@@ -314,9 +383,40 @@ def test_pull_requests_beyond_one_query_are_evaluated_like_the_first(monkeypatch
             },
             ["review_thread"],
         ),
-        (
+        pytest.param(
             {"threads": [thread(comment("renovate[bot]", created=BEFORE_PUSH), outdated=True)]},
             ["review_thread"],
+            id="old-bot-thread",
+        ),
+        pytest.param(
+            {"threads": [thread(comment("reviewer", created=AFTER_PUSH))]},
+            ["review_thread"],
+            id="new-reviewer-thread",
+        ),
+        pytest.param(
+            {"reviews": [review("reviewer", "CHANGES_REQUESTED", created=AFTER_PUSH)]},
+            ["changes_requested"],
+            id="current-verdict",
+        ),
+        pytest.param(
+            {"reviews": [review("testuser", "CHANGES_REQUESTED", created=AFTER_PUSH)]},
+            ["changes_requested"],
+            id="configured-user-verdict",
+        ),
+        pytest.param(
+            {"reviews": [review("ci[bot]", "CHANGES_REQUESTED", created=AFTER_PUSH)]},
+            ["changes_requested"],
+            id="bot-verdict",
+        ),
+        pytest.param(
+            {
+                "reviews": [
+                    review("reviewer", "CHANGES_REQUESTED", created=AFTER_PUSH)
+                    | {"isMinimized": True}
+                ]
+            },
+            ["changes_requested"],
+            id="minimized-verdict",
         ),
     ],
 )
@@ -325,7 +425,23 @@ def test_actionable_feedback(monkeypatch, fields, kinds) -> None:
     github.add_pull_request(PR, **fields)
     [state] = _evaluate()
     assert [feedback.kind for feedback in state.feedback] == kinds
-    assert ("address_review" in state.reasons) == bool(kinds)
+    assert state.reasons == (("address_review",) if kinds else ())
+    assert state.ready is bool(kinds)
+
+
+def test_review_feedback_takes_priority_over_failing_ci(monkeypatch):
+    github = install_fake_github(monkeypatch)
+    github.add_pull_request(
+        PR,
+        checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+        threads=[thread(comment("reviewer", created=AFTER_PUSH))],
+    )
+
+    [state] = _evaluate()
+
+    assert state.ready
+    assert state.action == "address_review"
+    assert state.reasons == ("address_review", "fix_ci")
 
 
 @pytest.mark.parametrize(
@@ -739,6 +855,70 @@ def test_ready_returns_issues_with_actionable_authored_prs_and_completed_parents
         (1, "implement"),
         (6, "implement"),
     ]
+
+
+@pytest.mark.parametrize("blocker_state", ["OPEN", "CLOSED"])
+def test_ready_issue_is_held_only_by_an_open_blocker(monkeypatch, blocker_state):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("other/lib#1", state=blocker_state)
+    github.add_issue("owner/repo#5", blocked_by=("other/lib#1",))
+
+    ready = GitHubClient().find_ready_work(
+        repositories=["owner/repo"], github_username="testuser", todo_repository="testuser/todos"
+    )
+
+    assert [format_work_item_id(work.item) for work in ready.items] == (
+        ["owner/repo#ISSUE-5"] if blocker_state == "CLOSED" else []
+    )
+
+
+@pytest.mark.parametrize(
+    "check",
+    [check_run("tests"), check_run("tests", None, status="IN_PROGRESS")],
+    ids=["awaiting-review", "awaiting-ci"],
+)
+def test_ready_excludes_the_issue_of_an_authored_pr_waiting_for_ci_or_review(monkeypatch, check):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    github.add_pull_request(PR, closes=("owner/repo#42",), checks={HEAD_SHA: [check]})
+
+    ready = GitHubClient().find_ready_work(
+        repositories=["owner/repo"], github_username="testuser", todo_repository="testuser/todos"
+    )
+
+    assert ready.items == []
+
+
+@pytest.mark.parametrize(
+    "author, permission, state, expected",
+    [
+        ("testuser", "READ", "OPEN", []),
+        ("someone-else", "WRITE", "OPEN", ["owner/repo#ISSUE-43"]),
+        ("testuser", "WRITE", "CLOSED", ["owner/repo#ISSUE-42"]),
+        ("testuser", "WRITE", "MERGED", ["owner/repo#ISSUE-42"]),
+    ],
+)
+def test_ready_issue_depends_on_the_linked_pr_ownership_permission_and_state(
+    monkeypatch, author, permission, state, expected
+):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    github.add_pull_request(
+        PR,
+        closes=("owner/repo#42",),
+        author=author,
+        head_permission=permission,
+        state=state,
+        checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+    )
+    if author != "testuser":
+        github.add_issue("owner/repo#43")
+
+    ready = GitHubClient().find_ready_work(
+        repositories=["owner/repo"], github_username="testuser", todo_repository="testuser/todos"
+    )
+
+    assert [format_work_item_id(work.item) for work in ready.items] == expected
 
 
 def test_work_state_keeps_other_pull_requests_when_review_threads_are_truncated(monkeypatch):

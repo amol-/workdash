@@ -23,7 +23,9 @@ import workdash.repo_worktree as repo_worktree
 from gh_todo_fake import fake_gh_todo_run
 from gh_work_state_fake import (
     AFTER_PUSH,
+    BEFORE_PUSH,
     HEAD_SHA,
+    OLD_HEAD_SHA,
     check_run,
     comment,
     failure,
@@ -845,17 +847,436 @@ def test_ready_api_reports_ready_work(monkeypatch, tmp_path) -> None:
     [
         ({}, 400, "bad_request"),
         ({"scope": "https://github.com/owner/repo/pull/5"}, 400, "unsupported_item_type"),
+        ({"scope": "owner/repo#404"}, 404, "unknown_item"),
+        ({"scope": "owner/repo#PR-51"}, 400, "unsupported_item_type"),
+        ({"scope": "not a scope"}, 400, "invalid_target"),
         ({"scope": "owner/down"}, 502, "github_error"),
     ],
 )
 def test_ready_api_reports_a_scope_error(payload, status, code, monkeypatch, tmp_path) -> None:
     github = install_fake_github(monkeypatch)
-    github.failures["ReadyRepositoryIssues"] = failure("GraphQL: Something went wrong")
+    github.add_issue("owner/repo#1")
+    if code == "github_error":
+        github.failures["ReadyRepositoryIssues"] = failure("GraphQL: Something went wrong")
     monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _session: [])
 
     status_code, body = _post_ready(_ready_session(tmp_path), payload)
 
     assert (status_code, body["error"]["code"]) == (status, code)
+    assert body["ok"] is False
+    if status < 500:
+        assert "ReadyRepositoryIssues" not in github.operations
+
+
+@pytest.fixture
+def ready_session(monkeypatch, tmp_path):
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _session: [])
+    return _ready_session(tmp_path, repositories=("owner/repo", "team/*"))
+
+
+def test_ready_reports_work_outside_the_dashboard_without_side_effects(monkeypatch, ready_session):
+    github = install_fake_github(monkeypatch)
+    for number in (1, 2, 3):
+        github.add_issue(f"owner/repo#{number}", state="CLOSED" if number == 3 else "OPEN")
+    dashboard_item = replace(_work_item(number=9, title="Other work"), repo="elsewhere/dashboard")
+    ready_session.work_items[:] = [dashboard_item]
+    launch = MagicMock()
+    terminal = MagicMock()
+    prepare = MagicMock()
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch)
+    monkeypatch.setattr(control_module, "launch_terminal_context", terminal)
+    monkeypatch.setattr(control_module, "ensure_worktree", prepare)
+
+    items = ready_session.ready(scope="owner/repo")["items"]
+
+    assert [(item["id"], item["action"]) for item in items] == [
+        ("owner/repo#ISSUE-1", "implement"),
+        ("owner/repo#ISSUE-2", "implement"),
+    ]
+    assert all(item["number"] != 3 for item in items)
+    assert ready_session.work_items == [dashboard_item]
+    launch.assert_not_called()
+    terminal.assert_not_called()
+    prepare.assert_not_called()
+
+
+def test_ready_todo_lists_targeted_and_ordinary_todos(monkeypatch, ready_session):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("testuser/todos#7", body=todo_body("owner/other"))
+    github.add_issue("testuser/todos#8", body=todo_body(None))
+
+    assert [
+        (item["id"], item["action"]) for item in ready_session.ready(scope="todo")["items"]
+    ] == [("owner/other#ISSUE-WT7", "implement"), ("testuser/todos#ISSUE-8", "implement")]
+    assert [item["id"] for item in ready_session.ready(scope="owner/other#ISSUE-WT7")["items"]] == [
+        "owner/other#ISSUE-WT7"
+    ]
+
+
+def test_ready_any_expands_selectors_and_lists_linked_targeted_todo_once(
+    monkeypatch, ready_session
+):
+    github = install_fake_github(monkeypatch)
+    github.owners["team"] = ["team/a", "team/b"]
+    ready_session.config = replace(
+        ready_session.config, repositories=("owner/repo", "team/a", "team/*", "testuser/todos")
+    )
+    for repo in ("owner/repo", "team/a", "team/b"):
+        github.add_issue(f"{repo}#1")
+    github.add_issue("testuser/todos#9", body=todo_body("owner/repo"))
+    github.add_pull_request(
+        "owner/repo#30",
+        closes=("testuser/todos#9",),
+        checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+    )
+
+    todo, *other = ready_session.ready(scope="any")["items"]
+
+    assert (todo["id"], todo["action"], todo["pr_id"]) == (
+        "owner/repo#ISSUE-WT9",
+        "fix_ci",
+        "owner/repo#PR-30",
+    )
+    assert [item["id"] for item in other] == [
+        "owner/repo#ISSUE-1",
+        "team/a#ISSUE-1",
+        "team/b#ISSUE-1",
+    ]
+
+
+@pytest.mark.parametrize(
+    "replacement_check, expected_ids",
+    [
+        pytest.param(check_run("tests", None, status="IN_PROGRESS"), [], id="pending"),
+        pytest.param(check_run("tests", "FAILURE"), ["owner/repo#ISSUE-42"], id="failing"),
+    ],
+)
+def test_ready_result_carries_current_head_failure_details(
+    monkeypatch, ready_session, replacement_check, expected_ids
+):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    pr = github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#42",),
+        head=OLD_HEAD_SHA,
+        checks={OLD_HEAD_SHA: [check_run("tests", "FAILURE")]},
+    )
+
+    [item] = ready_session.ready(scope="owner/repo")["items"]
+
+    assert (item["id"], item["action"], item["reasons"]) == (
+        "owner/repo#ISSUE-42",
+        "fix_ci",
+        ["fix_ci"],
+    )
+    assert item["pr_id"] == "owner/repo#PR-51"
+    assert item["issue_url"] == "https://github.com/owner/repo/issues/42"
+    assert (item["ci_status"], item["failing_checks"], item["pr_head_sha"]) == (
+        "failing",
+        ["tests"],
+        OLD_HEAD_SHA,
+    )
+
+    pr.update(head=HEAD_SHA, pushed_at="2026-03-10T00:00:00Z")
+    pr["checks"][HEAD_SHA] = [replacement_check]
+    assert [item["id"] for item in ready_session.ready(scope="owner/repo")["items"]] == expected_ids
+
+
+def test_ready_reports_actionable_feedback_references(monkeypatch, ready_session):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    verdict = review("reviewer", "CHANGES_REQUESTED", created=AFTER_PUSH)
+    inline = comment("another-reviewer", created=AFTER_PUSH)
+    github.add_pull_request(
+        "owner/repo#51", closes=("owner/repo#42",), reviews=[verdict], threads=[thread(inline)]
+    )
+
+    [item] = ready_session.ready(scope="owner/repo")["items"]
+
+    assert (item["id"], item["pr_id"]) == ("owner/repo#ISSUE-42", "owner/repo#PR-51")
+    assert (item["action"], item["reasons"]) == ("address_review", ["address_review"])
+    assert sorted((ref["kind"], ref["author"], ref["url"]) for ref in item["feedback"]) == [
+        ("changes_requested", "reviewer", verdict["url"]),
+        ("review_thread", "another-reviewer", inline["url"]),
+    ]
+
+
+def test_ready_lists_one_issue_with_all_reasons_in_priority_order(monkeypatch, ready_session):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#42",),
+        checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+        mergeable="CONFLICTING",
+        threads=[thread(comment("reviewer", created=AFTER_PUSH))],
+    )
+
+    status, body = _post_ready(ready_session, {"scope": "owner/repo"})
+
+    assert status == 200
+    [item] = body["result"]["items"]
+    assert (item["id"], item["action"], item["reasons"]) == (
+        "owner/repo#ISSUE-42",
+        "address_review",
+        ["address_review", "fix_merge_conflicts", "fix_ci"],
+    )
+
+
+def test_ready_respects_a_rerequested_review_but_keeps_unresolved_threads(
+    monkeypatch, ready_session
+):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    pr = github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#42",),
+        reviews=[
+            review(
+                "reviewer",
+                "CHANGES_REQUESTED",
+                created=BEFORE_PUSH,
+                commit=OLD_HEAD_SHA,
+                body="Please rework this.",
+            )
+        ],
+    )
+    expected = [("owner/repo#ISSUE-42", "address_review", ["address_review"])]
+
+    assert [
+        (i["id"], i["action"], i["reasons"])
+        for i in ready_session.ready(scope="owner/repo")["items"]
+    ] == expected
+    pr["review_requests"].append("reviewer")
+    assert ready_session.ready(scope="owner/repo")["items"] == []
+    pr["threads"].append(thread(comment("reviewer", created=AFTER_PUSH)))
+    assert [
+        (i["id"], i["action"], i["reasons"])
+        for i in ready_session.ready(scope="owner/repo")["items"]
+    ] == expected
+
+
+def test_ready_reports_conflicts_against_the_current_base(monkeypatch, ready_session):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42")
+    pr = github.add_pull_request("owner/repo#51", closes=("owner/repo#42",), base_sha="base1")
+
+    assert ready_session.ready(scope="owner/repo")["items"] == []
+
+    pr.update(base_sha="base2", mergeable="CONFLICTING")
+    [item] = ready_session.ready(scope="owner/repo")["items"]
+
+    assert (item["id"], item["action"], item["mergeability"]) == (
+        "owner/repo#ISSUE-42",
+        "fix_merge_conflicts",
+        "conflicting",
+    )
+    assert (item["base_ref"], item["base_head_sha"], item["pr_head_sha"]) == (
+        "main",
+        "base2",
+        HEAD_SHA,
+    )
+
+
+@pytest.mark.parametrize(
+    "required, ci_status",
+    [
+        pytest.param([], "no_checks", id="no-checks-required"),
+        pytest.param(["build"], "unknown", id="absent-required-check"),
+        pytest.param("unreadable", "unknown", id="unreadable-ruleset"),
+    ],
+)
+def test_ready_projects_ci_status_when_review_needs_work(
+    monkeypatch, ready_session, required, ci_status
+):
+    github = install_fake_github(monkeypatch)
+    github.ruleset_checks["owner/repo", "main"] = required
+    github.add_issue("owner/repo#42")
+    github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#42",),
+        checks={},
+        threads=[thread(comment("reviewer", created=AFTER_PUSH))],
+    )
+
+    status, body = _post_ready(ready_session, {"scope": "owner/repo"})
+
+    assert status == 200
+    [item] = body["result"]["items"]
+    assert (item["id"], item["action"]) == ("owner/repo#ISSUE-42", "address_review")
+    assert (item["ci_status"], item["failing_checks"]) == (ci_status, [])
+
+
+def test_ready_ignores_terminal_panes_but_filters_agent_claims(
+    monkeypatch, ready_session, tmp_path
+):
+    github = install_fake_github(monkeypatch)
+    for number in (42, 43, 44):
+        github.add_issue(f"owner/repo#{number}")
+    for number, links in [(51, ("owner/repo#42",)), (52, ())]:
+        github.add_pull_request(
+            f"owner/repo#{number}",
+            closes=links,
+            author="someone-else",
+            checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+        )
+    ready_session.git = MagicMock()
+    ready_session.git.worktree_proves_item.return_value = True
+    panes = []
+    for number, kind in [(42, "code"), (43, "terminal"), (44, "code"), (52, "code")]:
+        worktree = tmp_path / f"owner_repo_{number}"
+        worktree.mkdir()
+        panes.append({"id": number, "title": f"{kind}_{worktree.name}", "pane_cwd": str(worktree)})
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _session: panes)
+
+    assert [item["id"] for item in ready_session.ready(scope="owner/repo")["items"]] == [
+        "owner/repo#ISSUE-43"
+    ]
+
+
+@pytest.mark.parametrize(
+    "state, blocker, check, action",
+    [
+        pytest.param("OPEN", None, None, "implement", id="open-no-pr"),
+        pytest.param("CLOSED", None, None, None, id="closed-no-pr"),
+        pytest.param("OPEN", "owner/blockers#1", None, None, id="open-blocker"),
+        pytest.param("OPEN", None, check_run("tests", "FAILURE"), "fix_ci", id="open-failing-ci"),
+        pytest.param(
+            "OPEN", None, check_run("tests", None, status="IN_PROGRESS"), None, id="open-pending-ci"
+        ),
+        pytest.param("CLOSED", None, check_run("tests", "FAILURE"), None, id="closed-failing-ci"),
+    ],
+)
+def test_ready_exact_leaf_scope_does_not_fall_back_to_the_repository(
+    monkeypatch, ready_session, state, blocker, check, action
+):
+    github = install_fake_github(monkeypatch)
+    if blocker is not None:
+        github.add_issue(blocker)
+    github.add_issue("owner/repo#42", state=state, blocked_by=(blocker,) if blocker else ())
+    github.add_issue("owner/repo#43")
+    if check is not None:
+        github.add_pull_request(
+            "owner/repo#51", closes=("owner/repo#42",), checks={HEAD_SHA: [check]}
+        )
+
+    items = ready_session.ready(scope="owner/repo#42")["items"]
+
+    assert [(item["id"], item["action"]) for item in items] == (
+        [("owner/repo#ISSUE-42", action)] if action else []
+    )
+
+
+@pytest.mark.parametrize("state", ["OPEN", "CLOSED"])
+def test_ready_scopes_open_descendants_of_an_open_or_closed_parent(
+    monkeypatch, ready_session, state
+):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#99", state=state)
+    github.add_issue("owner/repo#101", parent="owner/repo#99")
+    github.add_issue("owner/repo#102", parent="owner/repo#99", state="CLOSED")
+
+    assert [item["id"] for item in ready_session.ready(scope="owner/repo#ISSUE-99")["items"]] == [
+        "owner/repo#ISSUE-101"
+    ]
+
+
+def test_ready_url_scopes_only_eligible_descendants_across_repositories(monkeypatch, ready_session):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#99")
+    github.add_issue("owner/repo#100", parent="owner/repo#99")
+    github.add_issue("owner/repo#101", parent="owner/repo#100")
+    github.add_issue("other/lib#7", parent="owner/repo#100")
+    github.add_issue("owner/repo#102", parent="owner/repo#99")
+    github.add_issue("owner/repo#103", parent="owner/repo#99", state="CLOSED")
+    github.add_issue("owner/repo#200")
+    failed = {HEAD_SHA: [check_run("tests", "FAILURE")]}
+    github.add_pull_request("owner/repo#110", closes=("owner/repo#102",), checks=failed)
+    github.add_pull_request("owner/repo#210", checks=failed)
+
+    items = ready_session.ready(scope="https://github.com/owner/repo/issues/99")["items"]
+
+    assert [item["id"] for item in items] == [
+        "owner/repo#ISSUE-102",
+        "other/lib#ISSUE-7",
+        "owner/repo#ISSUE-101",
+    ]
+
+
+def test_ready_cli_formats_the_same_prioritized_issues_in_text_and_json(
+    monkeypatch, ready_session, capsys
+):
+    import workdash.workdash as cli
+
+    github = install_fake_github(monkeypatch)
+    for issue, created, pr_created in [
+        (1, "2026-01-01", None),
+        (2, "2026-01-03", None),
+        (60, "2026-02-01", "2026-03-02"),
+        (61, "2026-02-02", "2026-03-01"),
+    ]:
+        ref = f"owner/repo#{issue}"
+        github.add_issue(ref, created=f"{created}T00:00:00Z")
+        if pr_created is not None:
+            github.add_pull_request(
+                f"owner/repo#{issue + 100}",
+                closes=(ref,),
+                created=f"{pr_created}T00:00:00Z",
+                checks={HEAD_SHA: [check_run("tests", "FAILURE")]},
+            )
+
+    def request(endpoint, payload):
+        assert endpoint == "ready"
+        return ready_session.ready(**payload)
+
+    monkeypatch.setattr(
+        cli, "WorkdashControlClient", lambda _host: SimpleNamespace(request=request)
+    )
+    args = ["ready", "owner/repo"]
+    assert cli.main([*args, "--json"]) == 0
+    items = json.loads(capsys.readouterr().out)["items"]
+    assert [item["id"] for item in items] == [f"owner/repo#ISSUE-{n}" for n in (61, 60, 1, 2)]
+
+    assert cli.main(args) == 0
+    lines = capsys.readouterr().out.splitlines()
+    for line, item in zip(lines, items, strict=True):
+        assert line.split()[:3] == [item["type"].upper(), item["id"], item["action"]]
+        assert f"{item['title']} {item['url']}" in line
+
+
+@pytest.mark.parametrize(
+    "outage, status, code, messages",
+    [
+        ("zellij", 503, "zellij_unavailable", ("Failed to list Zellij panes",)),
+        (
+            "github",
+            502,
+            "github_error",
+            ("GitHub lookup for 'owner/repo' failed", "HTTP 502"),
+        ),
+    ],
+)
+def test_ready_api_reports_outages_instead_of_empty_results(
+    monkeypatch, ready_session, outage, status, code, messages
+):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    if outage == "github":
+        github.failures["ReadyRepositoryIssues"] = failure("HTTP 502: Bad Gateway")
+    else:
+
+        def unavailable(_session):
+            raise RuntimeError("Failed to list Zellij panes for workdash-main: session not found")
+
+        monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", unavailable)
+
+    status_code, body = _post_ready(ready_session, {"scope": "owner/repo"})
+
+    assert (status_code, body["error"]["code"]) == (status, code)
+    assert body["ok"] is False
+    assert "result" not in body
+    assert all(message in body["error"]["message"] for message in messages)
 
 
 def test_ready_ids_resolve_to_the_same_items_code_acts_on(monkeypatch, tmp_path) -> None:
