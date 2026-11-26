@@ -12,7 +12,15 @@ import pytest
 from pytest_bdd import given, parsers, then, when
 from textual.widgets import Static
 
-from gh_work_state_fake import HEAD_SHA, check_run, failure, install_fake_github
+from gh_work_state_fake import (
+    AFTER_PUSH,
+    HEAD_SHA,
+    check_run,
+    comment,
+    failure,
+    install_fake_github,
+    thread,
+)
 from workdash.analysis_cache import AnalysisCache
 from workdash.control import WorkdashSession, format_work_item_id
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
@@ -588,6 +596,36 @@ def _launched_prompt(scenario_state: dict[str, Any]) -> str:
     ]
     [prompt] = prompts
     return " ".join(prompt.split())
+
+
+@given("pull request #51 has an unresolved review thread asking for a regression test")
+def _linked_pr_review_thread(scenario_state: dict[str, Any]) -> None:
+    pr = scenario_state["github"].pull_requests["owner/repo#51"]
+    pr["threads"].append(
+        thread(comment("reviewer", created=AFTER_PUSH) | {"body": "Add a regression test"})
+        | {"path": "src/app.py", "line": 7}
+    )
+    scenario_state["real_coding_briefing"] = True
+
+
+@then(
+    "the agent is briefed to build on the linked pull request's work without assuming its commits are in the checkout"
+)
+def _briefed_to_build_on_linked_pr(scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["api_payload"]["result"]["cwd"] == scenario_state["existing_worktree"]
+    prompt = _launched_prompt(scenario_state)
+    assert prompt.startswith("TASK: IMPLEMENT ")
+    assert "WORK ALREADY IN PROGRESS:" in prompt
+    assert "build on the work already done instead of starting over" in prompt
+    assert "do not assume this checkout contains its commits" in prompt
+
+
+@then("the agent receives the linked pull request's review thread in the briefing")
+def _briefed_on_linked_pr_review_thread(scenario_state: dict[str, Any]) -> None:
+    prompt = _launched_prompt(scenario_state)
+    assert "https://github.com/owner/repo/pull/51" in prompt
+    assert 'path="src/app.py" line="7"' in prompt
+    assert "Add a regression test" in prompt
 
 
 @given("GitHub answers issue work state queries with an outage")

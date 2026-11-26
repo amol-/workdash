@@ -1840,6 +1840,9 @@ def test_autodispatch_review_feedback_cycle(monkeypatch, tmp_path):
         def linked_open_pull_request(self, item):
             return (pr.repo, pr.number) if self.opened else None
 
+        def linked_authored_open_pull_request_context(self, item, **kwargs):
+            return self.fetch_launch_context(pr) if self.opened else None
+
         def fetch_item(self, repo, number, **kwargs):
             return {1: issue, 51: pr}.get(number)
 
@@ -2168,7 +2171,7 @@ def test_rate_limited_launch_read_does_not_hold_the_session_lock(monkeypatch, tm
         "workdash.control.autostart_briefing", lambda item, **kw: (item, "briefing", None)
     )
     monkeypatch.setattr("workdash.control.launcher.zellij.load_zellij_panes", lambda _: [])
-    monkeypatch.setattr("workdash.github_client._TRANSIENT_RETRY_DELAY_SECONDS", 0.01)
+    monkeypatch.setattr("workdash.github_client._RATE_LIMIT_RETRY_DELAY_SECONDS", 0.01)
     reading = threading.Event()
 
     def run(command, *args, **kwargs):

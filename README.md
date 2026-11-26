@@ -620,9 +620,11 @@ false when omitted. `already_running` injects nothing into the running agent.
 
 Naming an authored pull request that closes an issue is the same as naming the
 issue, with or without `--autostart`. Plan-first mode uses the issue checkout
-and briefing. When creating that checkout, the briefing includes the newest open
-pull request you authored that closes the issue, if there is one. The pull
-request does not choose the checkout.
+and briefing. Whether that checkout is new or existing, the briefing includes
+context and unresolved review threads from the newest open pull request you
+authored that closes the issue, if there is one. The agent is told to build on
+that work without assuming the checkout contains its commits. The pull request
+does not choose the checkout.
 Reviewing somebody else's pull request uses its cached pull request analysis
 instead; linked issues are background, not instructions to implement. An open
 parent whose descendants are closed is briefed to verify its goal and, if

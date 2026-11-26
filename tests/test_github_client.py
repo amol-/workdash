@@ -1863,10 +1863,12 @@ def test_linked_authored_open_pull_request_returns_only_the_newest_created(monke
     assert issue is not None
 
     github.operations.clear()
-    pull_request = client.linked_authored_open_pull_request_url(issue, github_username="testuser")
+    pull_request = client.linked_authored_open_pull_request_context(
+        issue, github_username="testuser"
+    )
 
-    assert github.operations == ["ItemLookup"]
-    assert pull_request == "https://github.com/owner/repo/pull/51"
+    assert pull_request["url"] == "https://github.com/owner/repo/pull/51"
+    assert [ref for ref, pr in github.pull_requests.items() if pr["lookups"]] == ["owner/repo#51"]
 
 
 @pytest.mark.parametrize(

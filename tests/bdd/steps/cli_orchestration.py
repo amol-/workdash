@@ -116,6 +116,8 @@ def _run_workdash(
             return github_run(*args, **kwargs)
         if cmd[:3] == ["gh", "issue", "view"] and scenario_state.get("real_launch_context"):
             return github_run(*args, **kwargs)
+        if cmd[:3] == ["gh", "pr", "view"] and scenario_state.get("github_lookup_installed"):
+            return github_run(*args, **kwargs)
         if cmd == ["git", "rev-parse", "--show-toplevel"]:
             cwd = Path(kwargs["cwd"]).resolve()
             if str(kwargs["cwd"]) in scenario_state.get("git_origins", {}):

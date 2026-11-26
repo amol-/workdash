@@ -757,8 +757,8 @@ class WorkdashSession:
     ) -> dict[str, object]:
         """Launch a coding agent for an explicit target unless one already works in its worktree.
 
-        In plan-first coding, an authored PR with a linked issue resolves to that issue
-        before choosing a checkout. A live agent claims the checkout: return ``already_running``
+        An authored PR with a linked issue resolves to that issue before choosing a checkout.
+        A live agent claims the checkout: return ``already_running``
         without pulling. Otherwise, ``ensure_worktree`` prepares the checkout before launch.
 
         :param bool autostart: Brief a newly launched agent to work autonomously from the
@@ -805,27 +805,15 @@ class WorkdashSession:
         )
         if item.kind == WorkItemKind.AUTHORED_PR:
             try:
-                if autostart:
-                    state = self.backend.github_client.work_pull_request(
-                        item,
-                        github_username=self.config.github_username,
-                        todo_repository=self.config.todo_repository,
-                    )
-                    linked = (
-                        [(issue.repo, issue.number) for issue in state.linked_issues]
-                        if state
-                        else []
-                    )
-                else:
-                    linked = self.backend.github_client.fetch_linked_issues_for_pull_request(
-                        item.repo, item.number
-                    )
+                linked = self.backend.github_client.fetch_linked_issues_for_pull_request(
+                    item.repo, item.number
+                )
                 if linked:
                     repo, number = min(linked, key=lambda issue: (issue[0].lower(), issue[1]))
                     item = self._require_item(f"{repo}#ISSUE-{number}")
                     analysis_item = item
                     item_id = format_work_item_id(item)
-                elif not autostart and item.closing_issue_numbers:
+                elif item.closing_issue_numbers:
                     item = replace(item, closing_issue_numbers=())
             except RuntimeError as error:
                 raise WorkdashControlError(
@@ -835,7 +823,7 @@ class WorkdashSession:
                 ) from error
         if (
             not autostart
-            and item.kind == WorkItemKind.AUTHORED_PR
+            and (item.item_type == WorkItemType.ISSUE or item.kind == WorkItemKind.AUTHORED_PR)
             and (claimed := existing_claim(item, item_id)) is not None
         ):
             return claimed
@@ -866,15 +854,13 @@ class WorkdashSession:
                         "Verify the checkout and configure its upstream to the PR head branch."
                     )
 
-        linked_pr_url = None
-        if (
-            not autostart
-            and item.item_type == WorkItemType.ISSUE
-            and existing_worktree_path(self.config.workdir, item, git=git) is None
-        ):
+        linked_pr_context = None
+        if item.item_type == WorkItemType.ISSUE:
             try:
-                linked_pr_url = self.backend.github_client.linked_authored_open_pull_request_url(
-                    item, github_username=self.config.github_username
+                linked_pr_context = (
+                    self.backend.github_client.linked_authored_open_pull_request_context(
+                        item, github_username=self.config.github_username
+                    )
                 )
             except RuntimeError as error:
                 raise WorkdashControlError(
@@ -904,7 +890,6 @@ class WorkdashSession:
                     return claimed
             if repo_path is not None:
                 verify_selected_head(repo_path)
-                linked_pr_url = None
             repo_path = ensure_worktree(
                 self.config.workdir,
                 item,
@@ -929,6 +914,7 @@ class WorkdashSession:
                 ),
                 merge_base=get_merge_base(repo_path, git=git),
                 github_client=self.backend.github_client,
+                linked_pr_context=linked_pr_context,
             )
             if (
                 analysis_item is not None
@@ -942,8 +928,6 @@ class WorkdashSession:
                     "\n\nThis work originates from a todo; never disclose or reference the todo "
                     "in the pull request."
                 )
-            if linked_pr_url is not None:
-                prompt += f"\n\nOpen pull request linked to this issue: {linked_pr_url}"
             if autostart:
                 prompt = f"{prompt.rstrip()}\n\n{autostart_text}"
             if selected_agent == "vscode":

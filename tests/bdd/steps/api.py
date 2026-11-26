@@ -29,6 +29,7 @@ from workdash.control import (
     _source_and_header_guarded_wsgi_app,
     format_work_item_id,
 )
+from workdash.launcher import prepare_launch_agent_prompt
 from workdash.models import WorkItem, WorkItemKind, WorkItemType, worktree_item_number
 from workdash.repo_worktree import worktree_path
 
@@ -109,6 +110,8 @@ def _install_code_fakes(scenario_state: dict[str, Any], monkeypatch: pytest.Monk
 
     def prepare(item, repo_path, **kwargs):
         scenario_state["prompt_analysis"] = kwargs.get("analysis_path")
+        if scenario_state.get("real_coding_briefing"):
+            return prepare_launch_agent_prompt(item, repo_path, **kwargs)
         if kwargs.get("analysis_path") and item.kind in {
             WorkItemKind.REVIEW_REQUESTED_PR,
             WorkItemKind.TRACKED_PR,

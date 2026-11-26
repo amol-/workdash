@@ -1406,10 +1406,10 @@ class GitHubClient:
                     return None
                 after = json.dumps(connection["pageInfo"]["endCursor"])
 
-    def linked_authored_open_pull_request_url(
+    def linked_authored_open_pull_request_context(
         self, item: WorkItem, *, github_username: str
-    ) -> str | None:
-        """Return the URL of the user's newest open PR that closes the issue."""
+    ) -> dict[str, Any] | None:
+        """Return launch context for the user's newest open PR that closes the issue."""
         owner, name = item.repo.split("/", 1)
         subject = f"{item.repo}#{item.number}"
         newest = None
@@ -1419,7 +1419,8 @@ class GitHubClient:
                 data = self._graphql(
                     f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
                     f"{{ issue(number: {item.number}) {{ closedByPullRequestsReferences(first: 100, after: {after}) "
-                    "{ nodes { url state createdAt author { login } } "
+                    "{ nodes { number title url state createdAt updatedAt author { login } "
+                    "repository { nameWithOwner } } "
                     "pageInfo { hasNextPage endCursor } } } } }",
                     subject,
                 )
@@ -1431,11 +1432,24 @@ class GitHubClient:
                     ):
                         created = parse_github_datetime(node["createdAt"])
                         if newest is None or created > newest[0]:
-                            newest = (created, node["url"])
+                            newest = (created, node)
                 if not connection["pageInfo"]["hasNextPage"]:
                     break
                 after = json.dumps(connection["pageInfo"]["endCursor"])
-        return newest[1] if newest is not None else None
+            if newest is None:
+                return None
+            created, node = newest
+            pull_request = WorkItem(
+                kind=WorkItemKind.AUTHORED_PR,
+                item_type=WorkItemType.PR,
+                repo=node["repository"]["nameWithOwner"],
+                number=node["number"],
+                title=node["title"],
+                created_at=created,
+                updated_at=parse_github_datetime(node["updatedAt"]),
+                url=node["url"],
+            )
+            return self.fetch_launch_context(pull_request)
 
     def work_pull_request(
         self,
@@ -2018,6 +2032,9 @@ class GitHubClient:
 
     def fetch_linked_issues_for_pull_request(self, repo: str, number: int) -> list[tuple[str, int]]:
         """List the issues one pull request closes.
+
+        Coding sessions use this lookup to resolve PR targets to their issues,
+        without evaluating PR readiness.
 
         Returns an empty list when it closes no issue. Raises ``RuntimeError``
         carrying GitHub's reason when the lookup is denied or cannot be resolved,

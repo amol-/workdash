@@ -1014,6 +1014,7 @@ def test_vscode_is_not_opened_while_an_agent_pane_is_live(monkeypatch, tmp_path)
 
 
 def test_vscode_opens_without_a_zellij_session(monkeypatch, tmp_path) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     session, worktree, _ensure, _launch = _coding_session(
         monkeypatch, tmp_path, [], zellij_session=None
     )
@@ -1029,6 +1030,7 @@ def test_vscode_opens_without_a_zellij_session(monkeypatch, tmp_path) -> None:
 def test_an_unconfirmed_launch_whose_pane_shows_up_later_is_reported_as_running(
     monkeypatch, tmp_path
 ) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     panes: list[dict[str, object]] = []
     session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
     side_effect = launch_agent.side_effect
@@ -1056,6 +1058,7 @@ def test_an_unconfirmed_launch_whose_pane_shows_up_later_is_reported_as_running(
 def test_an_agent_that_exits_right_after_launch_fails_without_blocking_a_retry(
     monkeypatch, tmp_path
 ) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     # An earlier agent pane for this worktree that exited long ago.
     panes = [{"id": 1, "title": "code_owner_repo_1", "exited": True}]
     session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
@@ -1096,7 +1099,7 @@ def test_code_reports_and_supervises_only_the_winning_retry(
     supervise = MagicMock()
     monkeypatch.setattr(session.autoclose, "supervise", supervise)
 
-    monkeypatch.setattr(session.backend.github_client, "work_pull_request", lambda *a, **kw: None)
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
 
     def launch(repo, *_args, **_kwargs):
         title = "code_owner_repo_1"
@@ -1130,6 +1133,7 @@ def test_code_reports_and_supervises_only_the_winning_retry(
 
 
 def test_code_waits_for_a_launched_agent_pane_that_zellij_lists_late(monkeypatch, tmp_path) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
     launch_agent.side_effect = None
     late_pane = {"id": 8, "title": "code_owner_repo_1", "pane_cwd": str(worktree)}
@@ -1149,6 +1153,7 @@ def test_code_waits_for_a_launched_agent_pane_that_zellij_lists_late(monkeypatch
 
 
 def test_an_expired_unconfirmed_launch_no_longer_blocks_the_worktree(monkeypatch, tmp_path) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     panes: list[dict[str, object]] = []
     session, _worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
     side_effect = launch_agent.side_effect
@@ -1201,22 +1206,6 @@ def _authored_session(monkeypatch, tmp_path, panes=None):
     git.branch_tracks_repository.return_value = True
     session.git = git
     return session, worktree, ensure, launch_agent, prepare
-
-
-def test_plan_first_existing_issue_checkout_reopens_without_pr_lookup(
-    monkeypatch, tmp_path
-) -> None:
-    github = install_fake_github(monkeypatch)
-    github.add_issue("owner/repo#1")
-    github.add_pull_request("owner/repo#51", closes=("owner/repo#1",))
-    session, worktree, ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
-
-    result = session.code(target="owner/repo#ISSUE-1", agent="pi")
-
-    assert (result["status"], result["cwd"]) == ("launched", str(worktree))
-    assert _launched_prompt(launch_agent) == "PROMPT"
-    assert github.operations == []
-    ensure.assert_called_once()
 
 
 def test_code_with_autostart_adds_the_implementation_appendix_once(monkeypatch, tmp_path) -> None:
@@ -2272,6 +2261,7 @@ def test_review_api_forwards_group_and_rejects_invalid_group():
 
 
 def test_grouped_code_forwards_group_and_reports_live_tab(monkeypatch, tmp_path):
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     panes = []
     session, _, _, launch = _coding_session(monkeypatch, tmp_path, panes)
     launch.side_effect = lambda repo, prompt, **kwargs: (
@@ -2884,7 +2874,8 @@ def test_item_files_pins_worktree_before_git_validation(tmp_path, monkeypatch):
             control_module.os.fstat(fd)
 
 
-def test_coding_authored_pr_uses_linked_issue_analysis_and_claim(monkeypatch, tmp_path):
+@pytest.mark.parametrize("autostart", [False, True])
+def test_coding_authored_pr_uses_linked_issue_analysis_and_claim(monkeypatch, tmp_path, autostart):
     github = install_fake_github(monkeypatch)
     github.add_issue("owner/repo#1")
     github.add_pull_request(
@@ -2901,18 +2892,22 @@ def test_coding_authored_pr_uses_linked_issue_analysis_and_claim(monkeypatch, tm
     pr.analysis = "pr analysis"
     session.work_items.append(pr)
 
-    result = session.code(target="owner/repo#PR-51", agent="pi", autostart=True)
+    result = session.code(target="owner/repo#PR-51", agent="pi", autostart=autostart)
     assert result["item_id"] == "owner/repo#ISSUE-1"
     assert prepare.call_args.kwargs["analysis_path"] == session.analysis_url(issue)
-    assert prepare.call_args.args[0].number == 51
-    assert "has failing checks: tests" in _launched_prompt(launch)
+    assert prepare.call_args.args[0].number == (51 if autostart else 1)
+    assert ("has failing checks: tests" in _launched_prompt(launch)) == autostart
+    assert github.operations.count("ReadyPullRequests") == int(autostart)
     assert (
-        session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=True)["status"]
+        session.code(target="owner/repo#ISSUE-1", agent="pi", autostart=autostart)["status"]
         == "already_running"
     )
 
 
-def test_plan_first_pr_ignores_removed_issue_link_without_changing_dashboard(monkeypatch, tmp_path):
+@pytest.mark.parametrize("autostart", [False, True])
+def test_coding_pr_ignores_removed_issue_link_without_changing_dashboard(
+    monkeypatch, tmp_path, autostart
+):
     github = install_fake_github(monkeypatch)
     github.add_pull_request("owner/repo#51")
     session, _, _, _, _ = _authored_session(monkeypatch, tmp_path)
@@ -2931,7 +2926,7 @@ def test_plan_first_pr_ignores_removed_issue_link_without_changing_dashboard(mon
     session.git.find_worktree_for_branch.return_value = None
     session.git.local_branch_exists.return_value = False
 
-    result = session.code(target="owner/repo#PR-51", agent="pi")
+    result = session.code(target="owner/repo#PR-51", agent="pi", autostart=autostart)
 
     assert (result["item_id"], result["cwd"]) == (
         "owner/repo#PR-51",
@@ -2969,21 +2964,31 @@ def test_issue_redirect_preserves_issue_analysis(monkeypatch, tmp_path):
 
 def test_plan_first_issue_uses_linked_pr_as_context_not_checkout(monkeypatch, tmp_path):
     github = install_fake_github(monkeypatch)
-    github.add_issue("owner/repo#1")
-    github.add_pull_request("other/implementation#51", closes=("owner/repo#1",))
-    session, worktree, ensure, launch, prepare = _authored_session(monkeypatch, tmp_path)
+    github.add_issue("owner/repo#1", body="Issue implementation goal")
+    github.add_pull_request(
+        "other/implementation#51",
+        closes=("owner/repo#1",),
+        body="PR implementation details",
+        threads=[
+            thread(comment("reviewer", created=AFTER_PUSH) | {"body": "Add a regression case"})
+            | {"path": "src/app.py", "line": 7}
+        ],
+    )
+    session, worktree, ensure, launch, _ = _authored_session(monkeypatch, tmp_path)
     monkeypatch.setattr(control_module, "existing_worktree_path", lambda *_args, **kwargs: None)
-
+    monkeypatch.setattr(
+        control_module, "prepare_launch_agent_prompt", launcher_module.prepare_launch_agent_prompt
+    )
     entered, release = Event(), Event()
     client = session.backend.github_client
-    fetch = client.linked_authored_open_pull_request_url
+    fetch = client.linked_authored_open_pull_request_context
 
     def slow_fetch(*args, **kwargs):
         entered.set()
         assert release.wait(5)
         return fetch(*args, **kwargs)
 
-    monkeypatch.setattr(client, "linked_authored_open_pull_request_url", slow_fetch)
+    monkeypatch.setattr(client, "linked_authored_open_pull_request_context", slow_fetch)
     with ThreadPoolExecutor(max_workers=2) as pool:
         coding = pool.submit(session.code, target="owner/repo#ISSUE-1", agent="pi")
         try:
@@ -2997,9 +3002,15 @@ def test_plan_first_issue_uses_linked_pr_as_context_not_checkout(monkeypatch, tm
     assert (result["item_id"], result["cwd"]) == ("owner/repo#ISSUE-1", str(worktree))
     issue = session.work_items[0]
     assert ensure.call_args.args[1] is issue
-    assert prepare.call_args.args[0] is issue
     prompt = _launched_prompt(launch)
+    assert prompt.startswith("TASK: IMPLEMENT\n")
     assert "https://github.com/other/implementation/pull/51" in prompt
+    assert "Issue implementation goal" in prompt
+    assert "WORK ALREADY IN PROGRESS:" in prompt
+    assert "PR implementation details" in prompt
+    assert '<thread path="src/app.py" line="7">' in prompt
+    assert "Add a regression case" in prompt
+    assert "do not assume this checkout contains its commits" in prompt
     assert "AUTOSTART" not in prompt
 
 
@@ -4484,6 +4495,7 @@ def test_session_analyzes_and_launches_coding_agent_with_real_executor(
 
 
 def test_shared_agent_execution_can_simulate_analysis_and_coding(monkeypatch, tmp_path) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     from workdash.analyzer import Analyzer
 
     panes = []

@@ -13,8 +13,9 @@ Before starting any work, read these files in order:
 
 ## Issue and pull request assumptions
 
+- Use `GitHubClient.fetch_linked_issues_for_pull_request` to resolve a PR's linked issue. Fetch PR work state only when deciding what work to do, not to discover the link.
 - Coding an authored PR that closes an issue is the same as coding the issue. A PR with no linked issue uses its own worktree. If an issue is later linked, plan-first coding uses the issue worktree and leaves the old PR worktree alone.
-- For plan-first coding, if the issue has no worktree, mention only the most recently created open PR you authored that closes it in the briefing. The issue chooses the checkout.
+- For plan-first coding, include launch context for only the most recently created open PR you authored that closes the issue, whether or not the issue worktree already exists. The issue chooses the checkout.
 
 ## Zellij session assumptions
 
