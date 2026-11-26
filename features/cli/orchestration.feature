@@ -386,7 +386,7 @@ Feature: CLI orchestration commands
     Then the command asks the server to analyze in tab `epic`
 
   @id:F-CLI-ORCHESTRATION-S046
-  Scenario: Review asks the server for the requested tab
-    Given a server-backed Workdash session has loaded dashboard items
-    When the user runs `workdash review owner/repo#PR-2 --group epic --json`
-    Then the command asks the server to review in tab `epic`
+  Scenario: Start a pull request review
+    Given an open pull request is available for review
+    When the user runs `workdash review owner/repo#PR-2`
+    Then the command reports that the review started and where to find its document

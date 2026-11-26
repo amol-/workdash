@@ -647,26 +647,6 @@ def test_agent_failure_is_not_retried(setup_review, monkeypatch):
     assert session.review(target="owner/repo#PR-2")["status"] == "reviewed"
 
 
-def test_other_authors_get_formal_verdict_instructions(setup_review, monkeypatch):
-    session, _ = setup_review
-    session.backend.github_client.fetch_launch_context.return_value = {
-        "state": "OPEN",
-        "author": {"login": "other"},
-    }
-    prompts = []
-
-    def run(*, item, prompt, command_tokens, cwd):
-        prompts.append(prompt)
-        Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-            "Review outcome: success\nOutcome: approved\nInline comments: none"
-        )
-        return ""
-
-    install_agent(monkeypatch, run)
-    session.review(target="owner/repo#PR-2")
-    assert "changes-requested review" in prompts[0] and "approved review" in prompts[0]
-
-
 def test_cli_routes_review_to_server(monkeypatch, capsys):
     import workdash.workdash as cli
 
@@ -677,25 +657,6 @@ def test_cli_routes_review_to_server(monkeypatch, capsys):
     assert cli.main(["review", "owner/repo#1", "--agent", "agent", "--host", "localhost"]) == 0
     request.assert_called_once_with("review", {"target": "owner/repo#1", "agent": "agent"})
     assert "No open pull request" in capsys.readouterr().out
-
-
-def test_cli_reports_review_document_path(monkeypatch, capsys):
-    import workdash.workdash as cli
-
-    monkeypatch.setattr(
-        cli.WorkdashControlClient,
-        "request",
-        MagicMock(
-            return_value={
-                "status": "started",
-                "item_id": "owner/repo#PR-2",
-                "agent": "agent",
-                "document_path": "/server/worktree/.workdash/reviews/review-123.md",
-            }
-        ),
-    )
-    assert cli.main(["review", "owner/repo#PR-2"]) == 0
-    assert "/server/worktree/.workdash/reviews/review-123.md" in capsys.readouterr().out
 
 
 def test_one_shot_command_gets_prompt_as_final_shell_argument(setup_review, monkeypatch):
@@ -716,27 +677,12 @@ def test_one_shot_command_gets_prompt_as_final_shell_argument(setup_review, monk
     result = session.review(target="owner/repo#PR-2")
     assert result["status"] == "reviewed"
     assert (worktree / "agent-cwd").read_text().splitlines() == [str(worktree)]
-    assert [(launch["work_action"], launch["group"]) for launch in launches] == [("review", "repo")]
-
-
-def test_review_runs_in_the_requested_group(setup_review, monkeypatch):
-    session, worktree = setup_review
-    launches = install_pane_launch(monkeypatch)
-    script = worktree / "agent"
-    script.write_text(
-        f"#!{sys.executable}\n"
-        "import pathlib, re, sys\n"
-        "prompt = sys.argv[-1]\n"
-        "path = pathlib.Path(re.search(r'completion document at (\\S+)', prompt).group(1))\n"
-        "path.write_text('Review outcome: success\\nOutcome: approved\\nInline comments: none')\n"
+    (launch,) = launches
+    assert (launch["work_action"], launch["pane_name"], launch["group"]) == (
+        "review",
+        f"review_{worktree.name}",
+        "repo",
     )
-    script.chmod(0o755)
-    session.backend.resolve_analyze_command_tokens.return_value = [str(script)]
-
-    assert session.review(target="owner/repo#PR-2", group="project")["status"] == "reviewed"
-    assert [(launch["work_action"], launch["group"]) for launch in launches] == [
-        ("review", "project")
-    ]
 
 
 def test_review_without_a_zellij_session_starts_no_agent(setup_review, monkeypatch):
@@ -821,17 +767,25 @@ def test_closed_pr_needs_no_worktree(setup_review, monkeypatch, state):
 
 def test_review_prompt_instructs_agent_how_to_submit(setup_review, monkeypatch):
     session, _ = setup_review
+    session.backend.github_client.fetch_launch_context.return_value["author"] = {"login": "other"}
     prompts = []
 
     def run(*, item, prompt, command_tokens, cwd):
         prompts.append(prompt)
         Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-            "Review outcome: success\nOutcome: approved\nInline comments: none"
+            "Review outcome: success\n"
+            "Outcome: REQUEST_CHANGES\n"
+            "Inline comments:\n"
+            "- app.py:3: 🤖 First defect\n"
+            "- app.py:7: 🤖 Second defect\n"
         )
         return ""
 
     install_agent(monkeypatch, run)
-    session.review(target="owner/repo#PR-2")
+    result = session.review(target="owner/repo#PR-2")
+    assert result["status"] == "reviewed"
+    assert result["content"].startswith("Review outcome: success\n")
+    assert "🤖 First defect" in result["content"] and "🤖 Second defect" in result["content"]
     prompt = prompts[0]
     assert (
         "Post findings as inline review comments on the pull request, not conversation comments"
@@ -1293,24 +1247,32 @@ def test_real_server_cli_returns_while_agent_is_blocked(setup_review, monkeypatc
 
     session, worktree = setup_review
     running, release, finished = (threading.Event() for _ in range(3))
-    calls = []
     log_info = control.logger.info
 
     def completed(*args, **kwargs):
         log_info(*args, **kwargs)
         finished.set()
 
-    def run(*, item, prompt, command_tokens, cwd):
-        calls.append(item.number)
+    script = worktree / "agent.py"
+    script.write_text(
+        "import pathlib, re, sys\n"
+        "assert 'https://github.com/owner/repo/pull/2' in sys.argv[-1]\n"
+        "path = pathlib.Path(re.search(r'completion document at (\\S+)', sys.argv[-1]).group(1))\n"
+        "path.write_text('Review outcome: success\\nOutcome: approved\\nInline comments: none')\n"
+    )
+    session.backend.resolve_analyze_command_tokens.return_value = [sys.executable, str(script)]
+    launches = install_pane_launch(monkeypatch)
+    zellij = agent_execution.launcher.zellij
+    launch_and_wait = zellij.launch_pane_and_wait
+
+    def wait_in_pane(*args, **kwargs):
         running.set()
         assert release.wait(10)
-        Path(re.search(r"completion document at (\S+)", prompt).group(1)).write_text(
-            "Review outcome: success\nOutcome: approved\nInline comments: none"
-        )
-        return ""
+        return launch_and_wait(*args, **kwargs)
 
+    launch = MagicMock(side_effect=wait_in_pane)
+    monkeypatch.setattr(zellij, "launch_pane_and_wait", launch)
     monkeypatch.setattr(control.logger, "info", completed)
-    install_agent(monkeypatch, run)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -1319,25 +1281,36 @@ def test_real_server_cli_returns_while_agent_is_blocked(setup_review, monkeypatc
     server.start()
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
-            first = pool.submit(cli.main, ["review", "owner/repo#PR-2", "--json"])
+            first = pool.submit(
+                cli.main, ["review", "owner/repo#PR-2", "--group", "epic", "--json"]
+            )
             assert running.wait(3)
             assert first.result(timeout=2) == 0
-            import json
 
             started = json.loads(capsys.readouterr().out)
-            assert started["item_id"] == "owner/repo#PR-2"
-            assert started["agent"] == "agent"
             document = Path(started["document_path"])
             assert document.parent == worktree / ".workdash/reviews"
+            assert started == {
+                "status": "started",
+                "item_id": "owner/repo#PR-2",
+                "agent": "agent",
+                "document_path": str(document),
+            }
             client = control.WorkdashControlClient()
-            assert pool.submit(client.request, "list", {}).result(timeout=2)["items"]
+            listed = pool.submit(client.request, "list", {}).result(timeout=2)
+            assert {item["id"] for item in listed["items"]} == {
+                "owner/repo#ISSUE-1",
+                "owner/repo#CHECK-2",
+            }
             repeat = pool.submit(client.request, "review", {"target": "owner/repo#1"}).result(
                 timeout=2
             )
             assert repeat == started
-            assert calls == [2]
+            assert launch.call_count == 1
             release.set()
             assert finished.wait(3)
+            (first_launch,) = launches
+            assert (first_launch["work_action"], first_launch["group"]) == ("review", "epic")
         finished.clear()
         new_review = client.request("review", {"target": "owner/repo#PR-2"})
         assert new_review["status"] == "started"
@@ -1346,7 +1319,7 @@ def test_real_server_cli_returns_while_agent_is_blocked(setup_review, monkeypatc
     finally:
         release.set()
         server.stop()
-    assert calls == [2, 2]
+    assert len(launches) == 2
     assert not document.exists()
 
 

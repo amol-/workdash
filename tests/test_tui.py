@@ -28,7 +28,6 @@ from workdash.tui import (
     BusyScreen,
     CodeDialog,
     IncludeDialog,
-    ReviewDialog,
     SearchDialog,
     ViewDialog,
     WorkdashApp,
@@ -1200,56 +1199,6 @@ def test_code_dialog_shows_every_choice_without_scrolling() -> None:
                 "(Esc) Cancel",
             ]
             assert app.screen.query_one("#code-shell").max_scroll_y == 0
-
-    asyncio.run(run_smoke())
-
-
-def test_code_menu_auto_review_waits_with_a_progress_dialog_then_reports_completion() -> None:
-    work_item = WorkItem(
-        kind=WorkItemKind.TRACKED_PR,
-        item_type=WorkItemType.PR,
-        repo="owner/repo",
-        number=22,
-        title="Implement renderer",
-        created_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
-        updated_at=datetime(2026, 2, 25, 0, 0, 0, tzinfo=UTC),
-        url="https://example.com/pull/22",
-    )
-    review_calls: list[tuple[WorkItem, str]] = []
-    release_review = threading.Event()
-
-    def review_callback(item: WorkItem, agent: str) -> dict[str, object]:
-        review_calls.append((item, agent))
-        release_review.wait(5)
-        return {"status": "reviewed", "agent": agent}
-
-    app = WorkdashApp(
-        work_items=[work_item],
-        analyze_choices=_DEFAULT_TUI_CONFIG.tui_analyze_choices(),
-        code_choices=_DEFAULT_TUI_CONFIG.tui_code_choices(),
-        review_callback=review_callback,
-        now_utc=datetime(2026, 2, 26, 0, 0, 0, tzinfo=UTC),
-    )
-
-    async def run_smoke() -> None:
-        async with app.run_test() as pilot:
-            await pilot.press("c")
-            assert isinstance(app.screen, CodeDialog)
-            await pilot.press("r")
-            assert isinstance(app.screen, ReviewDialog)
-            lines = [str(line.render()) for line in app.screen.query(".review-line")]
-            assert lines == ["Review with:", "(1) claude", "(2) codex", "(Esc) Cancel"]
-
-            await pilot.press("2")
-            await _wait_for_busy_message("Reviewing with codex...", pilot)
-            assert review_calls == [(work_item, "codex")]
-            release_review.set()
-            await _wait_for_footer(
-                app.query_one("#status-footer", Static),
-                "Reviewed pr owner/repo#22 with codex.",
-                pilot,
-            )
-            _assert_no_modal_screens(app)
 
     asyncio.run(run_smoke())
 
