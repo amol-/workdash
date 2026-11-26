@@ -28,3 +28,11 @@ Feature: Triage work on the dashboard
     When the user returns to the dashboard
     Then the pull request appears on the dashboard
     And the issue it closes does not appear on the dashboard
+
+  @id:F-TRIAGE-LIST-S020
+  Scenario: Hide repositories from the dashboard
+    Given work items in `team/old`, `team/current`, and `archive/project`
+    And the configuration excludes `Team/OLD` and `Archive/*`
+    When the user opens the dashboard with these exclusions
+    Then only `team/current` appears in the work table
+    And no work item is marked as suggested

@@ -14,6 +14,7 @@ import pytest
 from pytest_bdd import given, parsers, then, when
 
 import workdash.github_client as github_client_module
+from gh_work_state_fake import failure, install_fake_github
 from workdash.backend import compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig
 from workdash.control import WorkdashControlError
@@ -47,6 +48,8 @@ def _run_workdash(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    *,
+    real_worktree: bool = False,
 ) -> None:
     import workdash.control as control_module
     import workdash.workdash as workdash_module
@@ -103,12 +106,17 @@ def _run_workdash(
             return str(analysis_path)
 
     github_run = subprocess.run
+    ensure_worktree = control_module.ensure_worktree
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
+        if real_worktree and cmd[0] == "git":
+            return github_run(*args, **kwargs)
         if cmd[:2] == ["gh", "api"] and scenario_state.get("github_lookup_installed"):
             return github_run(*args, **kwargs)
         if cmd[:3] == ["gh", "issue", "view"] and scenario_state.get("real_launch_context"):
+            return github_run(*args, **kwargs)
+        if cmd[:3] == ["gh", "pr", "view"] and scenario_state.get("github_lookup_installed"):
             return github_run(*args, **kwargs)
         if cmd == ["git", "rev-parse", "--show-toplevel"]:
             cwd = Path(kwargs["cwd"]).resolve()
@@ -298,12 +306,14 @@ def _run_workdash(
             find_worktree_for_branch=lambda *_: None,
         ),
     )
-    if "api_session" in scenario_state:
+    if "api_session" in scenario_state and not real_worktree:
         scenario_state["api_session"].git = control_module.GitHelper()
     monkeypatch.setattr(
         control_module,
         "ensure_worktree",
-        lambda workdir, item, **_kwargs: (
+        ensure_worktree
+        if real_worktree
+        else lambda workdir, item, **_kwargs: (
             scenario_state.setdefault("ensure_calls", []).append((workdir, item))
             or scenario_state.get("pr_worktrees", {}).get(
                 item.number, (str(Path(workdir) / "owner_repo_1"),)
@@ -715,6 +725,8 @@ def _run_action_with_agent(
     target: str,
     agent: str,
 ) -> None:
+    if action == "code" and scenario_state.get("github_lookup_installed"):
+        scenario_state["real_launch_context"] = True
     _run_workdash(
         [action, target, "--agent", agent],
         scenario_state,
@@ -864,6 +876,83 @@ def _run_close_json(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _run_workdash(["close", "terminal_26", "--json"], scenario_state, monkeypatch, capsys)
+
+
+@given("authored pull request `owner/repo#50` has a branch but no linked issue")
+def _unlinked_authored_pr(scenario_state, monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    github.failures["ReadyPullRequests"] = failure("PR readiness unavailable")
+    scenario_state["pull_request"] = github.add_pull_request("owner/repo#50")
+    github.add_issue("owner/repo#1")
+    session = scenario_state["api_session"]
+    monkeypatch.setattr(
+        session.backend.github_client,
+        "fetch_worktree_head",
+        lambda item: (f"pr-{item.number}", item.repo),
+    )
+
+    main = Path(session.config.workdir) / "owner_repo"
+    remote = tmp_path / "remote.git"
+    main.mkdir(parents=True)
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=main, check=True, capture_output=True)
+
+    git("init", "-qb", "main")
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "initial",
+    )
+    git("branch", "pr-50")
+    git("branch", "issue-1")
+    git("clone", "--bare", ".", str(remote))
+    url = "https://github.com/owner/repo.git"
+    git("config", f"url.{remote}.insteadOf", url)
+    git("remote", "add", "origin", url)
+    git("fetch", "origin")
+    git("remote", "set-head", "origin", "main")
+
+
+@when("the user runs `workdash code https://github.com/owner/repo/pull/50`")
+def _code_named_pr(scenario_state, monkeypatch, capsys):
+    _run_workdash(
+        ["code", "https://github.com/owner/repo/pull/50"],
+        scenario_state,
+        monkeypatch,
+        capsys,
+        real_worktree=True,
+    )
+
+
+@then(parsers.parse("code opens in the checkout for `{checkout}`"))
+def _code_opens_in_checkout(checkout, scenario_state):
+    assert scenario_state["exit_code"] == 0, scenario_state["stderr"]
+    assert "Status: launched" in scenario_state["stdout"]
+    path = Path(scenario_state["api_session"].config.workdir) / checkout
+    assert f"Cwd: {path}\n" in scenario_state["stdout"]
+
+
+@when("the author links pull request `owner/repo#50` to issue `owner/repo#1`")
+def _link_pull_request(scenario_state):
+    path = Path(scenario_state["agent_launches"][0][0]) / "draft.txt"
+    path.write_text("local work", encoding="utf-8")
+    scenario_state["pull_request"]["closes"] = ("owner/repo#1",)
+
+
+@then("the original pull request checkout is left untouched")
+def _old_checkout_left_untouched(scenario_state):
+    path = Path(scenario_state["agent_launches"][0][0])
+    assert (path / "draft.txt").read_text(encoding="utf-8") == "local work"
+    assert (
+        subprocess.check_output(["git", "branch", "--show-current"], cwd=path, text=True).strip()
+        == "pr-50"
+    )
 
 
 @when("the user runs an orchestration command")
@@ -1188,31 +1277,12 @@ def _requests_code_launch(scenario_state: dict[str, Any]) -> None:
     assert any(req["endpoint"] == "code" for req in control_requests)
 
 
-@when("the user runs `workdash code owner/repo#ISSUE-42 --agent pi --autoclose`")
-def _run_code_with_autoclose(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+@when(parsers.parse("the user runs `workdash code {target} --agent pi --autostart`"))
+def _start_autonomous_code(target, scenario_state, monkeypatch, capsys):
+    scenario_state["real_launch_context"] = True
     _run_workdash(
-        ["code", "owner/repo#ISSUE-42", "--agent", "pi", "--autoclose"],
-        scenario_state,
-        monkeypatch,
-        capsys,
+        ["code", target, "--agent", "pi", "--autostart"], scenario_state, monkeypatch, capsys
     )
-
-
-@when("the user runs `workdash code owner/repo#ISSUE-1 --autostart`")
-def _run_code_with_autostart_option(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with pytest.raises(SystemExit) as parse_error:
-        _run_workdash(
-            ["code", "owner/repo#ISSUE-1", "--autostart"], scenario_state, monkeypatch, capsys
-        )
-    scenario_state["exit_code"] = parse_error.value.code
 
 
 @then(parsers.parse("the command reports that pi launched in a pane for `{item_id}`"))
@@ -1229,16 +1299,10 @@ def _reports_pull_request_checkout(scenario_state: dict[str, Any]) -> None:
     assert f"Cwd: {path}" in scenario_state["stdout"].splitlines()
 
 
-@then("the command asks the server to code with autostart and autoclose enabled")
-def _asks_server_to_code_with_autostart_and_autoclose(scenario_state: dict[str, Any]) -> None:
-    [request] = scenario_state["control_requests"]
-    assert request["endpoint"] == "code"
-    assert (request["payload"]["autostart"], request["payload"]["autoclose"]) == (True, True)
-
-
-@then("the command asks no server to code")
-def _asks_no_server_to_code(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("control_requests", []) == []
+@then("the agent is asked to start implementing without routine confirmation")
+def _starts_implementation(scenario_state):
+    [(_, prompt, _, _)] = scenario_state["agent_launches"]
+    assert "start implementing without asking for routine confirmation" in " ".join(prompt.split())
 
 
 @then("the command requests terminal launch from the local Workdash server")

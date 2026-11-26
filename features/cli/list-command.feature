@@ -29,3 +29,10 @@ Feature: List work items from another terminal
     Then the printed list identifies the todo as `owner/repo#ISSUE-WT110`
     When the user passes that ID to `workdash terminal`
     Then Workdash reports a shell in a new worktree of the Codeberg repository
+
+  @id:F-TRIAGE-LIST-COMMAND-S009
+  Scenario: List work items after repository exclusions
+    Given work items in `team/old`, `team/current`, and `archive/project`
+    And the configuration excludes `Team/OLD` and `Archive/*`
+    When the user runs `workdash list`
+    Then only `team/current` appears in the command output

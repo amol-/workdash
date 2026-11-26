@@ -2,7 +2,7 @@
 Feature: Include a work item by URL
 
   Keep GitHub work from outside your tracked repositories on the dashboard
-  until it is resolved.
+  until it is resolved. Repository exclusions still apply to the work table.
 
   @id:F-TRIAGE-INCLUDE-S001
   Scenario: Add off-dashboard work from its GitHub URL

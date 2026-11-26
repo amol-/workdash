@@ -182,6 +182,22 @@ class FakeGitHub:
         return self.pull_requests[ref]
 
     def run(self, command, *args, **kwargs):
+        if command[:3] in (["gh", "pr", "view"], ["gh", "issue", "view"]) and "--json" in command:
+            ref = f"{command[5]}#{command[3]}"
+            if command[1] == "issue" and ref in self.issues:
+                node = self._issue_node(ref)
+            elif command[1] == "pr" and ref in self.pull_requests:
+                pr = self.pull_requests[ref]
+                node = self._pull_request_node(ref) | {
+                    "body": pr.get("body", ""),
+                    "comments": pr["comments"],
+                    "reviews": pr["reviews"],
+                }
+            else:
+                return self._previous_run(command, *args, **kwargs)
+            fields = command[-1].split(",")
+            payload = {key: node[key] for key in fields if key in node}
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
         if command[:2] != ["gh", "api"]:
             return self._previous_run(command, *args, **kwargs)
         if command[2] != "graphql":
@@ -197,19 +213,55 @@ class FakeGitHub:
                 ref = (
                     f"{_queried_repository(query)}#{re.search(r'issue\(number: (\d+)\)', query)[1]}"
                 )
-                connection = self._issue_node(ref)["closedByPullRequestsReferences"]
+                nodes = self._issue_node(ref)["closedByPullRequestsReferences"]["nodes"]
+                if "author { login }" in query:
+                    for node in nodes:
+                        pr = self.pull_requests[
+                            f"{node['repository']['nameWithOwner']}#{node['number']}"
+                        ]
+                        node.update(
+                            title=f"Pull request {node['number']}",
+                            createdAt=pr["created"],
+                            updatedAt=pr["updated"] or pr["created"],
+                            author={"login": pr["author"]},
+                            url=f"https://github.com/{node['repository']['nameWithOwner']}/pull/{node['number']}",
+                        )
                 data = {
                     "repository": {
-                        "issue": {
-                            "closedByPullRequestsReferences": self._page(query, connection["nodes"])
-                        }
+                        "issue": {"closedByPullRequestsReferences": self._page(query, nodes)}
                     }
                 }
                 return subprocess.CompletedProcess(
                     command, 0, stdout=json.dumps({"data": data}), stderr=""
                 )
-            return self._item_lookup(command, query)
-        data = getattr(self, f"_{name}")(query)
+            if "reviewThreads(first:" in query and "issueOrPullRequest" not in query:
+                ref = f"{_queried_repository(query)}#{re.search(r'pullRequest\(number: (\d+)\)', query)[1]}"
+                node = self._pull_request_node(ref)
+                for issue in node["closingIssuesReferences"]["nodes"]:
+                    issue.update(author=None, comments={"nodes": []})
+                data = {"repository": {"pullRequest": node}}
+                return subprocess.CompletedProcess(
+                    command, 0, stdout=json.dumps({"data": data}), stderr=""
+                )
+            if "closingIssuesReferences" not in query or "issueOrPullRequest" in query:
+                return self._item_lookup(command, query)
+            data = {
+                alias: {
+                    "pullRequest": {
+                        "closingIssuesReferences": {
+                            "nodes": [
+                                {"number": n, "repository": {"nameWithOwner": repo}}
+                                for repo, n in map(
+                                    _split, self.pull_requests[f"{owner}/{name}#{number}"]["closes"]
+                                )
+                            ]
+                        }
+                    }
+                }
+                for alias, owner, name, number in _queried_pull_requests(query)
+            }
+        else:
+            data = getattr(self, f"_{name}")(query)
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"data": data}), stderr="")
 
     # -- GraphQL operations --------------------------------------------------

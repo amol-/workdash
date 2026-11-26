@@ -7,7 +7,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 
 import pytest
@@ -15,6 +14,7 @@ from pytest_bdd import given, parsers, then, when
 
 from test_zellij_integration import (
     _free_dashboard_address,
+    _private_socket_dir,
     _temporary_home,
     dashboard_address_recovery,
     dashboard_restart,
@@ -198,7 +198,7 @@ def _return_does_not_run_setup(returning_cli_output, moved_config_path):
 def _before_first_launch(tmp_path):
     if not shutil.which("zellij"):
         pytest.skip("Zellij is not installed")
-    with tempfile.TemporaryDirectory(prefix="wd-zellij-") as sockets:
+    with _private_socket_dir() as sockets:
         yield from dashboard_restart(tmp_path, sockets)
 
 
@@ -242,7 +242,7 @@ def _reopened_dashboard_preserves_shell_work(dashboard_lifecycle, reopened_panes
 def _address_in_use(tmp_path):
     if not shutil.which("zellij"):
         pytest.skip("Zellij is not installed")
-    with tempfile.TemporaryDirectory(prefix="wd-zellij-") as sockets:
+    with _private_socket_dir() as sockets:
         yield from dashboard_address_recovery(tmp_path, sockets)
 
 

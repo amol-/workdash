@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,53 @@ def is_linked_issues_query(command: list[str]) -> bool:
 # --------------------------------------------------------------------------
 # F-TRIAGE-LIST
 # --------------------------------------------------------------------------
+
+
+@given("work items in `team/old`, `team/current`, and `archive/project`")
+def _items_across_repositories(work_items: list[WorkItem]) -> None:
+    work_items[:] = [
+        make_work_item(repo=repo) for repo in ("team/old", "team/current", "archive/project")
+    ]
+    work_items[0].created_at -= timedelta(days=1)
+
+
+@given("the configuration excludes `Team/OLD` and `Archive/*`")
+def _exclude_repositories(scenario_state, work_items, tmp_path) -> None:
+    session = ensure_api_session(scenario_state, work_items, tmp_path)
+    session.config = replace(session.config, excluded_repositories=["Team/OLD", "Archive/*"])
+
+
+@when("the user opens the dashboard with these exclusions")
+def _open_dashboard_with_exclusions(scenario_state, work_items) -> None:
+    async def inspect_table(app, pilot):
+        table = app.query_one("#work-items", DataTable)
+        scenario_state["listed_repos"] = [
+            str(table.get_row_at(index)[1]) for index in range(table.row_count)
+        ]
+        scenario_state["listed_titles"] = [
+            str(table.get_row_at(index)[2]) for index in range(table.row_count)
+        ]
+
+    run_app(
+        work_items=work_items, session=scenario_state["api_session"], interactions=inspect_table
+    )
+
+
+@then("only `team/current` appears in the work table")
+def _only_current_repo_in_table(scenario_state) -> None:
+    assert scenario_state["listed_repos"] == ["team/current"]
+
+
+@then("no work item is marked as suggested")
+def _no_work_is_suggested_after_exclusions(scenario_state) -> None:
+    assert not any(title.startswith("* ") for title in scenario_state["listed_titles"])
+
+
+@then("only `team/current` appears in the command output")
+def _only_current_repo_in_list(scenario_state) -> None:
+    lines = scenario_state["print_output"].splitlines()
+    assert len(lines) == 1
+    assert "team/current#ISSUE-1" in lines[0]
 
 
 @given(

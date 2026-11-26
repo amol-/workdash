@@ -56,3 +56,11 @@ Feature: Start and resume work on the dashboard
     When I press "c" and choose "t" from the code menu
     Then the terminal opens in the same checkout with my local changes
     And the latest remote changes are visible in the checkout
+
+  @id:F-CODING-LAUNCH-S046
+  Scenario: Plan how to continue linked pull request work from the issue checkout
+    Given I closed the terminal for an issue after making local edits
+    And my authored pull request closes the issue and has review feedback
+    When I press "c" and choose "1" from the code menu
+    Then the agent opens in my existing issue checkout
+    And the agent is asked to plan how to build on the pull request and address its review feedback

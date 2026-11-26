@@ -28,7 +28,7 @@ import workdash.workdash as workdash_module
 from view_fake import ISSUE_URL, fake_gh_view_run
 from workdash.backend import compute_suggestion_markers
 from workdash.config import AgentConfig, WorkdashConfig, load_config, save_config
-from workdash.control import probe_dashboard_session
+from workdash.control import WorkdashSession, probe_dashboard_session
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.workdash import _print_work_items, _print_work_items_result
 from zellij_pane_launch import mark_pane_started, pane_launch
@@ -862,6 +862,33 @@ def test_main_list_command_prints_only_the_listing(
     assert capsys.readouterr().out == expected_stdout
 
 
+def test_main_list_json_hides_excluded_repositories_after_refresh(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    hidden = _issue("team/old")
+    visible = _issue("team/current", number=2)
+    markers = {(hidden.item_type, hidden.repo, hidden.number): "*"}
+    session = WorkdashSession(
+        config=WorkdashConfig(excluded_repositories=["Team/OLD"]),
+        backend=SimpleNamespace(load_items=lambda: ([hidden, visible], markers)),  # type: ignore[arg-type]
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    def request(endpoint: str, payload: dict[str, bool]) -> dict[str, object]:
+        assert endpoint == "list"
+        return session.list_items(refresh=payload["refresh"])
+
+    monkeypatch.setattr(
+        workdash_module, "WorkdashControlClient", lambda host: SimpleNamespace(request=request)
+    )
+
+    assert workdash_module.main(["list", "--json", "--refresh"]) == 0
+    rows = json.loads(capsys.readouterr().out)["items"]
+    assert [(row["id"], row["suggested"]) for row in rows] == [("team/current#ISSUE-2", False)]
+
+
 @pytest.mark.parametrize(
     ("kind", "item_type", "number", "included", "label", "item_id"),
     [
@@ -1212,7 +1239,7 @@ def test_main_rejects_invalid_commands_before_zellij_wrapping(
         (
             ["code", "owner/repo#ISSUE-1", "--agent", "pi"],
             "code",
-            {"target": "owner/repo#ISSUE-1", "agent": "pi", "autostart": True},
+            {"target": "owner/repo#ISSUE-1", "agent": "pi"},
         ),
         (["read", "terminal_23"], "pane/content", {"pane_id": "terminal_23", "full": False}),
         (
@@ -1638,8 +1665,8 @@ def test_main_analyze_reports_server_error(
     ("arguments", "expected_payload", "result", "expected_lines"),
     [
         (
-            ["code", "owner/repo#ISSUE-1", "--agent", "pi"],
-            {"target": "owner/repo#ISSUE-1", "agent": "pi", "autostart": True},
+            ["code", "owner/repo#ISSUE-1", "--agent", "pi", *flags],
+            {"target": "owner/repo#ISSUE-1", "agent": "pi", **mode},
             {
                 "status": "launched",
                 "item_id": "owner/repo#ISSUE-1",
@@ -1659,7 +1686,10 @@ def test_main_analyze_reports_server_error(
                 "Pane title: code_wt",
                 "Pane id: terminal_7",
             ],
-        ),
+        )
+        for flags, mode in [([], {}), (["--autostart"], {"autostart": True})]
+    ]
+    + [
         (
             ["code", "owner/repo#ISSUE-1", "--agent", "pi", "--autoclose"],
             {
@@ -1768,7 +1798,6 @@ def test_main_code_json_outputs_server_response(
             assert payload == {
                 "target": "https://github.com/owner/repo/issues/1",
                 "agent": "codex",
-                "autostart": True,
             }
             return response
 
@@ -2855,9 +2884,10 @@ def test_workdash_control_skill_examples_are_valid_commands_and_explain_code_cla
     assert "no `workdash claim` command" in skill
     with pytest.raises(SystemExit):
         workdash_module._parse_args(["claim", "owner/repo#1"])
-    # Agents must learn what CLI code does, how the TUI differs, and that nothing is merged.
+    # Agents must learn both CLI launch modes and that nothing is merged.
+    assert any(argv[0] == "code" and "--autostart" in argv for argv in examples)
     for text in (
-        "There is no `--autostart` option: the CLI always asks for",
+        "`workdash code ITEM` uses the plan-first briefing by default",
         "plan-first briefing",
         "resumes that pull request in place",
         "merge conflicts, or failing CI",
@@ -2868,8 +2898,6 @@ def test_workdash_control_skill_examples_are_valid_commands_and_explain_code_cla
     ):
         assert text in " ".join(skill.split())
     assert "--autoclose" not in skill
-    with pytest.raises(SystemExit):
-        workdash_module._parse_args(["code", "owner/repo#1", "--autostart"])
     # Ready previews issue-only dispatch, which supervises one selected task.
     for text in (
         "Pull requests are never ready items",
@@ -2894,7 +2922,6 @@ def test_code_group_is_forwarded_to_remote_server_and_reports_actual_tab(monkeyp
                 "target": "owner/repo#1",
                 "agent": None,
                 "group": "epic",
-                "autostart": True,
             }
             return {
                 "status": "already_running",

@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from gh_work_state_fake import todo_body
+from gh_work_state_fake import install_fake_github, todo_body
 from workdash.github_client import (
     GitHubClient,
     ParsedGitHubItemURL,
@@ -1854,6 +1854,33 @@ def test_fetch_item_reads_an_authored_pull_request_and_its_own_repository_closin
         5,
     )
     assert item.closing_issue_numbers == (3, 9)
+
+
+def test_linked_authored_open_pull_request_returns_only_the_newest_created(monkeypatch):
+    """Returning only the newest eligible PR by creation time is an explicit design choice."""
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#1")
+    closes = ("owner/repo#1",)
+    github.add_pull_request("owner/repo#49", closes=closes, updated="2026-02-06T00:00:00Z")
+    github.add_pull_request("owner/repo#51", closes=closes, created="2026-02-03T00:00:00Z")
+    github.add_pull_request("owner/repo#50", closes=closes, created="2026-02-02T00:00:00Z")
+    github.add_pull_request(
+        "owner/repo#52", closes=closes, created="2026-02-04T00:00:00Z", author="someone-else"
+    )
+    github.add_pull_request(
+        "owner/repo#53", closes=closes, created="2026-02-05T00:00:00Z", state="CLOSED"
+    )
+    client = GitHubClient()
+    issue = client.fetch_item("owner/repo", 1, github_username="testuser", todo_repository="")
+    assert issue is not None
+
+    github.operations.clear()
+    pull_request = client.linked_authored_open_pull_request_context(
+        issue, github_username="testuser"
+    )
+
+    assert pull_request["url"] == "https://github.com/owner/repo/pull/51"
+    assert [ref for ref, pr in github.pull_requests.items() if pr["lookups"]] == ["owner/repo#51"]
 
 
 @pytest.mark.parametrize(

@@ -7,7 +7,7 @@ Feature: Supervise an autoclosed coding pane
 
   Rules:
     - `workdash code ITEM --autoclose` launches an ordinary interactive agent and asks the server to supervise that new pane, about every 30 seconds.
-    - Autoclose needs autostart: the CLI always autostarts, the TUI never asks for autoclose, and a request for autoclose without autostart is rejected.
+    - Autoclose needs autostart: `--autoclose` implies `--autostart` in the CLI, the TUI never asks for autoclose, and an API request for autoclose without autostart is rejected.
     - Supervision never takes over a pane that `code` did not just launch, so `already_running` enables nothing.
     - A pane is not judged while its output keeps changing, including output during a GitHub lookup before a blocked decision.
     - Five minutes without new output and without a Workdash message make the pane a candidate for a decision; every message Workdash sends restarts that wait.

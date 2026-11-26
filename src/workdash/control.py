@@ -19,6 +19,7 @@ import urllib.request
 from collections.abc import Callable, Collection, Iterator, Sequence
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager, suppress
+from dataclasses import replace
 from datetime import UTC, datetime
 from http import HTTPStatus
 from importlib.metadata import version
@@ -52,7 +53,7 @@ from .models import (
     display_repo,
     format_type_label,
 )
-from .repo_resolver import validate_repository_selectors
+from .repo_resolver import dashboard_items, validate_repository_selectors
 from .repo_worktree import (
     analysis_worktree,
     ensure_worktree,
@@ -186,14 +187,15 @@ class WorkdashSession:
             return self._busy[-1] if self._busy else None
 
     def list_items(self, *, refresh: bool = False) -> dict[str, object]:
-        """Return the dashboard items currently known to the shared session."""
+        """Return the visible dashboard items without removing anything from the session."""
 
         notify_items_changed = False
         with self._lock:
             if refresh:
                 self.work_items, self.suggestion_markers = self.backend.load_items()
                 notify_items_changed = True
-            payload = _work_items_payload(self.work_items, self.suggestion_markers)
+            visible_items = dashboard_items(self.work_items, self.config.excluded_repositories)
+            payload = _work_items_payload(visible_items, self.suggestion_markers)
         if notify_items_changed:
             self._notify_items_changed()
         return payload
@@ -755,8 +757,9 @@ class WorkdashSession:
     ) -> dict[str, object]:
         """Launch a coding agent for an explicit target unless one already works in its worktree.
 
-        The live agent pane in a worktree is the claim on it, so instead of starting
-        a second agent there this reports that pane with status ``already_running``.
+        An authored PR with a linked issue resolves to that issue before choosing a checkout.
+        A live agent claims the checkout: return ``already_running``
+        without pulling. Otherwise, ``ensure_worktree`` prepares the checkout before launch.
 
         :param bool autostart: Brief a newly launched agent to work autonomously from the
             current GitHub state of the work, instead of proposing a plan first.
@@ -786,34 +789,32 @@ class WorkdashSession:
         git = self.git
         # Without Zellij no agent pane can exist, and VSCode needs none to launch.
         no_zellij_vscode = self.zellij_session is None and selected_agent == "vscode"
-        if autostart or item.kind == WorkItemKind.AUTHORED_PR:
-            # A live agent answers without reading GitHub, so an outage cannot hide it. Only
-            # a worktree known locally is checked here; the briefing may redirect the work to
-            # another item, whose claim is checked below.
+
+        def existing_claim(item: WorkItem, item_id: str) -> dict[str, object] | None:
             with self._lock:
                 repo_path = existing_worktree_path(self.config.workdir, item, git=git)
-                if repo_path is not None:
-                    panes = [] if no_zellij_vscode else self._live_panes()
-                    claimed = self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
-                    if claimed is not None:
-                        return claimed
+                if repo_path is None:
+                    return None
+                panes = [] if no_zellij_vscode else self._live_panes()
+                return self._claimed_launch(item_id, repo_path, panes, autoclose=autoclose)
+
+        if autostart and (claimed := existing_claim(item, item_id)) is not None:
+            return claimed
         analysis_item = (
             item if item.item_type == WorkItemType.ISSUE or item.kind in REVIEW_KINDS else None
         )
         if item.kind == WorkItemKind.AUTHORED_PR:
             try:
-                state = self.backend.github_client.work_pull_request(
-                    item,
-                    github_username=self.config.github_username,
-                    todo_repository=self.config.todo_repository,
+                linked = self.backend.github_client.fetch_linked_issues_for_pull_request(
+                    item.repo, item.number
                 )
-                if state and state.linked_issues:
-                    linked = min(
-                        state.linked_issues, key=lambda issue: (issue.repo.lower(), issue.number)
-                    )
-                    item = self._require_item(f"{linked.repo}#ISSUE-{linked.number}")
+                if linked:
+                    repo, number = min(linked, key=lambda issue: (issue[0].lower(), issue[1]))
+                    item = self._require_item(f"{repo}#ISSUE-{number}")
                     analysis_item = item
                     item_id = format_work_item_id(item)
+                elif item.closing_issue_numbers:
+                    item = replace(item, closing_issue_numbers=())
             except RuntimeError as error:
                 raise WorkdashControlError(
                     "github_error",
@@ -822,23 +823,10 @@ class WorkdashSession:
                 ) from error
         if (
             not autostart
-            and item.item_type == WorkItemType.ISSUE
-            and existing_worktree_path(self.config.workdir, item, git=git) is None
+            and (item.item_type == WorkItemType.ISSUE or item.kind == WorkItemKind.AUTHORED_PR)
+            and (claimed := existing_claim(item, item_id)) is not None
         ):
-            try:
-                state = self.backend.github_client.work_pull_request(
-                    item,
-                    github_username=self.config.github_username,
-                    todo_repository=self.config.todo_repository,
-                )
-            except RuntimeError as error:
-                raise WorkdashControlError(
-                    "github_error",
-                    f"GitHub lookup for {target!r} failed: {error}",
-                    status=HTTPStatus.BAD_GATEWAY,
-                ) from error
-            if state is not None and state.state == "OPEN":
-                item = state.item
+            return claimed
         if autostart:
             try:
                 item, autostart_text, launch_reason = autostart_briefing(
@@ -865,6 +853,21 @@ class WorkdashSession:
                         f"Cannot verify worktree {path} is on {repo}'s branch {branch}. "
                         "Verify the checkout and configure its upstream to the PR head branch."
                     )
+
+        linked_pr_context = None
+        if item.item_type == WorkItemType.ISSUE:
+            try:
+                linked_pr_context = (
+                    self.backend.github_client.linked_authored_open_pull_request_context(
+                        item, github_username=self.config.github_username
+                    )
+                )
+            except RuntimeError as error:
+                raise WorkdashControlError(
+                    "github_error",
+                    f"GitHub lookup for {target!r} failed: {error}",
+                    status=HTTPStatus.BAD_GATEWAY,
+                ) from error
 
         with self._lock:
             panes = [] if no_zellij_vscode else self._live_panes()
@@ -911,6 +914,7 @@ class WorkdashSession:
                 ),
                 merge_base=get_merge_base(repo_path, git=git),
                 github_client=self.backend.github_client,
+                linked_pr_context=linked_pr_context,
             )
             if (
                 analysis_item is not None

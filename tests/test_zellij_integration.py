@@ -17,7 +17,10 @@ import termios
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext, suppress
+from pathlib import Path
+from typing import NamedTuple
+from unittest.mock import Mock
 
 import pytest
 
@@ -32,35 +35,609 @@ def _temporary_home(tmp_path) -> str:
     return str(tmp_path / "home")
 
 
-def _cleanup_sessions(zellij, env, sessions):
+def _cleanup_sessions(zellij, env, sessions, *, previously_owned=None):
+    if not sessions:
+        return
+    by_name = {}
     for name, pid, fd in sessions:
-        for command in (["delete-session", "--force", name], ["kill-session", name]):
-            try:
-                result = subprocess.run(
-                    [zellij, *command], env=env, capture_output=True, timeout=10
-                )
-                if result.returncode == 0:
+        by_name.setdefault(name, set()).add(pid)
+    owned = dict(previously_owned or {})
+    pane_groups = {}
+    interrupted = False
+
+    def defer_interrupt(signum, frame):
+        nonlocal interrupted
+        interrupted = True
+
+    # Defer Ctrl+C in pytest; run cleanup commands outside its foreground group.
+    previous_handler = signal.signal(signal.SIGINT, defer_interrupt)
+    try:
+        try:
+            # Record descendants before Zellij can hang them up and orphan them.
+            discovery_deadline = time.monotonic() + 1
+            while True:
+                try:
+                    current = _session_processes(
+                        zellij, env, by_name, pane_groups=pane_groups, deadline=discovery_deadline
+                    )
                     break
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-        else:
-            print(
-                f"Warning: could not confirm cleanup of Zellij session {name}; it may have exited already.",
-                file=sys.stderr,
-            )
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        try:
-            os.waitpid(pid, 0)
+                except subprocess.TimeoutExpired:
+                    if time.monotonic() >= discovery_deadline:
+                        raise
+            owned.update(current)
+            # Stop startup/attach clients so they cannot launch a server during deletion.
+            for (pid, _), name in current.items():
+                if pid in by_name[name]:
+                    with suppress(ProcessLookupError, PermissionError):
+                        os.kill(pid, signal.SIGKILL)
+            owned.update(_session_processes(zellij, env, by_name, pane_groups=pane_groups))
+            for name in by_name:
+                with suppress(subprocess.TimeoutExpired):
+                    subprocess.run(
+                        [zellij, "delete-session", "--force", name],
+                        env=env,
+                        capture_output=True,
+                        timeout=1,
+                        start_new_session=True,
+                    )
+            owned.update(_session_processes(zellij, env, by_name))
         finally:
-            if fd is not None:
+            _kill_and_verify_owned_processes(owned, pane_groups)
+    finally:
+        try:
+            for _, pid, fd in sessions:
+                with suppress(ChildProcessError):
+                    os.waitpid(pid, os.WNOHANG)
                 os.close(fd)
+        finally:
+            signal.signal(signal.SIGINT, previous_handler)
+            if interrupted:
+                signal.raise_signal(signal.SIGINT)
+
+
+def _kill_and_verify_owned_processes(owned, pane_groups=None):
+    deadline = time.monotonic() + 1
+    signaled = set()
+    remaining = 1
+    survivors = {}
+    while True:
+        try:
+            live = _live_processes(timeout=min(0.5, remaining))
+        except subprocess.TimeoutExpired as error:
+            timeout = error
+        else:
+            timeout = None
+            # An orphan still belongs to its pane group after the leader exits.
+            # A different live leader means the group ID has been reused.
+            live_groups = {
+                pgid: name
+                for (pgid, started), name in (pane_groups or {}).items()
+                if pgid not in live or live[pgid].started == started
+            }
+            survivors = {}
+            for pid, process in live.items():
+                identity = pid, process.started
+                name = owned.get(identity) or live_groups.get(process.pgid)
+                if name is not None:
+                    survivors[identity] = f"{name}: PID {pid} ({process.command})"
+            if not survivors:
+                break
+            for pid, started in survivors.keys() - signaled:
+                with suppress(ProcessLookupError, PermissionError):
+                    os.kill(pid, signal.SIGKILL)
+                signaled.add((pid, started))
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.05, remaining))
+            remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if survivors:
+                raise AssertionError(
+                    "Zellij cleanup left live processes: " + "; ".join(survivors.values())
+                ) from timeout
+            raise timeout
+
+
+def _session_processes(zellij, env, sessions, *, pane_groups=None, deadline=None):
+    """Find the server by its private socket path, even if Workdash started it."""
+
+    def ps_timeout():
+        if deadline is None:
+            return 1
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired("Zellij process discovery", 1)
+        return min(0.3, remaining)
+
+    live = _live_processes(timeout=ps_timeout())
+    socket_dir = Path(env["ZELLIJ_SOCKET_DIR"]).resolve()
+    listing = subprocess.run(
+        ["ps", "-ww", "-U", str(os.getuid()), "-o", "pid=", "-o", "args="],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=True,
+        timeout=ps_timeout(),
+        start_new_session=True,
+    ).stdout
+    candidates = set()
+    for line in listing.splitlines():
+        if " --server " in line and f"/{socket_dir.name}/" in line:
+            pid = line.split(maxsplit=1)[0]
+            if pid.isdecimal() and int(pid) in live:
+                candidates.add(int(pid))
+
+    servers = {}
+    for pid in candidates:
+        # Re-read candidates by PID: multiline arguments can look like rows in the bulk listing.
+        if sys.platform == "linux":
+            # ps can rewrite non-ASCII paths and lose argument boundaries.
+            try:
+                argv = Path(f"/proc/{pid}/cmdline").read_bytes().removesuffix(b"\0").split(b"\0")
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+            if len(argv) < 3 or argv[1] != b"--server" or not os.path.isabs(argv[0]):
+                continue
+            socket_arg = os.fsdecode(argv[2])
+        else:
+            args = subprocess.run(
+                ["ps", "-ww", "-p", str(pid), "-o", "args="],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=ps_timeout(),
+                start_new_session=True,
+            ).stdout.strip()
+            executable, flag, socket_arg = args.partition(" --server ")
+            # With flattened argv, require the known binary to reject embedded matches.
+            if not flag or executable not in {os.path.abspath(zellij), os.path.realpath(zellij)}:
+                continue
+        socket = Path(socket_arg)
+        if (
+            socket.name in sessions
+            and socket.is_absolute()
+            and socket.resolve().parent.is_relative_to(socket_dir)
+        ):
+            servers[socket.name] = pid
+
+    owned = {}
+    for name, clients in sessions.items():
+        roots = {pid for pid in clients if pid in live and live[pid].parent == os.getpid()}
+        if name in servers:
+            roots.add(servers[name])
+        pids = roots.copy()
+        while descendants := {pid for pid, proc in live.items() if proc.parent in pids} - pids:
+            pids.update(descendants)
+        owned.update({(pid, live[pid].started): name for pid in pids})
+        if pane_groups is not None:
+            # Only follow groups led by owned descendants, not the client's or server's group.
+            pane_groups.update(
+                {(pid, live[pid].started): name for pid in pids - roots if live[pid].pgid == pid}
+            )
+    return owned
+
+
+class _LiveProcess(NamedTuple):
+    parent: int
+    started: tuple[str, ...]
+    command: str
+    pgid: int
+
+
+def _live_processes(*, timeout=1):
+    # Start times keep snapshots taken before a mid-test kill from targeting reused PIDs.
+    result = subprocess.run(
+        [
+            "ps",
+            "-U",
+            str(os.getuid()),
+            "-o",
+            "pid=",
+            "-o",
+            "ppid=",
+            "-o",
+            "pgid=",
+            "-o",
+            "stat=",
+            "-o",
+            "lstart=",
+            "-o",
+            "ucomm=",
+        ],
+        env={**os.environ, "LC_ALL": "C"},
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=True,
+        timeout=timeout,
+        start_new_session=True,
+    )
+    processes = {}
+    for line in result.stdout.splitlines():
+        fields = line.split(maxsplit=9)
+        if len(fields) >= 9 and all(field.isdigit() for field in fields[:3]):
+            pid, parent, pgid, state, *started = fields[:9]
+            if not state.startswith("Z"):
+                processes[int(pid)] = _LiveProcess(
+                    int(parent), tuple(started), fields[9] if len(fields) == 10 else "", int(pgid)
+                )
+    return processes
+
+
+def _private_socket_dir():
+    # Unix socket paths have a short length limit, even when TMPDIR is long.
+    return tempfile.TemporaryDirectory(prefix="wd-zellij-", dir="/tmp")
+
+
+@contextmanager
+def _private_zellij_env(monkeypatch):
+    with _private_socket_dir() as sockets, monkeypatch.context() as env:
+        for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
+            env.delenv(key, raising=False)
+        env.setenv("ZELLIJ_SOCKET_DIR", sockets)
+        env.setenv("XDG_CACHE_HOME", os.path.join(sockets, "cache"))
+        yield env
+
+
+@pytest.fixture
+def zellij_socket_dir(monkeypatch):
+    with _private_zellij_env(monkeypatch):
+        yield
+
+
+def test_zellij_cleanup_does_not_signal_pid_from_multiline_args(tmp_path, monkeypatch):
+    unrelated_pid = 12345
+    socket = tmp_path / "contract_version_1" / "test-session"
+    env = {"ZELLIJ_SOCKET_DIR": str(tmp_path)}
+
+    def run(command, **kwargs):
+        stdout = ""
+        if command[0] == "ps":
+            if "ucomm=" in command:
+                stdout = f"{unrelated_pid} 1 1 S Mon Jan  1 00:00:00 2024 sleep\n"
+            elif "-p" in command:
+                assert command[command.index("-p") + 1] == str(unrelated_pid)
+                stdout = "/bin/sleep 120\n"
+            else:
+                stdout = (
+                    "12346 pane-command multiline argument:\n"
+                    f"{unrelated_pid} {sys.executable} --server {socket}\n"
+                    ": end of argument\n"
+                )
+        return subprocess.CompletedProcess(command, 0, stdout)
+
+    kill = Mock(side_effect=AssertionError("cleanup signaled the unrelated process"))
+    monkeypatch.setattr(subprocess, "run", run)
+    if sys.platform == "linux":
+        monkeypatch.setattr(Path, "read_bytes", lambda path: b"/bin/sleep\x00120\0")
+    monkeypatch.setattr(os, "kill", kill)
+    fd = os.open(os.devnull, os.O_RDONLY)
+    _cleanup_sessions("zellij", env, [(socket.name, os.getpid(), fd)])
+    kill.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "timeout_at", ["initial-discovery", "discovery", "kill", "persistent", "survivor"]
+)
+def test_zellij_cleanup_kills_and_verifies_recorded_pids_after_ps_timeout(
+    tmp_path, monkeypatch, timeout_at
+):
+    pid, reused_pid = 12345, 12346
+    started = ("Mon", "Jan", "1", "00:00:00", "2024")
+    session = "test-session"
+    deleted = discovered = matched = killed = verified = False
+    elapsed = 0.0
+    timeouts = []
+
+    def advance(seconds):
+        nonlocal elapsed
+        elapsed += seconds
+
+    def run(command, **kwargs):
+        nonlocal deleted, discovered, matched, verified
+        stdout = ""
+        if command[0] == "zellij":
+            assert command[1:] == ["delete-session", "--force", session]
+            deleted = True
+        elif (timeout_at == "initial-discovery" and elapsed < 1) or (
+            deleted
+            and (
+                (timeout_at == "discovery" and not timeouts)
+                or (
+                    discovered
+                    and (timeout_at == "persistent" or (timeout_at == "kill" and not timeouts))
+                )
+                or (timeout_at == "survivor" and killed)
+            )
+        ):
+            timeout = subprocess.TimeoutExpired(command, kwargs["timeout"])
+            timeouts.append(timeout)
+            advance(timeout.timeout)
+            raise timeout
+        elif "ucomm=" in command:
+            stdout = f"{reused_pid} 1 1 S Mon Jan  1 00:00:01 2024 unrelated\n"
+            if killed:
+                verified = True
+            else:
+                matched = timeout_at == "initial-discovery" or (
+                    deleted and (discovered or bool(timeouts))
+                )
+                stdout += f"{pid} 1 1 S Mon Jan  1 00:00:00 2024 pane\n"
+        elif deleted:
+            discovered = True
+        return subprocess.CompletedProcess(command, 0, stdout)
+
+    def kill(target, sig):
+        nonlocal killed
+        assert matched
+        assert (target, sig) == (pid, signal.SIGKILL)
+        killed = True
+
+    monkeypatch.setattr(time, "monotonic", lambda: elapsed)
+    monkeypatch.setattr(time, "sleep", advance)
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(os, "kill", kill)
+    fd = os.open(os.devnull, os.O_RDONLY)
+    if timeout_at == "kill":
+        expected = nullcontext()
+    elif timeout_at == "survivor":
+        expected = pytest.raises(AssertionError, match=rf"{session}: PID {pid} \(pane\)")
+    else:
+        expected = pytest.raises(subprocess.TimeoutExpired)
+    with expected as error:
+        _cleanup_sessions(
+            "zellij",
+            {"ZELLIJ_SOCKET_DIR": str(tmp_path)},
+            [(session, os.getpid(), fd)],
+            previously_owned={(pid, started): session, (reused_pid, started): session},
+        )
+    if timeout_at == "survivor":
+        assert error.value.__cause__ is timeouts[-1]
+        assert killed and elapsed == pytest.approx(1)
+        return
+    if error is not None:
+        assert error.value is timeouts[-1]
+    if timeout_at == "persistent":
+        assert len(timeouts) > 1
+        assert elapsed == pytest.approx(1)
+        assert not killed and not verified
+    elif timeout_at == "initial-discovery":
+        assert len(timeouts) > 2
+        assert sum(timeout.timeout for timeout in timeouts) == pytest.approx(1)
+        assert not deleted
+        assert killed and verified
+    else:
+        assert len(timeouts) == 1
+        assert killed and verified
+        if timeout_at == "kill":
+            assert elapsed < 1
 
 
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
-def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
+@pytest.mark.parametrize(
+    "case",
+    [
+        "normal",
+        "failure",
+        "ctrl-c",
+        "ctrl-c-delete",
+        "ctrl-c-scan",
+        "ctrl-c-first-ps",
+        "ctrl-c-verify",
+        "late-child",
+        "two-initial-ps-timeouts",
+        "survivor",
+        "renamed-binary",
+        "long-tmpdir",
+        pytest.param(
+            "debug-server",
+            marks=pytest.mark.skipif(sys.platform != "linux", reason="Linux server argv"),
+        ),
+        pytest.param(
+            "non-ascii-binary-dir",
+            marks=pytest.mark.skipif(sys.platform != "linux", reason="Linux ps C locale"),
+        ),
+    ],
+)
+def test_zellij_cleanup_kills_hup_ignoring_pane(tmp_path, monkeypatch, case):
+    zellij = shutil.which("zellij")
+    if case in {"renamed-binary", "non-ascii-binary-dir"}:
+        bin_dir = tmp_path / "bin"
+        if case == "non-ascii-binary-dir":
+            bin_dir = tmp_path / "bin-è"
+            monkeypatch.setenv("LC_ALL", "C")
+        bin_dir.mkdir()
+        binary = bin_dir / "terminal-multiplexer"
+        shutil.copy2(zellij, binary)
+        link = bin_dir / "zellij"
+        link.symlink_to(binary)
+        monkeypatch.setenv("PATH", str(bin_dir), prepend=os.pathsep)
+        zellij = str(link)
+    elif case == "debug-server":
+        wrapper = tmp_path / "zellij"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            'if [ "$#" -eq 2 ] && [ "$1" = --session ]; then set -- "$@" --debug; fi\n'
+            f'exec {shlex.quote(zellij)} "$@"\n',
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o700)
+        monkeypatch.setenv("PATH", str(tmp_path), prepend=os.pathsep)
+        zellij = str(wrapper)
+    elif case == "long-tmpdir":
+        long_tmpdir = tmp_path / ("long-" * 24)
+        long_tmpdir.mkdir()
+        monkeypatch.setenv("TMPDIR", str(long_tmpdir))
+        monkeypatch.setattr(tempfile, "tempdir", None)
+
+    body_error = {"failure": AssertionError, "ctrl-c": KeyboardInterrupt}.get(case)
+    leave_survivor = case == "survivor"
+    interrupt_cleanup = case.startswith("ctrl-c-")
+    scans = initial_timeouts = 0
+    sent_interrupt = post_delete_scan = deleted = False
+    ready = tmp_path / "pane-pids"
+    release = tmp_path / "fork-late-child"
+    late_ready = tmp_path / "late-child-pid"
+    owned = {}
+    fallback = {}
+    kill = os.kill
+    run = subprocess.run
+    previous_socket_dir = os.environ.get("ZELLIJ_SOCKET_DIR")
+
+    def kill_except_pane(pid, sig):
+        if (pid, sig) != (pane_pid, signal.SIGKILL):
+            kill(pid, sig)
+
+    def run_during_teardown(command, **kwargs):
+        nonlocal scans, sent_interrupt, post_delete_scan, initial_timeouts, deleted
+        ps = command[0] == "ps"
+        if case == "two-initial-ps-timeouts" and ps and initial_timeouts < 2:
+            initial_timeouts += 1
+            time.sleep(kwargs["timeout"])
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        delete = command == [zellij, "delete-session", "--force", name]
+        scan = ps and "-U" in command and "args=" in command
+        if scan:
+            scans += 1
+            post_delete_scan |= deleted
+        if not sent_interrupt and (
+            (case == "ctrl-c-first-ps" and ps)
+            or (case == "ctrl-c-scan" and scan and scans == 2)
+            or (case == "ctrl-c-delete" and delete)
+            or (case == "ctrl-c-verify" and post_delete_scan and "ucomm=" in command)
+        ):
+            sent_interrupt = True
+            kill(os.getpid(), signal.SIGINT)
+        if delete and case == "late-child":
+            # The pane cannot fork this child until cleanup has taken its last snapshot.
+            release.touch()
+            deadline = time.monotonic() + 5
+            while not late_ready.exists():
+                assert time.monotonic() < deadline, "late child did not start"
+                time.sleep(0.01)
+            late_pid = int(late_ready.read_text())
+            live = _live_processes()
+            fallback[late_pid, live[late_pid].started] = name
+            assert live[late_pid].parent == pane_pid
+            assert os.getpgid(late_pid) == os.getpgid(pane_pid)
+        result = run(command, **kwargs)
+        if delete:
+            deleted = result.returncode == 0
+            if case == "late-child":
+                deadline = time.monotonic() + 5
+                while server_pid in (live := _live_processes()):
+                    assert time.monotonic() < deadline, "Zellij server did not exit"
+                    time.sleep(0.01)
+                assert (late_pid, live[late_pid].started) in fallback
+        return result
+
+    def previous_interrupt_handler(signum, frame):
+        assert signal.getsignal(signum) is previous_interrupt_handler
+        raise KeyboardInterrupt("delivered to prior handler")
+
+    if case == "ctrl-c-verify":
+        expected = pytest.raises(KeyboardInterrupt, match="delivered to prior handler")
+    elif interrupt_cleanup:
+        expected = pytest.raises(KeyboardInterrupt)
+    elif leave_survivor:
+        expected = pytest.raises(AssertionError, match="Zellij cleanup left live processes")
+    elif body_error:
+        expected = pytest.raises(body_error, match="interrupted test body")
+    else:
+        expected = nullcontext()
+
+    original_handler = signal.getsignal(signal.SIGINT)
+    prior_handler = (
+        previous_interrupt_handler if case == "ctrl-c-verify" else signal.default_int_handler
+    )
+    try:
+        with (
+            expected as cleanup_error,
+            monkeypatch.context() as fault,
+            live_zellij_session(monkeypatch) as name,
+        ):
+            socket_dir = os.environ["ZELLIJ_SOCKET_DIR"]
+            assert socket_dir != previous_socket_dir
+            subprocess.run(
+                [
+                    zellij,
+                    "--session",
+                    name,
+                    "action",
+                    "new-pane",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "import os, signal, time\nfrom pathlib import Path\n"
+                    "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+                    "child = os.fork()\n"
+                    "if child:\n"
+                    f"    ready = Path({str(ready)!r})\n"
+                    "    pending = ready.with_suffix('.tmp')\n"
+                    "    pending.write_text(f'{os.getpid()} {child}')\n"
+                    "    pending.rename(ready)\n"
+                    f"    if {case == 'late-child'}:\n"
+                    f"        while not Path({str(release)!r}).exists(): time.sleep(0.01)\n"
+                    "        late = os.fork()\n"
+                    "        if late:\n"
+                    f"            ready = Path({str(late_ready)!r})\n"
+                    "            pending = ready.with_suffix('.tmp')\n"
+                    "            pending.write_text(str(late))\n"
+                    "            pending.rename(ready)\n"
+                    "time.sleep(120)\n",
+                ],
+                check=True,
+                capture_output=True,
+                timeout=5,
+            )
+            deadline = time.monotonic() + 10
+            while not ready.exists():
+                assert time.monotonic() < deadline, "pane did not start"
+                time.sleep(0.05)
+            pane_pid, child_pid = map(int, ready.read_text().split())
+            live = _live_processes()
+            # Zellij starts the pane directly; discovery must not supply the expected server PID.
+            server_pid = live[pane_pid].parent
+            assert server_pid > 1
+            fallback = {(pid, live[pid].started): name for pid in (server_pid, pane_pid, child_pid)}
+            if case == "debug-server":
+                argv = Path(f"/proc/{server_pid}/cmdline").read_bytes().split(b"\0")
+                assert b"--debug" in argv[3:]
+            owned = _session_processes(zellij, os.environ, {name: set()})
+            if interrupt_cleanup or case in {"two-initial-ps-timeouts", "late-child"}:
+                fault.setattr(subprocess, "run", run_during_teardown)
+            if interrupt_cleanup:
+                signal.signal(signal.SIGINT, prior_handler)
+            if leave_survivor:
+                fault.setattr(os, "kill", kill_except_pane)
+            if body_error:
+                raise body_error("interrupted test body")
+        assert os.environ.get("ZELLIJ_SOCKET_DIR") == previous_socket_dir
+        assert not os.path.exists(socket_dir)
+        if interrupt_cleanup:
+            assert sent_interrupt
+            assert signal.getsignal(signal.SIGINT) is prior_handler
+        if leave_survivor:
+            assert f"{name}: PID {pane_pid} (" in str(cleanup_error.value)
+        if case == "two-initial-ps-timeouts":
+            assert initial_timeouts == 2 and deleted
+        live = _live_processes()
+        assert {server_pid, pane_pid, child_pid} <= {pid for pid, _ in owned}
+        survivors = {
+            pid for pid, started in owned | fallback if pid in live and live[pid].started == started
+        }
+        assert survivors == ({pane_pid} if leave_survivor else set())
+        if case == "late-child":
+            assert deleted and len(fallback) == 4
+    finally:
+        if interrupt_cleanup:
+            signal.signal(signal.SIGINT, original_handler)
+        if owned or fallback:
+            _kill_and_verify_owned_processes(owned | fallback)
+
+
+@pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
+def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path, zellij_socket_dir):
     import socket
     import sys
 
@@ -99,7 +676,7 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
         "control.get_merge_base = lambda *_args, **_kwargs: None\n"
         f"control.SERVER_LOG_PATH = Path({str(tmp_path / 'workdash.log')!r})\n"
         "from workdash.github_client import GitHubClient\n"
-        "GitHubClient.work_pull_request = lambda *_args, **_kwargs: None\n"
+        "GitHubClient.linked_authored_open_pull_request_context = lambda *_args, **_kwargs: None\n"
         "control.prepare_launch_agent_prompt = lambda *_args, **_kwargs: 'test prompt'\n"
         "cli.GitHubClient.check_authentication = lambda self: None\n"
         "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
@@ -186,13 +763,15 @@ def test_two_server_dashboards_use_their_own_real_zellij_sessions(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
-def test_launch_pane_and_wait_blocks_until_the_pane_command_exits_in_its_group_tab(tmp_path):
+def test_launch_pane_and_wait_blocks_until_the_pane_command_exits_in_its_group_tab(
+    tmp_path, zellij_socket_dir
+):
     import threading
 
     from workdash.launcher import zellij as zellij_client
 
     zellij = shutil.which("zellij")
-    name = f"workdash-wait-test-{uuid.uuid4().hex}"
+    name = f"workdash-wait-{uuid.uuid4().hex[:8]}"
     env = os.environ.copy()
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
         env.pop(key, None)
@@ -278,30 +857,28 @@ def live_zellij_session(monkeypatch):
     zellij = shutil.which("zellij")
     if zellij is None:
         pytest.skip("Zellij is not installed")
-    name = f"workdash-pane-test-{uuid.uuid4().hex}"
-    env = os.environ.copy()
-    for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
-        env.pop(key, None)
-    env.update(TERM="xterm-256color", SHELL="/bin/sh")
-    monkeypatch.setenv("SHELL", "/bin/sh")
-    pid, fd = pty.fork()
-    if pid == 0:
-        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
-        os.execve(zellij, [zellij, "--session", name], env)
-    try:
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            try:
-                if zellij_client.load_zellij_panes(name):
-                    break
-            except RuntimeError:
-                pass
-            time.sleep(0.1)
-        else:
-            pytest.fail("Zellij did not start")
-        yield name
-    finally:
-        _cleanup_sessions(zellij, env, [(name, pid, fd)])
+    with _private_zellij_env(monkeypatch) as session_env:
+        session_env.setenv("SHELL", "/bin/sh")
+        env = {**os.environ, "TERM": "xterm-256color"}
+        name = f"workdash-pane-test-{uuid.uuid4().hex[:8]}"
+        pid, fd = pty.fork()
+        if pid == 0:
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+            os.execve(zellij, [zellij, "--session", name], env)
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    if zellij_client.load_zellij_panes(name):
+                        break
+                except RuntimeError:
+                    pass
+                time.sleep(0.1)
+            else:
+                pytest.fail("Zellij did not start")
+            yield name
+        finally:
+            _cleanup_sessions(zellij, env, [(name, pid, fd)])
 
 
 @pytest.mark.parametrize("tab_name", ["epic", "-foo"])
@@ -587,15 +1164,7 @@ def dashboard_restart(tmp_path, sockets):
             "verify_reopened_dashboard_and_shell": verify_reopened_dashboard_and_shell,
         }
     finally:
-        if clients:
-            _cleanup_sessions(zellij, env, [(name, *clients[0])])
-        for pid, fd in clients[1:]:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            os.waitpid(pid, 0)
-            os.close(fd)
+        _cleanup_sessions(zellij, env, [(name, pid, fd) for pid, fd in clients])
 
 
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
@@ -603,13 +1172,13 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
     from workdash import launcher
 
     zellij = shutil.which("zellij")
-    sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
+    sockets = _private_socket_dir()
     monkeypatch.setenv("ZELLIJ_SOCKET_DIR", sockets.name)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     config = tmp_path / "config.kdl"
     config.write_text("")
     monkeypatch.setenv("ZELLIJ_CONFIG_FILE", str(config))
-    name = f"workdash-viewer-test-{uuid.uuid4().hex}"
+    name = f"workdash-viewer-{uuid.uuid4().hex[:8]}"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     executable = bin_dir / "workdash"
@@ -734,7 +1303,6 @@ def test_analysis_viewer_renders_and_closes_full_size_floating_pane(tmp_path, mo
 def test_cli_and_api_analysis_preserve_focus_in_real_zellij(tmp_path, monkeypatch):
     import socket
     from concurrent.futures import ThreadPoolExecutor
-    from contextlib import nullcontext
     from datetime import UTC, datetime
     from unittest.mock import MagicMock
 
@@ -745,7 +1313,7 @@ def test_cli_and_api_analysis_preserve_focus_in_real_zellij(tmp_path, monkeypatc
     from workdash.workdash import main
 
     zellij = shutil.which("zellij")
-    sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
+    sockets = _private_socket_dir()
     monkeypatch.setenv("ZELLIJ_SOCKET_DIR", sockets.name)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     config = tmp_path / "config.kdl"
@@ -950,12 +1518,11 @@ def test_cli_and_api_analysis_preserve_focus_in_real_zellij(tmp_path, monkeypatc
 @pytest.mark.parametrize("repeat", range(2))
 def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected, repeat):
     import socket
-    import tempfile
 
     from workdash.control import WorkdashControlClient, WorkdashControlError
 
     zellij = shutil.which("zellij")
-    sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
+    sockets = _private_socket_dir()
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         old_port = probe.getsockname()[1]
@@ -1052,7 +1619,6 @@ def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
 def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
     import socket
-    import tempfile
 
     from workdash.control import WorkdashControlClient, WorkdashControlError
 
@@ -1074,7 +1640,7 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
     script.chmod(0o755)
     command = tmp_path / "saved-command"
     runs = tmp_path / "command-runs"
-    command.write_text(f"#!/bin/sh\necho run >> {shlex.quote(str(runs))}\nsleep 120\n")
+    command.write_text(f"#!/bin/sh\ntrap '' HUP\necho $$ >> {shlex.quote(str(runs))}\nsleep 120\n")
     command.chmod(0o755)
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -1083,7 +1649,7 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
     config.write_text(
         "session_serialization false\ndisable_session_metadata true\nserialization_interval 1\n"
     )
-    with tempfile.TemporaryDirectory(prefix="wd-zellij-") as sockets:
+    with _private_socket_dir() as sockets:
         env = os.environ.copy()
         for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
             env.pop(key, None)
@@ -1099,6 +1665,7 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
             XDG_CONFIG_HOME=str(tmp_path / "config"),
         )
         clients = []
+        previously_owned = {}
 
         def start(command):
             pid, fd = pty.fork()
@@ -1109,6 +1676,22 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
 
         def run(*args):
             return subprocess.run([zellij, *args], env=env, capture_output=True, text=True)
+
+        def stop_for_resurrection():
+            previously_owned.update(
+                _session_processes(zellij, env, {name: {pid for pid, _ in clients}})
+            )
+            assert run("kill-session", name).returncode == 0
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                sessions = run("list-sessions", "--no-formatting").stdout
+                if any(
+                    line.startswith(f"{name} ") and "(EXITED" in line
+                    for line in sessions.splitlines()
+                ):
+                    return
+                time.sleep(0.1)
+            pytest.fail(f"session did not exit: {sessions}")
 
         try:
             start([str(script), "--session", name])
@@ -1144,24 +1727,21 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 layouts = list((tmp_path / "cache").rglob("session-layout.kdl"))
-                if runs.exists() and any(
-                    'name="work"' in layout.read_text() and str(command) in layout.read_text()
-                    for layout in layouts
+                if (
+                    runs.exists()
+                    and runs.read_text()
+                    and any(
+                        'name="work"' in layout.read_text() and str(command) in layout.read_text()
+                        for layout in layouts
+                    )
                 ):
                     break
                 time.sleep(0.1)
             else:
                 pytest.fail(f"work tab was not serialized: {layouts}")
-            assert run("kill-session", name).returncode == 0
-            deadline = time.monotonic() + 15
-            while time.monotonic() < deadline:
-                sessions = run("list-sessions", "--no-formatting").stdout
-                if name in sessions and "(EXITED" in sessions:
-                    break
-                time.sleep(0.1)
-            else:
-                pytest.fail(f"session did not exit: {sessions}")
-            client = WorkdashControlClient(f"127.0.0.1:{port}")
+            saved_pid = int(runs.read_text())
+            stop_for_resurrection()
+            assert saved_pid in _live_processes(), "the saved pane did not survive the session stop"
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 try:
@@ -1186,14 +1766,13 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
             panes = json.loads(
                 run("--session", name, "action", "list-panes", "--json", "--all").stdout
             )
-            assert runs.read_text().splitlines() == ["run"]
+            assert runs.read_text().splitlines() == [str(saved_pid)]
             assert any(p["title"] == "saved-command" and p["is_held"] for p in panes)
             work = next(
                 p
                 for p in panes
                 if p["tab_name"] == "work" and not p["is_plugin"] and not p["is_held"]
             )
-            dashboard = next(p for p in panes if p["title"] == "workdash tui" and not p["is_held"])
             pane_id = f"terminal_{work['id']}"
             assert (
                 run(
@@ -1228,15 +1807,7 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
                 time.sleep(0.1)
             else:
                 pytest.fail("tab added after recovery was not serialized")
-            assert run("kill-session", name).returncode == 0
-            deadline = time.monotonic() + 15
-            while time.monotonic() < deadline:
-                sessions = run("list-sessions", "--no-formatting").stdout
-                if name in sessions and "(EXITED" in sessions:
-                    break
-                time.sleep(0.1)
-            else:
-                pytest.fail(f"recovered session did not exit: {sessions}")
+            stop_for_resurrection()
             start([str(script), "--session", name])
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
@@ -1254,7 +1825,7 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
                 time.sleep(0.1)
             else:
                 pytest.fail("tab added after recovery did not survive the next recovery")
-            assert runs.read_text().splitlines() == ["run"]
+            assert runs.read_text().splitlines() == [str(saved_pid)]
             assert any(p["title"] == "saved-command" and p["is_held"] for p in panes)
             assert any(p["tab_name"] == "work" and not p["is_plugin"] for p in panes)
             dashboard = next(p for p in panes if p["title"] == "workdash tui" and not p["is_held"])
@@ -1276,15 +1847,13 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
             else:
                 pytest.fail(f"dashboard did not respond to quit: {screen}")
         finally:
-            if clients:
-                _cleanup_sessions(zellij, env, [(name, *clients[0])])
-            for pid, fd in clients[1:]:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                os.waitpid(pid, 0)
-                os.close(fd)
+            _cleanup_sessions(
+                zellij,
+                env,
+                [(name, pid, fd) for pid, fd in clients],
+                previously_owned=previously_owned,
+            )
+        assert saved_pid not in _live_processes(), "cleanup missed the pane from the first stop"
 
 
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
@@ -1293,7 +1862,7 @@ def test_startup_resurrects_exited_session_with_work_pane(tmp_path):
 def test_dashboard_analysis_focuses_viewer_in_real_zellij(tmp_path, choice, repeat):
     import socket
 
-    sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
+    sockets = _private_socket_dir()
     config = tmp_path / "config.kdl"
     config.write_text("show_release_notes false\nshow_startup_tips false\n")
     zellij = shutil.which("zellij")
@@ -1408,7 +1977,7 @@ def running_dashboard_return(
     tmp_path, *, has_pane=True, duplicate_tab=False, new_last_input=False, last_detach=False
 ):
     zellij = shutil.which("zellij")
-    name = f"workdash-focus-{uuid.uuid4().hex}"
+    name = f"workdash-focus-{uuid.uuid4().hex[:8]}"
     env = os.environ.copy()
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "XDG_CONFIG_HOME"):
         env.pop(key, None)
@@ -1425,7 +1994,7 @@ def running_dashboard_return(
         f"{shlex.quote(str(dashboard))}; fi\necho DASHBOARD_PANE_$ZELLIJ_PANE_ID\nexec /bin/sh\n"
     )
     shell.chmod(0o755)
-    sockets = tempfile.TemporaryDirectory(prefix="wd-zellij-")
+    sockets = _private_socket_dir()
     config = tmp_path / "config.kdl"
     config.write_text("show_release_notes false\nshow_startup_tips false\n")
     home = _temporary_home(tmp_path)
@@ -1471,7 +2040,6 @@ def running_dashboard_return(
         wrapper.chmod(0o755)
         env["PATH"] = f"{wrapper_dir}:{env['PATH']}"
     sessions = []
-    children = []
     output = bytearray()
     returning_output = bytearray()
     stop_draining = threading.Event()
@@ -1556,7 +2124,7 @@ def running_dashboard_return(
         if new_last_input:
             args.append("--refresh")
         child, returning_fd = start_terminal(returning_output, sys.executable, *args)
-        children.append((child, returning_fd))
+        sessions.append((name, child, returning_fd))
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             clients = action("list-clients").stdout.splitlines()[1:]
@@ -1676,13 +2244,6 @@ def running_dashboard_return(
         stop_draining.set()
         for thread in drain_threads:
             thread.join()
-        for child, child_fd in children:
-            try:
-                os.kill(child, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            os.waitpid(child, 0)
-            os.close(child_fd)
         _cleanup_sessions(zellij, env, sessions)
         sockets.cleanup()
 

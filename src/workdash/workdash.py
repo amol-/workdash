@@ -209,6 +209,7 @@ class CLIOptions:
     close_todo: str | None = None
     full: bool = False
     raw: bool = False
+    autostart: bool = False
     autoclose: bool = False
     automerge: bool = False
     host: str = "127.0.0.1"
@@ -305,11 +306,14 @@ class WorkdashCommands:
         agent: str | None,
         group: str | None,
         json_output: bool,
+        autostart: bool = False,
         autoclose: bool = False,
     ) -> int:
         """Launch a coding agent through the local Workdash server."""
 
-        payload: dict[str, object] = {"target": target, "agent": agent, "autostart": True}
+        payload: dict[str, object] = {"target": target, "agent": agent}
+        if autostart or autoclose:
+            payload["autostart"] = True
         if group is not None:
             payload["group"] = group
         if autoclose:
@@ -701,6 +705,7 @@ def _run_server_backed_command(commands: WorkdashCommands, options: CLIOptions) 
             agent=options.agent,
             group=options.group,
             json_output=options.json_output,
+            autostart=options.autostart,
             autoclose=options.autoclose,
         )
     if options.command == "terminal":
@@ -878,10 +883,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     )
     code_parser.add_argument("--group", help="Zellij tab for the agent pane.")
     code_parser.add_argument(
+        "--autostart",
+        action="store_true",
+        help="Start work autonomously instead of waiting for plan approval.",
+    )
+    code_parser.add_argument(
         "--autoclose",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="Let the server nudge the new agent and close its pane when the work is done.",
+        help="Let the server supervise and close the new agent pane (implies --autostart).",
     )
     code_parser.add_argument(
         "--json",
@@ -1132,6 +1142,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         close_todo=getattr(namespace, "close_todo", None),
         full=getattr(namespace, "full", False),
         raw=getattr(namespace, "raw", False),
+        autostart=getattr(namespace, "autostart", False),
         autoclose=getattr(namespace, "autoclose", False),
         automerge=getattr(namespace, "automerge", False),
         host=host or "127.0.0.1",

@@ -32,8 +32,8 @@ Feature: CLI orchestration commands
     - `workdash code` launches only configured coding agents reported by `workdash show-config`.
     - `workdash code --group NAME` asks the server to open a new agent in the named Zellij tab, creating it if needed; without the option it opens in the current tab.
     - Code results report the actual tab of the agent pane, including an already-running pane, in human and JSON output.
-    - `workdash code` always asks the server to autostart the agent, so the new agent works autonomously from its briefing; there is no `--autostart` option and the TUI never asks for it.
-    - `workdash code --autoclose` asks the server to supervise the new pane as well; the CLI polls nothing itself and `--autoclose` never asks for autoclose without autostart.
+    - `workdash code` launches a plan-first coding session by default. Use `--autostart` to have the new agent work autonomously from its briefing.
+    - `workdash code --autoclose` implies `--autostart` and asks the server to supervise the new pane; the CLI polls nothing itself.
     - A configured agent that lacks the command for the requested action is reported as unable to do that action, not as unconfigured.
     - Without `--agent`, `workdash analyze` and `workdash code` use the first configured agent for that action, in configuration order.
     - `workdash analyze`, `workdash code`, and `workdash terminal` accept any explicit target the JSON API accepts, including items `workdash list` does not show; the server resolves it.
@@ -325,26 +325,40 @@ Feature: CLI orchestration commands
     And the command exits with a non-zero status
 
   @id:F-CLI-ORCHESTRATION-S040
-  Scenario: Start coding an issue from the command line
+  Scenario: Code launches a plan-first coding session by default
     Given a server-backed Workdash session is ready to answer
     And GitHub repository `owner/repo` has open issue #1
     When the user runs `workdash code owner/repo#ISSUE-1 --agent pi`
     Then the command reports that pi launched in a pane for `owner/repo#ISSUE-1`
+    And the agent is asked to propose a plan rather than start implementation
 
   @id:F-CODING-LAUNCH-S031
   Scenario: Continue an issue's open pull request from the command line
     Given a server-backed Workdash session is ready to answer
     And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51` whose CI failed
     And pull request #51 has an existing worktree on branch `pr-branch`
-    When the user runs `workdash code owner/repo#42 --agent pi`
+    When the user runs `workdash code owner/repo#42 --agent pi --autostart`
     Then the command reports that pi launched in a pane for `owner/repo#ISSUE-42`
     And the command shows the existing pull request checkout as the pane's working directory
 
+  @id:F-CLI-ORCHESTRATION-S047
+  Scenario: Coding a pull request follows its newly linked issue
+    Given a server-backed Workdash session has loaded dashboard items
+    And authored pull request `owner/repo#50` has a branch but no linked issue
+    When the user runs `workdash code https://github.com/owner/repo/pull/50`
+    Then code opens in the checkout for `owner_repo_50`
+    When the author links pull request `owner/repo#50` to issue `owner/repo#1`
+    And the user runs `workdash code https://github.com/owner/repo/pull/50`
+    Then code opens in the checkout for `owner_repo_1`
+    And the original pull request checkout is left untouched
+
   @id:F-CLI-ORCHESTRATION-S041
-  Scenario: Code has no autostart option
-    When the user runs `workdash code owner/repo#ISSUE-1 --autostart`
-    Then the command exits with a non-zero status
-    And the command asks no server to code
+  Scenario: Code with autostart launches an autonomous coding session
+    Given a server-backed Workdash session is ready to answer
+    And GitHub repository `owner/repo` has open issue #1
+    When the user runs `workdash code owner/repo#ISSUE-1 --agent pi --autostart`
+    Then the command reports that pi launched in a pane for `owner/repo#ISSUE-1`
+    And the agent is asked to start implementing without routine confirmation
 
   @id:F-CLI-ORCHESTRATION-S042
   Scenario Outline: Host selection is rejected for non-client commands
@@ -376,10 +390,3 @@ Feature: CLI orchestration commands
     Given a server-backed Workdash session has loaded dashboard items
     When the user runs `workdash review owner/repo#PR-2 --group epic --json`
     Then the command asks the server to review in tab `epic`
-
-  @id:F-CLI-ORCHESTRATION-S044
-  Scenario: Code with autoclose asks the server to supervise the new pane
-    Given a server-backed Workdash session is ready to answer
-    And GitHub repository `owner/repo` has open issue #42
-    When the user runs `workdash code owner/repo#ISSUE-42 --agent pi --autoclose`
-    Then the command asks the server to code with autostart and autoclose enabled

@@ -664,6 +664,7 @@ def build_launch_agent_prompt(
     repo_path: str,
     analysis_path: str | None = None,
     merge_base: str | None = None,
+    linked_pr_context: dict[str, Any] | None = None,
 ) -> str:
     """Build the initial interactive launch prompt for a coding agent."""
 
@@ -676,8 +677,21 @@ def build_launch_agent_prompt(
     # else's pull request, so the work kind picks between two briefings.
     template_name = "launch_review.txt" if item.kind in REVIEW_KINDS else "launch_issue.txt"
 
+    context = render_github_context(github_context, item.item_type)
     partial_work_section = ""
-    if item.kind == WorkItemKind.AUTHORED_PR:
+    if item.item_type == WorkItemType.ISSUE and linked_pr_context is not None:
+        partial_work_section = (
+            "\nWORK ALREADY IN PROGRESS:\n"
+            "An open pull request of yours already addresses this issue. Review its context\n"
+            "below and build on the work already done instead of starting over. Check which\n"
+            "changes are present locally; do not assume this checkout contains its commits.\n"
+        )
+        context += (
+            "\n<linkedPullRequest>\n"
+            f"{render_github_context(linked_pr_context, WorkItemType.PR)}\n"
+            "</linkedPullRequest>"
+        )
+    elif item.kind == WorkItemKind.AUTHORED_PR:
         partial_work_section = (
             "\nWORK ALREADY IN PROGRESS:\n"
             f"This work already has an open pull request of yours ({item.url}), and the\n"
@@ -717,7 +731,7 @@ def build_launch_agent_prompt(
         partial_work_section=partial_work_section,
         analysis_section=analysis_section,
         merge_base_section=merge_base_line,
-        github_context=render_github_context(github_context, item.item_type),
+        github_context=context,
     )
 
 
@@ -727,6 +741,8 @@ def prepare_launch_agent_prompt(
     analysis_path: str | None = None,
     merge_base: str | None = None,
     github_client=None,
+    *,
+    linked_pr_context: dict[str, Any] | None = None,
 ) -> str:
     """Collect GitHub context and return the launch prompt text for a coding agent."""
 
@@ -740,6 +756,7 @@ def prepare_launch_agent_prompt(
         repo_path=repo_path,
         analysis_path=analysis_path,
         merge_base=merge_base,
+        linked_pr_context=linked_pr_context,
     )
 
 

@@ -14,6 +14,7 @@ import pytest
 from pytest_bdd import given, parsers, then, when
 from textual.widgets import Static
 
+from gh_work_state_fake import AFTER_PUSH, comment, install_fake_github, thread
 from workdash.backend import WorkdashBackend
 from workdash.control import WorkdashSession, format_work_item_id
 from workdash.models import WorkItemKind, WorkItemType
@@ -197,6 +198,13 @@ def worktree_remote(tmp_path, monkeypatch, scenario_state):
                     )
                 else:
                     payload = json.dumps({"body": "Proposed keyboard shortcut changes."})
+            case ["gh", "api", "graphql"] if "closedByPullRequestsReferences" in command[4]:
+                connection = {"nodes": [], "pageInfo": {"hasNextPage": False}}
+                issue = {"closedByPullRequestsReferences": connection}
+                payload = json.dumps({"data": {"repository": {"issue": issue}}})
+            case ["gh", "api", "graphql"] if command[4].startswith("query={ p0:"):
+                pull_request = {"closingIssuesReferences": {"nodes": []}}
+                payload = json.dumps({"data": {"p0": {"pullRequest": pull_request}}})
             case ["gh", "api", "graphql"] if "reviewThreads" in command[4]:
                 discussion = {
                     "closingIssuesReferences": {"nodes": []},
@@ -265,6 +273,20 @@ def _leave_issue_work(scenario_state, worktree_remote, tmp_path, monkeypatch):
     (checkout / "notes.txt").write_text(_LOCAL_EDIT)
     scenario_state["original_checkout"] = checkout
     scenario_state["panes"].clear()  # The user has exited the previous shell.
+
+
+@given("my authored pull request closes the issue and has review feedback")
+def _add_linked_pr_feedback(scenario_state, monkeypatch):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("owner/repo#42", body=_ISSUE_BODY)
+    github.add_pull_request(
+        "owner/repo#51",
+        closes=("owner/repo#42",),
+        threads=[
+            thread(comment("reviewer", created=AFTER_PUSH) | {"body": "Add a regression test"})
+            | {"path": "src/app.py", "line": 7}
+        ],
+    )
 
 
 @given("my pull request from that branch now replaces the issue on the dashboard")
@@ -358,6 +380,25 @@ def _agent_starts_plan_first(scenario_state):
     [(_, prompt, _, _)] = scenario_state["agent_launches"]
     assert "Propose a concrete implementation plan" in prompt
     assert "Do not start implementing code yet." in prompt
+    assert "AUTOSTART:" not in prompt
+
+
+@then("the agent opens in my existing issue checkout")
+def _agent_opens_in_issue_checkout(scenario_state):
+    assert scenario_state["worktree_status"].startswith("Launched"), scenario_state[
+        "worktree_status"
+    ]
+    [(cwd, _, _, _)] = scenario_state["agent_launches"]
+    assert Path(cwd) == scenario_state["original_checkout"]
+    assert (Path(cwd) / "notes.txt").read_text() == _LOCAL_EDIT
+
+
+@then("the agent is asked to plan how to build on the pull request and address its review feedback")
+def _agent_plans_linked_pr_work(scenario_state):
+    _agent_starts_plan_first(scenario_state)
+    [(_, prompt, _, _)] = scenario_state["agent_launches"]
+    assert "build on the work already done instead of starting over" in prompt
+    assert "Add a regression test" in prompt
 
 
 @then("the coding agent opens on my pull request's branch to plan how to build on my changes")
