@@ -40,6 +40,7 @@ from workdash.control import (
     format_work_item_id,
     probe_dashboard_session,
 )
+from workdash.git import GitHelper
 from workdash.github_client import GitHubClient
 from workdash.included_items import IncludedItemsStore
 from workdash.models import WorkItem, WorkItemKind, WorkItemType, accepted_worktree_numbers
@@ -590,6 +591,30 @@ def test_todo_notifies_the_live_tui_after_capturing(body, monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
+    ("text", "target", "message"),
+    [
+        ("   ", None, "The todo text is required."),
+        ("Fix the flaky test", "not-a-repo", "must be a GitHub owner/repo or a supported git URL"),
+    ],
+)
+def test_todo_session_rejects_invalid_input_before_contacting_github(text, target, message):
+    github = MagicMock(spec=GitHubClient)
+    session = WorkdashSession(
+        config=WorkdashConfig(todo_repository="testuser/todos"),
+        backend=MagicMock(github_client=github),
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+
+    with pytest.raises(WorkdashControlError, match=message):
+        session.todo(text=text, target=target)
+
+    assert github.mock_calls == []
+    assert session.work_items == []
+
+
+@pytest.mark.parametrize(
     ("fields", "expected_status", "message"),
     [
         ({}, 200, None),
@@ -679,7 +704,95 @@ def test_todo_api_validates_input_and_captures_the_issue(
             "url": "https://github.com/testuser/todos/issues/110",
         },
     }
-    assert [format_work_item_id(item) for item in session.work_items] == [item_id]
+    [entry] = session.list_items()["items"]
+    assert entry["id"] == item_id
+    assert entry["repo"] == ("owner/repo" if target else "testuser/todos")
+
+
+def test_capture_and_refresh_use_todo_metadata_over_conflicting_body_details(tmp_path, monkeypatch):
+    from gh_todo_fake import TODO_ISSUE_NUMBER, TODO_ISSUE_URL, TODO_REPOSITORY
+
+    config = WorkdashConfig(
+        github_username="testuser", todo_repository=TODO_REPOSITORY, workdir=str(tmp_path)
+    )
+    backend = WorkdashBackend(config=config, cache_root=tmp_path / "cache")
+    github = backend.github_client
+    for method in (
+        "list_open_authored_prs",
+        "list_open_review_requested_prs",
+        "list_open_reviewed_prs",
+        "list_open_assigned_issues",
+        "list_recent_tracked_items",
+    ):
+        monkeypatch.setattr(github, method, lambda *args, **kwargs: [])
+    session = WorkdashSession(
+        config=config,
+        backend=backend,
+        work_items=[],
+        suggestion_markers={},
+        zellij_session=None,
+    )
+    title = "Fix the flaky test"
+    conflicting_metadata = todo_body("wrong/repository")
+    details = f"Research for wrong/repository.\n\n{conflicting_metadata}"
+    commands = []
+    capture = fake_gh_todo_run(commands)
+
+    def run(cmd, **kwargs):
+        if cmd[:3] != ["gh", "api", "graphql"]:
+            return capture(cmd, **kwargs)
+        create = commands[-1]
+        assert create[:3] == ["gh", "issue", "create"]
+        body = create[create.index("--body") + 1]
+        assert conflicting_metadata in body
+        node = {
+            "id": "I110",
+            "number": TODO_ISSUE_NUMBER,
+            "title": title,
+            "url": TODO_ISSUE_URL,
+            "createdAt": "2026-04-01T00:00:00Z",
+            "updatedAt": "2026-04-02T00:00:00Z",
+            "subIssuesSummary": {"total": 0},
+            "body": body,
+        }
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=json.dumps(
+                {
+                    "data": {"repository": {"issues": {"nodes": [node]}}},
+                }
+            ),
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+    checkout = str(tmp_path / "owner_repo_todo_110")
+    prepare = MagicMock(return_value=checkout)
+    launch = MagicMock(
+        return_value=SimpleNamespace(
+            session=None, cwd=checkout, pane_title="Todo", pane_id="terminal_23"
+        )
+    )
+    monkeypatch.setattr(control_module, "ensure_worktree", prepare)
+    monkeypatch.setattr(control_module, "launch_terminal_context", launch)
+    result = session.todo(text=title, target="owner/repo", body=details)
+    assert result["item_id"] == "owner/repo#ISSUE-WT110"
+    [captured] = session.work_items
+    assert captured.todo_target == "owner/repo"
+    assert session.terminal(target=result["item_id"])["cwd"] == checkout
+    assert prepare.call_args.args[1] is captured
+
+    [entry] = session.list_items(refresh=True)["items"]
+
+    [refreshed] = session.work_items
+    assert refreshed is not captured
+    assert (entry["repo"], entry["id"], refreshed.todo_target) == (
+        "owner/repo",
+        "owner/repo#ISSUE-WT110",
+        "owner/repo",
+    )
+    assert session.terminal(target=entry["id"])["cwd"] == checkout
+    assert prepare.call_args.args[1] is refreshed
 
 
 def _ready_session(tmp_path, *, repositories: tuple[str, ...] = ()) -> WorkdashSession:
@@ -1573,6 +1686,41 @@ def test_coding_a_todo_protects_its_identity(monkeypatch, tmp_path, autostart, t
     assert "Fixes owner/other#7" not in prompt
 
 
+@pytest.mark.parametrize(
+    "target",
+    ["owner/repo", "https://gitlab.com/owner/repo.git", "https://codeberg.org/owner/repo.git"],
+)
+def test_coding_a_targeted_todo_launches_in_its_checkout_with_the_original_task(
+    target, monkeypatch, tmp_path
+):
+    prepare_prompt = control_module.prepare_launch_agent_prompt
+    session, _, ensure, launch = _coding_session(monkeypatch, tmp_path, [])
+    monkeypatch.setattr(control_module, "prepare_launch_agent_prompt", prepare_prompt)
+    session.config = replace(session.config, todo_repository="testuser/todos")
+    todo = replace(
+        _github_issue("testuser/todos", 1, todo_target=target),
+        url="https://github.com/testuser/todos/issues/1",
+    )
+    session.work_items = [todo]
+    checkout = str(tmp_path / "owner_repo_todo_1")
+    ensure.return_value = checkout
+    body = "Find what makes the test fail intermittently"
+    context = MagicMock(return_value={"title": todo.title, "body": body})
+    monkeypatch.setattr(session.backend.github_client, "fetch_launch_context", context)
+
+    result = session.code(target="owner/repo#ISSUE-WT1", agent="pi")
+
+    assert result["cwd"] == launch.call_args.args[0] == checkout
+    assert ensure.call_args.args == (str(tmp_path), todo)
+    context.assert_called_once_with(todo)
+    prompt = _launched_prompt(launch)
+    assert {"- repo: testuser/todos", "- number: 1", f"- url: {todo.url}"} <= set(
+        prompt.splitlines()
+    )
+    assert f"- repo: {target}" not in prompt.splitlines()
+    assert body in prompt
+
+
 def test_autostarting_a_review_reads_no_github_state_and_stays_review_only(
     monkeypatch, tmp_path
 ) -> None:
@@ -1950,6 +2098,136 @@ def test_terminal_resolves_issue_references(monkeypatch, tmp_path, target, hidde
     assert prepare.call_args.args == (str(tmp_path), item)
     assert prepare.call_count == 1
     launch.assert_called_once_with(worktree, zellij_session="workdash-main")
+
+
+def test_terminal_resolves_an_unlisted_targeted_todo_not_the_targets_issue(monkeypatch, tmp_path):
+    github = install_fake_github(monkeypatch)
+    github.add_issue("testuser/todos#42", body=todo_body("owner/repo"))
+    github.add_issue("owner/repo#42")
+    session = _ready_session(tmp_path)
+    lookup = MagicMock(wraps=session.backend.github_client.fetch_item)
+    monkeypatch.setattr(session.backend.github_client, "fetch_item", lookup)
+    worktree = str(tmp_path / "owner_repo_todo_42")
+    prepare = MagicMock(return_value=worktree)
+    launch = MagicMock(
+        return_value=SimpleNamespace(
+            session="workdash-main", cwd=worktree, pane_title="Todo", pane_id="terminal_23"
+        )
+    )
+    monkeypatch.setattr(control_module, "ensure_worktree", prepare)
+    monkeypatch.setattr(control_module, "launch_terminal_context", launch)
+
+    response = _post_item_action(session, "terminal", "owner/repo#ISSUE-WT42")
+
+    assert response.status_int == 200, response.text
+    result = response.json["result"]
+    assert (result["item_id"], result["cwd"], result["pane_id"]) == (
+        "owner/repo#ISSUE-WT42",
+        worktree,
+        "terminal_23",
+    )
+    assert [called.args for called in lookup.call_args_list] == [("testuser/todos", 42)]
+    assert prepare.call_count == 1
+    workdir, item = prepare.call_args.args
+    assert workdir == str(tmp_path)
+    assert (item.repo, item.number, item.todo_target) == ("testuser/todos", 42, "owner/repo")
+    launch.assert_called_once_with(worktree, zellij_session="workdash-main")
+    assert session.work_items == []
+
+
+def test_terminal_does_not_launch_when_todo_checkout_conflicts(monkeypatch, tmp_path):
+    session = _ready_session(tmp_path)
+    todo = _github_issue("testuser/todos", 1, todo_target="https://codeberg.org/owner/repo.git")
+    session.work_items.append(todo)
+    clone = tmp_path / "owner_repo"
+    clone.mkdir()
+    marker = clone / "work.txt"
+    marker.write_text("local changes")
+
+    def run(cmd, *, cwd, **kwargs):
+        assert cwd == clone
+        match cmd:
+            case ["git", "rev-parse", "--show-toplevel"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout=f"{clone}\n")
+            case ["git", "config", "--local", "--get", "remote.origin.url"]:
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout="https://github.com/owner/repo.git\n"
+                )
+            case _:
+                pytest.fail(f"Unexpected command against the unrelated clone: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    launch = MagicMock()
+    monkeypatch.setattr(control_module, "launch_terminal_context", launch)
+
+    with pytest.raises(RuntimeError, match="belongs to a different repository"):
+        session.terminal(target="owner/repo#ISSUE-WT1")
+
+    launch.assert_not_called()
+    assert marker.read_text() == "local changes"
+
+
+def test_terminal_reuses_matching_todo_worktree_when_main_clone_is_unrelated(tmp_path, monkeypatch):
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    main = workdir / "owner_repo"
+    worktree = workdir / "owner_repo_todo_110"
+    source = tmp_path / "source"
+    target = "https://codeberg.org/owner/repo.git"
+    for path, origin in ((main, "https://github.com/owner/repo.git"), (source, target)):
+        subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+        subprocess.run(["git", "remote", "add", "origin", origin], cwd=path, check=True)
+    (source / "work.txt").write_text("todo work")
+    subprocess.run(["git", "add", "work.txt"], cwd=source, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "initial",
+        ],
+        cwd=source,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "wt-110", str(worktree)],
+        cwd=source,
+        check=True,
+        capture_output=True,
+    )
+    (main / "work.txt").write_text("other repository work")
+    (worktree / "work.txt").write_text("uncommitted todo work")
+    pulls = []
+    monkeypatch.setattr(GitHelper, "pull_ff_only", lambda self, path: pulls.append(path))
+
+    session = _ready_session(workdir)
+    session.work_items.append(
+        replace(_github_issue("testuser/todos", 1, todo_target=target), number=110)
+    )
+    launch = MagicMock(
+        return_value=SimpleNamespace(
+            cwd=str(worktree), session="workdash-main", pane_title="Todo", pane_id="terminal_23"
+        )
+    )
+    monkeypatch.setattr(control_module, "launch_terminal_context", launch)
+
+    assert session.terminal(target="owner/repo#ISSUE-WT110")["cwd"] == str(worktree)
+
+    launch.assert_called_once_with(str(worktree), zellij_session="workdash-main")
+    assert pulls == [worktree]
+    assert (main / "work.txt").read_text() == "other repository work"
+    assert (worktree / "work.txt").read_text() == "uncommitted todo work"
+    assert subprocess.check_output(
+        ["git", "remote", "get-url", "origin"], cwd=main, text=True
+    ).strip() == ("https://github.com/owner/repo.git")
+    assert subprocess.check_output(["git", "status", "--porcelain"], cwd=main, text=True) == (
+        "?? work.txt\n"
+    )
 
 
 @pytest.mark.parametrize(
@@ -5561,7 +5839,8 @@ def test_issue_analysis_uses_disposable_default_branch_worktree(tmp_path, monkey
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_targeted_todo_analysis_uses_target_default_branch(tmp_path, fail):
+@pytest.mark.parametrize("target_url", [None, "https://codeberg.org/owner/target.git"])
+def test_targeted_todo_analysis_uses_target_default_branch(tmp_path, monkeypatch, fail, target_url):
     repos = {"owner/todos": tmp_path / "todos", "owner/target": tmp_path / "target"}
 
     def git(cwd, *args):
@@ -5583,8 +5862,18 @@ def test_targeted_todo_analysis_uses_target_default_branch(tmp_path, fail):
     git(target, "commit", "-am", "other branch")
     git(target, "switch", "main")
 
+    if target_url:
+        # Exercise Git URL cloning without contacting the forge.
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+        monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{target}.insteadOf")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", target_url)
+
     item = replace(
-        _work_item(number=1, title="Todo"), repo="owner/todos", todo_target="owner/target"
+        _work_item(number=1, title="Todo"),
+        repo="owner/todos",
+        todo_target=target_url or "owner/target",
     )
     backend = MagicMock()
     paths = []
@@ -5623,11 +5912,16 @@ def test_targeted_todo_analysis_uses_target_default_branch(tmp_path, fail):
             session.analyze(target="owner/target#ISSUE-WT1")
     else:
         assert session.analyze(target="owner/target#ISSUE-WT1")["status"] == "generated"
-    assert len(paths) == 1 and not paths[0].exists()
+    [temporary_checkout] = paths
+    assert temporary_checkout.name == "owner_target_todo_1"
+    assert not temporary_checkout.exists()
     main = tmp_path / "work" / "owner_target"
     assert len(git(main, "worktree", "list", "--porcelain").split("worktree ")) == 2
     assert "wt-1" not in git(main, "branch", "--list")
-    backend.github_client.clone_repository.assert_called_once_with("owner/target", main)
+    if target_url:
+        backend.github_client.clone_repository.assert_not_called()
+    else:
+        backend.github_client.clone_repository.assert_called_once_with("owner/target", main)
     backend.github_client.create_issue_branch.assert_not_called()
 
 
@@ -6141,8 +6435,15 @@ def test_close_todo_api_updates_tui_table():
                 content_type="application/json",
                 body=json.dumps({"item": "10"}).encode(),
             )
-            response = await asyncio.to_thread(request.get_response, api)
-            assert response.status_int == 200
+
+            def close_todo():
+                response = request.get_response(api)
+                assert response.status_int == 200
+                return response.json["result"]
+
+            result = await asyncio.to_thread(close_todo)
+            assert result["item_id"] == "testuser/todos#ISSUE-10"
+            assert result["status"] == "closed"
             await pilot.pause()
             assert table.row_count == 1
             assert str(table.get_row_at(0)[2]).lstrip("* ") == "Keep this item"

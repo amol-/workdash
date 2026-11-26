@@ -434,15 +434,23 @@ def test_existing_worktree_path_finds_the_targeted_todo_worktree_of_the_target_c
     assert existing_worktree_path(str(tmp_path), make_issue(110)) == tmp_path / "owner_repo_110"
 
 
+@pytest.mark.parametrize(
+    ("target", "clone_command"),
+    [
+        ("owner/repo", ["gh", "repo", "clone"]),
+        ("https://gitlab.com/owner/repo.git", ["git", "clone"]),
+        ("https://codeberg.org/owner/repo.git", ["git", "clone"]),
+    ],
+)
 def test_ensure_worktree_creates_a_target_clone_branch_for_a_targeted_todo(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str, clone_command: list[str]
 ) -> None:
     calls: list[list[str]] = []
 
     def fake_run(*args, **kwargs):
         cmd = args[0]
         calls.append(list(cmd))
-        if cmd[:3] == ["gh", "repo", "clone"]:
+        if cmd[: len(clone_command)] == clone_command:
             Path(cmd[-1]).mkdir(parents=True, exist_ok=True)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd == ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"]:
@@ -452,20 +460,23 @@ def test_ensure_worktree_creates_a_target_clone_branch_for_a_targeted_todo(
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[:2] == ["git", "show-ref"] or cmd[:3] == ["git", "worktree", "list"]:
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
-        if cmd[0] == "git":
+        if cmd[0] == "git" and cmd[:2] != ["git", "clone"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         raise AssertionError(f"Unexpected command: {cmd}")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    result = ensure_worktree(str(tmp_path), make_targeted_todo())
+    result = ensure_worktree(str(tmp_path), make_targeted_todo(target=target))
 
     assert result == str(tmp_path / "owner_repo_todo_110")
-    assert ["gh", "repo", "clone", "owner/repo", str(tmp_path / "owner_repo")] in calls
+    assert [*clone_command, target, str(tmp_path / "owner_repo")] in calls
     assert not any(cmd[:3] == ["gh", "issue", "view"] for cmd in calls)
+    if clone_command[0] == "git":
+        assert not any(cmd[0] == "gh" for cmd in calls)
     wt_add = next(cmd for cmd in calls if cmd[:3] == ["git", "worktree", "add"])
     assert "wt-110" in wt_add
     assert "origin/HEAD" in wt_add
+    assert calls.index(["git", "fetch", "--prune", "origin"]) < calls.index(wt_add)
 
 
 def test_existing_worktree_path_finds_direct_worktree_when_origin_matches_item_repo(
@@ -1570,56 +1581,12 @@ def test_targeted_todo_worktree_casing_depends_on_host(
         assert pulls == [path]
 
 
-def test_targeted_todo_reuses_matching_worktree_when_main_clone_is_another_repository(
-    tmp_path, monkeypatch
-):
-    workdir = tmp_path / "workdir"
-    workdir.mkdir()
-    main = workdir / "owner_repo"
-    worktree = workdir / "owner_repo_todo_110"
-    source = tmp_path / "source"
-    target = "https://codeberg.org/owner/repo.git"
-    for path, origin in ((main, "https://github.com/owner/repo.git"), (source, target)):
-        subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
-        subprocess.run(["git", "remote", "add", "origin", origin], cwd=path, check=True)
-    (source / "work.txt").write_text("todo work")
-    subprocess.run(["git", "add", "work.txt"], cwd=source, check=True)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.com",
-            "commit",
-            "-m",
-            "initial",
-        ],
-        cwd=source,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "worktree", "add", "-b", "wt-110", str(worktree)],
-        cwd=source,
-        check=True,
-        capture_output=True,
-    )
-    (main / "work.txt").write_text("other repository work")
-    (worktree / "work.txt").write_text("uncommitted todo work")
-    pulls = []
-    monkeypatch.setattr(GitHelper, "pull_ff_only", lambda self, path: pulls.append(path))
-
-    assert ensure_worktree(str(workdir), make_targeted_todo(target=target)) == str(worktree)
-    assert pulls == [worktree]
-    assert (main / "work.txt").read_text() == "other repository work"
-    assert (worktree / "work.txt").read_text() == "uncommitted todo work"
-
-
 @pytest.mark.parametrize("occupied", ["main", "worktree", "branch"])
 def test_targeted_todo_conflicts_never_mutate_another_repository(tmp_path, monkeypatch, occupied):
     main = tmp_path / "owner_repo"
     main.mkdir()
+    main_marker = main / "work.txt"
+    main_marker.write_text("another repository's work")
     candidate = tmp_path / ("owner_repo_todo_110" if occupied == "worktree" else "custom")
     candidate.mkdir()
     marker = candidate / "work.txt"
@@ -1646,6 +1613,7 @@ def test_targeted_todo_conflicts_never_mutate_another_repository(tmp_path, monke
     with pytest.raises(RuntimeError, match="belongs to a different repository"):
         ensure_worktree(str(tmp_path), item)
     assert marker.read_text() == "uncommitted work"
+    assert main_marker.read_text() == "another repository's work"
     assert all(command[0] == "git" for command in calls)
 
 

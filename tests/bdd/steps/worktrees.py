@@ -16,7 +16,7 @@ from textual.widgets import Static
 
 from workdash.backend import WorkdashBackend
 from workdash.control import WorkdashSession, format_work_item_id
-from workdash.models import WorkItem, WorkItemKind, WorkItemType
+from workdash.models import WorkItemKind, WorkItemType
 from zellij_pane_launch import mark_pane_started
 
 from .common import install_zellij_agent_fakes, make_valid_config, make_work_item, run_app
@@ -37,6 +37,9 @@ def _install_fake_git(
     """
 
     recorded: list[list[str]] = []
+    cloned_repositories: dict[Path, str] = {}
+    target_source = scenario_state.get("target_source", {})
+    source_repository = scenario_state["todo_item"].todo_target if target_source else None
     existing = existing_worktrees or {}
 
     def _porcelain() -> str:
@@ -55,6 +58,7 @@ def _install_fake_git(
         if cmd[:3] == ["gh", "repo", "clone"] or cmd[:2] == ["git", "clone"]:
             target = Path(cmd[-1])
             target.mkdir(parents=True, exist_ok=True)
+            cloned_repositories[target] = cmd[-2]
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd == ["git", "rev-parse", "--show-toplevel"]:
             return subprocess.CompletedProcess(cmd, 0, stdout=str(kwargs["cwd"]), stderr="")
@@ -104,10 +108,13 @@ def _install_fake_git(
             else:
                 wt_path = Path(cmd[3])
             wt_path.mkdir(parents=True, exist_ok=True)
-            for name, content in scenario_state.get("target_source", {}).items():
-                source = wt_path / name
-                source.parent.mkdir(parents=True, exist_ok=True)
-                source.write_text(content)
+            if source_repository is not None and (
+                cloned_repositories.get(kwargs.get("cwd")) == source_repository
+            ):
+                for name, content in target_source.items():
+                    source = wt_path / name
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_text(content)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[:3] == ["git", "worktree", "remove"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -121,15 +128,6 @@ def _install_fake_git(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     scenario_state["_recorded_git_calls"] = recorded
-
-
-@then(parsers.parse('the worktree is checked out on a branch named "{branch_template}"'))
-def _worktree_on_named_branch(branch_template: str, scenario_state: dict[str, Any]) -> None:
-    item: WorkItem = scenario_state["work_item"]
-    expected = branch_template.replace("<number>", str(item.number))
-    recorded = scenario_state["_recorded_git_calls"]
-    add_cmd = next(cmd for cmd in recorded if cmd[:3] == ["git", "worktree", "add"])
-    assert expected in add_cmd, (expected, add_cmd)
 
 
 _ISSUE_BODY = "Keep the existing keyboard shortcuts."

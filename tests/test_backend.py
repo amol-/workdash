@@ -15,7 +15,7 @@ from workdash.backend import (
 from workdash.config import AgentConfig, WorkdashConfig, WorkdashConfigValidationError
 from workdash.github_client import GitHubClient, TransientFetchError
 from workdash.included_items import IncludedItemsStore
-from workdash.models import WorkItem, WorkItemKind, WorkItemType
+from workdash.models import WorkItem, WorkItemKind, WorkItemType, display_repo
 
 
 def make_work_item(
@@ -352,8 +352,12 @@ def test_load_items_keeps_a_hand_picked_item_older_than_every_discovered_item(
     assert 888 in numbers, "the included item was dropped by the row cap"
 
 
+@pytest.mark.parametrize(
+    "target",
+    ["owner/repo", "https://gitlab.com/owner/repo.git", "https://codeberg.org/owner/repo.git"],
+)
 def test_load_items_keeps_the_todo_target_when_the_same_issue_is_also_assigned(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    target: str, tmp_path: Path
 ) -> None:
     issue_payload = {
         "id": "ISSUE-110",
@@ -382,7 +386,7 @@ def test_load_items_keeps_the_todo_target_when_the_same_issue_is_also_assigned(
             return []
 
         def list_open_todo_issues(self, todo_repository, progress_callback=None):
-            return [dict(issue_payload, target="owner/repo")]
+            return [dict(issue_payload, target=target)]
 
     backend = WorkdashBackend(
         github_client=FakeGitHubClient(),
@@ -394,8 +398,10 @@ def test_load_items_keeps_the_todo_target_when_the_same_issue_is_also_assigned(
     work_items, _markers = backend.load_items(progress_callback=lambda _: None)
 
     assert [(item.repo, item.number, item.todo_target) for item in work_items] == [
-        ("testuser/todos", 110, "owner/repo")
+        ("testuser/todos", 110, target)
     ]
+
+    assert display_repo(work_items[0]) == "owner/repo"
 
 
 def test_load_items_survives_a_todo_repository_that_does_not_exist_yet(

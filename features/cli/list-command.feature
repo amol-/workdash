@@ -19,3 +19,13 @@ Feature: List work items from another terminal
     Given the dashboard is running on the custom address set in `WORKDASH_HOST`
     When the user runs `workdash list` from another terminal
     Then the printed list includes "Fix the issue" with the ID `owner/repo#ISSUE-1`
+
+  @id:F-TODO-TARGET-S001
+  @id:F-TODO-TARGET-S007
+  Scenario: Find a todo and open a shell in its target repository
+    Given the dashboard lists a todo "Fix the flaky test" targeting `https://codeberg.org/owner/repo.git`
+    And the target repository has no local clone or worktree
+    When the user runs `workdash list` to find the todo's ID
+    Then the printed list identifies the todo as `owner/repo#ISSUE-WT110`
+    When the user passes that ID to `workdash terminal`
+    Then Workdash reports a shell in a new worktree of the Codeberg repository

@@ -34,3 +34,9 @@ Feature: Choose how to open the selected item
     And neither viewer opens
     When I open the selected item in my browser from the view menu
     Then my browser opens "https://github.com/owner/repo/issues/12"
+
+  @id:F-TODO-TARGET-S002
+  Scenario: Read the original GitHub issue for a todo shown under its target
+    Given the dashboard lists a todo "Fix the flaky test" targeting `owner/repo`
+    When the user presses "v" then "o" on the todo
+    Then the browser opens `https://github.com/testuser/todos/issues/110`, not an issue in `owner/repo`

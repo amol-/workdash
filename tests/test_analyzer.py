@@ -569,6 +569,11 @@ def test_analyze_reports_an_unusable_shell_without_launching_a_pane(
         ("https://codeberg.org/owner/repo", "Codeberg", "codeberg.org/owner/repo/src/branch/main"),
         ("https://gitlab.com/owner/repo.git", "GitLab", "gitlab.com/owner/repo/-/blob/main"),
         ("git@codeberg.org:owner/repo.git", "Codeberg", "codeberg.org/owner/repo/src/branch/main"),
+        (
+            "https://codeberg.org/owner/repo.git",
+            "Codeberg",
+            "codeberg.org/owner/repo/src/branch/main",
+        ),
     ],
 )
 def test_analysis_process_runs_in_worktree_with_code_and_todo_discussion(
@@ -587,7 +592,13 @@ def test_analysis_process_runs_in_worktree_with_code_and_todo_discussion(
         return subprocess.CompletedProcess(
             command,
             0,
-            stdout=json.dumps({"title": item.title, "body": "todo discussion"}),
+            stdout=json.dumps(
+                {
+                    "title": "Title fetched with the todo discussion",
+                    "body": "Find the missing ace in the todo discussion.",
+                    "comments": [{"body": "todo comment", "author": {"login": "owner"}}],
+                }
+            ),
             stderr="",
         )
 
@@ -602,7 +613,9 @@ def test_analysis_process_runs_in_worktree_with_code_and_todo_discussion(
     assert Path.cwd() == initial_cwd
     prompt = " ".join(recorded_prompt(tmp_path).split())
     assert f"The code repository is {target}" in prompt
-    assert "todo discussion" in prompt
+    assert "Title fetched with the todo discussion" in prompt
+    assert "Find the missing ace in the todo discussion." in prompt
+    assert "todo comment" in prompt
     assert "code repository's own hosting service" in prompt
     assert "Inspect the local Git checkout to determine the default branch" in prompt
     assert "Use the actual repository and branch, not the example values" in prompt

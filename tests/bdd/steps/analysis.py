@@ -8,6 +8,7 @@ from pathlib import Path
 from workdash.backend import WorkdashBackend
 from workdash.config import AgentConfig
 from workdash.control import format_work_item_id
+from workdash.models import WorkItem
 
 from .common import _configure_agents, install_pane
 
@@ -52,13 +53,16 @@ def _install_analysis_agent(scenario_state, monkeypatch, tmp_path):
     )
 
 
-def _install_github_discussion(scenario_state, monkeypatch):
+def _install_github_discussion(scenario_state, monkeypatch, *, issue: WorkItem | None = None):
     """Fake the GitHub discussion the analysis prompt is built from."""
 
     previous_run = subprocess.run
+    expected_issue = [str(issue.number), "--repo", issue.repo] if issue is not None else None
 
     def fake_run(command, **kwargs):
         if command[:3] == ["gh", "issue", "view"]:
+            if expected_issue is not None:
+                assert command[3:6] == expected_issue, command
             scenario_state["discussion_command"] = command
             discussion = scenario_state.get(
                 "discussion", {"title": "Issue title", "body": "Issue discussion"}
