@@ -107,11 +107,6 @@ def _current_dashboard_items_include(
     assert format_work_item_id(item) == item_id
 
 
-@given(parsers.parse("`workdash info` reports pane ID `{pane_id}`"))
-def _workdash_info_reports_pane_id(pane_id: str, scenario_state: dict[str, Any]) -> None:
-    scenario_state["pane_id"] = pane_id
-
-
 @when(
     parsers.parse(
         "a client requests code with autostart `{value}` for `{item_id}` with agent `{agent}`"

@@ -220,7 +220,7 @@ def _owner_repositories(
 @given(
     parsers.re(
         r"GitHub issue `(?P<issue>[^`]+)` is open and closed by (?:authored )?open pull request "
-        r"`(?P<pull_request>[^`]+)`(?P<other> of another author)?"
+        r"`(?P<pull_request>[^`]+)`(?P<other> of another author)?(?P<failed> whose CI failed)?"
     )
 )
 def _issue_closed_by_pull_request(
@@ -228,12 +228,15 @@ def _issue_closed_by_pull_request(
     issue: str,
     pull_request: str,
     other: str | None,
+    failed: str | None,
 ) -> None:
     github = _github(scenario_state)
     github.add_issue(issue)
-    github.add_pull_request(
+    added = github.add_pull_request(
         pull_request, closes=(issue,), author="someone-else" if other else "testuser"
     )
+    if failed:
+        _set_ci(scenario_state, added, "failing")
 
 
 @given(parsers.parse("pull request #51 has {ci} CI, {mergeability} mergeability, and no reviews"))

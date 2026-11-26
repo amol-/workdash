@@ -2558,27 +2558,29 @@ def _post_item_action(session, action, target, **fields):
 
 
 @pytest.mark.parametrize(
-    ("fields", "agent", "group"),
+    ("fields", "agent", "group", "agents"),
     [
-        pytest.param({"agent": "codex"}, "codex", "repo", id="selected-agent"),
-        pytest.param({}, "pi", "repo", id="first-agent"),
-        pytest.param({"group": "epic"}, "pi", "epic", id="requested-tab"),
+        pytest.param(
+            {"agent": "codex"}, "codex", "repo", ("pi", "claude", "codex"), id="selected-agent"
+        ),
+        pytest.param({"agent": "codex"}, "codex", "repo", ("codex",), id="analyze-only-config"),
+        pytest.param({}, "pi", "repo", ("pi", "claude", "codex"), id="first-agent"),
+        pytest.param(
+            {"group": "epic"}, "pi", "epic", ("pi", "claude", "codex"), id="requested-tab"
+        ),
     ],
 )
-def test_analyze_api_runs_the_configured_agent(monkeypatch, tmp_path, fields, agent, group):
+def test_analyze_api_runs_the_configured_agent(monkeypatch, tmp_path, fields, agent, group, agents):
     item = _work_item(number=1, title="Issue")
     analysis = tmp_path / "analysis.md"
     analysis.write_bytes(b"analysis body\n")
     worktree = str(tmp_path / "owner_repo_1")
     monkeypatch.setattr(control_module, "analysis_worktree", lambda *a, **k: nullcontext(worktree))
     analyze_item = MagicMock(side_effect=[None, str(analysis)])
+    analyze_commands = {"pi": "pi", "claude": "claude -p", "codex": "codex exec"}
     session = WorkdashSession(
         config=WorkdashConfig(
-            agents={
-                "pi": AgentConfig(analyze="pi"),
-                "claude": AgentConfig(analyze="claude -p"),
-                "codex": AgentConfig(analyze="codex exec"),
-            }
+            agents={name: AgentConfig(analyze=analyze_commands[name]) for name in agents}
         ),
         backend=SimpleNamespace(analyze_item=analyze_item, github_client=MagicMock()),
         work_items=[item],
@@ -7751,7 +7753,33 @@ def test_info_api_filters_unrelated_panes_unless_all_requested(monkeypatch, tmp_
             "pane_command": "codex",
             "state": "Running",
         },
-        {"id": 2, "title": "shell", "pane_cwd": str(worktree), "pane_command": "bash"},
+        {
+            "id": 2,
+            "title": "terminal_owner_repo_1",
+            "pane_cwd": str(worktree),
+            "tab_id": 7,
+            "tab_name": "work",
+            "terminal_command": "bash",
+        },
+        {
+            "id": 5,
+            "title": "code_unknown",
+            "pane_cwd": str(worktree),
+            "pane_command": "pi",
+            "state": "Running",
+        },
+        {"id": 6, "title": "code_old", "exited": True},
+        {"id": 7, "title": "terminal_held", "exited": False, "is_held": True},
+        {
+            "id": 11,
+            "title": "shell",
+            "pane_cwd": str(worktree),
+            "pane_command": "bash",
+            "tab_name": "scratch",
+        },
+        {"id": 12, "title": "old-shell", "exited": True},
+        {"id": 13, "title": "held-shell", "is_held": True},
+        {"id": 14, "title": "status", "is_plugin": True},
     ]
     monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", lambda _: panes)
     monkeypatch.setattr(control_module, "existing_worktree_path", lambda *args, **kwargs: worktree)
@@ -7780,9 +7808,10 @@ def test_info_api_filters_unrelated_panes_unless_all_requested(monkeypatch, tmp_
         assert response.status_int == 200
         assert response.json["result"]["session"] == "project"
         result = response.json["result"]["panes"]
-        assert [pane["pane_id"] for pane in result] == (
-            ["terminal_1", "terminal_2"] if payload.get("panes") == "all" else ["terminal_1"]
-        )
+        expected_ids = ["terminal_1", "terminal_2", "terminal_5"]
+        if payload.get("panes") == "all":
+            expected_ids.append("terminal_11")
+        assert [pane["pane_id"] for pane in result] == expected_ids
         assert result[0]["session"] == "project"
         assert result[0]["tab_id"] == 7
         assert result[0]["tab_name"] == "work"
@@ -7793,10 +7822,29 @@ def test_info_api_filters_unrelated_panes_unless_all_requested(monkeypatch, tmp_
         assert result[0]["state"] == "Running"
         assert result[0]["item"] == "owner/repo#ISSUE-1"
         assert result[0]["item_url"] == "https://github.com/owner/repo/issues/1"
+        terminal, unmatched = result[1:3]
+        assert terminal["session"] == "project"
+        assert terminal["tab_id"] == 7
+        assert terminal["tab_name"] == "work"
+        assert terminal["title"] == "terminal_owner_repo_1"
+        assert terminal["cwd"] == str(worktree)
+        assert terminal["command"] == "bash"
+        assert terminal["kind"] == "terminal"
+        assert terminal["state"] == "running"
+        assert terminal["item"] == "owner/repo#ISSUE-1"
+        assert unmatched["title"] == "code_unknown"
+        assert unmatched["cwd"] == str(worktree)
+        assert unmatched["command"] == "pi"
+        assert unmatched["state"] == "Running"
+        assert unmatched["item"] == "unknown"
         if payload.get("panes") == "all":
-            assert result[1]["kind"] == "unknown"
-            assert result[1]["item"] == "unknown"
-            assert result[1]["command"] == "bash"
+            shell = result[3]
+            assert shell["title"] == "shell"
+            assert shell["kind"] == "unknown"
+            assert shell["item"] == "unknown"
+            assert shell["cwd"] == str(worktree)
+            assert shell["command"] == "bash"
+            assert shell["tab_name"] == "scratch"
 
 
 @pytest.mark.parametrize(

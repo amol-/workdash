@@ -51,83 +51,37 @@ Feature: CLI orchestration commands
     - `workdash todo` reports the created Workdash item ID and the created issue URL.
 
   @id:F-CLI-ORCHESTRATION-S003
-  Scenario: Info inspects panes through the local Workdash server
+  Scenario: Find the agent and terminal for an issue
     Given a server-backed Workdash session is running
-    And that session has a `code_owner_repo_1` pane in a known worktree
-    And that session has a `terminal_owner_repo_1` pane in the same known worktree
+    And that session has an agent and a terminal for `owner/repo#ISSUE-1`
     When the user runs `workdash info`
-    Then the command requests pane information from the local Workdash server
-    And the system reports the Workdash session name
-    And the system reports the agent pane with its Zellij pane identifier, title, cwd, command, tab, and state
-    And the system reports the terminal pane with its Zellij pane identifier, title, cwd, command, tab, and state
-    And both panes are mapped to the matching Workdash item
+    Then the system reports the Workdash session name
+    And the listing identifies `terminal_1` as the agent and `terminal_2` as the terminal for `owner/repo#ISSUE-1`
 
   @id:F-CLI-ORCHESTRATION-S004
-  Scenario: Info requires the local Workdash server
+  Scenario: Start Workdash when info cannot reach it
     Given no server-backed Workdash session is running
     When the user runs `workdash info`
-    Then the command reports that `workdash` must be running
-    And the command exits with a non-zero status
-
-  @id:F-CLI-ORCHESTRATION-S005
-  Scenario: Info returns machine-readable pane state
-    Given a server-backed Workdash session is running
-    And that session has Workdash terminal-backed panes
-    When the user runs `workdash info --json`
-    Then the command requests pane information from the local Workdash server
-    And the system returns JSON pane records
-    And each record includes the session, tab, pane identifier, title, cwd, command, pane kind, state, and mapped item when known
-
-  @id:F-CLI-ORCHESTRATION-S006
-  Scenario: Info keeps unmapped live panes visible
-    Given a server-backed Workdash session is running
-    And that session has an agent pane in a known worktree with an unmatched launch title
-    When the user runs `workdash info --json`
-    Then the system reports the raw pane information
-    And the pane item mapping is marked unknown
-
-  @id:F-CLI-ORCHESTRATION-S007
-  Scenario: Info ignores exited or held Workdash panes
-    Given a server-backed Workdash session is running
-    And that session has live, exited, and held Workdash terminal-backed panes
-    When the user runs `workdash info --json`
-    Then the system returns JSON pane records
-    And the system does not report exited or held panes
-
-  @id:F-CLI-ORCHESTRATION-S008
-  Scenario: Top-level JSON flag applies to info
-    Given a server-backed Workdash session is running
-    And that session has Workdash terminal-backed panes
-    When the user runs `workdash --json info`
-    Then the system returns JSON pane records
-    And each record includes the session, tab, pane identifier, title, cwd, command, pane kind, state, and mapped item when known
+    Then the command tells the user to start it with `workdash`
+    When the user starts `workdash` and retries `workdash info`
+    Then the system reports the Workdash session name
 
   @id:F-CLI-ORCHESTRATION-S009
-  Scenario: Analyze resolves a current work item through the local Workdash server
+  Scenario: Get an analysis report for an assigned issue
     Given a server-backed Workdash session has loaded dashboard items
     And the current Workdash items include an assigned issue without cached analysis
-    When the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`
-    Then the command requests analysis from the local Workdash server
-    And the server analysis response includes markdown content as base64 with a file name
-    And the system returns JSON with the item ID, selected agent, analysis URL, and cache status
-
-  @id:F-CLI-ORCHESTRATION-S010
-  Scenario: Orchestration commands require the local Workdash server
-    Given no server-backed Workdash session is running
-    When the user runs a server-backed orchestration command
-    Then the command reports that `workdash` must be running
-    And the command exits with a non-zero status
+    When the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex`
+    Then the command shows the Markdown report link for `owner/repo#ISSUE-1` from `codex`
 
   @id:F-CLI-ORCHESTRATION-S012
-  Scenario: Info can include ordinary live panes on request
+  Scenario: Find an ordinary shell alongside work panes
     Given a server-backed Workdash session is running
-    And that session has Workdash terminal-backed panes
-    And that session has ordinary live, exited, held, and plugin panes
-    When the user runs `workdash info --all --json`
-    Then the command requests pane information from the local Workdash server with ordinary panes included
-    And the system returns JSON pane records
-    And the system reports the ordinary live pane as unknown kind with raw pane information
-    And the system does not report exited, held, or plugin panes
+    And that session has an agent and a terminal for `owner/repo#ISSUE-1`
+    And the user has an ordinary shell in the `scratch` tab
+    When the user runs `workdash info`
+    Then the listing does not show `terminal_11`
+    When the user runs `workdash info --all`
+    Then the listing identifies the shell in `scratch` as `terminal_11`
 
   @id:F-CLI-ORCHESTRATION-S013
   Scenario: Code launches an agent through the local Workdash server
@@ -138,19 +92,11 @@ Feature: CLI orchestration commands
     And the system returns JSON with status `launched`, the item ID, selected agent, selected session, cwd, pane title, and pane ID
 
   @id:F-CLI-ORCHESTRATION-S027
-  Scenario: Terminal opens a plain terminal through the local Workdash server
+  Scenario: Open a shell to inspect an issue's checkout
     Given a server-backed Workdash session has loaded dashboard items
     And the current Workdash items include an assigned issue
-    When the user runs `workdash terminal owner/repo#ISSUE-1 --json`
-    Then the command requests terminal launch from the local Workdash server
-    And the system returns JSON with the item ID, session, cwd, pane title, and pane ID
-
-  @id:F-CLI-ORCHESTRATION-S028
-  Scenario: Terminal requires the local Workdash server
-    Given no server-backed Workdash session is running
     When the user runs `workdash terminal owner/repo#ISSUE-1`
-    Then the command reports that `workdash` must be running
-    And the command exits with a non-zero status
+    Then the command identifies the new shell's pane and checkout for `owner/repo#ISSUE-1`
 
   @id:F-CLI-ORCHESTRATION-S014
   Scenario: Code does not expose non-terminal editors
@@ -161,124 +107,49 @@ Feature: CLI orchestration commands
     And the system reports "Agent 'vscode' is not configured."
     And the command exits with a non-zero status
 
-  @id:F-CLI-ORCHESTRATION-S016
-  Scenario: Analyze accepts a partial agent configuration reported by show-config
-    Given a server-backed Workdash session has loaded dashboard items
-    And the current Workdash items include an assigned issue without cached analysis
-    And `workdash show-config` reports only `codex` as an analysis agent
-    When the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`
-    Then the command requests analysis from the local Workdash server
-    And the server analysis response includes markdown content as base64 with a file name
-    And the system returns JSON with the item ID, selected agent, analysis URL, and cache status
-
-  @id:F-CLI-ORCHESTRATION-S017
-  Scenario: Server-backed commands skip local GitHub and Zellij preflight
-    Given the local Workdash server is reachable
-    And the client process cannot find GitHub CLI or Zellij on PATH
-    When the user runs `workdash info`
-    Then the command still sends the request to the local Workdash server
-    And the command formats the server response
-
   @id:F-CLI-ORCHESTRATION-S019
-  Scenario: Read shows pane text through the local Workdash server
+  Scenario: Check the output of a work terminal
     Given a server-backed Workdash session is running
-    And `workdash info` reports pane ID `terminal_23`
+    And a work terminal `terminal_23` displays "Local checks finished."
+    When the user runs `workdash info`
+    Then the listing shows `terminal_23`
     When the user runs `workdash read terminal_23`
-    Then the command requests pane content from the local Workdash server
-    And the system prints the pane text for direct agent use
-
-  @id:F-CLI-ORCHESTRATION-S020
-  Scenario: Read can request full scrollback and JSON output
-    Given a server-backed Workdash session is running
-    And `workdash info` reports pane ID `terminal_23`
-    When the user runs `workdash read terminal_23 --full --json`
-    Then the command requests full pane content from the local Workdash server
-    And the system returns JSON with the pane ID, content, and full flag
-
-  @id:F-CLI-ORCHESTRATION-S021
-  Scenario: Write sends pane input through the local Workdash server
-    Given a server-backed Workdash session is running
-    And `workdash info` reports pane ID `terminal_23`
-    When the user runs `workdash write terminal_23 "continue"`
-    Then the command sends pane input through the local Workdash server
-    And the system confirms that the pane input was accepted
-
-  @id:F-CLI-ORCHESTRATION-S022
-  Scenario: Write can send raw input and JSON output
-    Given a server-backed Workdash session is running
-    And `workdash info` reports pane ID `terminal_23`
-    When the user runs `workdash write terminal_23 "continue" --raw --json`
-    Then the command sends raw pane input through the local Workdash server
-    And the system returns JSON with the pane ID, raw flag, and accepted status
+    Then the command displays "Local checks finished."
 
   @id:F-CLI-ORCHESTRATION-S023
-  Scenario: Close closes a pane through the local Workdash server
+  Scenario: Close an unneeded work terminal
     Given a server-backed Workdash session is running
-    And `workdash info` reports pane ID `terminal_26`
+    And work terminals `terminal_26` and `terminal_27` are open
+    When the user runs `workdash info`
+    Then the listing shows `terminal_26`
     When the user runs `workdash close terminal_26`
-    Then the command requests pane close from the local Workdash server
-    And the system confirms that the pane close was accepted
-
-  @id:F-CLI-ORCHESTRATION-S024
-  Scenario: Close can return JSON output
-    Given a server-backed Workdash session is running
-    And `workdash info` reports pane ID `terminal_26`
-    When the user runs `workdash close terminal_26 --json`
-    Then the command requests pane close from the local Workdash server
-    And the system returns JSON with the pane ID and accepted status
+    Then the command confirms that it accepted the close
+    When the user runs `workdash info`
+    Then the listing does not show `terminal_26`
+    And the listing shows `terminal_27`
 
   @id:F-CLI-ORCHESTRATION-S030
-  Scenario Outline: Todo captures a work item through the local Workdash server
+  Scenario: Capture a follow-up for a repository
     Given a server-backed Workdash session is running
-    When the user runs `workdash todo "Fix the flaky test" --target <target>`
-    Then the command captures the todo through the local Workdash server
-    And the system reports the created Workdash item ID and issue URL
-
-    Examples:
-      | target                                   |
-      | owner/repo                               |
-      | https://gitlab.com/owner/repo.git        |
-      | https://codeberg.org/owner/repo.git      |
-
-  @id:F-CLI-ORCHESTRATION-S031
-  Scenario: Todo requires the local Workdash server
-    Given no server-backed Workdash session is running
-    When the user runs `workdash todo "Fix the flaky test"`
-    Then the command reports that `workdash` must be running
-    And the command exits with a non-zero status
-
-  @id:F-CLI-ORCHESTRATION-S032
-  Scenario: Info maps the shared worktree of an authored pull request to that pull request
-    Given a server-backed Workdash session is running
-    And that session has an agent pane in the worktree of the issue an authored pull request closes
-    When the user runs `workdash info`
-    Then the pane is mapped to that authored pull request
-
-  @id:F-CLI-ORCHESTRATION-S033
-  Scenario: Analyze CLI reports the server analysis URL without local files
-    Given a server-backed Workdash session has loaded dashboard items
-    And the current Workdash items include an assigned issue without cached analysis
-    And the generated analysis content is returned by the server
-    When the user runs `workdash analyze owner/repo#ISSUE-1 --agent codex --json`
-    Then the command requests analysis from the local Workdash server
-    And the server analysis response includes markdown content as base64 with a file name
-    And the system returns JSON with the item ID, selected agent, analysis URL, cache status, and no server file or content fields
+    When the user runs `workdash todo "Fix the flaky test" --target owner/repo`
+    Then the system reports the created Workdash item ID and issue URL
 
   @id:F-CLI-ORCHESTRATION-S034
-  Scenario: Todo selects a remote server without changing its target
-    Given a server-backed Workdash session is running
+  Scenario: File a todo from a client of a remote dashboard
+    Given the user's dashboard is running on `dashboard.lan` instead of locally
     When the user runs `workdash todo "Fix the flaky test" --target owner/repo --host dashboard.lan`
-    Then the command connects to host `dashboard.lan`
-    And the command captures the todo through the local Workdash server
-    And the system reports the created Workdash item ID and issue URL
+    Then the new todo appears under `owner/repo` in `workdash list --host dashboard.lan`
 
   @id:F-CLI-ORCHESTRATION-S035
-  Scenario: Todo captures long details separately from its title
+  Scenario: Keep detailed notes separate from a todo's title
     Given a server-backed Workdash session is running
-    And the user has a multiline todo body longer than 256 characters
-    When the user captures a short todo title with that body using the CLI
-    Then the command captures the todo through the local Workdash server
-    And the created issue keeps the short title and the complete body after its metadata
+    When the user runs `workdash todo "Fix the flaky test" --target owner/repo --body` with these notes:
+      """
+      The test fails when run after the export tests.
+
+      Compare the saved settings before and after export and document the result.
+      """
+    Then the created issue is titled "Fix the flaky test" and includes those notes
     And the system reports the created Workdash item ID and issue URL
 
   @id:F-CLI-ORCHESTRATION-S036
@@ -292,7 +163,6 @@ Feature: CLI orchestration commands
 
     Examples:
       | action  | agent | error                                                 |
-      | analyze | pi    | Agent 'pi' cannot analyze: it has no analyze command. |
       | code    | aider | Agent 'aider' cannot code: it has no launch command.  |
 
   @id:F-CLI-ORCHESTRATION-S037
@@ -314,15 +184,6 @@ Feature: CLI orchestration commands
     When the user runs `workdash code owner/repo#ISSUE-1 --agent pi`
     Then the system prints status `already_running` and the running pane ID
     And no coding agent is launched
-
-  @id:F-CLI-ORCHESTRATION-S039
-  Scenario: Item commands report a target GitHub cannot find
-    Given a server-backed Workdash session has loaded dashboard items
-    And GitHub answers item lookups with no item
-    When the user runs `workdash terminal owner/repo#ISSUE-99 --json`
-    Then the command requests terminal launch from the local Workdash server
-    And the system reports that the work item is unknown
-    And the command exits with a non-zero status
 
   @id:F-CLI-ORCHESTRATION-S040
   Scenario: Code launches a plan-first coding session by default
@@ -360,16 +221,6 @@ Feature: CLI orchestration commands
     Then the command reports that pi launched in a pane for `owner/repo#ISSUE-1`
     And the agent is asked to start implementing without routine confirmation
 
-  @id:F-CLI-ORCHESTRATION-S042
-  Scenario Outline: Host selection is rejected for non-client commands
-    When the user runs `workdash --host 127.0.0.1:9001 <command>`
-    Then the command rejects `--host` as a client-only option
-    And the command exits with a non-zero status
-
-    Examples:
-      | command     |
-      | show-config |
-
   @id:F-CLI-ORCHESTRATION-S043
   Scenario: A remote client launches an agent in a group
     Given a server-backed Workdash session is ready to answer
@@ -377,13 +228,6 @@ Feature: CLI orchestration commands
     When the user runs `workdash code owner/repo#ISSUE-1 --group epic --host dashboard.lan --json`
     Then the command connects to host `dashboard.lan`
     And the result reports the agent in tab `epic`
-
-  @id:F-CLI-ORCHESTRATION-S045
-  Scenario: Analyze asks the server for the requested tab
-    Given a server-backed Workdash session has loaded dashboard items
-    And the current Workdash items include an assigned issue without cached analysis
-    When the user runs `workdash analyze owner/repo#ISSUE-1 --group epic --json`
-    Then the command asks the server to analyze in tab `epic`
 
   @id:F-CLI-ORCHESTRATION-S046
   Scenario: Start a pull request review

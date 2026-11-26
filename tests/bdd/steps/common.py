@@ -232,29 +232,6 @@ def _no_server_backed_workdash_session(
     monkeypatch.setattr(control_module.urllib.request, "urlopen", fail_urlopen)
 
 
-@given("the local Workdash server is reachable")
-def _local_workdash_server_reachable(
-    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import workdash.workdash as workdash_module
-
-    class FakeControlClient:
-        def __init__(self, host="127.0.0.1") -> None:
-            assert host == "127.0.0.1"
-
-        def request(self, endpoint: str, payload: dict[str, object] | None = None):
-            scenario_state.setdefault("control_requests", []).append(
-                {"endpoint": endpoint, "payload": dict(payload or {})}
-            )
-            if endpoint == "list":
-                return {"items": []}
-            if endpoint == "info":
-                return {"session": "workdash-main", "panes": []}
-            raise AssertionError(f"Unexpected control endpoint: {endpoint}")
-
-    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
-
-
 # -- Shared server-backed session setup --------------------------------------
 
 
@@ -350,9 +327,7 @@ class FakeApiBackend:
             raise AssertionError("scenario must set analysis_path from tmp_path")
         analysis_path = Path(self._state["analysis_path"])
         analysis_path.parent.mkdir(parents=True, exist_ok=True)
-        analysis_path.write_text(
-            self._state.get("analysis_content", "analysis body\n"), encoding="utf-8"
-        )
+        analysis_path.write_text("analysis body\n", encoding="utf-8")
         return str(analysis_path)
 
 

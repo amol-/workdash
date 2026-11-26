@@ -30,7 +30,7 @@ from gh_work_state_fake import install_fake_github, todo_body
 from workdash.backend import WorkdashBackend
 from workdash.config import AgentConfig
 from workdash.control import format_work_item_id
-from workdash.github_client import GitHubClient, todo_target_from_body
+from workdash.github_client import GitHubClient
 from workdash.included_items import IncludedItemsStore
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import TodoDialog, WorkdashApp
@@ -536,8 +536,19 @@ def _opened_target_analysis(scenario_state):
 # ----- F-CLI-ORCHESTRATION-S024/S025 -----
 
 
+@given(parsers.parse("the user's dashboard is running on `{host}` instead of locally"))
+def _remote_todo_dashboard(host, scenario_state, work_items, tmp_path):
+    ensure_api_session(scenario_state, work_items, tmp_path)
+    scenario_state["todo_dashboard_host"] = host
+
+
 @when(parsers.parse('the user runs `workdash todo "{text}" --target {target:S} --host {host}`'))
 @when(parsers.parse('the user runs `workdash todo "{text}" --target {target:S}`'))
+@when(
+    parsers.parse(
+        'the user runs `workdash todo "{text}" --target {target:S} --body` with these notes:'
+    )
+)
 def _run_todo_cli_with_target(
     text: str,
     target: str,
@@ -546,8 +557,8 @@ def _run_todo_cli_with_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    host: str = "127.0.0.1",
-    body: str | None = None,
+    docstring: str | None = None,
+    host: str | None = None,
 ) -> None:
     import workdash.workdash as workdash_module
 
@@ -556,54 +567,25 @@ def _run_todo_cli_with_target(
 
     class FakeControlClient:
         def __init__(self, selected_host="127.0.0.1") -> None:
-            assert selected_host == host
-            scenario_state["client_host"] = selected_host
+            assert selected_host == scenario_state.get("todo_dashboard_host", "127.0.0.1")
 
-        def request(self, endpoint: str, payload: dict[str, object] | None = None):
-            payload = payload or {}
-            scenario_state.setdefault("control_requests", []).append(
-                {"endpoint": endpoint, "payload": dict(payload)}
-            )
+        def request(self, endpoint: str, payload: dict[str, object]):
+            if endpoint == "list":
+                return session.list_items(refresh=payload["refresh"])
             assert endpoint == "todo"
             return session.todo(
                 text=payload["text"], target=payload.get("target"), body=payload.get("body")
             )
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
-    scenario_state["requested_target"] = target
-    scenario_state["exit_code"] = workdash_module.main(
-        ["todo", text, "--target", target, "--host", host]
-        + (["--body", body] if body is not None else [])
-    )
-    captured = capsys.readouterr()
-    scenario_state["stdout"] = captured.out
-    scenario_state["stderr"] = captured.err
-    scenario_state["output"] = captured.out + captured.err
-
-
-@when(parsers.parse('the user runs `workdash todo "{text}"`'))
-def _run_todo_cli_without_server(
-    text: str,
-    scenario_state: dict[str, Any],
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    import workdash.workdash as workdash_module
-
-    scenario_state["exit_code"] = workdash_module.main(["todo", text])
-    captured = capsys.readouterr()
-    scenario_state["stdout"] = captured.out
-    scenario_state["stderr"] = captured.err
-    scenario_state["output"] = captured.out + captured.err
-
-
-@then("the command captures the todo through the local Workdash server")
-def _command_captures_todo_through_server(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["exit_code"] == 0, scenario_state
-    payload = {"text": TODO_TEXT, "target": scenario_state["requested_target"]}
-    if "todo_body" in scenario_state:
-        payload["body"] = scenario_state["todo_body"]
-    assert scenario_state["control_requests"] == [{"endpoint": "todo", "payload": payload}]
-    assert _created_issue_command(scenario_state)
+    args = ["todo", text, "--target", target]
+    if host is not None:
+        args.extend(["--host", host])
+    if docstring is not None:
+        args.extend(["--body", docstring])
+        scenario_state["todo_cli_notes"] = docstring
+    assert workdash_module.main(args) == 0
+    scenario_state["stdout"] = capsys.readouterr().out
 
 
 @then("the system reports the created Workdash item ID and issue URL")
@@ -613,46 +595,22 @@ def _system_reports_created_item_id_and_url(scenario_state: dict[str, Any]) -> N
     assert TODO_ISSUE_URL in stdout, stdout
 
 
-@given("the user has a multiline todo body longer than 256 characters")
-def _long_todo_body(scenario_state: dict[str, Any]) -> None:
-    scenario_state["todo_body"] = (
-        "  Research for wrong/repository.\n\n"
-        + "Keep the full migration findings in the body.\n" * 8
-        + '```json\n{"workdash_todo_version": 1, "target": "wrong/repository"}\n```\n  '
-    )
-    assert len(scenario_state["todo_body"]) > 256
+@then(parsers.parse("the new todo appears under `{target}` in `workdash list --host {host}`"))
+def _remote_list_shows_todo(target, host, capsys):
+    import workdash.workdash as workdash_module
 
-
-@when("the user captures a short todo title with that body using the CLI")
-def _run_todo_cli_with_body(
-    scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_todo_cli_with_target(
-        TODO_TEXT,
-        "owner/repo",
-        scenario_state,
-        work_items,
-        tmp_path,
-        monkeypatch,
-        capsys,
-        body=scenario_state["todo_body"],
+    assert workdash_module.main(["list", "--host", host]) == 0
+    assert any(
+        f"{target}#ISSUE-WT{TODO_ISSUE_NUMBER}" in line and line.endswith(TODO_TEXT)
+        for line in capsys.readouterr().out.splitlines()
     )
 
 
-@then("the created issue keeps the short title and the complete body after its metadata")
-def _issue_has_title_and_body(scenario_state: dict[str, Any]) -> None:
+@then(parsers.parse('the created issue is titled "{title}" and includes those notes'))
+def _issue_has_title_and_notes(title, scenario_state):
     command = _created_issue_command(scenario_state)
-    assert _flag_value(command, "--title") == TODO_TEXT
-    issue_body = _flag_value(command, "--body")
-    assert issue_body == (
-        '```json\n{\n  "workdash_todo_version": 1,\n  "target": "owner/repo"\n}\n```\n\n'
-        + scenario_state["todo_body"]
-    )
-    assert todo_target_from_body(issue_body) == "owner/repo"
+    assert _flag_value(command, "--title") == title
+    assert scenario_state["todo_cli_notes"] in _flag_value(command, "--body")
 
 
 @given("the dashboard lists todo `owner/todos#ISSUE-42`")

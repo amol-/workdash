@@ -1378,7 +1378,11 @@ def test_main_rejects_invalid_commands_before_zellij_wrapping(
         (["ready", "any"], "ready", {"scope": "any"}),
         (["ready", "owner/repo#42", "--json"], "ready", {"scope": "owner/repo#42"}),
         (["ready", "owner/repo", "--json"], "ready", {"scope": "owner/repo"}),
-        (["terminal", "owner/repo#ISSUE-1"], "terminal", {"target": "owner/repo#ISSUE-1"}),
+        (
+            ["terminal", "owner/repo#ISSUE-1", "--json"],
+            "terminal",
+            {"target": "owner/repo#ISSUE-1"},
+        ),
         (
             ["todo", "Fix it", "--target", "owner/repo"],
             "todo",
@@ -1580,6 +1584,9 @@ def test_main_server_backed_commands_are_pure_http_clients(
 
     monkeypatch.setattr(workdash_module, "WorkdashApp", unexpected_app)
 
+    if expected_endpoint == "info":
+        monkeypatch.setenv("PATH", str(tmp_path))
+
     if environment_host is None:
         monkeypatch.delenv("WORKDASH_HOST", raising=False)
     else:
@@ -1590,6 +1597,7 @@ def test_main_server_backed_commands_are_pure_http_clients(
 
     output, stderr = capsys.readouterr()
     if expected_endpoint == "info":
+        assert "Session: workdash" in output
         assert "gh CLI" not in output + stderr
     if expected_endpoint == "analyze":
         analysis_url = next(
@@ -1609,6 +1617,14 @@ def test_main_server_backed_commands_are_pure_http_clients(
             "https://github.com/owner/repo/pull/51 [address_review,fix_ci] "
             "(issue owner/repo#ISSUE-42)\n"
         )
+    if expected_endpoint == "terminal":
+        assert json.loads(output) == {
+            "item_id": "owner/repo#ISSUE-1",
+            "session": "workdash",
+            "cwd": "/tmp/wt",
+            "pane_title": "terminal_owner_repo_1",
+            "pane_id": "terminal_1",
+        }
     if expected_endpoint == "todo" and "--json" in argv:
         assert json.loads(output) == {
             "item_id": "owner/repo#ISSUE-WT1",
@@ -1628,27 +1644,26 @@ def test_main_server_backed_commands_are_pure_http_clients(
         ["code", "owner/repo#ISSUE-1"],
         ["read", "terminal_23"],
         ["write", "terminal_23", "continue"],
+        ["terminal", "owner/repo#ISSUE-1"],
+        ["todo", "Fix the flaky test"],
     ],
 )
 def test_main_server_backed_command_reports_unreachable_server(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
 ) -> None:
-    requests = []
-
-    def refuse_connection(request, *, timeout):
-        requests.append(request)
-        raise ConnectionRefusedError
-
+    refuse_connection = MagicMock(side_effect=ConnectionRefusedError)
     monkeypatch.setattr("urllib.request.urlopen", refuse_connection)
+    monkeypatch.delenv("WORKDASH_HOST", raising=False)
 
     assert workdash_module.main(argv) == 1
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "Start one with `workdash`." in captured.err
-    if argv[0] == "ready":
-        assert requests
-        assert "No Workdash server is reachable at 127.0.0.1:8765" in captured.err
+    assert (
+        "No Workdash server is reachable at 127.0.0.1:8765. Start one with `workdash`."
+        in captured.err
+    )
+    refuse_connection.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -1714,7 +1729,7 @@ def test_main_analyze_human_output_formats_server_response(
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "analyze"
-            assert payload == {"target": "owner/repo#ISSUE-1", "agent": None}
+            assert payload == {"target": "owner/repo#ISSUE-1", "agent": None, "group": "epic"}
             return {
                 "item_id": "owner/repo#ISSUE-1",
                 "path": "/server/cache/analysis.md",
@@ -1731,7 +1746,7 @@ def test_main_analyze_human_output_formats_server_response(
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
 
-    assert workdash_module.main(["analyze", "owner/repo#ISSUE-1"]) == 0
+    assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--group", "epic"]) == 0
 
     output = capsys.readouterr().out
     analysis_url = next(
@@ -1795,6 +1810,7 @@ def test_main_analyze_json_reports_the_same_server_analysis_url_twice(
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "analyze"
+            assert payload == {"target": "owner/repo#ISSUE-1", "agent": "codex"}
             return {
                 "item_id": "owner/repo#ISSUE-1",
                 "path": "/server/cache/analysis.md",
@@ -1809,17 +1825,26 @@ def test_main_analyze_json_reports_the_same_server_analysis_url_twice(
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
 
-    assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--json"]) == 0
+    assert (
+        workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--agent", "codex", "--json"]) == 0
+    )
     first_payload = json.loads(capsys.readouterr().out)
-    assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--json"]) == 0
+    assert (
+        workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--agent", "codex", "--json"]) == 0
+    )
     second_payload = json.loads(capsys.readouterr().out)
 
-    assert "path" not in first_payload
-    assert "file_content" not in first_payload
-    assert "file_name" not in first_payload
-    assert "content_type" not in first_payload
-    assert first_payload == second_payload
-    assert first_payload["url"] == "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis"
+    assert (
+        first_payload
+        == second_payload
+        == {
+            "item_id": "owner/repo#ISSUE-1",
+            "url": "http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-1/analysis",
+            "agent": "codex",
+            "cache_used": False,
+            "status": "generated",
+        }
+    )
 
 
 @pytest.mark.parametrize(
@@ -1864,26 +1889,67 @@ def test_main_analyze_reports_invalid_content_response(
     assert "Traceback" not in captured.err
 
 
-def test_main_analyze_reports_server_error(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    class FakeControlClient:
-        def __init__(self, host="127.0.0.1") -> None:
-            assert host == "127.0.0.1"
+@pytest.mark.parametrize(
+    ("argv", "endpoint", "payload", "code", "message"),
+    [
+        (
+            ["analyze", "owner/repo#ISSUE-1", "--agent", "vscode"],
+            "analyze",
+            {"target": "owner/repo#ISSUE-1", "agent": "vscode"},
+            "unknown_agent",
+            "Agent 'vscode' is not configured.",
+        ),
+        (
+            ["analyze", "owner/repo#ISSUE-1", "--agent", "pi"],
+            "analyze",
+            {"target": "owner/repo#ISSUE-1", "agent": "pi"},
+            "unsupported_agent",
+            "Agent 'pi' cannot analyze: it has no analyze command.",
+        ),
+        (
+            ["terminal", "owner/repo#ISSUE-99", "--json"],
+            "terminal",
+            {"target": "owner/repo#ISSUE-99"},
+            "unknown_item",
+            "No accessible GitHub issue or pull request matches 'owner/repo#ISSUE-99'.",
+        ),
+    ],
+)
+def test_main_item_command_reports_server_error(
+    monkeypatch, capsys, argv, endpoint, payload, code, message
+):
+    client = MagicMock()
+    client.request.side_effect = workdash_module.WorkdashControlError(code, message)
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", MagicMock(return_value=client))
 
-        def request(self, endpoint: str, payload: dict[str, object] | None = None):
-            raise workdash_module.WorkdashControlError(
-                "unknown_agent", "Agent 'vscode' is not configured."
-            )
+    assert workdash_module.main(argv) == 1
 
-    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
-
-    assert workdash_module.main(["analyze", "owner/repo#ISSUE-1", "--agent", "vscode"]) == 1
-
+    client.request.assert_called_once_with(endpoint, payload)
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "Agent 'vscode' is not configured" in captured.err
+    assert captured.err == f"Error: {message}\n"
+
+
+@pytest.mark.parametrize(
+    "target", ["https://gitlab.com/owner/repo.git", "https://codeberg.org/owner/repo.git"]
+)
+def test_main_todo_forwards_git_url_target_unchanged(monkeypatch, capsys, target):
+    client = MagicMock()
+    client.request.return_value = {
+        "item_id": "owner/repo#ISSUE-WT110",
+        "todo_repository": "testuser/todos",
+        "target": target,
+        "url": "https://github.com/testuser/todos/issues/110",
+    }
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", MagicMock(return_value=client))
+
+    assert workdash_module.main(["todo", "Fix the flaky test", "--target", target]) == 0
+
+    client.request.assert_called_once_with("todo", {"text": "Fix the flaky test", "target": target})
+    assert {
+        "Item: owner/repo#ISSUE-WT110",
+        "Issue: https://github.com/testuser/todos/issues/110",
+    } <= set(capsys.readouterr().out.splitlines())
 
 
 @pytest.mark.parametrize(
@@ -2067,9 +2133,11 @@ def test_main_code_reports_server_error_before_local_worktree(
     assert "vscode" in captured.err
 
 
+@pytest.mark.parametrize("content", ["visible output\nnext", "visible output\nnext\n"])
 def test_main_read_human_output_prints_pane_content(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    content: str,
 ) -> None:
     class FakeControlClient:
         def __init__(self, host="127.0.0.1") -> None:
@@ -2078,13 +2146,13 @@ def test_main_read_human_output_prints_pane_content(
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "pane/content"
             assert payload == {"pane_id": "terminal_23", "full": False}
-            return {"pane_id": "terminal_23", "content": "agent output\nnext", "full": False}
+            return {"pane_id": "terminal_23", "content": content, "full": False}
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
 
     assert workdash_module.main(["read", "terminal_23"]) == 0
 
-    assert capsys.readouterr().out == "agent output\nnext\n"
+    assert capsys.readouterr().out == "visible output\nnext\n"
 
 
 def test_main_read_json_outputs_server_response(
@@ -2119,19 +2187,21 @@ def test_main_write_human_output_confirms_accepted_input(
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "pane/send"
-            assert payload == {"pane_id": "terminal_23", "data": "continue", "raw": False}
+            assert payload == {"pane_id": "terminal_23", "data": "sample text", "raw": False}
             return {"pane_id": "terminal_23", "raw": False, "accepted": True}
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
 
-    assert workdash_module.main(["write", "terminal_23", "continue"]) == 0
+    assert workdash_module.main(["write", "terminal_23", "sample text"]) == 0
 
     assert capsys.readouterr().out == "Accepted input for terminal_23 (raw: no).\n"
 
 
+@pytest.mark.parametrize("mode", ["--raw", "--no-enter"])
 def test_main_write_json_outputs_server_response(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    mode: str,
 ) -> None:
     response = {"pane_id": "terminal_23", "raw": True, "accepted": True}
 
@@ -2141,72 +2211,107 @@ def test_main_write_json_outputs_server_response(
 
         def request(self, endpoint: str, payload: dict[str, object] | None = None):
             assert endpoint == "pane/send"
-            assert payload == {"pane_id": "terminal_23", "data": "continue", "raw": True}
+            assert payload == {"pane_id": "terminal_23", "data": "sample text", "raw": True}
             return response
 
     monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
 
-    assert workdash_module.main(["write", "terminal_23", "continue", "--no-enter", "--json"]) == 0
+    assert workdash_module.main(["write", "terminal_23", "sample text", mode, "--json"]) == 0
 
     assert json.loads(capsys.readouterr().out) == response
 
 
-def test_main_info_human_output_formats_server_response(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+@pytest.mark.parametrize("json_output", [False, True], ids=["human", "json"])
+def test_main_close_reports_accepted_pane(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], json_output: bool
 ) -> None:
-    class FakeControlClient:
-        def __init__(self, host="127.0.0.1") -> None:
-            assert host == "127.0.0.1"
+    response = {"pane_id": "terminal_26", "accepted": True}
+    client = MagicMock()
+    client.request.return_value = response
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", lambda host: client)
 
-        def request(self, endpoint: str, payload: dict[str, object] | None = None):
-            assert endpoint == "info"
-            assert payload == {"panes": "work"}
-            return {
-                "session": "workdash",
-                "panes": [
-                    {
-                        "kind": "agent",
-                        "pane_id": "terminal_1",
-                        "title": "code_owner_repo_1",
-                        "cwd": "/tmp/wt",
-                        "command": "pi",
-                        "tab_name": "work",
-                        "state": "running",
-                        "item": "owner/repo#ISSUE-1",
-                    }
-                ],
+    assert workdash_module.main(["close", "terminal_26", *(["--json"] if json_output else [])]) == 0
+
+    client.request.assert_called_once_with("pane/close", {"pane_id": "terminal_26"})
+    output = capsys.readouterr().out
+    if json_output:
+        assert json.loads(output) == response
+    else:
+        assert output == "Accepted close for terminal_26.\n"
+
+
+def test_main_info_human_output_formats_server_response(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = MagicMock()
+    client.request.return_value = {
+        "session": "workdash",
+        "panes": [
+            {
+                "kind": kind,
+                "pane_id": pane_id,
+                "title": title,
+                "cwd": "/tmp/wt",
+                "command": command,
+                "tab_name": "work",
+                "state": "Running",
+                "item": "owner/repo#ISSUE-1",
             }
-
-    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
+            for kind, pane_id, title, command in (
+                ("agent", "terminal_1", "code_owner_repo_1", "pi"),
+                ("terminal", "terminal_2", "terminal_owner_repo_1", "bash"),
+            )
+        ],
+    }
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", lambda host: client)
 
     assert workdash_module.main(["info"]) == 0
 
-    output = capsys.readouterr().out
-    assert "Session: workdash" in output
-    assert "item=owner/repo#ISSUE-1" in output
-    assert "code_owner_repo_1" in output
+    client.request.assert_called_once_with("info", {"panes": "work"})
+    assert capsys.readouterr().out.splitlines() == [
+        "Session: workdash",
+        "agent    terminal_1 code_owner_repo_1 cwd=/tmp/wt command=pi tab=work "
+        "state=Running item=owner/repo#ISSUE-1",
+        "terminal terminal_2 terminal_owner_repo_1 cwd=/tmp/wt command=bash tab=work "
+        "state=Running item=owner/repo#ISSUE-1",
+    ]
 
 
+@pytest.mark.parametrize(
+    ("argv", "panes"),
+    [
+        (["info", "--json"], "work"),
+        (["--json", "info"], "work"),
+        (["info", "--all", "--json"], "all"),
+    ],
+)
 def test_main_info_json_outputs_server_response(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str], panes: str
 ) -> None:
-    response = {"session": "workdash", "panes": []}
+    response = {
+        "session": "workdash",
+        "panes": [
+            {
+                "session": "workdash",
+                "tab_id": 7,
+                "tab_name": "work",
+                "pane_id": "terminal_1",
+                "title": "code_owner_repo_1",
+                "cwd": "/tmp/wt",
+                "command": "pi",
+                "kind": "agent",
+                "state": "running",
+                "item": "owner/repo#ISSUE-1",
+            },
+        ],
+    }
+    client = MagicMock()
+    client.request.return_value = response
+    monkeypatch.setattr(workdash_module, "WorkdashControlClient", lambda host: client)
 
-    class FakeControlClient:
-        def __init__(self, host="127.0.0.1") -> None:
-            assert host == "127.0.0.1"
+    assert workdash_module.main(argv) == 0
 
-        def request(self, endpoint: str, payload: dict[str, object] | None = None):
-            assert endpoint == "info"
-            assert payload == {"panes": "work"}
-            return response
-
-    monkeypatch.setattr(workdash_module, "WorkdashControlClient", FakeControlClient)
-
-    assert workdash_module.main(["--json", "info"]) == 0
-
+    client.request.assert_called_once_with("info", {"panes": panes})
     assert json.loads(capsys.readouterr().out) == response
 
 
