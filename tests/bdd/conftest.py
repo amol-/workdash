@@ -32,9 +32,6 @@ from .steps import (
     cli_orchestration as _cli_orchestration,
 )
 from .steps import (
-    coding as _coding,
-)
-from .steps import (
     common as _common,
 )
 from .steps import (
@@ -83,7 +80,6 @@ for _step_module in (
     _setup,
     _startup,
     _analysis_tui,
-    _coding,
     _terminal,
     _show_config,
     _todo,

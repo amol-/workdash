@@ -325,12 +325,20 @@ Feature: CLI orchestration commands
     And the command exits with a non-zero status
 
   @id:F-CLI-ORCHESTRATION-S040
-  Scenario: Code always asks the server to autostart the agent
+  Scenario: Start coding an issue from the command line
     Given a server-backed Workdash session is ready to answer
     And GitHub repository `owner/repo` has open issue #1
     When the user runs `workdash code owner/repo#ISSUE-1 --agent pi`
-    Then the command asks the server to code with autostart enabled
-    And the agent is briefed with the original prompt followed by the autonomous appendix once
+    Then the command reports that pi launched in a pane for `owner/repo#ISSUE-1`
+
+  @id:F-CODING-LAUNCH-S031
+  Scenario: Continue an issue's open pull request from the command line
+    Given a server-backed Workdash session is ready to answer
+    And GitHub issue `owner/repo#42` is open and closed by open pull request `owner/repo#51` whose CI failed
+    And pull request #51 has an existing worktree on branch `pr-branch`
+    When the user runs `workdash code owner/repo#42 --agent pi`
+    Then the command reports that pi launched in a pane for `owner/repo#ISSUE-42`
+    And the command shows the existing pull request checkout as the pane's working directory
 
   @id:F-CLI-ORCHESTRATION-S041
   Scenario: Code has no autostart option

@@ -579,15 +579,10 @@ def _user_presses_key(
     scenario_state: dict[str, Any],
     work_items: list[WorkItem],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Dispatch on the key to the correct domain-specific handler.
     if key == "r":
         _run_refresh_scenario(scenario_state, work_items, tmp_path)
-    elif key == "c":
-        from . import coding
-
-        coding.run_code_dialog_scenario(scenario_state, work_items, monkeypatch, tmp_path)
     elif key == "/":
         _run_search_clear_scenario(scenario_state, work_items)
     else:

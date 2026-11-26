@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import threading
 from contextlib import nullcontext
 from importlib.metadata import version
 from pathlib import Path
@@ -21,7 +19,7 @@ from workdash.control import (
     _source_and_header_guarded_wsgi_app,
     format_work_item_id,
 )
-from workdash.models import WorkItem, WorkItemKind, WorkItemType, worktree_item_number
+from workdash.models import WorkItem, WorkItemType, worktree_item_number
 from workdash.repo_worktree import worktree_path
 
 from .common import (
@@ -29,9 +27,7 @@ from .common import (
     github_item_node,
     install_github_item_lookup,
     install_zellij_agent_fakes,
-    make_work_item,
     seed_dashboard_item,
-    set_session_items,
 )
 
 
@@ -56,9 +52,6 @@ def _call_api(
     response = request.get_response(app)
     scenario_state["api_status"] = response.status_int
     scenario_state["api_payload"] = json.loads(response.text)
-    scenario_state.setdefault("api_responses", []).append(
-        (response.status_int, scenario_state["api_payload"])
-    )
 
 
 def _install_fake_ensure_worktree(
@@ -95,23 +88,7 @@ def _install_code_fakes(scenario_state: dict[str, Any], monkeypatch: pytest.Monk
         scenario_state["api_session"].git = control_module.GitHelper()
     monkeypatch.setattr("workdash.control.get_merge_base", lambda _path, **kwargs: None)
 
-    def prepare(item, repo_path, **kwargs):
-        scenario_state["prompt_analysis"] = kwargs.get("analysis_path")
-        if kwargs.get("analysis_path") and item.kind in {
-            WorkItemKind.REVIEW_REQUESTED_PR,
-            WorkItemKind.TRACKED_PR,
-        }:
-            from workdash.launcher import build_launch_agent_prompt
-
-            return build_launch_agent_prompt(
-                item=item,
-                github_context={},
-                repo_path=repo_path,
-                analysis_path=kwargs["analysis_path"],
-            )
-        return "PROMPT"
-
-    monkeypatch.setattr("workdash.control.prepare_launch_agent_prompt", prepare)
+    monkeypatch.setattr("workdash.control.prepare_launch_agent_prompt", lambda *_a, **_kw: "PROMPT")
     install_zellij_agent_fakes(scenario_state, monkeypatch)
 
 
@@ -133,19 +110,6 @@ def _current_dashboard_items_include(
 @given(parsers.parse("`workdash info` reports pane ID `{pane_id}`"))
 def _workdash_info_reports_pane_id(pane_id: str, scenario_state: dict[str, Any]) -> None:
     scenario_state["pane_id"] = pane_id
-
-
-@when(parsers.parse("a client requests code for `{item_id}` with agent `{agent}`"))
-def _client_requests_code(
-    item_id: str,
-    agent: str,
-    scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install_code_fakes(scenario_state, monkeypatch)
-    _call_api(scenario_state, work_items, tmp_path, "code", {"target": item_id, "agent": agent})
 
 
 @when(
@@ -177,54 +141,6 @@ def _response_reports_already_running(scenario_state: dict[str, Any]) -> None:
     assert _api_result(scenario_state)["status"] == "already_running"
 
 
-@then(parsers.parse("the response is for `{item_id}`"))
-def _response_is_for(item_id: str, scenario_state: dict[str, Any]) -> None:
-    assert _api_result(scenario_state)["item_id"] == item_id
-
-
-@then(parsers.parse("the agent works in the checkout of pull request `{ref}`"))
-def _agent_works_in_pull_request_checkout(ref: str, scenario_state: dict[str, Any]) -> None:
-    [(_workdir, item)] = scenario_state["ensure_calls"]
-    assert (f"{item.repo}#{item.number}", item.item_type) == (ref, WorkItemType.PR)
-
-
-@then(parsers.parse("the agent works in the checkout of issue `{ref}`"))
-def _agent_works_in_issue_checkout(ref: str, scenario_state: dict[str, Any]) -> None:
-    [(_workdir, item)] = scenario_state["ensure_calls"]
-    assert (f"{item.repo}#{item.number}", item.item_type) == (ref, WorkItemType.ISSUE)
-
-
-@when(parsers.parse("two clients request code for `{item_id}` at the same time"))
-def _two_clients_request_code(
-    item_id: str,
-    scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install_code_fakes(scenario_state, monkeypatch)
-    # A slow launch keeps the first request busy while the second one arrives.
-    scenario_state["launch_delay"] = 0.05
-    clients = [
-        threading.Thread(
-            target=_call_api,
-            args=(
-                scenario_state,
-                work_items,
-                tmp_path,
-                "code",
-                {"target": item_id, "agent": agent},
-            ),
-        )
-        for agent in ("pi", "claude")
-    ]
-    for client in clients:
-        client.start()
-    for client in clients:
-        client.join(timeout=5)
-    assert not any(client.is_alive() for client in clients)
-
-
 @when(parsers.parse("a client requests terminal for `{item_id}`"))
 def _client_requests_terminal(
     item_id: str,
@@ -254,11 +170,6 @@ def _api_reports_the_zellij_session(session: str, scenario_state: dict[str, Any]
     assert scenario_state["api_payload"]["result"]["session"] == session
 
 
-@then("the server does not prepare a worktree")
-def _server_does_not_prepare_worktree(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("ensure_calls", []) == []
-
-
 # -- Explicit targets outside the dashboard ----------------------------------
 
 
@@ -283,34 +194,6 @@ def _github_answers_item_lookups(
     install_github_item_lookup(scenario_state, monkeypatch)
 
 
-@given(
-    parsers.parse(
-        "the current dashboard items include `{pull_request_id}` which shares the worktree of "
-        "`{issue_id}`"
-    )
-)
-def _dashboard_includes_pull_request_sharing_worktree(
-    pull_request_id: str,
-    issue_id: str,
-    scenario_state: dict[str, Any],
-    work_items: list[WorkItem],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from gh_work_state_fake import install_fake_github
-
-    github = install_fake_github(monkeypatch)
-    github.add_issue("owner/repo#1")
-    github.add_pull_request("owner/repo#5", closes=("owner/repo#1",))
-    issue = seed_dashboard_item(work_items, scenario_state)
-    pull_request = make_work_item(
-        item_type=WorkItemType.PR, kind=WorkItemKind.AUTHORED_PR, number=5, title="Fix it"
-    )
-    pull_request.closing_issue_numbers = (issue.number,)
-    work_items.append(pull_request)
-    set_session_items(scenario_state, work_items)
-    assert [format_work_item_id(item) for item in work_items] == [issue_id, pull_request_id]
-
-
 @given(parsers.parse("the worktree of `{item_id}` already exists"))
 def _worktree_already_exists(
     item_id: str,
@@ -330,91 +213,12 @@ def _worktree_already_exists(
     )
 
 
-@given("an exited agent pane is left in that worktree")
-def _exited_agent_pane_in_worktree(scenario_state: dict[str, Any]) -> None:
-    path = scenario_state["existing_worktree"]
-    scenario_state.setdefault("panes", []).append(
-        {"id": 3, "title": f"code_{Path(path).name}", "pane_cwd": path, "exited": True}
-    )
-
-
 @given("an agent pane is running in that worktree")
 def _agent_pane_running_in_worktree(scenario_state: dict[str, Any]) -> None:
     path = scenario_state["existing_worktree"]
     scenario_state.setdefault("panes", []).append(
         {"id": 7, "title": f"code_{Path(path).name}", "pane_cwd": path}
     )
-
-
-@given("a terminal pane is open in that worktree")
-def _terminal_pane_in_worktree(scenario_state: dict[str, Any]) -> None:
-    path = scenario_state["existing_worktree"]
-    scenario_state.setdefault("panes", []).append(
-        {"id": 4, "title": f"terminal_{Path(path).name}", "pane_cwd": path}
-    )
-
-
-@given("an agent pane is running in another item's worktree")
-def _agent_pane_in_other_worktree(scenario_state: dict[str, Any]) -> None:
-    other = Path(scenario_state["existing_worktree"]).with_name("owner_repo_2")
-    scenario_state.setdefault("panes", []).append(
-        {"id": 5, "title": f"code_{other.name}", "pane_cwd": str(other)}
-    )
-
-
-@given("Zellij cannot report the panes of the Workdash Zellij session")
-def _zellij_cannot_report_panes(scenario_state: dict[str, Any]) -> None:
-    scenario_state["zellij_unavailable"] = True
-
-
-def _install_unusable_pane_listings(
-    scenario_state: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
-    count: int,
-) -> None:
-    import workdash.launcher as launcher_module
-
-    scenario_state["zellij_reads_real_panes"] = True
-    panes = scenario_state.setdefault("panes", [])
-    answers = [
-        subprocess.CompletedProcess([], 0, stdout="Session 'workdash-main' not found.\n")
-    ] * count
-
-    def run(command, **_kwargs):
-        if answers:
-            return answers.pop()
-        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(panes))
-
-    def assert_unusable_answers_consumed():
-        assert not answers, "an unusable pane listing was never read"
-
-    monkeypatch.setattr(launcher_module, "subprocess", SimpleNamespace(run=run))
-    monkeypatch.setattr(launcher_module, "_resolve_zellij_binary", lambda: "zellij")
-    monkeypatch.setattr(launcher_module, "_ZELLIJ_PANE_READ_RETRY_SECONDS", 0)
-    monkeypatch.setattr(
-        launcher_module.zellij, "load_zellij_panes", launcher_module.Zellij.load_zellij_panes
-    )
-    request.addfinalizer(assert_unusable_answers_consumed)
-
-
-@given("Zellij answers the first pane listing unusably")
-def _zellij_answers_first_listing_unusably(
-    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
-) -> None:
-    _install_unusable_pane_listings(scenario_state, monkeypatch, request, 1)
-
-
-@given("Zellij answers the first two pane listings unusably")
-def _zellij_answers_first_two_listings_unusably(
-    scenario_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
-) -> None:
-    _install_unusable_pane_listings(scenario_state, monkeypatch, request, 2)
-
-
-@given("launched agent panes never become visible in Zellij")
-def _launched_panes_never_visible(scenario_state: dict[str, Any]) -> None:
-    scenario_state["launched_panes_invisible"] = True
 
 
 @then(parsers.parse("the server runs {action} for `{item_id}` in its worktree"))
@@ -447,72 +251,6 @@ def _api_returns_error(code: str, status: int, scenario_state: dict[str, Any]) -
 # -- Coding claims -------------------------------------------------------------
 
 
-def _code_results(scenario_state: dict[str, Any]) -> list[dict[str, Any]]:
-    responses = scenario_state["api_responses"]
-    assert all(status == 200 for status, _payload in responses), responses
-    return [payload["result"] for _status, payload in responses]
-
-
-@then("exactly one coding agent is launched")
-def _exactly_one_agent_launched(scenario_state: dict[str, Any]) -> None:
-    assert len(scenario_state.get("agent_launches", [])) == 1, scenario_state.get("agent_launches")
-
-
 @then("no coding agent is launched")
 def _no_agent_launched(scenario_state: dict[str, Any]) -> None:
     assert scenario_state.get("agent_launches", []) == []
-
-
-@then("one response reports status `launched` with the new pane ID")
-def _one_response_launched(scenario_state: dict[str, Any]) -> None:
-    launched = [
-        result for result in _code_results(scenario_state) if result["status"] == "launched"
-    ]
-    assert [result["pane_id"] for result in launched] == ["terminal_23"]
-
-
-@then("the other response reports status `already_running` with the same pane ID")
-def _other_response_already_running(scenario_state: dict[str, Any]) -> None:
-    running = [
-        result for result in _code_results(scenario_state) if result["status"] == "already_running"
-    ]
-    assert [result["pane_id"] for result in running] == ["terminal_23"]
-
-
-@then("the last response reports status `already_running` with the pane ID of the first agent")
-def _last_response_reports_first_agent(scenario_state: dict[str, Any]) -> None:
-    first, last = _code_results(scenario_state)
-    assert first["status"] == "launched"
-    assert (last["status"], last["pane_id"]) == ("already_running", first["pane_id"])
-
-
-@then(parsers.parse("the last response does not report `{agent}` as the running agent"))
-def _last_response_does_not_report_agent(agent: str, scenario_state: dict[str, Any]) -> None:
-    assert _code_results(scenario_state)[-1]["agent"] != agent
-
-
-@then("the last response reports status `launched` with a new pane ID")
-def _last_response_launched_new_pane(scenario_state: dict[str, Any]) -> None:
-    result = _code_results(scenario_state)[-1]
-    assert (result["status"], result["pane_id"]) == ("launched", "terminal_23")
-
-
-@then("the coding agent starts in the existing worktree")
-def _agent_starts_in_existing_worktree(scenario_state: dict[str, Any]) -> None:
-    [launch] = scenario_state["agent_launches"]
-    assert launch[0] == scenario_state["existing_worktree"]
-
-
-@then("the API returns an error saying Zellij pane state is unavailable")
-def _api_reports_zellij_unavailable(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state["api_status"] == 503
-    assert scenario_state["api_payload"]["error"]["code"] == "zellij_unavailable"
-
-
-@then("both responses are errors saying the launch could not be confirmed")
-def _both_responses_unconfirmed(scenario_state: dict[str, Any]) -> None:
-    responses = scenario_state["api_responses"]
-    assert [(status, payload["error"]["code"]) for status, payload in responses] == [
-        (409, "launch_unconfirmed"),
-        (409, "launch_unconfirmed"),
-    ]

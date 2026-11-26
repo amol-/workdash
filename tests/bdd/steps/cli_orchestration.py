@@ -706,16 +706,17 @@ def _run_code_vscode_json(
     )
 
 
-@when(parsers.parse("the user runs `workdash {action:w} owner/repo#ISSUE-1 --agent {agent:w}`"))
+@when(parsers.parse("the user runs `workdash {action:w} {target} --agent {agent:w}`"))
 def _run_action_with_agent(
     scenario_state: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     action: str,
+    target: str,
     agent: str,
 ) -> None:
     _run_workdash(
-        [action, "owner/repo#ISSUE-1", "--agent", agent],
+        [action, target, "--agent", agent],
         scenario_state,
         monkeypatch,
         capsys,
@@ -1214,11 +1215,18 @@ def _run_code_with_autostart_option(
     scenario_state["exit_code"] = parse_error.value.code
 
 
-@then("the command asks the server to code with autostart enabled")
-def _asks_server_to_code_with_autostart(scenario_state: dict[str, Any]) -> None:
-    [request] = scenario_state["control_requests"]
-    assert request["endpoint"] == "code"
-    assert request["payload"]["autostart"] is True
+@then(parsers.parse("the command reports that pi launched in a pane for `{item_id}`"))
+def _reports_launched_agent(item_id: str, scenario_state: dict[str, Any]) -> None:
+    assert scenario_state["exit_code"] == 0
+    lines = scenario_state["stdout"].splitlines()
+    assert {"Status: launched", f"Item: {item_id}", "Agent: pi"} <= set(lines)
+    assert any(line.startswith("Pane id: terminal_") for line in lines)
+
+
+@then("the command shows the existing pull request checkout as the pane's working directory")
+def _reports_pull_request_checkout(scenario_state: dict[str, Any]) -> None:
+    path, _branch, _repo = scenario_state["pr_worktrees"][51]
+    assert f"Cwd: {path}" in scenario_state["stdout"].splitlines()
 
 
 @then("the command asks the server to code with autostart and autoclose enabled")

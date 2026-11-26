@@ -1724,6 +1724,114 @@ def test_terminal_opens_when_zellij_cannot_list_existing_panes(monkeypatch, tmp_
     launch.assert_called_once_with(str(worktree), zellij_session="workdash")
 
 
+@pytest.mark.parametrize(
+    ("agent_names", "agent_running"),
+    [
+        pytest.param(("pi", "claude"), False, id="idle"),
+        pytest.param(("claude", "codex", "pi"), True, id="running"),
+    ],
+)
+def test_code_menu_lists_numbered_agents_in_configuration_order_before_actions(
+    monkeypatch, tmp_path, agent_names, agent_running
+):
+    item = _search_work_items()[0]
+    session = _dashboard_session()
+    session.config = WorkdashConfig(
+        agents={name: AgentConfig(launch=name) for name in agent_names}, workdir=str(tmp_path)
+    )
+    session.work_items = [item]
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *a, **k: worktree)
+    panes = [{"id": 7, "title": "code_wt", "pane_cwd": str(worktree)}] if agent_running else []
+    monkeypatch.setattr(launcher_module.zellij, "load_zellij_panes", lambda _: panes)
+    app = WorkdashApp(session=session, code_choices=session.config.tui_code_choices())
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            await pilot.press("c")
+            assert isinstance(app.screen, CodeDialog)
+            panes_at_menu = [
+                (pane["pane_id"], pane["state"], pane["item"]) for pane in session.info()["panes"]
+            ]
+            assert panes_at_menu == (
+                [("terminal_7", "running", format_work_item_id(item))] if agent_running else []
+            )
+            options = [str(line.render()) for line in app.screen.query(".code-line")][1:]
+            assert options == [
+                *(f"({index}) {name}" for index, name in enumerate(agent_names, 1)),
+                "(e) edit (VSCode Copilot)",
+                "(d) branchdiff",
+                "(t) terminal",
+                "(r) auto review",
+                "(Esc) Cancel",
+            ]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status"),
+    [
+        ("worktree failure", "Launch failed: worktree failed"),
+        ("agent launch failure", "Launch failed: coding launch failed"),
+        ("late agent", "Focused pane terminal_9."),
+    ],
+)
+def test_code_selection_handles_launch_failures_and_late_claims(
+    monkeypatch, tmp_path, outcome, status
+):
+    item = _search_work_items()[0]
+    session = _dashboard_session()
+    session.work_items = [item]
+    session.config = replace(session.config, workdir=str(tmp_path))
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    panes = []
+    monkeypatch.setattr(launcher_module.zellij, "load_zellij_panes", lambda _: list(panes))
+    monkeypatch.setattr(control_module, "existing_worktree_path", lambda *a, **k: worktree)
+    prepare = MagicMock(return_value=str(worktree))
+    if outcome == "worktree failure":
+        prepare.side_effect = RuntimeError("worktree failed")
+    monkeypatch.setattr(control_module, "ensure_worktree", prepare)
+    monkeypatch.setattr(control_module, "get_merge_base", lambda *a, **k: None)
+    monkeypatch.setattr(control_module, "prepare_launch_agent_prompt", lambda *a, **k: "Briefing")
+    launch = MagicMock(side_effect=RuntimeError("coding launch failed"))
+    monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch)
+    focus = MagicMock()
+    app = WorkdashApp(
+        session=session,
+        code_choices=session.config.tui_code_choices(),
+        launch_callback=lambda item, agent: session.code(
+            target=format_work_item_id(item), agent=agent, allow_vscode=True
+        ),
+        focus_callback=focus,
+    )
+
+    async def exercise():
+        async with app.run_test() as pilot:
+            footer = app.query_one("#status-footer", Static)
+            await pilot.press("c")
+            assert isinstance(app.screen, CodeDialog)
+            if outcome == "late agent":
+                panes.append({"id": 9, "title": "code_wt", "pane_cwd": str(worktree)})
+            await pilot.press("1")
+            await _wait_for_footer(footer, status, pilot)
+            _assert_no_modal_screens(app)
+
+    asyncio.run(exercise())
+    if outcome == "late agent":
+        focus.assert_called_once_with("terminal_9")
+        prepare.assert_not_called()
+    else:
+        focus.assert_not_called()
+        prepare.assert_called_once()
+    if outcome == "agent launch failure":
+        launch.assert_called_once()
+    else:
+        launch.assert_not_called()
+
+
 def test_workdash_app_code_reports_a_failed_focus_of_the_running_agent_pane() -> None:
     work_item = WorkItem(
         kind=WorkItemKind.TRACKED_PR,

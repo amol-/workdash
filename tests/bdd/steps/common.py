@@ -11,7 +11,6 @@ import asyncio
 import json
 import re
 import subprocess
-import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,7 +18,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from pytest_bdd import given, parsers, then
+from pytest_bdd import given, then
 from textual.screen import ModalScreen
 
 import workdash.control as control_module
@@ -120,13 +119,6 @@ def _configure_agents(scenario_state: dict[str, Any], agents: dict[str, AgentCon
         session.config = replace(session.config, agents=agents)
 
 
-@given(parsers.parse("the coding agents `{first}` and `{second}` are configured in that order"))
-def _coding_agents_configured_in_order(
-    first: str, second: str, scenario_state: dict[str, Any]
-) -> None:
-    _configure_agents(scenario_state, {name: AgentConfig(launch=name) for name in (first, second)})
-
-
 # -- Reusable TUI harness ---------------------------------------------------
 
 
@@ -213,24 +205,6 @@ def _tui_has_work_item_selected(scenario_state: dict[str, Any], work_items: list
             )
         )
     scenario_state.setdefault("selected_item", work_items[0])
-
-
-@given("the next worktree preparation will fail")
-def _next_worktree_preparation_will_fail(scenario_state: dict[str, Any]) -> None:
-    scenario_state["worktree_fails"] = True
-
-
-@then("no dialog or progress overlay remains")
-def _no_dialog_or_progress_overlay_remains(scenario_state: dict[str, Any]) -> None:
-    assert scenario_state.get("modal_screen_names") == []
-
-
-@then("the system reports the worktree error details to the user")
-def _reports_worktree_error_details(scenario_state: dict[str, Any]) -> None:
-    status = scenario_state.get("coding_status") or scenario_state.get("branchdiff_status")
-    assert status is not None, scenario_state
-    prefix = "Launch failed" if "coding_status" in scenario_state else "Worktree setup failed"
-    assert f"{prefix}: worktree failed" in status
 
 
 @given("the Workdash server is not attached to a Zellij session")
@@ -409,9 +383,6 @@ def install_zellij_agent_fakes(
     ):
         launches = scenario_state.setdefault("agent_launches", [])
         launches.append((repo_path, prompt, agent_command_tokens, zellij_session))
-        if scenario_state.get("coding_launch_fails"):
-            raise RuntimeError("coding launch failed")
-        time.sleep(scenario_state.get("launch_delay", 0))
         pane_id = 22 + len(launches)
         pane_title = f"code_{Path(repo_path).name}"
         if not scenario_state.get("launched_panes_invisible"):
@@ -425,9 +396,7 @@ def install_zellij_agent_fakes(
             cwd=repo_path,
         )
 
-    # A scenario that proves the real pane read fakes Zellij at its process boundary.
-    if not scenario_state.get("zellij_reads_real_panes"):
-        monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", load_panes)
+    monkeypatch.setattr(control_module.launcher.zellij, "load_zellij_panes", load_panes)
     monkeypatch.setattr(control_module.agent_execution.executor, "launch", launch_agent)
     monkeypatch.setattr(control_module, "_LAUNCH_VISIBILITY_INTERVAL_SECONDS", 0)
 

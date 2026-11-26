@@ -17,9 +17,16 @@ from textual.widgets import Static
 from workdash.backend import WorkdashBackend
 from workdash.control import WorkdashSession, format_work_item_id
 from workdash.models import WorkItemKind, WorkItemType
+from workdash.tui import CodeDialog
 from zellij_pane_launch import mark_pane_started
 
-from .common import install_zellij_agent_fakes, make_valid_config, make_work_item, run_app
+from .common import (
+    install_zellij_agent_fakes,
+    make_valid_config,
+    make_work_item,
+    modal_screen_names,
+    run_app,
+)
 
 
 def _install_fake_git(
@@ -180,13 +187,22 @@ def worktree_remote(tmp_path, monkeypatch, scenario_state):
                 )
             case ["gh", "pr", "view"]:
                 assert command[3:6] == ["73", "--repo", "owner/repo"]
-                payload = json.dumps(
-                    dict(
-                        headRefName=scenario_state["pr_branch"],
-                        headRepository={"name": "repo"},
-                        headRepositoryOwner={"login": "owner"},
+                if "headRepositoryOwner" in command[-1]:
+                    payload = json.dumps(
+                        dict(
+                            headRefName=scenario_state["pr_branch"],
+                            headRepository={"name": "repo"},
+                            headRepositoryOwner={"login": "owner"},
+                        )
                     )
-                )
+                else:
+                    payload = json.dumps({"body": "Proposed keyboard shortcut changes."})
+            case ["gh", "api", "graphql"] if "reviewThreads" in command[4]:
+                discussion = {
+                    "closingIssuesReferences": {"nodes": []},
+                    "reviewThreads": {"nodes": []},
+                }
+                payload = json.dumps({"data": {"repository": {"pullRequest": discussion}}})
             case _ if Path(command[0]).name == "zellij":
                 assert "new-pane" in command, command
                 cwd = command[command.index("--cwd") + 1]
@@ -220,6 +236,24 @@ def _select_pr_for_review(scenario_state, worktree_remote):
     scenario_state["dashboard_item"] = make_work_item(
         number=73, item_type=WorkItemType.PR, kind=WorkItemKind.TRACKED_PR
     )
+
+
+@given("my own pull request is selected on the dashboard")
+def _select_authored_pr(scenario_state, worktree_remote):
+    _select_pr_for_review(scenario_state, worktree_remote)
+    scenario_state["dashboard_item"] = replace(
+        scenario_state["dashboard_item"], kind=WorkItemKind.AUTHORED_PR
+    )
+
+
+@given("my selected issue has a running coding agent")
+def _start_agent(scenario_state, worktree_remote, tmp_path, monkeypatch):
+    _select_new_issue(scenario_state, worktree_remote)
+    _open_from_code_menu("1", scenario_state, tmp_path, monkeypatch)
+    assert len(scenario_state["agent_launches"]) == 1
+    [pane] = scenario_state["panes"]
+    scenario_state["running_agent"] = f"terminal_{pane['id']}"
+    scenario_state["agent_launches"].clear()
 
 
 @given("I started work from an issue and left local changes in its checkout")
@@ -274,7 +308,7 @@ def _open_from_code_menu(choice, scenario_state, tmp_path, monkeypatch):
         await pilot.press("c", choice)
         async with asyncio.timeout(5):
             while not (status := footer.render().plain).startswith(
-                ("Launched", "Opened terminal", "Launch failed", "Terminal failed")
+                ("Launched", "Opened terminal", "Focused", "Launch failed", "Terminal failed")
             ):
                 await asyncio.sleep(0.01)
         scenario_state["worktree_status"] = status
@@ -288,6 +322,7 @@ def _open_from_code_menu(choice, scenario_state, tmp_path, monkeypatch):
             target=format_work_item_id(item), agent=agent, allow_vscode=True
         ),
         terminal_callback=lambda item: session.terminal(target=format_work_item_id(item)),
+        focus_callback=scenario_state.setdefault("focused_panes", []).append,
     )
     if choice == "t":
         assert scenario_state["worktree_status"] == (
@@ -316,6 +351,68 @@ def _agent_sees_issue(scenario_state):
 def _agent_launch_reported(scenario_state):
     status = scenario_state["worktree_status"]
     assert status == "Launched claude for issue owner/repo#42.", status
+
+
+@then("the agent is asked to propose a plan rather than start implementation")
+def _agent_starts_plan_first(scenario_state):
+    [(_, prompt, _, _)] = scenario_state["agent_launches"]
+    assert "Propose a concrete implementation plan" in prompt
+    assert "Do not start implementing code yet." in prompt
+
+
+@then("the coding agent opens on my pull request's branch to plan how to build on my changes")
+@then(
+    "the coding agent opens on the pull request's branch to discuss review findings, not to implement changes"
+)
+def _agent_opens_on_pr_branch(scenario_state):
+    assert scenario_state["worktree_status"].startswith("Launched"), scenario_state[
+        "worktree_status"
+    ]
+    [(cwd, prompt, command, _)] = scenario_state["agent_launches"]
+    assert command == ["claude"]
+    assert _git(cwd, "branch", "--show-current") == scenario_state["pr_branch"]
+    assert (Path(cwd) / "source.py").read_text() == _PR_CODE
+    if scenario_state["dashboard_item"].kind == WorkItemKind.AUTHORED_PR:
+        assert "Propose a concrete implementation plan" in prompt
+        assert "build on them instead of starting the work over" in prompt
+    else:
+        assert "Discuss review findings, risks, and open questions for the author." in prompt
+        assert "Do not start implementing code changes." in prompt
+
+
+@then("I return to the running agent's pane without starting a new agent")
+def _return_to_running_agent(scenario_state):
+    pane_id = scenario_state["running_agent"]
+    assert scenario_state["focused_panes"] == [pane_id]
+    assert f"Focused pane {pane_id}" in scenario_state["worktree_status"]
+    assert scenario_state["agent_launches"] == []
+
+
+@when('I press "c" and then Esc in the code menu')
+def _cancel_code_menu(scenario_state):
+    async def interactions(app, pilot):
+        await pilot.press("c")
+        assert isinstance(app.screen, CodeDialog)
+        await pilot.press("escape")
+        scenario_state["cancelled_code_menu"] = not modal_screen_names(app)
+
+    def unexpected_launch(item, tool):
+        pytest.fail(f"Unexpected launch of {tool} for {item}")
+
+    def unexpected_prepare(item):
+        pytest.fail(f"Unexpected worktree preparation for {item}")
+
+    run_app(
+        work_items=[scenario_state["dashboard_item"]],
+        launch_callback=unexpected_launch,
+        worktree_callback=unexpected_prepare,
+        interactions=interactions,
+    )
+
+
+@then("I return to the dashboard without starting an agent or preparing a checkout")
+def _code_menu_cancelled(scenario_state):
+    assert scenario_state["cancelled_code_menu"]
 
 
 @then("the terminal opens on the pull request's branch with its proposed changes")
