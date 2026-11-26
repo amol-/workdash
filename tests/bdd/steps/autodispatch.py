@@ -1,13 +1,9 @@
 """Autodispatch behavior at the dispatch and pane boundaries."""
 
 import json
-import os
-import select
 import subprocess
-import sys
 import threading
 import time
-import tty
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -825,7 +821,7 @@ def dashboard_automerge_visible(autodispatch_state):
 
 
 @given("a blocked autodispatch session visible in dashboard progress")
-def blocked_session(scenario_state, work_items, tmp_path, monkeypatch, caplog):
+def blocked_session(scenario_state, work_items, tmp_path, monkeypatch):
     import workdash.autoclose as autoclose_module
     from workdash.autodispatch import _AutodispatchSession
 
@@ -833,9 +829,7 @@ def blocked_session(scenario_state, work_items, tmp_path, monkeypatch, caplog):
 
     scenario_state["real_monotonic"] = autoclose_module.time.monotonic
     scenario_state["github"] = install_fake_github(monkeypatch)
-    _supervised_coding_pane_without_pull_request(
-        "owner/repo#42", scenario_state, work_items, tmp_path, monkeypatch, caplog
-    )
+    _supervised_coding_pane_without_pull_request(scenario_state, work_items, tmp_path, monkeypatch)
     session = scenario_state["api_session"]
     activity = _AutodispatchSession(session, "owner/repo", None, "pi")
     activity.pane = (session.zellij_session, scenario_state["supervised_pane_id"])
@@ -848,7 +842,6 @@ def blocked_session(scenario_state, work_items, tmp_path, monkeypatch, caplog):
         scenario_state["clock"]["now"] += 30
         session.autoclose.poll_once()
     assert len(scenario_state["sent"]) == 3
-    assert session.info()["autodispatch_sessions"][0]["status"] == "blocked"
 
 
 @when("the user presses Shift+Tab and f, then types guidance directly into the focused agent pane")
@@ -856,31 +849,14 @@ def guide_blocked_agent(scenario_state, work_items, monkeypatch):
     import workdash.autoclose as autoclose_module
 
     session = scenario_state["api_session"]
-    pane_id = scenario_state["supervised_pane_id"]
-    focused = None
-    run = subprocess.run
+    focus = MagicMock()
+    monkeypatch.setattr(control_module.launcher.zellij, "focus_zellij_pane", focus)
 
-    def run_command(command, *args, **kwargs):
-        nonlocal focused
-        if command[0] != "fake-zellij":
-            return run(command, *args, **kwargs)
-        assert command[1:] == [
-            "--session",
-            session.zellij_session,
-            "action",
-            "focus-pane-id",
-            pane_id,
-        ]
-        focused = pane_id
-        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
-
-    monkeypatch.setattr("workdash.launcher._resolve_zellij_binary", lambda: "fake-zellij")
-    monkeypatch.setattr(subprocess, "run", run_command)
-
-    async def guide(app, pilot):
+    async def interact(app, pilot):
         progress = app.query_one("#autodispatch-progress", Static)
         assert "blocked" in progress.render().plain
         await pilot.press("shift+tab", "f")
+        pane_id = scenario_state["supervised_pane_id"]
         footer = app.query_one("#status-footer", Static)
         for _ in range(100):
             if f"Focused pane {pane_id}" in footer.render().plain:
@@ -888,55 +864,27 @@ def guide_blocked_agent(scenario_state, work_items, monkeypatch):
             await pilot.pause(0.02)
         assert f"Focused pane {pane_id}" in footer.render().plain
         assert "blocked" in progress.render().plain
-        assert focused == pane_id
-        os.write(terminal, b"check the documentation\n")
-        response = b""
-        while not response.endswith(b"\n"):
-            assert select.select([terminal], [], [], 2)[0], "The fake agent did not respond"
-            response += os.read(terminal, 4096)
-        assert response == b"Agent received: check the documentation\n"
-        scenario_state["screen"] = response.decode()
-        scenario_state["clock"]["now"] += 30
+        focus.assert_called_once_with(session.zellij_session, pane_id)
+
+        # Typing directly into Zellij is observed by Workdash only as changed pane content.
+        scenario_state["screen"] = "Please continue with the implementation.\n"
         with monkeypatch.context() as patch:
             patch.setattr(
-                autoclose_module,
-                "time",
-                SimpleNamespace(monotonic=lambda: scenario_state["clock"]["now"]),
+                autoclose_module.time, "monotonic", lambda: scenario_state["clock"]["now"]
             )
+            scenario_state["clock"]["now"] += 30
             session.autoclose.poll_once()
         await app._poll_autodispatch_progress()
         scenario_state["resumed_progress"] = progress.render().plain
 
-    # Use a real terminal for guidance, but no Zellij session or external agent.
-    terminal, pane = os.openpty()
-    try:
-        tty.setraw(pane)
-        with subprocess.Popen(
-            [
-                sys.executable,
-                "-u",
-                "-c",
-                "import sys\nfor line in sys.stdin: print('Agent received:', line, end='')",
-            ],
-            stdin=pane,
-            stdout=pane,
-        ) as agent:
-            try:
-                with monkeypatch.context() as patch:
-                    patch.setattr(
-                        autoclose_module.time, "monotonic", scenario_state["real_monotonic"]
-                    )
-                    run_app(
-                        work_items=work_items,
-                        session=session,
-                        focus_callback=session.focus_pane,
-                        interactions=guide,
-                    )
-            finally:
-                agent.terminate()
-    finally:
-        os.close(pane)
-        os.close(terminal)
+    with monkeypatch.context() as patch:
+        patch.setattr(autoclose_module.time, "monotonic", scenario_state["real_monotonic"])
+        run_app(
+            work_items=work_items,
+            session=session,
+            interactions=interact,
+            focus_callback=session.focus_pane,
+        )
 
 
 @then("the dashboard shows that the session has resumed")

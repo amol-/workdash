@@ -2482,6 +2482,24 @@ def test_code_api_forwards_boolean_autostart_and_autoclose_defaulting_to_false(
     )
 
 
+def test_code_api_rejects_autoclose_without_autostart(monkeypatch, tmp_path) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
+    session, _, _, launch_agent = _coding_session(monkeypatch, tmp_path, [])
+    request = Request.blank(
+        "/api/v0/code",
+        method="POST",
+        content_type="application/json",
+        body=json.dumps(
+            {"target": "owner/repo#1", "agent": "pi", "autostart": False, "autoclose": True}
+        ).encode(),
+    )
+
+    response = request.get_response(control_module._make_turbogears_app(session))
+
+    assert (response.status_int, json.loads(response.text)["error"]["code"]) == (400, "bad_request")
+    launch_agent.assert_not_called()
+
+
 @pytest.mark.parametrize("value", ["false", "true", 1, 0, [], {}])
 @pytest.mark.parametrize("field", ["autostart", "autoclose"])
 def test_code_api_rejects_a_non_boolean_flag(field, value) -> None:

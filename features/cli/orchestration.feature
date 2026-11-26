@@ -234,3 +234,32 @@ Feature: CLI orchestration commands
     Given an open pull request is available for review
     When the user runs `workdash review owner/repo#PR-2`
     Then the command reports that the review started and where to find its document
+
+  @id:F-CLI-ORCHESTRATION-S044 @id:F-CODING-AUTOCLOSE-S010
+  Scenario: Close an idle coding pane when the work is already ready to merge
+    Given a server-backed Workdash session is ready to answer
+    And issue `owner/repo#42` has an open pull request `owner/repo#51` ready to merge with all changes published
+    When the user runs `workdash code owner/repo#ISSUE-42 --agent pi --autoclose`
+    Then Workdash reports the new agent pane with autoclose enabled
+    When the agent goes idle
+    Then the supervised pane is closed
+
+  @id:F-CODING-AUTOCLOSE-S005
+  Scenario: Close an active coding pane when its pull request merges
+    Given a server-backed Workdash session is ready to answer
+    And issue `owner/repo#42` has an open pull request `owner/repo#51`
+    When the user runs `workdash code owner/repo#ISSUE-42 --agent pi --autoclose`
+    And pull request `owner/repo#51` merges while the agent is still producing output
+    Then the supervised pane is closed
+
+  @id:F-CODING-AUTOCLOSE-S006 @id:F-CODING-AUTOCLOSE-S008
+  Scenario: Keep an idle agent working as failing checks and review feedback arrive
+    Given a server-backed Workdash session is ready to answer
+    And issue `owner/repo#42` has an open pull request `owner/repo#51`
+    When the user runs `workdash code owner/repo#ISSUE-42 --agent pi --autoclose`
+    And pull request `owner/repo#51` develops a failing check `tests`
+    And the agent goes idle
+    Then the agent receives a message to fix the failing checks
+    When a reviewer requests changes on pull request `owner/repo#51`
+    And the agent goes idle
+    Then the agent receives a message to address the review feedback

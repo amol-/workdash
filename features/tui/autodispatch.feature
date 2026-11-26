@@ -9,7 +9,7 @@ Feature: Control autodispatch from the dashboard
     Then an autodispatch session launches that issue with the compatible agent
     And the dashboard has announced the start and shows the other item while autodispatch continues
 
-  @id:F-AUTODISPATCH-S020
+  @id:F-AUTODISPATCH-S020 @id:F-CODING-AUTOCLOSE-S019
   Scenario: Guide a blocked agent from the dashboard
     Given a blocked autodispatch session visible in dashboard progress
     When the user presses Shift+Tab and f, then types guidance directly into the focused agent pane

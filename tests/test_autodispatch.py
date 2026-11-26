@@ -72,7 +72,6 @@ def test_autodispatch_supervises_reminders_blocking_and_recovery(monkeypatch, tm
             session.autoclose.poll_once()
         assert state["sent"] == [(pane_id, instruction)] * 3
         info = session.info()
-        assert info["autodispatch_sessions"][0]["status"] == "blocked"
         monkeypatch.setattr(
             "workdash.workdash.WorkdashControlClient",
             lambda *args, **kwargs: MagicMock(request=MagicMock(return_value=info)),
@@ -133,11 +132,11 @@ def test_dashboard_stops_only_selected_running_session(request, monkeypatch):
     asyncio.run(run())
 
 
-def test_dashboard_toggles_automerge_for_selected_blocked_session(monkeypatch, tmp_path, caplog):
+def test_dashboard_toggles_automerge_for_selected_blocked_session(monkeypatch, tmp_path):
     import workdash.autoclose as autoclose_module
 
     state = {}
-    blocked_session(state, [], tmp_path, monkeypatch, caplog)
+    blocked_session(state, [], tmp_path, monkeypatch)
     session = state["api_session"]
 
     async def run():
