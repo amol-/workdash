@@ -1576,6 +1576,7 @@ def _coding_session(
 
 
 def test_concurrent_code_requests_launch_one_agent(monkeypatch, tmp_path) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     session, _worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
     target = "owner/repo#ISSUE-1"
     launching, second_request = Event(), Event()
@@ -1619,6 +1620,7 @@ def test_concurrent_code_requests_launch_one_agent(monkeypatch, tmp_path) -> Non
 def test_code_launches_in_existing_worktree_without_a_live_claim(
     monkeypatch, tmp_path, panes
 ) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     panes = [{**pane, "pane_cwd": str(tmp_path / pane["pane_cwd"])} for pane in panes]
     session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, panes)
 
@@ -1707,6 +1709,7 @@ def test_code_does_not_launch_when_pane_listing_fails(monkeypatch, tmp_path) -> 
 
 @pytest.mark.parametrize("unusable_count", [1, 2], ids=["first-read", "first-two-reads"])
 def test_code_launches_after_unusable_pane_listings(monkeypatch, tmp_path, unusable_count):
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     panes = []
     session, _worktree, _ensure, launch = _coding_session(monkeypatch, tmp_path, panes)
     unusable = [
@@ -1762,6 +1765,7 @@ def test_vscode_opens_without_a_zellij_session(monkeypatch, tmp_path) -> None:
 
 
 def test_code_retry_does_not_repeat_an_unconfirmed_launch(monkeypatch, tmp_path) -> None:
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     session, worktree, _ensure, launch_agent = _coding_session(monkeypatch, tmp_path, [])
     launch_agent.side_effect = None
     launch_agent.return_value = SimpleNamespace(
@@ -2365,6 +2369,7 @@ def test_coding_a_todo_protects_its_identity(monkeypatch, tmp_path, autostart, t
 def test_coding_a_targeted_todo_launches_in_its_checkout_with_the_original_task(
     target, monkeypatch, tmp_path
 ):
+    install_fake_github(monkeypatch).add_issue("testuser/todos#1")
     prepare_prompt = control_module.prepare_launch_agent_prompt
     session, _, ensure, launch = _coding_session(monkeypatch, tmp_path, [])
     monkeypatch.setattr(control_module, "prepare_launch_agent_prompt", prepare_prompt)
@@ -2633,6 +2638,7 @@ def test_analyze_api_runs_the_configured_agent(monkeypatch, tmp_path, fields, ag
 
 
 def test_code_api_launches_the_selected_agent(monkeypatch, tmp_path):
+    install_fake_github(monkeypatch).add_issue("owner/repo#1")
     session, worktree, _, launch_agent = _coding_session(monkeypatch, tmp_path, [])
 
     response = _post_item_action(session, "code", "owner/repo#ISSUE-1", agent="pi")
