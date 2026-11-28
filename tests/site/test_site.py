@@ -128,7 +128,7 @@ def test_homepage_quickstart():
     assert "--configure" not in quickstart[1]
     assert re.search(r"setup wizard.*installs missing .*GitHub CLI.*Zellij", homepage)
     assert re.search(
-        r"<p>[^<]*Workdash 0\.5\.0\b[^<]*<code>workdash --configure</code>",
+        r"<p>[^<]*Upgrading from a previous version[^<]*<code>workdash --configure</code>",
         before_tour[quickstart.end() :],
     )
 
