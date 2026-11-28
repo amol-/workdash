@@ -32,6 +32,13 @@ Filter review feedback through "simple is robust": when subagents or reviewers r
 theoretical corner cases that do not matter in practice or that bloat the design,
 use your executive judgment to reject them and keep the solution minimal.
 
+Before writing any code, sync the checkout with the base branch:
+`git fetch origin && git rebase origin/HEAD`. Worktrees are created from
+origin/HEAD, which always points at the repository's current default branch,
+so this guarantees the branch includes changes merged in the meantime (for
+example sub-issues or blockers merged while this worktree was open). If the
+rebase conflicts, resolve the conflicts before continuing.
+
 Existing work comes first: continue valid partial work and preserve what is
 good. Replace or discard it only for a clear technical reason such as defects,
 wrong behavior, or code below the repository's quality standards, never merely
