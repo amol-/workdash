@@ -26,3 +26,10 @@ Feature: Read an analysis
     Given a Markdown document is open in the viewer
     When the user selects text and presses Ctrl+C
     Then the selected text is copied
+
+  @id:F-ANALYSIS-GENERATE-S011
+  Scenario: Start coding from a saved issue analysis in the built-in viewer
+    Given an issue is selected with a saved analysis and the built-in viewer is configured
+    And the viewer cannot reach GitHub
+    When the user opens the saved analysis with "a" twice and chooses a coding agent with "c"
+    Then the saved analysis viewer reports the launched coding pane

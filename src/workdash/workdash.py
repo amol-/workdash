@@ -8,7 +8,6 @@ import logging
 import os
 import re
 import sys
-import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -77,7 +76,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .view import run_view
 
         inject_workdash_local_bin_into_path()
-        return run_view(options.target)
+        return run_view(options.target, item_target=options.view_target)
     if options.command == "branchdiff":
         from .branchdiff import run_branchdiff
 
@@ -202,6 +201,7 @@ class CLIOptions:
     command: str | None = None
     session: str | None = None
     target: str | None = None
+    view_target: str | None = None
     agent: str | None = None
     group: str | None = None
     include_all_panes: bool = False
@@ -407,25 +407,19 @@ class WorkdashCommands:
         json_output: bool,
         automerge: bool = False,
     ) -> int:
-        payload = {"id": target} if stop else {"scope": target, "agent": agent}
-        if not stop and group is not None:
-            payload["group"] = group
-        if not stop and automerge:
-            payload["automerge"] = True
         try:
-            result = self._client.request("autodispatch_stop" if stop else "autodispatch", payload)
-            if not stop and result.pop("issue_scope", False):
-                session_id = result["id"]
-                while not result["initial_check_complete"]:
-                    time.sleep(0.1)
-                    result = self._client.request("autodispatch_status", {"id": session_id})[
-                        "session"
-                    ]
-                    if result is None:
-                        print("Autodispatch session was replaced or removed.", file=sys.stderr)
-                        return 1
+            result = (
+                self._client.request("autodispatch_stop", {"id": target})
+                if stop
+                else self._client.start_autodispatch(
+                    target, agent=agent, group=group, automerge=automerge
+                )
+            )
         except WorkdashControlError as error:
             _print_control_error(error)
+            return 1
+        if result is None:
+            print("Autodispatch session was replaced or removed.", file=sys.stderr)
             return 1
         if json_output:
             print(json.dumps(result, ensure_ascii=True, indent=2))
@@ -571,6 +565,8 @@ class WorkdashCommands:
             suggestion_markers=suggestion_markers,
             zellij_session=zellij_session,
         )
+        host, port = server_address()
+        dashboard_address = f"{host}:{port}"
         app = WorkdashApp(
             work_items=session.work_items,
             suggestion_markers=session.suggestion_markers,
@@ -580,14 +576,18 @@ class WorkdashCommands:
                 needs_pane=config.open_needs_pane,
                 zellij_session=zellij_session,
             ),
-            view_callback=lambda item: open_item_document(item.url, zellij_session=zellij_session),
-            open_markdown_callback=lambda path: open_markdown(
+            view_callback=lambda item: open_item_document(
+                item.url, zellij_session=zellij_session, dashboard_address=dashboard_address
+            ),
+            open_markdown_callback=lambda path, item_url: open_markdown(
                 path,
                 config.analysis_viewer["command"],
                 format=config.analysis_viewer["format"],
                 needs_pane=config.analysis_viewer["needs_pane"],
                 zellij_session=zellij_session,
                 focus=True,
+                item_url=item_url,
+                dashboard_address=dashboard_address,
             ),
             refresh_callback=lambda: (
                 session.list_items(refresh=True)
@@ -647,12 +647,11 @@ class WorkdashCommands:
         records = DashboardRecords()
         try:
             if zellij_session:
-                host, port = server_address()
                 records.save(
                     DashboardRecord(
                         session=zellij_session,
                         pid=os.getpid(),
-                        address=f"{host}:{port}",
+                        address=dashboard_address,
                         pane_id=os.environ.get("ZELLIJ_PANE_ID"),
                     )
                 )
@@ -1099,9 +1098,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
     )
     view_parser.add_argument(
         "target",
-        metavar="TARGET",
-        help="GitHub issue or pull request URL, owner/repo#NUMBER, a number, a local path, "
-        "a file URL, or an HTTP(S) URL.",
+        metavar="DOCUMENT",
+        help="GitHub item URL or ID, an item number, a local path, a file URL, or an HTTP(S) URL.",
+    )
+    view_parser.add_argument(
+        "--target", dest="view_target", metavar="ITEM", help="GitHub item the document is about."
     )
     branchdiff_parser = subparsers.add_parser(
         "branchdiff",
@@ -1164,6 +1165,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> CLIOptions:
         command=namespace.command,
         session=getattr(namespace, "session", None),
         target=getattr(namespace, "target", None),
+        view_target=getattr(namespace, "view_target", None),
         agent=getattr(namespace, "agent", None),
         group=getattr(namespace, "group", None),
         include_all_panes=getattr(namespace, "include_all_panes", False),

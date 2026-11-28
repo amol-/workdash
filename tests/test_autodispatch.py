@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 from rich.cells import cell_len
@@ -21,7 +21,12 @@ from bdd.steps.autodispatch import autodispatch_state as autodispatch_state
 from bdd.steps.autodispatch import blocked_session, wait_for
 from gh_work_state_fake import HEAD_SHA, check_run, comment, install_fake_github, thread, todo_body
 from workdash.config import AgentConfig, WorkdashConfig
-from workdash.control import WorkdashControlError, WorkdashSession, _make_turbogears_app
+from workdash.control import (
+    WorkdashControlClient,
+    WorkdashControlError,
+    WorkdashSession,
+    _make_turbogears_app,
+)
 from workdash.github_client import GitHubClient
 from workdash.models import WorkItem, WorkItemKind, WorkItemType
 from workdash.tui import _MAX_PROGRESS_ERROR_WIDTH, WorkdashApp
@@ -1315,15 +1320,33 @@ def test_tui_progress_keeps_a_failed_error_on_one_plain_line():
     asyncio.run(exercise())
 
 
+def test_client_reports_when_issue_session_disappears_during_first_check(monkeypatch):
+    client = WorkdashControlClient()
+    request = MagicMock(
+        side_effect=[
+            {"id": "abc", "issue_scope": True, "initial_check_complete": False},
+            {"session": None},
+        ]
+    )
+    monkeypatch.setattr(client, "request", request)
+
+    assert client.start_autodispatch("owner/repo#1") is None
+    assert request.call_args_list == [
+        call("autodispatch", {"scope": "owner/repo#1", "agent": None}),
+        call("autodispatch_status", {"id": "abc"}),
+    ]
+
+
 def test_cli_starts_and_stops_through_server(monkeypatch, capsys):
     from workdash.workdash import main
 
-    client = MagicMock()
-    client.request.side_effect = [
-        {"id": "abc", "status": "running", "scope": "owner/repo", "group": "team"},
-        {"id": "abc", "status": "stopped", "scope": "owner/repo", "group": "team"},
-    ]
-    monkeypatch.setattr("workdash.workdash.WorkdashControlClient", lambda *args, **kwargs: client)
+    request = MagicMock(
+        side_effect=[
+            {"id": "abc", "status": "running", "scope": "owner/repo", "group": "team"},
+            {"id": "abc", "status": "stopped", "scope": "owner/repo", "group": "team"},
+        ]
+    )
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
     assert (
         main(
             [
@@ -1340,7 +1363,7 @@ def test_cli_starts_and_stops_through_server(monkeypatch, capsys):
         == 0
     )
     assert json.loads(capsys.readouterr().out)["id"] == "abc"
-    client.request.assert_called_with(
+    request.assert_called_with(
         "autodispatch",
         {
             "scope": "owner/repo",
@@ -1350,23 +1373,19 @@ def test_cli_starts_and_stops_through_server(monkeypatch, capsys):
         },
     )
     assert main(["autodispatch-stop", "abc"]) == 0
-    client.request.assert_called_with("autodispatch_stop", {"id": "abc"})
+    request.assert_called_with("autodispatch_stop", {"id": "abc"})
     assert "stopped" in capsys.readouterr().out
 
 
 def test_cli_omits_group_and_reports_automatic_group(monkeypatch, capsys):
     from workdash.workdash import main
 
-    client = MagicMock()
-    client.request.return_value = {
-        "id": "abc",
-        "status": "running",
-        "scope": "owner/repo",
-        "group": None,
-    }
-    monkeypatch.setattr("workdash.workdash.WorkdashControlClient", lambda *args, **kwargs: client)
+    request = MagicMock(
+        return_value={"id": "abc", "status": "running", "scope": "owner/repo", "group": None}
+    )
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
     assert main(["autodispatch", "owner/repo"]) == 0
-    client.request.assert_called_with("autodispatch", {"scope": "owner/repo", "agent": None})
+    request.assert_called_with("autodispatch", {"scope": "owner/repo", "agent": None})
     assert "None" not in capsys.readouterr().out
 
 
@@ -4132,12 +4151,14 @@ def test_issue_cli_returns_while_ready_work_is_launching(autodispatch_state, mon
 
     monkeypatch.setattr(session, "code", code)
     commands = WorkdashCommands()
-    commands._client = MagicMock(
-        request=lambda endpoint, payload: (
+    monkeypatch.setattr(
+        commands._client,
+        "request",
+        lambda endpoint, payload: (
             session.start_autodispatch(**payload)
             if endpoint == "autodispatch"
             else session.autodispatch_status(payload["id"])
-        )
+        ),
     )
     thread = threading.Thread(
         target=lambda: (
@@ -4172,12 +4193,14 @@ def test_stopping_session_releases_issue_cli_waiting_for_readiness(
 
     monkeypatch.setattr(session, "dispatch_once", dispatch)
     commands = WorkdashCommands()
-    commands._client = MagicMock(
-        request=lambda endpoint, payload: (
+    monkeypatch.setattr(
+        commands._client,
+        "request",
+        lambda endpoint, payload: (
             session.start_autodispatch(**payload)
             if endpoint == "autodispatch"
             else session.autodispatch_status(payload["id"])
-        )
+        ),
     )
     thread = threading.Thread(
         target=lambda: (

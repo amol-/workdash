@@ -64,7 +64,13 @@ def test_local_viewer_receives_encoded_url_with_correct_content(tmp_path, monkey
     opened = MagicMock()
     opened.return_value.wait.return_value = 0
     monkeypatch.setattr(launcher.subprocess, "Popen", opened)
-    launcher.open_markdown(str(path), "viewer --quiet", format=format)
+    launcher.open_markdown(
+        str(path),
+        "viewer --quiet",
+        format=format,
+        item_url="https://github.com/owner/repo/issues/42",
+        dashboard_address="127.0.0.1:8766",
+    )
     expected = path if format == "markdown" else path.with_suffix(".html")
     opened.assert_called_once_with(
         ["viewer", "--quiet", expected.as_uri()],
@@ -97,6 +103,35 @@ def test_pane_viewer_receives_literal_local_markdown_url_and_focus(tmp_path, mon
         "workdash-main", ["term-view", "--quiet", path.as_uri()], executable="term-view"
     )
     focus.assert_called_once_with("workdash-main", "terminal_17")
+
+
+@pytest.mark.parametrize("needs_pane", [False, True], ids=["direct", "pane"])
+def test_builtin_analysis_viewer_receives_item_as_target_argument(
+    tmp_path, monkeypatch, needs_pane
+):
+    path = tmp_path / "analysis with spaces.md"
+    path.write_text("# Analysis")
+    item_url = "https://github.com/owner/repo/pull/42"
+    opened = MagicMock(return_value="terminal_17")
+    process = MagicMock()
+    process.return_value.wait.return_value = 0
+    monkeypatch.setattr(launcher.zellij, "open_viewer", opened)
+    monkeypatch.setattr(launcher.subprocess, "Popen", process)
+
+    launcher.open_markdown(
+        str(path),
+        "workdash view",
+        format="markdown",
+        needs_pane=needs_pane,
+        zellij_session="workdash-main",
+        item_url=item_url,
+        dashboard_address="127.0.0.1:8766",
+    )
+
+    argv = opened.call_args.args[1] if needs_pane else process.call_args.args[0]
+    assert argv[-4:] == ["view", path.as_uri(), "--target", item_url]
+    assert f"_WORKDASH_RESOLVED_VIEW_TARGET={item_url}" in argv
+    assert "WORKDASH_HOST=127.0.0.1:8766" in argv
 
 
 def test_direct_analysis_viewer_keeps_running_without_blocking(tmp_path):
@@ -804,7 +839,7 @@ def test_markdown_viewer_reports_a_github_link_that_cannot_be_fetched(monkeypatc
     assert observed["source"].startswith("# Analysis\n")
 
 
-def test_back_during_a_failed_load_keeps_the_status_clear(tmp_path, monkeypatch):
+def test_back_during_a_failed_load_restores_the_previous_status(tmp_path, monkeypatch):
     first = tmp_path / "analysis.md"
     first.write_text("# First\n\n[Next](second.md)\n", encoding="utf-8")
     (tmp_path / "second.md").write_text("# Second\n\n[Broken](missing.md)\n", encoding="utf-8")
@@ -836,4 +871,5 @@ def test_back_during_a_failed_load_keeps_the_status_clear(tmp_path, monkeypatch)
     _run_viewer(monkeypatch, exercise)
     assert view.run_view(str(first)) == 0
 
-    assert observed == {"status": "", "source": "# First\n\n[Next](second.md)\n"}
+    assert observed["source"] == "# First\n\n[Next](second.md)\n"
+    assert "no GitHub item" in observed["status"] and "broken" not in observed["status"]

@@ -1,22 +1,31 @@
 """Dashboard and terminal viewer analysis journeys."""
 
 import asyncio
+import io
+import json
 import shlex
 import subprocess
 import sys
-from functools import partial
+import urllib.request
 from threading import Event
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from pytest_bdd import given, parsers, then, when
-from textual.widgets import DataTable, Markdown, Static
+from textual.app import App
+from textual.widgets import DataTable, Markdown, OptionList, Static
 
 from pane_launch_fake import install_pane_launch
-from workdash import launcher
+from view_fake import fake_gh_view_run
+from workdash import dashboard_record, launcher, view, workdash
 from workdash.backend import WorkdashBackend
 from workdash.config import AgentConfig, WorkdashConfig
-from workdash.control import WorkdashSession, format_work_item_id
+from workdash.control import (
+    WorkdashSession,
+    format_work_item_id,
+    show_config_payload,
+)
 from workdash.github_client import GitHubClient
 from workdash.included_items import IncludedItemsStore
 from workdash.tui import AnalyzeDialog, WorkdashApp
@@ -138,6 +147,108 @@ def _saved_analysis(analysis_dashboard):
     items, _ = backend.load_items()
     backend.analysis_cache.save(items[0], "# Saved analysis\n\nKeep the cards.")
     _selected_item(analysis_dashboard)
+
+
+@given("an issue is selected with a saved analysis and the built-in viewer is configured")
+def _saved_issue_analysis(analysis_dashboard, tmp_path):
+    _saved_analysis(analysis_dashboard)
+    config = analysis_dashboard["backend"].config
+    executable = str(tmp_path / "custom bin" / "workdash")
+    config.analysis_viewer.update(
+        command=shlex.join([executable, "view"]), format="markdown", needs_pane=True
+    )
+    config.agents["studio"] = AgentConfig(launch="studio", analyze="studio -p")
+
+
+@given("the viewer cannot reach GitHub", target_fixture="offline_github")
+def _offline_github():
+    return MagicMock(side_effect=fake_gh_view_run({}, fails=True))
+
+
+@when(
+    'the user opens the saved analysis with "a" twice and chooses a coding agent with "c"',
+    target_fixture="coding_status",
+)
+def _code_from_saved_analysis(analysis_dashboard, tmp_path, monkeypatch, offline_github):
+    backend = analysis_dashboard["backend"]
+    config = backend.config
+    issue = analysis_dashboard["issue"]
+    viewer_args = []
+    viewer_env = {}
+
+    def open_viewer(session, argv, *, executable):
+        assert session == "workdash-main"
+        executable_index = argv.index(executable)
+        viewer_args.extend(argv[executable_index + 1 :])
+        if argv[4:5] == ["env"]:
+            viewer_env.update(arg.split("=", 1) for arg in argv[5:executable_index])
+        return "terminal_17"
+
+    async def open_saved_analysis(app):
+        async with app.run_test() as pilot:
+            await pilot.press("a", "a")
+            await _wait_for(pilot, lambda: bool(viewer_args))
+
+    monkeypatch.setattr(launcher.zellij, "open_viewer", open_viewer)
+    monkeypatch.setattr(
+        workdash.WorkdashCommands, "_load_config_and_backend", lambda _: (config, backend)
+    )
+    monkeypatch.setattr(workdash, "WorkdashControlServer", MagicMock())
+    monkeypatch.setattr(dashboard_record, "SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "workdash-main")
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:8766")
+    with patch.object(WorkdashApp, "run", lambda app, **_: asyncio.run(open_saved_analysis(app))):
+        assert workdash.WorkdashCommands().interactive() == 0
+
+    dashboard_address = "127.0.0.1:8766"
+
+    def open_request(request, *, timeout):
+        if request.host != dashboard_address:
+            raise ConnectionRefusedError(request.host)
+        if request.selector == "/api/v0/info":
+            result = {"session": "workdash-main"}
+        elif request.selector == "/api/v0/show_config":
+            result = show_config_payload(config)
+        else:
+            assert request.selector == "/api/v0/code"
+            assert json.loads(request.data) == {"target": issue["url"], "agent": "studio"}
+            result = {"status": "launched", "pane_id": "terminal_31"}
+        response = io.BytesIO(json.dumps({"ok": True, "result": result}).encode())
+        response.geturl = lambda: request.full_url
+        return response
+
+    async def choose_agent(app):
+        async with app.run_test() as pilot:
+            await _wait_for(pilot, lambda: app.screen.active_bindings["c"].enabled)
+            screenshot = app.export_screenshot().replace("&#160;", " ")
+            assert "Saved analysis" in screenshot and "Keep the cards." in screenshot
+            assert app.screen.active_bindings["d"].enabled
+            await pilot.press("c")
+            assert app.screen.query_one(OptionList).get_option_at_index(0).prompt == "studio"
+            await pilot.press("enter")
+            status = app.query_one("#status", Static)
+            await _wait_for(pilot, lambda: "terminal_31" in status.render().plain)
+            return status.render().plain
+
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:8767")
+    monkeypatch.delenv("_WORKDASH_RESOLVED_VIEW_TARGET", raising=False)
+    for name, value in viewer_env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(view, "load_config", lambda: config)
+    monkeypatch.setattr(view.subprocess, "run", offline_github)
+    monkeypatch.setattr(
+        urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_request)
+    )
+    statuses = []
+    with patch.object(App, "run", lambda app: statuses.append(asyncio.run(choose_agent(app)))):
+        assert workdash.main(viewer_args) == 0
+    offline_github.assert_not_called()
+    return statuses[0]
+
+
+@then("the saved analysis viewer reports the launched coding pane")
+def _saved_analysis_coding_pane(coding_status):
+    assert coding_status == "Code launched: pane terminal_31"
 
 
 @given("the work item changes on GitHub")
@@ -266,11 +377,8 @@ async def _use_analysis_menu(dashboard, choice):
         analyze_callback=lambda item, tool: session.analyze(
             target=format_work_item_id(item), agent=tool, prefer_cache=tool == "cached"
         )["path"],
-        open_markdown_callback=partial(
-            launcher.open_markdown,
-            zellij_session=zellij_session,
-            focus=True,
-            **viewer,
+        open_markdown_callback=lambda path, _item_url: launcher.open_markdown(
+            path, zellij_session=zellij_session, focus=True, **viewer
         ),
         session=session,
     )
