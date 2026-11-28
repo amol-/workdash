@@ -26,8 +26,8 @@ been tested on Windows.
   `workdash --configure` installs a local copy when `zellij` is not available.
 - Global `gh` and `zellij` binaries are preferred; configured local copies are
   used as fallbacks.
-- At least one agent command-line tool (for example `claude`, `codex`, or `pi`;
-  see *Agents* below) to analyze items or launch coding sessions.
+- At least one agent command-line tool (for example `claude`, `codex`, `pi`, or
+  `vibe`; see *Agents* below) to analyze items or launch coding sessions.
 - Optional: `code` — to launch a VSCode + Copilot coding session.
 
 ## Installation
@@ -69,8 +69,8 @@ The wizard fills in:
   Managed User login), enter an explicit `owner/repo` instead of accepting the
   usual `<username>/todos` default (see *Todos* below).
 - A working directory where per-item git worktrees will live.
-- The agents (see *Agents* below): `claude`, `codex`, and `pi` are added with
-  their default commands when they are on your `PATH`, and you can add more.
+- The agents (see *Agents* below): `claude`, `codex`, `pi`, and `vibe` are added
+  with their default commands when they are on your `PATH`, and you can add more.
 
 ### URL and analysis viewer
 
@@ -139,8 +139,8 @@ the command as its last argument and runs it through your `$SHELL`, so aliases
 work too. At least one agent is required.
 
 The wizard asks about agents only when none is configured: it adds `claude`,
-`codex`, and `pi` when found on your `PATH`, then asks for more analyze and
-launch commands, each with a name. The TUI numbers its entries with single
+`codex`, `pi`, and `vibe` when found on your `PATH`, then asks for more analyze
+and launch commands, each with a name. The TUI numbers its entries with single
 keys, so the wizard accepts at most 9 analysis agents and 9 coding agents.
 
 ## Usage

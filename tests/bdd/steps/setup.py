@@ -114,6 +114,13 @@ def claude_is_installed(setup_cli):
     assert (setup_cli["bin"] / "claude").is_file()
 
 
+@given("Mistral Vibe is installed")
+def vibe_is_installed(setup_cli):
+    script = setup_cli["bin"] / "vibe"
+    script.write_text("#!/bin/sh\nexit 1\n")
+    script.chmod(0o755)
+
+
 @given("no supported agent is installed")
 def remove_detectable_agents(setup_cli):
     (setup_cli["bin"] / "claude").unlink()
@@ -227,6 +234,13 @@ def saves_todo_destination(setup_cli, repo):
 def saves_detected_claude(setup_cli):
     assert "Detected 'claude' on PATH" in setup_cli["output"]
     assert "claude" in config.load_config(setup_cli["path"]).agents
+
+
+@then("the wizard reports detecting Mistral Vibe and saves its prompt and session commands")
+def saves_detected_vibe(setup_cli):
+    assert "Detected 'vibe' on PATH, using analyze: vibe -p, launch: vibe" in setup_cli["output"]
+    agent = config.load_config(setup_cli["path"]).agents["vibe"]
+    assert (agent.analyze, agent.launch) == ("vibe -p", "vibe")
 
 
 @then("the wizard explains that an agent is required")
