@@ -22,15 +22,48 @@ With [`uv`](https://docs.astral.sh/uv/):
 uv tool install workdash
 ```
 
-On the first run, `workdash` starts an interactive setup wizard that asks for:
+### First run
 
-- your GitHub username,
-- the repositories to track (`owner/*` by default),
-- the todo repository and the working directory for per-item worktrees,
-- the agents to use (found on your `PATH` are added automatically).
+On the first run, `workdash` starts an interactive setup wizard. If `gh` or
+`zellij` are not on your `PATH`, it downloads local copies automatically (run
+`gh auth login` to authenticate). A typical first run looks like this
+(user input shown after the prompts):
 
-If `gh` or `zellij` are not on your `PATH`, the wizard downloads local copies;
-run `gh auth login` if `gh` is not authenticated. Re-run the wizard at any time
+```text
+$ workdash
+Zellij is not on PATH. Installing a local Zellij binary from
+https://github.com/zellij-org/zellij/releases/latest/download/zellij-x86_64-unknown-linux-musl.tar.gz.
+To use a global Zellij instead, install it separately and make sure it is on PATH.
+Installed Zellij to: /home/octocat/.config/workdash/bin/zellij
+GitHub CLI is not on PATH. Installing a local GitHub CLI binary from
+https://github.com/cli/cli/releases/latest.
+To use a global GitHub CLI instead, install it separately and make sure it is on PATH.
+Installed GitHub CLI to: /home/octocat/.config/workdash/bin/gh
+Open command [xdg-open] (Enter to accept):
+Does the viewer require its own terminal window? [y/N]
+Analysis viewer [workdash view]:
+Detected 'claude' on PATH, using analyze: claude -p, launch: claude
+Detected 'codex' on PATH, using analyze: codex exec, launch: codex
+Agents for analyze (at most 9), commands that run once and print the analysis, e.g. claude -p:
+  claude: claude -p
+  codex: codex exec
+Agents for analyze, add a command (empty to finish):
+Agents for code (at most 9), commands that start an interactive coding session, e.g. claude:
+  claude: claude
+  codex: codex
+Agents for code, add a command (empty to finish):
+GitHub username: octocat
+Work directory [~/wrk]:
+Repositories set to: octocat/*
+Todo repository [octocat/todos]:
+Configuration saved to /home/octocat/.config/workdash/config.json.
+Run 'workdash' again to start the dashboard.
+```
+
+The wizard asks for your GitHub username, the viewer command, the analysis
+viewer, the agents to use (tools found on your `PATH` are added automatically),
+the working directory for per-item worktrees, the repositories to track
+(`<username>/*` by default), and the todo repository. Re-run it at any time
 with `workdash --configure`.
 
 ## Using workdash
