@@ -31,14 +31,12 @@ On the first run, `workdash` starts an interactive setup wizard. If `gh` or
 
 ```text
 $ workdash
-Zellij is not on PATH. Installing a local Zellij binary from
-https://github.com/zellij-org/zellij/releases/latest/download/zellij-x86_64-unknown-linux-musl.tar.gz.
-To use a global Zellij instead, install it separately and make sure it is on PATH.
+Zellij is not on PATH. Installing a local Zellij binary from https://.../zellij-x86_64-unknown-linux-musl.tar.gz.
 Installed Zellij to: /home/octocat/.config/workdash/bin/zellij
-GitHub CLI is not on PATH. Installing a local GitHub CLI binary from
-https://github.com/cli/cli/releases/latest.
-To use a global GitHub CLI instead, install it separately and make sure it is on PATH.
+
+GitHub CLI is not on PATH. Installing a local GitHub CLI binary from https://.../latest.
 Installed GitHub CLI to: /home/octocat/.config/workdash/bin/gh
+
 Open command [xdg-open] (Enter to accept):
 Does the viewer require its own terminal window? [y/N]
 Analysis viewer [workdash view]:
@@ -56,6 +54,7 @@ GitHub username: octocat
 Work directory [~/wrk]:
 Repositories set to: octocat/*
 Todo repository [octocat/todos]:
+
 Configuration saved to /home/octocat/.config/workdash/config.json.
 Run 'workdash' again to start the dashboard.
 ```
