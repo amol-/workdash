@@ -13,6 +13,13 @@
 - **Keep changes focused.** One logical change per pull request.
 - **No unrelated cleanup.** Don't mix refactors with feature or bug fix PRs.
 
+## Product behavior
+
+Canonical product behavior is described in [`features/`](features/). The
+`.feature` files are the source of truth for what the software does: they are
+product specifications first and executable BDD scenarios second. BDD is the
+integration point between humans and agents collaborating on the project.
+
 ## Releases
 
 Releases are cut by pushing a version tag in `N.N.N` format. The tag must match
