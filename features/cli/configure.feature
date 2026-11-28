@@ -28,6 +28,16 @@ Feature: Configure Workdash from the command line
       | Agents for code    | Enter  |
     Then the wizard reports detecting Claude and saves a configuration with Claude
 
+  @id:F-SETUP-CONFIGURE-S034
+  Scenario: Use an installed Mistral Vibe without entering its commands
+    Given the user has no Workdash configuration
+    And Mistral Vibe is installed
+    When the user runs `workdash --configure` and answers the wizard:
+      | prompt             | answer |
+      | Agents for analyze | Enter  |
+      | Agents for code    | Enter  |
+    Then the wizard reports detecting Mistral Vibe and saves its prompt and session commands
+
   @id:F-SETUP-CONFIGURE-S015
   Scenario: Continue setup after skipping agent selection
     Given the user has no Workdash configuration

@@ -620,7 +620,7 @@ def test_configure_fresh_adds_detected_agents_in_order_and_asks_username(tmp_pat
     config = configure(
         config_path,
         input_fn=input_fn,
-        which_fn=_on_path("zellij", "gh", "pi", "claude", "codex", "xdg-open"),
+        which_fn=_on_path("zellij", "gh", "pi", "claude", "codex", "vibe", "xdg-open"),
     )
 
     assert config.open_command == "xdg-open"
@@ -637,6 +637,7 @@ def test_configure_fresh_adds_detected_agents_in_order_and_asks_username(tmp_pat
         ("claude", AgentConfig(analyze="claude -p", launch="claude")),
         ("codex", AgentConfig(analyze="codex exec", launch="codex")),
         ("pi", AgentConfig(analyze="pi -p", launch="pi")),
+        ("vibe", AgentConfig(analyze="vibe -p", launch="vibe")),
     ]
     assert config.workdir == "~/projects"
     assert config.repositories == ("octocat/*",)
@@ -644,11 +645,13 @@ def test_configure_fresh_adds_detected_agents_in_order_and_asks_username(tmp_pat
         "claude",
         "codex",
         "pi",
+        "vibe",
     ]
     output = capsys.readouterr().out
     assert "Detected 'claude' on PATH" in output
     assert "Detected 'codex' on PATH" in output
     assert "Detected 'pi' on PATH, using analyze: pi -p" in output
+    assert "Detected 'vibe' on PATH, using analyze: vibe -p, launch: vibe" in output
     assert "Repositories set to: octocat/*" in output
     assert "Detected 'zellij' on PATH: /usr/bin/zellij" in output
     assert json.loads(config_path.read_text())["listens"] == []
@@ -932,7 +935,7 @@ def test_configure_requires_an_agent_before_saving(tmp_path, capsys, shell_with_
 
     output = capsys.readouterr().out
     assert output.index(
-        "No supported agent found on PATH (looked for claude, codex, pi)"
+        "No supported agent found on PATH (looked for claude, codex, pi, vibe)"
     ) < output.index("At least one agent is required")
     assert sum(prompt.startswith("Agents for analyze") for prompt in prompts) == 3
     assert load_config(config_path).agents == {"mine": AgentConfig(analyze="my-agent -p")}

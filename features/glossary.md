@@ -34,7 +34,7 @@ Canonical product vocabulary used by the feature files.
 - Analysis: A cached AI-generated summary and recommendation for a work item, viewable as rendered HTML.
 - Analysis cache: The local store of previously generated analyses, keyed so that GitHub updates invalidate stale entries.
 - Coding session: An interactive session with a supported coding agent, launched in the item's worktree and preloaded with work item context.
-- Agent: A named command-line tool the user configures to analyze work items (its analyze command), to code on them (its launch command), or both. The task prompt is appended as the last argument of its command. The configuration wizard detects Claude, ChatGPT Codex, and pi automatically.
+- Agent: A named command-line tool the user configures to analyze work items (its analyze command), to code on them (its launch command), or both. The task prompt is appended as the last argument of its command. The configuration wizard detects Claude, ChatGPT Codex, pi, and Mistral Vibe automatically.
 - Analysis agent: An agent with an analyze command.
 - Supported coding agent: An agent with a launch command, or VSCode Copilot, which the TUI offers as an editor launch.
 - Terminal-backed work action: A work action that opens a shell or terminal-hosted coding agent for a work item.

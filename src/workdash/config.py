@@ -46,6 +46,7 @@ _DETECTABLE_AGENTS = {
     "claude": ("claude -p", "claude"),
     "codex": ("codex exec", "codex"),
     "pi": ("pi -p", "pi"),
+    "vibe": ("vibe -p", "vibe"),
 }
 # Names that mean something else inside Workdash (the analyze dialog's cached analysis and
 # the code dialog's editor launch).
