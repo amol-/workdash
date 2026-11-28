@@ -13,6 +13,7 @@ import pytest
 from textual.widgets import Static
 
 from gh_work_state_fake import HEAD_SHA
+from workdash.control import WorkdashControlClient
 from workdash.models import WorkItemKind, WorkItemType
 from workdash.tui import WorkdashApp
 
@@ -331,7 +332,6 @@ def test_cli_start_json_reports_cross_repository_blocker_without_zellij(
     scenario_state, monkeypatch, capsys
 ):
     import json
-    from unittest.mock import MagicMock
 
     from webob import Request
 
@@ -343,7 +343,7 @@ def test_cli_start_json_reports_cross_repository_blocker_without_zellij(
     github.issues["other/repo#3"]["blocked_by"] = ("another/repo#5",)
     app = _make_turbogears_app(scenario_state["dashboard_session"])
 
-    def request(endpoint, payload):
+    def request(_client, endpoint, payload):
         response = Request.blank(
             f"/api/v0/{endpoint}",
             method="POST",
@@ -359,10 +359,7 @@ def test_cli_start_json_reports_cross_repository_blocker_without_zellij(
     )
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setattr(
-        "workdash.workdash.WorkdashControlClient",
-        lambda *args, **kwargs: MagicMock(request=request),
-    )
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
 
     assert main(["autodispatch", "other/repo#3", "--json"]) == 0
     result = json.loads(capsys.readouterr().out)
@@ -400,7 +397,7 @@ def test_blocker_is_reported_by_cli_and_info(scenario_state, capsys, monkeypatch
     )
     app = _make_turbogears_app(session)
 
-    def request(endpoint, payload):
+    def request(_client, endpoint, payload):
         response = Request.blank(
             f"/api/v0/{endpoint}",
             method="POST",
@@ -410,8 +407,8 @@ def test_blocker_is_reported_by_cli_and_info(scenario_state, capsys, monkeypatch
         assert response.status_int == 200
         return json.loads(response.body)["result"]
 
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
     commands = WorkdashCommands()
-    commands._client = MagicMock(request=request)
     assert (
         commands.autodispatch_cli(
             target="other/repo#3", agent="pi", group=None, stop=False, json_output=False
@@ -488,7 +485,6 @@ def test_blockers_clear_after_readiness(scenario_state, monkeypatch):
 @pytest.mark.parametrize("json_output", [False, True])
 def test_blocker_lookup_failure_is_reported(scenario_state, monkeypatch, capsys, json_output):
     import json
-    from unittest.mock import MagicMock
 
     from webob import Request
 
@@ -506,7 +502,7 @@ def test_blocker_lookup_failure_is_reported(scenario_state, monkeypatch, capsys,
     monkeypatch.setattr(github, "_IssueBlockers", fail)
     app = _make_turbogears_app(session)
 
-    def request(endpoint, payload):
+    def request(_client, endpoint, payload):
         response = Request.blank(
             f"/api/v0/{endpoint}",
             method="POST",
@@ -516,10 +512,7 @@ def test_blocker_lookup_failure_is_reported(scenario_state, monkeypatch, capsys,
         assert response.status_int == 200
         return json.loads(response.body)["result"]
 
-    monkeypatch.setattr(
-        "workdash.workdash.WorkdashControlClient",
-        lambda *args, **kwargs: MagicMock(request=request),
-    )
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
     args = ["autodispatch", "other/repo#3"] + (["--json"] if json_output else [])
     assert main(args) == 1
     output = capsys.readouterr()
@@ -610,7 +603,7 @@ def test_cli_issue_readiness_failure_exits_nonzero(scenario_state, monkeypatch, 
     )
     app = _make_turbogears_app(session)
 
-    def request(endpoint, payload):
+    def request(_client, endpoint, payload):
         response = Request.blank(
             f"/api/v0/{endpoint}",
             method="POST",
@@ -620,10 +613,7 @@ def test_cli_issue_readiness_failure_exits_nonzero(scenario_state, monkeypatch, 
         assert response.status_int == 200
         return json.loads(response.body)["result"]
 
-    monkeypatch.setattr(
-        "workdash.workdash.WorkdashControlClient",
-        lambda *args, **kwargs: MagicMock(request=request),
-    )
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
     assert main(["autodispatch", "other/repo#3"]) == 1
     assert "readiness unavailable" in capsys.readouterr().err
 
@@ -632,7 +622,6 @@ def test_cli_issue_readiness_failure_exits_nonzero(scenario_state, monkeypatch, 
 def test_cli_repository_scope_does_not_poll(scenario_state, monkeypatch, capsys):
     import json
     import threading
-    from unittest.mock import MagicMock
 
     from webob import Request
 
@@ -647,7 +636,7 @@ def test_cli_repository_scope_does_not_poll(scenario_state, monkeypatch, capsys)
     app = _make_turbogears_app(session)
     endpoints = []
 
-    def request(endpoint, payload):
+    def request(_client, endpoint, payload):
         endpoints.append(endpoint)
         response = Request.blank(
             f"/api/v0/{endpoint}",
@@ -658,10 +647,7 @@ def test_cli_repository_scope_does_not_poll(scenario_state, monkeypatch, capsys)
         assert response.status_int == 200
         return json.loads(response.body)["result"]
 
-    monkeypatch.setattr(
-        "workdash.workdash.WorkdashControlClient",
-        lambda *args, **kwargs: MagicMock(request=request),
-    )
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
     try:
         assert main(["autodispatch", "owner/repo"]) == 0
         assert endpoints == ["autodispatch"]
@@ -692,7 +678,7 @@ def test_cli_stops_failed_session_successfully(scenario_state, monkeypatch, caps
         time.sleep(0.01)
     app = _make_turbogears_app(session)
 
-    def request(endpoint, payload):
+    def request(_client, endpoint, payload):
         response = Request.blank(
             f"/api/v0/{endpoint}",
             method="POST",
@@ -702,10 +688,7 @@ def test_cli_stops_failed_session_successfully(scenario_state, monkeypatch, caps
         assert response.status_int == 200
         return json.loads(response.body)["result"]
 
-    monkeypatch.setattr(
-        "workdash.workdash.WorkdashControlClient",
-        lambda *args, **kwargs: MagicMock(request=request),
-    )
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
     args = ["autodispatch-stop", started["id"]] + (["--json"] if json_output else [])
     assert main(args) == 0
     output = capsys.readouterr()

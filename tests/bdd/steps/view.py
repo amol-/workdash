@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from pytest_bdd import given, parsers, then, when
 from textual.app import App
+from textual.widgets import OptionList, Static
 
 from gh_work_state_fake import AFTER_PUSH, HEAD_SHA, FakeGitHub, check_run, review
 from view_fake import (
@@ -37,8 +38,35 @@ def _pull_request_with_discussion(scenario_state: dict[str, Any]) -> None:
     scenario_state["gh_routes"] = pull_request_routes()
 
 
-@when(parsers.parse('I run `workdash view "{target}"`'))
-def _view_target(target, scenario_state, monkeypatch):
+@given("the Workdash server offers a coding agent for the viewer")
+@given("the Workdash server offers an agent that can code and analyze")
+def _viewer_launch_server(scenario_state, monkeypatch):
+    monkeypatch.delenv("ZELLIJ_SESSION_NAME", raising=False)
+    scenario_state["viewer_agents"] = {"code": ["studio"], "analyze": ["studio"]}
+
+
+@when(
+    parsers.re(
+        r'I run `workdash view "(?P<target>[^"]+)"(?: --target "(?P<item>[^"]+)")?`'
+        r'(?: and choose an agent with "(?P<key>[cd])")?'
+    )
+)
+def _view_target(target, scenario_state, monkeypatch, item=None, key=None):
+    assert _run_view(target, item, key, scenario_state, monkeypatch) == 0
+
+
+@when(
+    parsers.re(
+        r'I run `workdash view "(?P<target>[^"]+)" --target "(?P<item>[^"]+)"`'
+        r" expecting failure"
+    )
+)
+def _view_target_fails(target, item, scenario_state, monkeypatch, capsys):
+    assert _run_view(target, item, None, scenario_state, monkeypatch) == 1
+    scenario_state["error"] = capsys.readouterr().err
+
+
+def _run_view(target, item, key, scenario_state, monkeypatch):
     monkeypatch.setattr(
         view.subprocess,
         "run",
@@ -48,26 +76,115 @@ def _view_target(target, scenario_state, monkeypatch):
         ),
     )
 
-    def info(_client, endpoint, **kwargs):
-        assert endpoint == "info"
-        if "project_panes" not in scenario_state:
-            raise WorkdashControlError("server_unreachable", "No Workdash server")
-        return {"session": "workdash-test", "panes": scenario_state["project_panes"]}
+    def request(_client, endpoint, payload=None, **kwargs):
+        if endpoint == "info" and "project_panes" in scenario_state:
+            return {"session": "workdash-test", "panes": scenario_state["project_panes"]}
+        if endpoint == "show_config" and "viewer_agents" in scenario_state:
+            return {"agents": scenario_state["viewer_agents"]}
+        if endpoint == "code":
+            assert payload == {
+                "target": "https://github.com/owner/repo/issues/12",
+                "agent": "studio",
+            }
+            return {"status": "launched", "pane_id": "terminal_17"}
+        if endpoint == "autodispatch":
+            assert payload == {
+                "scope": "https://github.com/owner/repo/issues/12",
+                "agent": "studio",
+            }
+            return {
+                "id": "dispatch-1",
+                "status": "completed",
+                "issue_scope": True,
+                "initial_check_complete": True,
+                "outcome": "No ready work found.",
+            }
+        raise WorkdashControlError("server_unreachable", "No Workdash server")
 
     def run(app):
         async def exercise():
             async with app.run_test(size=(160, 100)) as pilot:
-                await pilot.pause()
+                status = app.query_one("#status", Static)
+                if key:
+                    async with asyncio.timeout(4):
+                        while app.screen.active_bindings[key].enabled is not True:
+                            await pilot.pause(0.01)
+                    await pilot.press(key)
+                    assert app.screen.query_one(OptionList).option_count == 1
+                    await pilot.press("enter")
+                    async with asyncio.timeout(4):
+                        while not status.render().plain.startswith(
+                            ("Code launched", "Autodispatch dispatch-1")
+                        ):
+                            await pilot.pause(0.01)
+                    scenario_state["launch_status"] = status.render().plain
+                else:
+                    await _wait_for_launch_actions(pilot, app)
+                scenario_state["actions"] = {
+                    name: app.screen.active_bindings[name].enabled
+                    for name in "cd"
+                    if name in app.screen.active_bindings
+                }
+                scenario_state["status"] = status.render().plain
                 scenario_state["screen"] = unescape(app.export_screenshot()).replace("\xa0", " ")
                 scenario_state["document"] = app._document.content
                 await pilot.press("q")
 
         asyncio.run(exercise())
 
-    monkeypatch.setattr(WorkdashControlClient, "request", info)
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
     monkeypatch.setattr(view, "load_config", lambda: WorkdashConfig(github_username="testuser"))
     monkeypatch.setattr(App, "run", run)
-    assert main(["view", target]) == 0
+    return main(["view", target, *(["--target", item] if item else [])])
+
+
+async def _wait_for_launch_actions(pilot, app):
+    """Wait until discovery settled: actions available, or disabled for a named reason."""
+    status = app.query_one("#status", Static)
+    async with asyncio.timeout(4):
+        while True:
+            plain = status.render().plain
+            if (
+                app.screen.active_bindings["c"].enabled is True
+                or "unavailable" in plain
+                or "no GitHub item" in plain
+            ):
+                return
+            await pilot.pause(0.01)
+
+
+@then("the viewer offers coding but not dispatch")
+def _viewer_code_only(scenario_state):
+    assert scenario_state["actions"] == {"c": True}
+    assert "unavailable" not in scenario_state["status"]
+
+
+@then("the viewer offers no launch actions because the document names no item")
+def _viewer_no_item(scenario_state):
+    assert scenario_state["actions"] == {"c": False, "d": False}
+    assert "no GitHub item" in scenario_state["status"]
+
+
+@then("the viewer offers no launch actions because no server is reachable")
+def _viewer_no_server(scenario_state):
+    assert scenario_state["actions"] == {"c": False, "d": False}
+    assert "No Workdash server" in scenario_state["status"]
+
+
+@then("the command reports the conflict between the document and --target")
+def _view_target_conflict(scenario_state):
+    assert "conflicts with --target" in scenario_state["error"]
+
+
+@then("the viewer reports the launched coding pane")
+def _viewer_coding_pane(scenario_state):
+    assert scenario_state["launch_status"] == "Code launched: pane terminal_17"
+
+
+@then("the viewer reports the autodispatch session for the issue")
+def _viewer_dispatch_session(scenario_state):
+    assert "Autodispatch dispatch-1" in scenario_state["launch_status"]
+    assert "No ready work found." in scenario_state["launch_status"]
 
 
 @then("the document shows the issue metadata, description, sub-issues and comments")

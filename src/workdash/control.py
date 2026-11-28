@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import logging
 import mimetypes
@@ -1843,9 +1844,10 @@ class WorkdashControlServer:
 class WorkdashControlClient:
     """HTTP client used by thin CLI commands."""
 
-    def __init__(self, host: str | None = None) -> None:
+    def __init__(self, host: str | None = None, *, direct: bool = False) -> None:
         selected_host, port = server_address(host)
         self._address = f"{selected_host}:{port}"
+        self._direct = direct
 
     def request(
         self,
@@ -1856,8 +1858,33 @@ class WorkdashControlClient:
         direct: bool = False,
     ) -> dict[str, object]:
         return _dashboard_api_result(
-            self._address, endpoint, payload, timeout=timeout, direct=direct
+            self._address, endpoint, payload, timeout=timeout, direct=direct or self._direct
         )
+
+    def start_autodispatch(
+        self,
+        scope: str,
+        *,
+        agent: str | None = None,
+        group: str | None = None,
+        automerge: bool = False,
+    ) -> dict[str, object] | None:
+        """Start a session and await an issue's first check, or None if it disappears."""
+        payload: dict[str, object] = {"scope": scope, "agent": agent}
+        if group is not None:
+            payload["group"] = group
+        if automerge:
+            payload["automerge"] = True
+
+        result = self.request("autodispatch", payload)
+        if result.pop("issue_scope", False):
+            session_id = result["id"]
+            while not result["initial_check_complete"]:
+                time.sleep(0.1)
+                result = self.request("autodispatch_status", {"id": session_id})["session"]
+                if result is None:
+                    return None
+        return result
 
 
 def probe_dashboard_session(address: str) -> str | None:
@@ -1923,18 +1950,25 @@ def _dashboard_api_result(
         else urllib.request.urlopen
     )
     try:
-        with open_url(request, timeout=timeout) as response:
-            if direct and response.geturl() != request.full_url:
-                raise WorkdashControlError(
-                    "invalid_response", "Workdash server redirected the request."
-                )
-            raw = response.read().decode("utf-8")
-    except urllib.error.HTTPError as error:
-        api_error = _client_error_from_body(error)
+        try:
+            with open_url(request, timeout=timeout) as response:
+                if direct and response.geturl() != request.full_url:
+                    raise WorkdashControlError(
+                        "invalid_response", "Workdash server redirected the request."
+                    )
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as error:
+            with error:
+                api_error = _client_error_from_body(error)
+            raise WorkdashControlError(
+                api_error.code,
+                f"Workdash server at {address}: {api_error}",
+                status=api_error.status,
+            ) from error
+    except http.client.HTTPException as error:
         raise WorkdashControlError(
-            api_error.code,
-            f"Workdash server at {address}: {api_error}",
-            status=api_error.status,
+            "invalid_response",
+            f"Workdash server at {address} returned an incomplete or invalid HTTP reply.",
         ) from error
     except OSError as error:
         if isinstance(getattr(error, "reason", error), ConnectionRefusedError):

@@ -83,6 +83,7 @@ def _run_browser_open(
     zellij_session: str | None = None,
     direct_nonblocking: bool = False,
     focus: bool = False,
+    item_url: str | None = None,
 ) -> str:
     try:
         command_tokens = (
@@ -93,6 +94,13 @@ def _run_browser_open(
     if not command_tokens:
         raise RuntimeError(f"Failed to open {kind}: command is empty.")
     command_name = command or command_tokens[0]
+    built_in_viewer = command_tokens[1:] == ["view"] and (
+        command_tokens[0] == "workdash"
+        or (Path(command_tokens[0]).is_absolute() and Path(command_tokens[0]).name == "workdash")
+    )
+    arguments = [target]
+    if built_in_viewer and item_url is not None:
+        arguments += ["--target", item_url]
     if needs_pane:
         session = zellij_session or os.getenv("ZELLIJ_SESSION_NAME")
         if not session:
@@ -100,12 +108,10 @@ def _run_browser_open(
                 f"Failed to open {kind} via {command_name}: viewer requires an active Zellij session."
             )
         try:
-            if command_tokens == list(_ITEM_DOCUMENT_COMMAND):
-                executable = shutil.which(command_tokens[0])
-                if executable:
-                    command_tokens[0] = os.path.abspath(executable)
             executable = command_tokens[0]
-            if command == " ".join(_ITEM_DOCUMENT_COMMAND):
+            if built_in_viewer:
+                if resolved := shutil.which(executable):
+                    executable = command_tokens[0] = os.path.abspath(resolved)
                 command_tokens = [
                     "/bin/sh",
                     "-c",
@@ -113,7 +119,9 @@ def _run_browser_open(
                     _ITEM_VIEW_WRAPPER_NAME,
                     *command_tokens,
                 ]
-            pane_id = zellij.open_viewer(session, [*command_tokens, target], executable=executable)
+            pane_id = zellij.open_viewer(
+                session, [*command_tokens, *arguments], executable=executable
+            )
             if focus:
                 zellij.focus_zellij_pane(session, pane_id)
         except subprocess.CalledProcessError as error:
@@ -127,7 +135,7 @@ def _run_browser_open(
     try:
         if direct_nonblocking:
             process = subprocess.Popen(
-                [*command_tokens, target],
+                [*command_tokens, *arguments],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -143,7 +151,7 @@ def _run_browser_open(
                     )
             return command_name
         subprocess.run(
-            [*command_tokens, target],
+            [*command_tokens, *arguments],
             check=True,
             capture_output=True,
             text=True,
@@ -238,8 +246,9 @@ def open_markdown(
     zellij_session: str | None = None,
     format: str = "html",
     focus: bool = False,
+    item_url: str | None = None,
 ) -> None:
-    """Open a local analysis in the requested format."""
+    """Open a local analysis, passing the item to the viewer command."""
 
     if not isinstance(path, str) or not path.strip():
         raise ValueError("Path must be a non-empty string.")
@@ -257,6 +266,7 @@ def open_markdown(
         kind="file",
         direct_nonblocking=True,
         focus=focus,
+        item_url=item_url,
         needs_pane=needs_pane,
         zellij_session=zellij_session,
     )
@@ -964,15 +974,7 @@ class Zellij:
                         text=True,
                     ).stdout.strip()
                 pane_id = _launch_zellij_pane(
-                    [
-                        "env",
-                        *(
-                            [f"WORKDASH_HOST={os.environ['WORKDASH_HOST']}"]
-                            if "WORKDASH_HOST" in os.environ
-                            else ["-u", "WORKDASH_HOST"]
-                        ),
-                        *workdash_command,
-                    ],
+                    workdash_command,
                     context="Failed to start dashboard in Zellij",
                     zellij_session=session_name,
                     tab_id=tab,

@@ -6,6 +6,11 @@ Before starting any work, read these files in order:
 2. **CONTRIBUTING.md** – Core rules, especially BDD-first workflow and the distinction between user-facing BDD scenarios and implementation-detail tests.
 3. **DESIGN.md** – Design direction; all solutions must adhere to it.
 
+## README assumptions
+
+- `README.md` is a quick reference and first-run user guide, not a reference manual: document only what a user needs to install, configure, and operate Workdash.
+- Keep every addition to a single paragraph of two or three lines.
+
 ## Repository and worktree assumptions
 
 - Use the repository's current name. Users only interact with the new name after a rename; do not add rename-specific handling.
@@ -20,6 +25,7 @@ Before starting any work, read these files in order:
 ## Zellij session assumptions
 
 - Workdash runs inside a Zellij session. Its actions operate only in that same session; cross-session capabilities are out of scope.
+- Every pane in a Zellij session, including panes Workdash opens, inherits the environment the session started with. `WORKDASH_HOST` is chosen before the session starts; changing it inside a running session is unsupported, so commands never propagate the server address to panes they open.
 - When Workdash quits, it no longer manages any remaining panes. On a later run, Workdash can discover panes it created in the current session and should generally reuse them rather than create duplicates.
 
 ## Verifying visual/TUI behavior

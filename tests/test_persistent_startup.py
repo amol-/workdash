@@ -46,7 +46,6 @@ def test_existing_session_restarts_dashboard_in_its_tab(monkeypatch, exited):
     attaches = []
     monkeypatch.setattr(launcher, "_resolve_zellij_binary", lambda: "/zellij")
     monkeypatch.setattr(sys, "argv", ["workdash"])
-    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:9432")
 
     def load_panes(session):
         assert session == "custom"
@@ -90,8 +89,6 @@ def test_existing_session_restarts_dashboard_in_its_tab(monkeypatch, exited):
     assert launch[launch.index("--name") + 1] == "workdash tui"
     _, launched = pane_launch(launch)
     assert launched == [
-        "env",
-        "WORKDASH_HOST=127.0.0.1:9432",
         "workdash",
         "--persistent-pane",
         "--session",

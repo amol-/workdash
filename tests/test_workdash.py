@@ -351,6 +351,7 @@ def test_main_passes_configured_agent_choices_and_separate_viewers_to_tui(
 ) -> None:
     captured_kwargs: dict[str, object] = {}
     commands: list[list[str]] = []
+    monkeypatch.delenv("WORKDASH_HOST", raising=False)
     config = WorkdashConfig(
         github_username="testuser",
         open_command='term-copy --label "two words"',
@@ -408,7 +409,7 @@ def test_main_passes_configured_agent_choices_and_separate_viewers_to_tui(
     analysis_path = tmp_path / "analysis ; literal.md"
     analysis_path.write_text("# Viewer analysis\n\n**Rendered content**")
     captured_kwargs["open_callback"](item)
-    captured_kwargs["open_markdown_callback"](str(analysis_path))
+    captured_kwargs["open_markdown_callback"](str(analysis_path), item.url)
     html_path = analysis_path.with_suffix(".html")
     assert "<h1>Viewer analysis</h1>" in html_path.read_text()
     assert "<strong>Rendered content</strong>" in html_path.read_text()
@@ -512,6 +513,7 @@ def test_main_view_menu_reaches_the_launcher(
 ):
     browser = 'term-copy --label "two words"'
     url = f"{ISSUE_URL}?a=one&b=two"
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:19876")
     needs_pane = key == "v" or browser_needs_pane
     tools = {"gh": "/usr/bin/gh", "workdash": "/usr/bin/workdash"}
     if needs_pane:

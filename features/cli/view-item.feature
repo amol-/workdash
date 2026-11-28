@@ -1,6 +1,10 @@
 @feature:F-VIEW-ITEM
 Feature: Read a document with workdash view
 
+  With a running Workdash server, the viewer starts coding or autodispatch on
+  the issue or pull request the document is about. A file or a URL names that
+  item with `--target`.
+
   @id:F-VIEW-ITEM-S001
   Scenario: View an issue
     Given a GitHub issue with sub-issues and comments
@@ -51,3 +55,44 @@ Feature: Read a document with workdash view
     Given a document served at an HTTPS URL
     When I run `workdash view "https://docs.example/guide.md"`
     Then the document shows the remote content
+
+  @id:F-VIEW-ITEM-S015
+  Scenario: Start coding from an issue document
+    Given a GitHub issue with sub-issues and comments
+    And the Workdash server offers a coding agent for the viewer
+    When I run `workdash view "https://github.com/owner/repo/issues/12"` and choose an agent with "c"
+    Then the viewer reports the launched coding pane
+
+  @id:F-VIEW-ITEM-S016
+  Scenario: Start autodispatch from a local report about an issue
+    Given a local Markdown document
+    And the Workdash server offers an agent that can code and analyze
+    When I run `workdash view "local notes.md" --target "owner/repo#12"` and choose an agent with "d"
+    Then the document shows the local content
+    And the viewer reports the autodispatch session for the issue
+
+  @id:F-VIEW-ITEM-S017
+  Scenario: A pull request document offers coding but not dispatch
+    Given a GitHub pull request with checks, reviews and review threads
+    And the Workdash server offers a coding agent for the viewer
+    When I run `workdash view "owner/repo#12"`
+    Then the viewer offers coding but not dispatch
+
+  @id:F-VIEW-ITEM-S018
+  Scenario: A document that names no item offers no launch actions
+    Given a local Markdown document
+    When I run `workdash view "local notes.md"`
+    Then the document shows the local content
+    And the viewer offers no launch actions because the document names no item
+
+  @id:F-VIEW-ITEM-S019
+  Scenario: A document about an issue offers no launch actions without a server
+    Given a local Markdown document
+    When I run `workdash view "local notes.md" --target "owner/repo#12"`
+    Then the document shows the local content
+    And the viewer offers no launch actions because no server is reachable
+
+  @id:F-VIEW-ITEM-S020
+  Scenario: An item argument conflicts with --target
+    When I run `workdash view "owner/repo#ISSUE-3" --target "owner/repo#12"` expecting failure
+    Then the command reports the conflict between the document and --target

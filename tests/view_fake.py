@@ -18,6 +18,7 @@ ISSUE_URL = "https://github.com/owner/repo/issues/12"
 def issue(**overrides) -> dict:
     """The issue read by default, with a description that references two other items."""
 
+    html_url = ISSUE_URL.replace("/issues/", "/pull/") if "pull_request" in overrides else ISSUE_URL
     return {
         "number": 12,
         "title": "Crash on startup",
@@ -28,7 +29,7 @@ def issue(**overrides) -> dict:
         "assignees": [{"login": "hubot"}],
         "milestone": {"title": "v1"},
         "comments": 1,
-        "html_url": ISSUE_URL,
+        "html_url": html_url,
         "updated_at": "2026-02-25T10:00:00Z",
         **overrides,
     }

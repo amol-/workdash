@@ -511,7 +511,7 @@ def _choose_todo_analysis(scenario_state, monkeypatch, tmp_path):
         analyze_callback=lambda item, agent: session.analyze(
             target=format_work_item_id(item), agent=agent, prefer_cache=False
         )["path"],
-        open_markdown_callback=lambda path: opened.append(Path(path).read_text()),
+        open_markdown_callback=lambda path, _url: opened.append(Path(path).read_text()),
     )
 
     async def interactions():

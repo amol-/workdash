@@ -279,7 +279,7 @@ def issue_taken_over(scenario_state, capsys):
 def _install_cli(monkeypatch, session):
     app = _make_turbogears_app(session)
 
-    def request(endpoint, payload):
+    def request(_client, endpoint, payload):
         response = Request.blank(
             f"/api/v0/{endpoint}",
             method="POST",
@@ -289,9 +289,7 @@ def _install_cli(monkeypatch, session):
         assert response.status_int == 200, response.text
         return json.loads(response.body)["result"]
 
-    monkeypatch.setattr(
-        "workdash.workdash.WorkdashControlClient", lambda *a, **kw: MagicMock(request=request)
-    )
+    monkeypatch.setattr(control_module.WorkdashControlClient, "request", request)
 
 
 @given("an autodispatch session has failed")

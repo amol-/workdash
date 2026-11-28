@@ -92,6 +92,9 @@ the suggested next pick. Keys:
 The CLI talks to the running dashboard: `workdash` starts the TUI and a JSON
 control API in the same process (default `127.0.0.1:8765`, override with
 `WORKDASH_HOST` or `--host HOST[:PORT]`), and the commands below call it.
+Zellij gives every pane in a session, including the panes Workdash opens, the
+environment the session started with, so choose the address before starting the
+session; changing `WORKDASH_HOST` inside a running session is unsupported.
 
 | Command | Purpose |
 | --- | --- |
@@ -109,10 +112,33 @@ control API in the same process (default `127.0.0.1:8765`, override with
 | `workdash birdview [--top N] [--format telegram\|markdown\|json]` | Shareable snapshot of ongoing work. |
 | `workdash read PANE_ID [--full]` / `workdash write PANE_ID TEXT` | Read text from / send text to a live pane. |
 | `workdash show-config [--json]` | Show the effective configuration. |
-| `workdash view TARGET` | Read a document — a GitHub item, local file, or URL — in the built-in viewer. |
+| `workdash view DOCUMENT [--target ITEM]` | Read a document — a GitHub item, local file, or URL — in the built-in viewer, and launch work on the item it is about. |
 
 Global flags: `--configure` (rerun the setup wizard), `--session NAME`,
 `--host HOST[:PORT]`, `--debug`, `--version`.
+
+### Reading a document
+
+`workdash view DOCUMENT [--target ITEM]` shows one document in the built-in
+viewer: a local path, a URL, or a GitHub issue or pull request. It needs no
+running server. With one running, `c` chooses a coding agent for the item the
+document is about, and `d` on an issue chooses an agent that also analyzes and
+starts autodispatch; both report the pane or session in the status line, and a
+pull request offers only `c`.
+
+For a file or a URL that is not itself an item, `--target` names that item.
+`owner/repo#NUMBER` and `#NUMBER` select issues only, a bare number needs a
+GitHub `origin` remote, and `owner/repo#ISSUE-WT12` selects a targeted todo in
+the configured todo repository. A GitHub item URL is taken as written; the other
+forms are looked up with `gh`. Using `--target` with a document argument that
+already names an item is an error.
+
+```bash
+workdash view report.md --target 'owner/repo#ISSUE-12'
+```
+
+Opening an analysis from the dashboard in the built-in viewer supplies the item
+automatically; other viewers receive only the analysis file.
 
 ## Agent-controlled dashboard
 

@@ -1,16 +1,18 @@
 import asyncio
 import http.client
+import io
 import json
 import os
 import subprocess
 import urllib.error
 import urllib.request
+from threading import Event
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 from textual.app import App
-from textual.widgets import Static
+from textual.widgets import Markdown, OptionList, Static
 
 from gh_work_state_fake import (
     HEAD_SHA,
@@ -29,7 +31,7 @@ from view_fake import (
 )
 from workdash import github_client, launcher, view
 from workdash.config import WorkdashConfig
-from workdash.control import WorkdashControlClient, WorkdashSession
+from workdash.control import WorkdashControlClient, WorkdashControlError, WorkdashSession
 from workdash.git import GitHelper
 
 
@@ -48,7 +50,8 @@ def _capture(monkeypatch) -> list[view.Document]:
     return documents
 
 
-def test_view_pull_request_document_reports_ci_reviews_and_threads(monkeypatch):
+@pytest.mark.parametrize("reference", ["owner/repo#12", "#12", ISSUE_URL])
+def test_view_pull_request_document_reports_ci_reviews_and_threads(monkeypatch, reference):
     documents = _capture(monkeypatch)
     routes = issue_routes()
     routes["api repos/owner/repo/issues/12"] = issue(pull_request={"url": "pulls/12"})
@@ -115,8 +118,10 @@ def test_view_pull_request_document_reports_ci_reviews_and_threads(monkeypatch):
         }
     }
     monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes))
+    monkeypatch.setattr(GitHelper, "get_repo_root", lambda *args: "/repo")
+    monkeypatch.setattr(GitHelper, "remote_url", lambda *args: "git@codeberg.org:owner/repo.git")
 
-    assert view.run_view("owner/repo#12") == 0
+    assert view.run_view(reference) == 0
 
     document = documents[0].content
     assert "**Draft:** yes" in document
@@ -475,14 +480,19 @@ def test_view_reports_a_failed_github_lookup(monkeypatch, capsys):
     assert "Failed to fetch GitHub data with gh: no such issue" in capsys.readouterr().err
 
 
-def test_view_reads_a_local_file_without_contacting_github(monkeypatch, tmp_path):
+@pytest.mark.parametrize("path_arg", ["notes.md", "notes/chapter#PR-12"])
+def test_view_reads_a_local_file_without_contacting_github(monkeypatch, tmp_path, path_arg):
+    from workdash.workdash import main
+
     documents = _capture(monkeypatch)
     commands = []
     monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run({}, recorded=commands))
-    path = tmp_path / "notes.md"
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / path_arg
+    path.parent.mkdir(exist_ok=True)
     path.write_text("# Local notes\n\nlocal body", encoding="utf-8")
 
-    assert view.run_view(str(path)) == 0
+    assert main(["view", path_arg]) == 0
 
     assert commands == []
     assert documents[0].content == "# Local notes\n\nlocal body"
@@ -555,7 +565,7 @@ def _run_viewer(monkeypatch, exercise) -> None:
 
     def run(app):
         async def session():
-            async with app.run_test(size=(80, 24)) as pilot:
+            async with app.run_test(size=(80, 24), notifications=True) as pilot:
                 await pilot.pause()
                 await exercise(pilot, app)
 
@@ -577,7 +587,7 @@ def test_viewer_opens_a_github_item_link_without_launching_anything(monkeypatch)
             await pilot.pause()
             if (
                 app.query_one(view._DocumentViewer).document.source.startswith("# Crash")
-                and app.query_one("#status", Static).render().plain == ""
+                and "unavailable" in app.query_one("#status", Static).render().plain
             ):
                 break
         shown.append(app.query_one(view._DocumentViewer).document.source)
@@ -588,7 +598,7 @@ def test_viewer_opens_a_github_item_link_without_launching_anything(monkeypatch)
     app.run()
 
     assert shown[0].startswith("# Crash on startup\n")
-    assert shown[1] == ""
+    assert "No Workdash server" in shown[1]
     assert shown[2] is True
     assert launched == []
 
@@ -961,3 +971,521 @@ def test_project_supplemental_reads_stop_at_a_deadline(monkeypatch):
         row = next(line for line in document.splitlines() if f"[owner/repo#{number}]" in line)
         assert "Linked PRs unavailable" in row and "Readiness unavailable" in row
     assert "Ready on GitHub" not in document
+
+
+@pytest.mark.parametrize(
+    ("args", "reason"),
+    [
+        (["owner/repo#ISSUE-3", "--target", "owner/repo#ISSUE-12"], "conflicts with --target"),
+        (["#3", "--target", "owner/repo#ISSUE-12"], "conflicts with --target"),
+        (["report.md", "--target", "owner/repo#ISSUE-404"], "no such issue"),
+        (["report.md", "--target", "owner/repo#PR-12"], "is an issue; use owner/repo#ISSUE-12"),
+    ],
+)
+def test_view_rejects_conflicting_or_unresolvable_targets(monkeypatch, capsys, args, reason):
+    from workdash.workdash import main
+
+    documents = _capture(monkeypatch)
+    gh = MagicMock(side_effect=fake_gh_view_run(issue_routes(), fails="404" in args[-1]))
+    monkeypatch.setattr(view.subprocess, "run", gh)
+    request = MagicMock()
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
+
+    assert main(["view", *args]) == 1
+    error = capsys.readouterr().err
+    assert reason in error and "--target" in error
+    assert not documents
+    request.assert_not_called()
+    if "conflicts" in reason:
+        gh.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("target", "origin", "reason"),
+    [
+        ("owner/repo#12", None, "is a pull request; use owner/repo#PR-12"),
+        ("#12", "git@github.com:owner/repo.git", "is a pull request; use owner/repo#PR-12"),
+        ("#12", "https://codeberg.org/owner/repo.git", "origin remote is not a GitHub repository"),
+        (
+            "#12",
+            "https://github.com:8443/owner/repo.git",
+            "origin remote is not a GitHub repository",
+        ),
+        (
+            "#12",
+            "ssh://git@ssh.github.com:443/owner/repo.git",
+            "origin remote is not a GitHub repository",
+        ),
+    ],
+)
+def test_explicit_issue_shorthand_rejects_prs_and_non_github_origins(
+    tmp_path, monkeypatch, capsys, target, origin, reason
+):
+    from workdash.workdash import main
+
+    path = tmp_path / "report.md"
+    path.write_text("# Report", encoding="utf-8")
+    documents = _capture(monkeypatch)
+    github_origin = "origin remote" not in reason
+    gh = MagicMock(
+        side_effect=fake_gh_view_run(pull_request_routes() if github_origin else issue_routes())
+    )
+    monkeypatch.setattr(view.subprocess, "run", gh)
+    monkeypatch.setattr(GitHelper, "get_repo_root", lambda *args: "/repo")
+    monkeypatch.setattr(GitHelper, "remote_url", lambda *args: origin)
+
+    assert main(["view", str(path), "--target", target]) == 1
+    assert reason in capsys.readouterr().err
+    assert not documents
+    if not github_origin:
+        gh.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("target", "origin", "lookup"),
+    [
+        ("owner/repo#ISSUE-12", None, True),
+        ("owner/repo#12", None, True),
+        ("#12", "git@github.com:owner/repo.git", True),
+        ("#12", "owner/repo", True),
+        # A URL already names the item, so it is not looked up again.
+        (ISSUE_URL, None, False),
+    ],
+)
+def test_target_identifies_item_without_rendering_it(tmp_path, monkeypatch, target, origin, lookup):
+    from workdash.workdash import main
+
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "owner/repo#ISSUE-12"
+    path.parent.mkdir()
+    path.write_text("# Report\n\n[Details](details.md)", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes(), recorded=calls))
+    monkeypatch.setattr(GitHelper, "get_repo_root", lambda *args: "/repo")
+    monkeypatch.setattr(GitHelper, "remote_url", lambda *args: origin)
+    request = MagicMock()
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
+    documents = _capture(monkeypatch)
+
+    assert main(["view", "owner/repo#ISSUE-12", "--target", target]) == 0
+    [document] = documents
+    assert document.item.canonical_url == ISSUE_URL
+    assert document.source == path.as_uri() and document.content == path.read_text()
+    assert calls == ([["gh", "api", "repos/owner/repo/issues/12"]] if lookup else [])
+    request.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "recorded_target", ["https://codeberg.org/owner/repo.git", "owner/other", None]
+)
+def test_explicit_targeted_todo_uses_configured_repository(
+    tmp_path, monkeypatch, capsys, recorded_target
+):
+    path = tmp_path / "report.md"
+    path.write_text("# Report")
+    docs = _capture(monkeypatch)
+    url = "https://github.com/owner/todos/issues/12"
+    routes = {
+        "api repos/owner/todos/issues/12": issue(html_url=url, body=todo_body(recorded_target))
+    }
+    monkeypatch.setattr(view, "load_config", lambda: WorkdashConfig(todo_repository="owner/todos"))
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes))
+
+    result = view.run_view(str(path), item_target="owner/repo#ISSUE-WT12")
+    if recorded_target == "https://codeberg.org/owner/repo.git":
+        assert result == 0
+        assert docs[0].item.canonical_url == url and docs[0].content == "# Report"
+    else:
+        assert result == 1
+        assert "--target" in capsys.readouterr().err
+        assert not docs
+
+
+@pytest.mark.parametrize("offline", [False, True], ids=["no-item", "offline"])
+def test_disabled_launch_actions_explain_why(tmp_path, monkeypatch, offline):
+    from workdash.workdash import main
+
+    path = tmp_path / "report.md"
+    path.write_text("# Report", encoding="utf-8")
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes()))
+    request = MagicMock(
+        side_effect=WorkdashControlError("server_unreachable", "No Workdash server")
+    )
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
+
+    async def exercise(pilot, app):
+        status = app.query_one("#status", Static)
+        expected = "No Workdash server" if offline else "no GitHub item"
+        await _wait_viewer(pilot, lambda: expected in status.render().plain)
+        assert all(not app.screen.active_bindings[key].enabled for key in "cd")
+        await pilot.press("c", "d")
+        assert expected in status.render().plain
+        assert app.query_one(Markdown).source == "# Report"
+        await pilot.press("q")
+
+    _run_viewer(monkeypatch, exercise)
+    assert main(["view", str(path), *(["--target", ISSUE_URL] if offline else [])]) == 0
+    if offline:
+        assert (
+            request.call_args_list
+            == [call("show_config", timeout=view._LAUNCH_PROBE_TIMEOUT_SECONDS)]
+            * view._LAUNCH_PROBE_ATTEMPTS
+        )
+    else:
+        request.assert_not_called()
+
+
+@pytest.mark.parametrize("status_line", ["200 OK", "503 Unavailable"])
+def test_interrupted_config_reply_leaves_document_open(tmp_path, monkeypatch, status_line):
+    path = tmp_path / "report.md"
+    path.write_text("# Report")
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:8765")
+    monkeypatch.setattr(view, "load_config", WorkdashConfig)
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes()))
+
+    def open_response(request, **_kwargs):
+        assert request.selector == "/api/v0/show_config"
+        wire = f'HTTP/1.1 {status_line}\r\nContent-Length: 100\r\n\r\n{{"ok":'.encode()
+        response = http.client.HTTPResponse(SimpleNamespace(makefile=lambda *_: io.BytesIO(wire)))
+        response.begin()
+        if response.status != 200:
+            raise urllib.error.HTTPError(
+                request.full_url, response.status, response.reason, {}, response
+            )
+        return response
+
+    monkeypatch.setattr(urllib.request, "urlopen", open_response)
+
+    async def exercise(pilot, app):
+        status = app.query_one("#status", Static)
+        await _wait_viewer(pilot, lambda: "unavailable" in status.render().plain)
+        assert not any(app.screen.active_bindings[key].enabled for key in "cd")
+        assert app.query_one(Markdown).source == "# Report"
+        await pilot.press("q")
+
+    _run_viewer(monkeypatch, exercise)
+    assert view.run_view(str(path), item_target=ISSUE_URL) == 0
+
+
+def test_view_pr_code_menu_cancels_or_reports_existing_pane(tmp_path, monkeypatch):
+    from workdash.workdash import main
+
+    path = tmp_path / "report.md"
+    path.write_text("# Report", encoding="utf-8")
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(pull_request_routes()))
+    request = MagicMock(
+        side_effect=[
+            {"agents": {"code": ["studio", "editorial"], "analyze": ["analyst"]}},
+            {"status": "already_running", "pane_id": "terminal_31"},
+        ]
+    )
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
+
+    async def exercise(pilot, app):
+        await _wait_viewer(pilot, lambda: app.screen.active_bindings["c"].enabled)
+        assert "d" not in app.screen.active_bindings
+        await pilot.press("d", "c")
+        assert _menu_agents(app) == ["studio", "editorial"]
+        await pilot.press("escape")
+        request.assert_called_once_with("show_config", timeout=2)
+        await pilot.press("c", "down", "enter")
+        await _wait_viewer(
+            pilot,
+            lambda: (
+                app.query_one("#status", Static).render().plain
+                == "Code already_running: pane terminal_31"
+            ),
+        )
+
+    _run_viewer(monkeypatch, exercise)
+    assert main(["view", str(path), "--target", "owner/repo#PR-12"]) == 0
+    assert request.call_args_list[1:] == [
+        call("code", {"target": "https://github.com/owner/repo/pull/12", "agent": "editorial"})
+    ]
+
+
+@pytest.mark.parametrize(
+    "final",
+    [
+        {"status": "completed", "outcome": "Blocked by owner/repo#13."},
+        {"status": "failed", "error": "GitHub blocker lookup failed."},
+    ],
+)
+def test_view_dispatch_waits_for_real_first_check(monkeypatch, final):
+    from workdash.workdash import main
+
+    routes = issue_routes()
+    routes["api repos/owner/repo/issues/12/sub_issues"] = []
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(routes))
+    request = MagicMock(
+        side_effect=[
+            {
+                "agents": {
+                    "code": ["coder", "studio", "editorial"],
+                    "analyze": ["analyst", "editorial", "studio"],
+                }
+            },
+            {
+                "id": "dispatch-1",
+                "status": "running",
+                "issue_scope": True,
+                "initial_check_complete": False,
+            },
+            {"session": {"id": "dispatch-1", "initial_check_complete": True, **final}},
+        ]
+    )
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
+
+    async def exercise(pilot, app):
+        await _wait_viewer(pilot, lambda: app.screen.active_bindings["d"].enabled)
+        assert app.screen.active_bindings["c"].enabled
+        await pilot.press("d")
+        assert _menu_agents(app) == ["studio", "editorial"]
+        await pilot.press("enter")
+        status = app.query_one("#status", Static)
+        await _wait_viewer(
+            pilot, lambda: status.render().plain.startswith("Autodispatch dispatch-1:")
+        )
+        assert final["status"] in status.render().plain
+        assert (final.get("outcome") or final["error"]) in status.render().plain
+
+    _run_viewer(monkeypatch, exercise)
+    assert main(["view", "owner/repo#ISSUE-12"]) == 0
+    assert request.call_args_list[1:] == [
+        call("autodispatch", {"scope": ISSUE_URL, "agent": "studio"}),
+        call("autodispatch_status", {"id": "dispatch-1"}),
+    ]
+
+
+def test_followed_document_cannot_launch_original_item_but_back_restores_it(tmp_path, monkeypatch):
+    from workdash.workdash import main
+
+    path = tmp_path / "report.md"
+    path.write_text("# Report\n\n[Details](details.md)", encoding="utf-8")
+    path.with_name("details.md").write_text("# Details", encoding="utf-8")
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes()))
+    request = MagicMock(
+        side_effect=[
+            {"agents": {"code": ["studio"], "analyze": []}},
+            {"agents": {"code": ["studio"], "analyze": []}},
+            {"status": "launched", "pane_id": "terminal_18"},
+        ]
+    )
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
+
+    async def exercise(pilot, app):
+        await _wait_viewer(pilot, lambda: app.screen.active_bindings["c"].enabled)
+        await pilot.click(Markdown, offset=(2, 4))
+        status = app.query_one("#status", Static)
+        await _wait_viewer(pilot, lambda: "no GitHub item" in status.render().plain)
+        assert app.query_one(Markdown).source == "# Details"
+        await pilot.press("c", "d")
+        request.assert_called_once_with("show_config", timeout=2)
+        await pilot.press("b")
+        await _wait_viewer(pilot, lambda: app.screen.active_bindings["c"].enabled)
+        assert app.query_one(Markdown).source == path.read_text()
+        await pilot.press("c", "enter")
+        await _wait_viewer(pilot, lambda: "terminal_18" in status.render().plain)
+
+    _run_viewer(monkeypatch, exercise)
+    assert main(["view", str(path), "--target", ISSUE_URL]) == 0
+    assert request.call_args_list[2:] == [call("code", {"target": ISSUE_URL, "agent": "studio"})]
+
+
+@pytest.mark.parametrize("replaced", [False, True], ids=["wrong-session", "replaced-server"])
+def test_viewer_refuses_launch_into_another_zellij_session(tmp_path, monkeypatch, replaced):
+    path = tmp_path / "report.md"
+    path.write_text("# Report")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "viewer-session")
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:8765")
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes()))
+    server_session = "viewer-session" if replaced else "other-session"
+
+    def respond(endpoint, payload=None, **kwargs):
+        if endpoint == "info":
+            return {"session": server_session}
+        assert endpoint == "show_config", "viewer must not send launch requests to another session"
+        return {"agents": {"code": ["studio"], "analyze": ["studio"]}}
+
+    monkeypatch.setattr(WorkdashControlClient, "request", MagicMock(side_effect=respond))
+
+    async def exercise(pilot, app):
+        nonlocal server_session
+        status = app.query_one("#status", Static)
+        if replaced:
+            await _wait_viewer(pilot, lambda: app.screen.active_bindings["c"].enabled)
+            await pilot.press("c")
+            server_session = "other-session"
+            await pilot.press("enter")
+        await _wait_viewer(pilot, lambda: "other-session" in status.render().plain)
+        assert all(not app.screen.active_bindings[key].enabled for key in "cd")
+        await pilot.press("c", "d")
+        assert app.query_one(Markdown).source == "# Report"
+
+    _run_viewer(monkeypatch, exercise)
+    monkeypatch.setattr(view, "load_config", WorkdashConfig)
+    assert view.run_view(str(path), item_target=ISSUE_URL) == 0
+
+
+@pytest.mark.parametrize("local", [True, False], ids=["local-lan", "remote-lan"])
+def test_viewer_launch_requires_local_address_in_zellij(tmp_path, monkeypatch, local):
+    path = tmp_path / "report.md"
+    path.write_text("# Report")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "viewer-session")
+    monkeypatch.setenv("WORKDASH_HOST", "192.0.2.5:8765")
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes()))
+    bind = MagicMock(side_effect=None if local else OSError("Cannot assign requested address"))
+    probe = MagicMock()
+    probe.__enter__.return_value.bind = bind
+    monkeypatch.setattr(
+        view,
+        "socket",
+        SimpleNamespace(AF_INET=2, socket=MagicMock(return_value=probe)),
+        raising=False,
+    )
+    request = MagicMock(
+        side_effect=[
+            {"session": "viewer-session"},
+            {"agents": {"code": ["studio"], "analyze": ["studio"]}},
+            {"session": "viewer-session"},
+            {"status": "launched", "pane_id": "terminal_31"},
+        ]
+    )
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
+
+    async def exercise(pilot, app):
+        status = app.query_one("#status", Static)
+        if local:
+            await _wait_viewer(pilot, lambda: app.screen.active_bindings["c"].enabled)
+            await pilot.press("c", "enter")
+            await _wait_viewer(pilot, lambda: "terminal_31" in status.render().plain)
+            assert request.call_args_list[-1] == call(
+                "code", {"target": ISSUE_URL, "agent": "studio"}
+            )
+        else:
+            await _wait_viewer(pilot, lambda: "requires a local" in status.render().plain)
+            assert not app.screen.active_bindings["c"].enabled
+            request.assert_not_called()
+
+    _run_viewer(monkeypatch, exercise)
+    monkeypatch.setattr(view, "load_config", WorkdashConfig)
+    assert view.run_view(str(path), item_target=ISSUE_URL) == 0
+    bind.assert_called_once_with(("192.0.2.5", 0))
+
+
+def test_busy_viewer_server_recovers_without_navigation(tmp_path, monkeypatch):
+    path = tmp_path / "report.md"
+    path.write_text("# Report")
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes()))
+    request = MagicMock(
+        side_effect=[
+            WorkdashControlError("server_unresponsive", "The server did not answer."),
+            WorkdashControlError("server_unresponsive", "The server did not answer."),
+            {"agents": {"code": ["studio"], "analyze": ["studio"]}},
+        ]
+    )
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
+
+    async def exercise(pilot, app):
+        await _wait_viewer(
+            pilot, lambda: all(app.screen.active_bindings[key].enabled for key in "cd")
+        )
+        await pilot.press("d")
+        assert _menu_agents(app) == ["studio"]
+
+    _run_viewer(monkeypatch, exercise)
+    monkeypatch.setattr(view, "load_config", WorkdashConfig)
+    assert view.run_view(str(path), item_target=ISSUE_URL) == 0
+
+
+@pytest.mark.parametrize("timeout_at", ["info", "code"], ids=["preflight", "launch-reply"])
+def test_launch_timeout_recovers_controls_without_relaunch(tmp_path, monkeypatch, timeout_at):
+    path = tmp_path / "report.md"
+    path.write_text("# Report")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "viewer-session")
+    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:8765")
+    monkeypatch.setattr(view, "load_config", WorkdashConfig)
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes()))
+    session = {"session": "viewer-session"}
+    config = {"agents": {"code": ["studio"], "analyze": ["studio"]}}
+    timeout = WorkdashControlError("server_unresponsive", "The server did not answer.")
+    request = MagicMock(
+        side_effect=[
+            session,
+            config,
+            *([] if timeout_at == "info" else [session]),
+            timeout,
+            session,
+            config,
+            session,
+            {"status": "launched", "pane_id": "terminal_31"},
+        ]
+    )
+    monkeypatch.setattr(WorkdashControlClient, "request", request)
+    launch = call("code", {"target": ISSUE_URL, "agent": "studio"})
+
+    async def exercise(pilot, app):
+        status = app.query_one("#status", Static)
+        await _wait_viewer(pilot, lambda: app.screen.active_bindings["c"].enabled)
+        await pilot.press("c", "enter")
+        await _wait_viewer(pilot, lambda: "code failed" in status.render().plain)
+        await _wait_viewer(
+            pilot, lambda: all(app.screen.active_bindings[key].enabled for key in "cd")
+        )
+        assert request.call_args_list.count(launch) == (timeout_at == "code")
+        await pilot.press("c", "enter")
+        await _wait_viewer(pilot, lambda: "terminal_31" in status.render().plain)
+        assert request.call_args_list.count(launch) == 1 + (timeout_at == "code")
+
+    _run_viewer(monkeypatch, exercise)
+    assert view.run_view(str(path), item_target=ISSUE_URL) == 0
+
+
+def test_viewer_reports_launch_result_after_following_a_link(tmp_path, monkeypatch):
+    path = tmp_path / "report.md"
+    path.write_text("# Report\n\n[Details](details.md)")
+    path.with_name("details.md").write_text("# Details")
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes()))
+    release = Event()
+
+    def respond(endpoint, payload=None, **kwargs):
+        if endpoint == "show_config":
+            return {"agents": {"code": ["studio"], "analyze": ["studio"]}}
+        assert endpoint == "autodispatch"
+        assert payload == {"scope": ISSUE_URL, "agent": "studio"}
+        assert release.wait(4)
+        return {"id": "dispatch-1", "status": "running"}
+
+    monkeypatch.setattr(WorkdashControlClient, "request", MagicMock(side_effect=respond))
+
+    async def exercise(pilot, app):
+        try:
+            await _wait_viewer(pilot, lambda: app.screen.active_bindings["d"].enabled)
+            await pilot.press("d", "enter")
+            await pilot.click(Markdown, offset=(2, 4))
+            await _wait_viewer(pilot, lambda: app.query_one(Markdown).source == "# Details")
+        finally:
+            release.set()
+        await _wait_viewer(
+            pilot,
+            lambda: any(
+                "Autodispatch dispatch-1: running" in toast.render().plain
+                for toast in app.query("Toast")
+            ),
+        )
+        assert "no GitHub item" in app.query_one("#status", Static).render().plain
+
+    _run_viewer(monkeypatch, exercise)
+    monkeypatch.setattr(view, "load_config", WorkdashConfig)
+    assert view.run_view(str(path), item_target=ISSUE_URL) == 0
+
+
+async def _wait_viewer(pilot, condition):
+    async with asyncio.timeout(4):
+        while not condition():
+            await pilot.pause(0.01)
+
+
+def _menu_agents(app):
+    options = app.screen.query_one(OptionList)
+    return [str(options.get_option_at_index(index).prompt) for index in range(options.option_count)]

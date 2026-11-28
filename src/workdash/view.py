@@ -13,12 +13,14 @@ import http.client
 import json
 import os
 import re
+import socket
 import ssl
 import subprocess
 import sys
 import threading
 import urllib.request
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from ipaddress import IPv4Address
 from pathlib import Path
@@ -27,21 +29,29 @@ from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Footer, MarkdownViewer, Static
+from textual.containers import Vertical
+from textual.screen import ModalScreen
+from textual.widgets import Footer, MarkdownViewer, OptionList, Static
 
 from . import launcher
 from .config import load_config
-from .git import GitHelper
+from .control import WorkdashControlClient, WorkdashControlError, server_address
+from .git import GitHelper, is_repository_name
 from .github_client import (
     GitHubClient,
+    ParsedGitHubItemURL,
     ProjectIssueDetails,
     ProjectPullDetails,
     parse_github_item_url,
+    todo_target_from_body,
 )
 from .models import WorkItemType
 from .work_state import select_actionable_pull_request
 
-_ITEM_REFERENCE_RE = re.compile(r"^(?P<repo>[\w.-]+/[\w.-]+)#(?P<number>\d+)$")
+_ITEM_REFERENCE_RE = re.compile(
+    r"^(?P<repo>[\w.-]+/[\w.-]+)#(?:(?P<kind>ISSUE|PR|REVIEW|CHECK)-)?(?P<number>\d+)$"
+)
+_TARGETED_TODO_RE = re.compile(r"(?P<repo>[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#ISSUE-WT(?P<number>\d+)")
 _BARE_NUMBER_RE = re.compile(r"^#?(?P<number>\d+)$")
 _PR_JSON_FIELDS = "isDraft,mergeable,mergeStateStatus,reviewDecision,headRefOid,reviews"
 _FAILING_CHECKS = frozenset(
@@ -52,6 +62,10 @@ _MAX_CHECKS = 20
 _DIFF_HUNK_LINES = 10
 _DOCUMENT_SUFFIXES = (".md", ".markdown")
 _DOCUMENT_FETCH_TIMEOUT_SECONDS = 10
+# A viewer probes a busy or missing server a few times, then leaves the keys off.
+_LAUNCH_PROBE_ATTEMPTS = 3
+_LAUNCH_PROBE_RETRY_SECONDS = 0.5
+_LAUNCH_PROBE_TIMEOUT_SECONDS = 2
 # A Markdown file on GitHub is a repository page, not a document to fetch.
 _GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
 
@@ -62,13 +76,26 @@ class Document:
 
     content: str
     source: str
+    item: ParsedGitHubItemURL | None = None
 
 
-def run_view(target: str) -> int:
-    """Show the document named by a command-line target."""
+def run_view(target: str, *, item_target: str | None = None) -> int:
+    """Show the named document, optionally with a separate GitHub launch item."""
     try:
+        item = None
+        if item_target is not None:
+            if (
+                _BARE_NUMBER_RE.fullmatch(target.strip())
+                or _github_item(target, prefer_local=True) is not None
+            ):
+                raise RuntimeError(
+                    f"Document argument {target!r} conflicts with --target: it already names an item."
+                )
+            item = _resolve_view_target(item_target)
         document = load_document(target)
-    except (OSError, RuntimeError) as error:
+        if item is not None:
+            document = replace(document, item=item)
+    except (OSError, RuntimeError, ValueError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
     show_document(document)
@@ -78,14 +105,14 @@ def run_view(target: str) -> int:
 def load_document(target: str) -> Document:
     """Read the document that a target or an in-document link points at."""
     try:
-        item = _github_item(target)
+        item = _github_item(target, prefer_local=True)
         url = urlsplit(target)
     except ValueError as error:
         raise RuntimeError(f"Unsupported target {target}: {error}") from error
     if item is not None:
-        repo, number = item
+        repo, number, expected_kind = item
         try:
-            issue = _gh_json(["gh", "api", f"repos/{repo}/issues/{number}"])
+            issue, launch_item = _fetch_github_item(repo, number, expected_kind)
             pull = (
                 _gh_json(
                     ["gh", "pr", "view", str(number), "--repo", repo, "--json", _PR_JSON_FIELDS]
@@ -93,7 +120,7 @@ def load_document(target: str) -> Document:
                 if "pull_request" in issue
                 else None
             )
-            return Document(_document(repo, number, issue, pull), issue["html_url"])
+            return Document(_document(repo, number, issue, pull), issue["html_url"], launch_item)
         except RuntimeError as error:
             # A link's failure names the item it could not load.
             raise RuntimeError(f"Failed to load {target}: {error}") from error
@@ -150,6 +177,8 @@ class _MarkdownApp(App):
     BINDINGS = [
         Binding("ctrl+c", "screen.copy_text", "Copy selected text", priority=True),
         Binding("b", "back", "Back"),
+        Binding("c", "launch('code')", "Code"),
+        Binding("d", "launch('autodispatch')", "Dispatch"),
         ("q", "quit", "Quit"),
     ]
 
@@ -158,7 +187,12 @@ class _MarkdownApp(App):
         self._document = document
         self._open_command = open_command
         self._open_needs_pane = open_needs_pane
+        self._zellij_session = os.getenv("ZELLIJ_SESSION_NAME")
         self._history: list[Document] = []
+        self._launch_client: WorkdashControlClient | None = None
+        self._agents: dict[str, list[str]] = {}
+        self._launch_pending = False
+        self._loading = False
 
     def compose(self) -> ComposeResult:
         yield _DocumentViewer(
@@ -167,8 +201,49 @@ class _MarkdownApp(App):
         yield Static("", id="status", markup=False)
         yield Footer()
 
+    def on_mount(self) -> None:
+        self._check_launch_actions()
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        return action != "back" or bool(self._history)
+        if action == "back":
+            return bool(self._history)
+        if action == "launch":
+            item = self._document.item
+            if parameters == ("autodispatch",) and item and item.item_type == WorkItemType.PR:
+                return False
+            if not self._launch_client or self._launch_pending or self._loading:
+                return None
+        return True
+
+    def action_launch(self, command: str) -> None:
+        item, client = self._document.item, self._launch_client
+        if item is None or client is None:
+            return
+        code = command == "code"
+        agents = self._agents["code"]
+        if not code:
+            agents = [agent for agent in agents if agent in self._agents["analyze"]]
+        if not agents:
+            self._set_status(
+                "No coding agents configured."
+                if code
+                else "No agents configured to both code and analyze."
+            )
+            return
+
+        document = self._document
+
+        def chosen(agent: str | None) -> None:
+            if agent is not None and self._document is document and not self._loading:
+                self._launch_pending = True
+                self._set_status(f"Starting {command} with {agent}...")
+                self.refresh_bindings()
+                self.run_worker(
+                    self._launch(client, command, item.canonical_url, agent, document),
+                    group="launch",
+                )
+
+        self.push_screen(_AgentMenu("Code with" if code else "Autodispatch with", agents), chosen)
 
     def follow(self, href: str) -> None:
         """Open a link found in the current document."""
@@ -215,16 +290,128 @@ class _MarkdownApp(App):
         except (OSError, subprocess.SubprocessError):
             self.notify("Copy unavailable: could not access the system clipboard", severity="error")
 
+    async def _launch(
+        self,
+        client: WorkdashControlClient,
+        command: str,
+        target: str,
+        agent: str,
+        document: Document,
+    ) -> None:
+        def request() -> str:
+            self._require_dashboard_session(client, timeout=5)
+            if command == "code":
+                result = client.request("code", {"target": target, "agent": agent})
+                return f"Code {result['status']}: pane {result['pane_id']}"
+            result = client.start_autodispatch(target, agent=agent)
+            if result is None:
+                return "Autodispatch session was replaced or removed."
+            details = " — ".join(
+                str(result[key]) for key in ("outcome", "error") if result.get(key)
+            )
+            status = f"Autodispatch {result['id']}: {result['status']}"
+            return f"{status} — {details}" if details else status
+
+        try:
+            message = await _in_daemon(request)
+        except WorkdashControlError as error:
+            message = f"{command} failed: {error}"
+            if (
+                error.code in {"server_unreachable", "server_unresponsive", "session_mismatch"}
+                and self._launch_client is client
+            ):
+                if error.code == "server_unresponsive":
+                    # A launch may have reached the server. Rediscover controls, not work.
+                    self._check_launch_actions(launch_failure=message)
+                else:
+                    self._launch_client = None
+        finally:
+            self._launch_pending = False
+            self.refresh_bindings()
+        if self._document is document and not self._loading:
+            self._set_status(message)
+        else:
+            self.notify(message, title=target, markup=False)
+
+    def _check_launch_actions(self, *, launch_failure: str = "") -> None:
+        self._launch_client = None
+        self.refresh_bindings()
+        if self._document.item is None:
+            self._set_status("Code and dispatch unavailable: no GitHub item for this document.")
+        else:
+            if not launch_failure:
+                self._set_status("Checking Workdash server...")
+            self.run_worker(
+                self._load_agents(self._document, launch_failure),
+                group="launch-config",
+                exclusive=True,
+            )
+
+    async def _load_agents(self, document: Document, launch_failure: str) -> None:
+        def discover(timeout: float) -> dict[str, object]:
+            self._require_dashboard_session(client, timeout=timeout)
+            return client.request("show_config", timeout=timeout)
+
+        action = "Code" if document.item.item_type == WorkItemType.PR else "Code and dispatch"
+        try:
+            host, port = server_address()
+            if self._zellij_session and not IPv4Address(host).is_loopback:
+                try:
+                    with socket.socket(socket.AF_INET) as probe:
+                        probe.bind((host, 0))
+                except OSError as error:
+                    raise ValueError(
+                        "Launching inside Zellij requires a local Workdash server."
+                    ) from error
+            client = WorkdashControlClient(f"{host}:{port}", direct=bool(self._zellij_session))
+        except ValueError as error:
+            self._set_status(f"{action} unavailable: {error}")
+            return
+
+        for attempt in range(1, _LAUNCH_PROBE_ATTEMPTS + 1):
+            try:
+                config = await _in_daemon(lambda: discover(_LAUNCH_PROBE_TIMEOUT_SECONDS))
+            except WorkdashControlError as error:
+                retry = (
+                    error.code in {"server_unreachable", "server_unresponsive"}
+                    and attempt < _LAUNCH_PROBE_ATTEMPTS
+                )
+                if retry:
+                    await asyncio.sleep(_LAUNCH_PROBE_RETRY_SECONDS)
+                    continue
+                message = f"{action} unavailable: {error}"
+            else:
+                message = launch_failure
+                self._launch_client = client
+                self._agents = config["agents"]
+            self.refresh_bindings()
+            if not self._loading:
+                self._set_status(message)
+            return
+
+    def _require_dashboard_session(self, client: WorkdashControlClient, *, timeout: float) -> None:
+        if self._zellij_session:
+            session = client.request("info", {"panes": "none"}, timeout=timeout).get("session")
+            if session != self._zellij_session:
+                raise WorkdashControlError(
+                    "session_mismatch",
+                    f"Workdash serves Zellij session {session!r}, not {self._zellij_session!r}.",
+                )
+
     def _load(self, target: str, anchor: str = "") -> None:
         """Read a target off the message pump, then show it when the read lands."""
+        self._loading = True
+        self.refresh_bindings()
         self._set_status(f"Loading {target}...")
         self.run_worker(self._fetch(target, self._document, anchor), exclusive=True)
 
     async def _fetch(self, target: str, previous: Document, anchor: str) -> None:
         try:
-            document = await _read_document(target)
+            document = await _in_daemon(lambda: load_document(target))
         except (OSError, RuntimeError) as error:
             if self._document is previous:
+                self._loading = False
+                self.refresh_bindings()
                 # The loader's message already names the target and the reason.
                 self._set_status(str(error))
             return
@@ -235,66 +422,162 @@ class _MarkdownApp(App):
         await self._show(document, anchor)
 
     async def _show(self, document: Document, anchor: str = "") -> None:
+        self.workers.cancel_group(self, "launch-config")
+        self._loading = True
         self._document = document
         viewer = self.query_one(_DocumentViewer)
         await viewer.document.update(document.content)
         if not (anchor and viewer.document.goto_anchor(anchor)):
             viewer.scroll_home(animate=False)
-        self._set_status("")
-        self.refresh_bindings()
+        self._loading = False
+        self._check_launch_actions()
 
     def _set_status(self, message: str) -> None:
         self.query_one("#status", Static).update(message)
 
 
-async def _read_document(target: str) -> Document:
-    """Read a document in a daemon thread, so quitting never waits for a slow read."""
+class _AgentMenu(ModalScreen[str | None]):
+    DEFAULT_CSS = """
+    _AgentMenu { align: center middle; }
+    _AgentMenu > Vertical {
+        width: 50;
+        height: auto;
+        max-height: 90%;
+        padding: 1 2;
+        border: solid $accent;
+        background: $surface;
+    }
+    _AgentMenu OptionList { height: auto; max-height: 14; }
+    """
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, title: str, agents: list[str]) -> None:
+        super().__init__()
+        self._title = title
+        self._agents = agents
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(f"{self._title}:")
+            yield OptionList(*self._agents, markup=False)
+            yield Static("Enter to select, Esc to cancel")
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(self._agents[event.option_index])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+async def _in_daemon[T](call: Callable[[], T]) -> T:
+    """Keep the viewer responsive without making quit wait for blocking I/O."""
     loop = asyncio.get_running_loop()
-    result: asyncio.Future[Document] = loop.create_future()
+    result: asyncio.Future[T] = loop.create_future()
 
-    def settle(document: Document | None, error: Exception | None) -> None:
-        if result.done():
-            return
-        if error is not None:
-            result.set_exception(error)
-        elif document is not None:
-            result.set_result(document)
+    def settle(value: T | None, error: Exception | None) -> None:
+        if not result.done():
+            if error is not None:
+                result.set_exception(error)
+            else:
+                result.set_result(value)
 
-    def read() -> None:
+    def run() -> None:
         try:
-            outcome: tuple[Document | None, Exception | None] = (load_document(target), None)
-        except Exception as error:  # noqa: BLE001 - re-raised where the read was awaited
+            outcome = (call(), None)
+        except Exception as error:  # noqa: BLE001 - re-raised in the worker
             outcome = (None, error)
-        # The loop is closed when the viewer quits before the read finishes.
         with contextlib.suppress(RuntimeError):
             loop.call_soon_threadsafe(settle, *outcome)
 
-    # Not the loop's executor: that one is joined on shutdown, which would stall quitting.
-    threading.Thread(target=read, daemon=True).start()
+    threading.Thread(target=run, daemon=True).start()
     return await result
 
 
-def _github_item(target: str) -> tuple[str, int] | None:
-    """Return the ``owner/repo`` and number named by a GitHub target, or None."""
+def _github_item(
+    target: str, *, prefer_local: bool = False
+) -> tuple[str, int, WorkItemType | None] | None:
+    """Read a GitHub item reference, or return None for ordinary documents."""
     parsed = parse_github_item_url(target)
     if parsed is not None:
-        return parsed.repo, parsed.number
-    reference = _ITEM_REFERENCE_RE.match(target.strip())
+        return parsed.repo, parsed.number, None
+    reference = _ITEM_REFERENCE_RE.fullmatch(target.strip())
     if reference is not None:
-        return reference["repo"], int(reference["number"])
-    number = _BARE_NUMBER_RE.match(target.strip())
+        kind = reference["kind"]
+        if kind and prefer_local and Path(target).is_file():
+            return None
+        expected_kind = (
+            (WorkItemType.ISSUE if kind == "ISSUE" else WorkItemType.PR) if kind else None
+        )
+        return reference["repo"], int(reference["number"]), expected_kind
+    number = _BARE_NUMBER_RE.fullmatch(target.strip())
     if number is not None:
-        return _origin_repo(), int(number["number"])
+        return _origin_repo(), int(number["number"]), None
     return None
 
 
-def _origin_repo() -> str:
+def _resolve_view_target(target: str) -> ParsedGitHubItemURL:
+    try:
+        if url := parse_github_item_url(target):
+            # An item URL already names the repository, number and kind.
+            return url
+        if todo := _TARGETED_TODO_RE.fullmatch(target.strip()):
+            repo = load_config().todo_repository
+            if not is_repository_name(repo):
+                raise RuntimeError("No todo repository is configured.")
+            issue, item = _fetch_github_item(repo, int(todo["number"]), WorkItemType.ISSUE)
+            recorded_target = todo_target_from_body(issue.get("body"))
+            if recorded_target and ":" in recorded_target:
+                recorded_target = GitHelper.repo_from_remote_url(recorded_target)
+            if recorded_target != todo["repo"]:
+                raise RuntimeError("The todo does not name the requested target repository.")
+            return item
+        if bare := _BARE_NUMBER_RE.fullmatch(target.strip()):
+            repo, number, kind = _origin_repo(github_only=True), int(bare["number"]), None
+        elif reference := _github_item(target):
+            repo, number, kind = reference
+        else:
+            raise RuntimeError("expected a GitHub item ID, number or URL")
+        _, item = _fetch_github_item(repo, number, kind or WorkItemType.ISSUE)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise RuntimeError(f"Failed to resolve --target {target!r}: {error}") from error
+    return item
+
+
+def _fetch_github_item(
+    repo: str, number: int, expected_kind: WorkItemType | None
+) -> tuple[dict, ParsedGitHubItemURL]:
+    issue = _gh_json(["gh", "api", f"repos/{repo}/issues/{number}"])
+    kind = WorkItemType.PR if "pull_request" in issue else WorkItemType.ISSUE
+    if expected_kind is not None and expected_kind != kind:
+        found, label = (
+            ("a pull request", "PR") if kind == WorkItemType.PR else ("an issue", "ISSUE")
+        )
+        raise RuntimeError(f"{repo}#{number} is {found}; use {repo}#{label}-{number}.")
+    item = parse_github_item_url(issue.get("html_url"))
+    if (
+        item is None
+        or item.item_type != kind
+        or item.repo.lower() != repo.lower()
+        or item.number != number
+    ):
+        raise RuntimeError(f"GitHub did not return the requested item {repo}#{number}.")
+    return issue, item
+
+
+def _origin_repo(*, github_only: bool = False) -> str:
     """Return the ``owner/repo`` the current directory's ``origin`` remote points at."""
     git_helper = GitHelper()
     try:
-        remote_url = git_helper.remote_url(git_helper.get_repo_root(), "origin")
+        root = git_helper.get_repo_root()
+        remote_url = git_helper.remote_url(root, "origin")
     except RuntimeError as error:
         raise RuntimeError(f"Failed to resolve the current repository: {error}") from error
+    if github_only:
+        # The same check worktree reuse makes, so a resolved item is one a launch can reuse.
+        repo = git_helper.remote_repo(root, "origin")
+        if not repo:
+            raise RuntimeError("The origin remote is not a GitHub repository.")
+        return repo
     repo = git_helper.repo_from_remote_url(remote_url) if remote_url else ""
     if not repo:
         raise RuntimeError("Could not determine owner/repo from the origin remote.")
@@ -466,8 +749,6 @@ def _load_sub_issues(row: _IssueRow, rows: list[_IssueRow], *, project: bool) ->
 
 
 def _project_coding_activity() -> tuple[set[tuple[WorkItemType, str, int]], bool]:
-    from .control import WorkdashControlClient, server_address
-
     session = os.getenv("ZELLIJ_SESSION_NAME")
     address = None
     try:
