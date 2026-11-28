@@ -4,822 +4,178 @@ Text-based GitHub work triage dashboard ( <https://alessandro.molina.fyi/workdas
 
 `workdash` pulls together the issues and pull requests that matter to you across
 your GitHub repositories, suggests what to pick up next, and makes it easy to
-jump into a work item — either for a quick review, a deeper AI-assisted
-analysis, or a full coding session in a dedicated worktree.
+jump into a work item — for a quick review, a deeper AI-assisted analysis, or a
+full coding session in a dedicated worktree.
 
 ![workdash screenshot](site/img/dashboard.gif)
 
-## Platform
+Linux and macOS (not tested on Windows). Requires Python `>=3.12`, an
+authenticated [`gh`](https://cli.github.com/), `zellij`, a viewer command for
+opening links, and at least one agent CLI tool (for example `claude`, `codex`,
+`pi`, or `vibe`).
 
-Linux and macOS. `workdash` uses a configured viewer and expects `zellij`
-for the interactive dashboard and terminal-backed work actions. It has not
-been tested on Windows.
+## Installing workdash
 
-## Requirements
-
-- Python `>=3.12`.
-- Authenticated [`gh`](https://cli.github.com/) for GitHub access.
-  `workdash --configure` installs a local copy when `gh` is not available.
-- An executable viewer command for opening links and rendered analyses (for example
-  `xdg-open`, `open`, a terminal viewer, or a clipboard wrapper).
-- `zellij` for the interactive dashboard, terminal panes, and agent sessions.
-  `workdash --configure` installs a local copy when `zellij` is not available.
-- Global `gh` and `zellij` binaries are preferred; configured local copies are
-  used as fallbacks.
-- At least one agent command-line tool (for example `claude`, `codex`, `pi`, or
-  `vibe`; see *Agents* below) to analyze items or launch coding sessions.
-- Optional: `code` — to launch a VSCode + Copilot coding session.
-
-## Installation
-
-With [`uv`](https://docs.astral.sh/uv/) — one isolated install, `workdash` on
-your `PATH`:
+With [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
 uv tool install workdash
 ```
 
-For development install:
+### First run
 
-```bash
-pip install -e '.[test]'
+On the first run, `workdash` starts an interactive setup wizard. If `gh` or
+`zellij` are not on your `PATH`, it downloads local copies automatically (run
+`gh auth login` to authenticate). A typical first run looks like this
+(user input shown after the prompts):
+
+```text
+$ workdash
+Zellij is not on PATH. Installing a local Zellij binary from https://.../zellij-x86_64-unknown-linux-musl.tar.gz.
+Installed Zellij to: /home/octocat/.config/workdash/bin/zellij
+
+GitHub CLI is not on PATH. Installing a local GitHub CLI binary from https://.../latest.
+Installed GitHub CLI to: /home/octocat/.config/workdash/bin/gh
+
+Open command [xdg-open] (Enter to accept):
+Does the viewer require its own terminal window? [y/N]
+Analysis viewer [workdash view]:
+Detected 'claude' on PATH, using analyze: claude -p, launch: claude
+Detected 'codex' on PATH, using analyze: codex exec, launch: codex
+Agents for analyze (at most 9), commands that run once and print the analysis, e.g. claude -p:
+  claude: claude -p
+  codex: codex exec
+Agents for analyze, add a command (empty to finish):
+Agents for code (at most 9), commands that start an interactive coding session, e.g. claude:
+  claude: claude
+  codex: codex
+Agents for code, add a command (empty to finish):
+GitHub username: octocat
+Work directory [~/wrk]:
+Repositories set to: octocat/*
+Todo repository [octocat/todos]:
+
+Configuration saved to /home/octocat/.config/workdash/config.json.
+Run 'workdash' again to start the dashboard.
 ```
 
-## First-time setup
+The wizard asks for your GitHub username, the viewer command, the analysis
+viewer, the agents to use (tools found on your `PATH` are added automatically),
+the working directory for per-item worktrees, the repositories to track
+(`<username>/*` by default), and the todo repository. Re-run it at any time
+with `workdash --configure`.
 
-On the first run you need a configuration file at
-`~/.config/workdash/config.json`. Running `workdash` without one starts the
-interactive wizard and asks you to run `workdash` again to start the dashboard.
-`workdash --configure` reruns the wizard at any time.
-
-The wizard fills in:
-
-- Your GitHub username.
-- Zellij availability. If `zellij` is not on `PATH`, the wizard downloads the
-  latest release binary into the workdash configuration directory.
-- GitHub CLI availability. If `gh` is not on `PATH`, the wizard downloads the
-  latest release binary into the workdash configuration directory. Authentication
-  is still handled by `gh`; run `gh auth login` if startup reports that `gh` is
-  not authenticated.
-- The repositories to track. The wizard defaults to `<username>/*` with a
-  lowercase owner when valid; otherwise it asks for a selector (see *Repository
-  selectors* below).
-- The todo repository where captured todos are created. If the username cannot
-  be used as a default repository owner (for example, a GitHub Enterprise
-  Managed User login), enter an explicit `owner/repo` instead of accepting the
-  usual `<username>/todos` default (see *Todos* below).
-- A working directory where per-item git worktrees will live.
-- The agents (see *Agents* below): `claude`, `codex`, `pi`, and `vibe` are added
-  with their default commands when they are on your `PATH`, and you can add more.
-
-### URL and analysis viewer
-
-Separate viewers open selected issue/PR URLs (`v` then `o`) and analyses (fresh or cached). Configure it with `workdash --configure`, or edit
-`~/.config/workdash/config.json` for advanced commands:
-
-```json
-{
-  "open": "term-copy --quiet",
-  "open_needs_pane": false,
-  "analysis_viewer": {"command": "workdash view", "format": "markdown", "needs_pane": true}
-}
-```
-
-`open` remains a command string. Quoted arguments are supported; Workdash appends
-one literal URL as the final argument. There are no templates,
-shell expansion, or implicit shell commands. Explicit executable paths are allowed;
-quote paths containing spaces. A missing `open` command prevents startup and tells
-you to run `--configure`; there is no runtime default.
-
-The wizard repairs missing, malformed, or unavailable viewer commands, checking
-that the first command token identifies an executable on PATH or at an explicit
-path. It suggests only an available `xdg-open` on Linux or `open` on macOS;
-Enter accepts the displayed suggestion. With no suggestion, empty input is rejected.
-Valid existing commands and unrelated settings are preserved.
-
-For a missing or invalid `open_needs_pane`, the wizard asks
-`Does the viewer require its own terminal window? [y/N]` (Enter means No).
-Explicit boolean choices are preserved. Legacy configurations without this flag
-continue to open directly. Direct viewers do not require Zellij and must finish
-within four seconds. Set the flag to `true` for a terminal viewer: Workdash launches
-it in a full-size floating pane in the current Zellij session,
-without creating a session or worktree. Launch failures report the configured
-command. The pane closes when the viewer exits.
-
-Re-running `--configure` otherwise only prompts for empty fields, except for
-Zellij and GitHub CLI: the wizard always checks for global binaries first and
-downloads fresh local copies when none are available.
-
-The analysis viewer is required and defaults to `workdash view` in the wizard.
-The removed `workdash mdview` and `workdash markdownview` commands are no longer
-available, and a configuration naming either one is repaired to the default.
-Choose `markdown` or `html` for a custom command and whether it needs
-a terminal pane. Direct analysis viewers run without blocking Workdash or a time limit.
-Analyses are passed as local file URLs; the HTTP server is not
-required. `workdash view` also reads local paths, file URLs and HTTP or HTTPS
-URLs, and it intentionally does not verify HTTPS certificates.
-
-### Agents
-
-An agent is a command-line tool that analyzes items, codes on them, or both. The
-`agents` map in `config.json` gives each agent a name you choose, an `analyze`
-command, a `launch` command, or both:
-
-```json
-"agents": {
-  "pi": {"analyze": "pi -p", "launch": "pi"},
-  "aider": {"analyze": "aider --yes"}
-}
-```
-
-The order in the file is the order of the TUI dialogs, and the first agent is
-the default for `workdash analyze` and `workdash code` without `--agent`. The
-names `cached` and `vscode` are reserved. Workdash appends the task prompt to
-the command as its last argument and runs it through your `$SHELL`, so aliases
-work too. At least one agent is required.
-
-The wizard asks about agents only when none is configured: it adds `claude`,
-`codex`, `pi`, and `vibe` when found on your `PATH`, then asks for more analyze
-and launch commands, each with a name. The TUI numbers its entries with single
-keys, so the wizard accepts at most 9 analysis agents and 9 coding agents.
-
-## Usage
-
-Launch the TUI:
+## Using workdash
 
 ```bash
 workdash
 ```
 
-Useful commands and flags:
+launches the dashboard in a persistent Zellij session (use `--session NAME` for
+another one). Each row is an issue or pull request; one row is marked `*` as
+the suggested next pick. Keys:
+
+| Key | Action |
+| --- | --- |
+| `/` | Filter the list by type, repo, or title (e.g. `IS 42`); press again to clear. |
+| `v` | View menu for the selected item: `v` reads it as Markdown in a pane, `o` opens its GitHub URL in your viewer. |
+| `r` | Refresh the list from GitHub. |
+| `a` | Analyze the selected item with a configured agent; the result opens in the analysis viewer (cached while the item is unchanged). |
+| `c` | Code menu: launch a coding agent in the item's dedicated worktree, or choose VSCode, a branch diff, a terminal, or an autonomous review. |
+| `d` | Start an autodispatch session on the selected issue: the agent implements it, reviews the resulting PR, and loops until done. |
+| `m` | Toggle automerge for a running autodispatch session. |
+| `w` | Capture a todo (created as an issue in your todo repository). |
+| `q` | Quit the dashboard; the session and its panes keep running. |
+
+## Workdash CLI
+
+The CLI talks to the running dashboard: `workdash` starts the TUI and a JSON
+control API in the same process (default `127.0.0.1:8765`, override with
+`WORKDASH_HOST` or `--host HOST[:PORT]`), and the commands below call it.
+
+| Command | Purpose |
+| --- | --- |
+| `workdash list [--refresh] [--json]` | Print the dashboard items, optionally refreshed from GitHub first. |
+| `workdash ready SCOPE [--json]` | List the GitHub work ready to be picked up next. |
+| `workdash dispatch SCOPE [--agent NAME] [--group NAME]` | Launch one ready issue with a coding agent. |
+| `workdash autodispatch SCOPE [--agent NAME] [--group NAME]` | Start a supervised session that keeps dispatching ready work. |
+| `workdash autodispatch-stop SESSION_ID` | Stop a running session. |
+| `workdash analyze ITEM [--agent NAME]` | Analyze an item; result is cached and viewable. |
+| `workdash review ITEM [--agent NAME]` | Start an autonomous review of an open PR. |
+| `workdash code ITEM [--agent NAME] [--autostart] [--autoclose]` | Launch a coding agent in the item's worktree. |
+| `workdash terminal ITEM` | Open a shell in the item's worktree. |
+| `workdash todo TEXT [--target REPO] [--body BODY]` | Capture a todo; `workdash todo --close ITEM` closes one. |
+| `workdash info [--all] [--json]` | Report live Workdash-owned Zellij panes and sessions. |
+| `workdash birdview [--top N] [--format telegram\|markdown\|json]` | Shareable snapshot of ongoing work. |
+| `workdash read PANE_ID [--full]` / `workdash write PANE_ID TEXT` | Read text from / send text to a live pane. |
+| `workdash show-config [--json]` | Show the effective configuration. |
+| `workdash view TARGET` | Read a document — a GitHub item, local file, or URL — in the built-in viewer. |
+
+Global flags: `--configure` (rerun the setup wizard), `--session NAME`,
+`--host HOST[:PORT]`, `--debug`, `--version`.
+
+## Agent-controlled dashboard
+
+Workdash is also designed to be driven by another agent, not just by a human
+in the TUI. Every CLI command in the table above calls the control API of the
+running dashboard, so an agent can list work, launch and supervise coding
+sessions, read and write agent panes, and capture todos — while a human keeps
+interacting with the same dashboard discursively through that intermediate
+agent.
+
+To let an agent orchestrate Workdash, install the [`workdash-control`
+skill](skills/workdash-control/SKILL.md) in that agent. The skill teaches it to
+use only `workdash` subcommands against the running server (never Zellij,
+GitHub, or the filesystem directly), e.g.:
 
 ```bash
-workdash list --host dashboard.lan --json  # connect to an explicit server host
-workdash list                # list server-backed dashboard items as plain text
-workdash list --refresh      # ask the server to refresh items before listing
-workdash list --json         # list items as machine-readable JSON
-workdash info [--all] [--json]  # report live Workdash-owned Zellij panes
-workdash birdview [--top N] [--format telegram|markdown|json]  # share a work snapshot
-workdash ready SCOPE [--json]   # list the GitHub work ready to be picked up next
-workdash dispatch SCOPE [--agent NAME] [--group NAME] [--host HOST] [--json]  # launch one ready issue
-workdash autodispatch SCOPE [--group NAME] [--agent NAME] [--host HOST] [--json]  # start a session
-workdash autodispatch-stop SESSION_ID [--host HOST] [--json]  # stop a session
-workdash analyze ITEM [--agent NAME] [--group NAME] [--json]  # analyze an item
-workdash review ITEM [--agent NAME] [--group NAME] [--json]   # autonomously review an open PR
-workdash code ITEM [--agent NAME] [--group NAME] [--autostart] [--autoclose] [--json]  # launch a coding agent, or report the running one
-workdash terminal ITEM [--json]            # open a plain terminal in an item's worktree
-workdash todo TEXT [--target REPOSITORY] [--body BODY] [--json]  # capture a todo
-workdash todo --close ITEM [--json]  # close a todo
-workdash read PANE_ID [--full] [--json]  # read text from a live pane
-workdash write PANE_ID TEXT [--raw] [--json]  # send text to a live pane
-workdash show-config [--json] # show configured agents and selected server address
-workdash view TARGET         # read a document: a GitHub item, a local path, or a URL
-workdash --debug             # verbose logging
-workdash --configure         # run the interactive setup wizard
-workdash --session NAME      # use a named persistent Zellij session
-workdash --version           # print version and exit
+workdash ready any --json                 # what is actionable next
+workdash code owner/repo#42 --agent pi    # launch a worker, get its pane_id
+workdash read terminal_3 --full           # follow the worker
+workdash write terminal_3 "focus on the failing test"
 ```
 
-Outside Zellij, the dashboard creates or attaches to the persistent `workdash`
-session. Use `--session NAME` to select another session. A new session has a
-dashboard above a shell, with Zellij's tab and status bars. If the dashboard is
-already running, new options are ignored; otherwise it starts with the supplied
-options in the `dashboard` tab. With a usable Zellij client, you can attach to a
-running dashboard at the selected address even if local configuration is
-unreadable. Pressing `q` exits the dashboard but keeps the
-session and its panes; Ctrl+Q quits the entire session. Inside Zellij, Workdash
-runs in the current pane and uses the current session regardless of `--session`.
+## Configuration
 
-## What gets shown
+Configuration lives in `~/.config/workdash/config.json` (JSON). Edit it directly
+or with `workdash --configure`; `workdash show-config` prints the effective
+values.
 
-`workdash` gathers the following for your configured GitHub username:
+| Option | Purpose | Accepted values |
+| --- | --- | --- |
+| `github_username` | Your GitHub username; selects what the dashboard tracks. | GitHub login |
+| `repositories` | Repositories shown on the dashboard. | List of `owner/repo` or `owner/*` selectors |
+| `excluded_repositories` | Repositories hidden from the dashboard. | List of `owner/repo` or `owner/*` selectors |
+| `todo_repository` | Where todos are created as issues. | `owner/repo` |
+| `workdir` | Directory where per-item git worktrees live. | Absolute path |
+| `open` | Viewer command for links and URLs (the URL is appended as the last argument). | Command string, e.g. `"xdg-open"` |
+| `open_needs_pane` | Whether the viewer needs its own terminal pane. | `true` / `false` |
+| `analysis_viewer` | Viewer for analyses. | `{"command": ..., "format": "markdown"\|"html", "needs_pane": bool}`; default `workdash view` |
+| `agents` | Agent tools for analysis and coding. | Map of name → `{"analyze": cmd, "launch": cmd}`; the first entry is the default |
+| `listens` | Extra LAN listeners for the control API. | List of `"HOST@IP1,IP2"` entries (trusted clients only) |
 
-- Open pull requests you authored (shown as `PR` in the TUI).
-- Open pull requests where you are a requested reviewer, plus open pull
-  requests you have already reviewed (shown as `RV` in the TUI).
-- Open issues assigned to you (shown as `TD` for the configured todo repository and `IS` for other repositories in the TUI).
-- Open issues and pull requests across the tracked repositories. A pull request
-  that is neither yours nor yours to review is shown as `VR` (voluntary review) in the TUI; once
-  you review it, the next refresh lists it as `RV`.
-
-Items are merged, deduplicated, and sorted by last update. A pull request that
-closes an issue replaces that issue, so the same work never takes two rows. One
-item is marked with `*` as the suggested next thing to pick up.
-
-### Repository selectors
-
-The `repositories` list in `config.json` accepts:
-
-- `owner/repo` — a specific repository.
-- `owner/*` — every repository accessible to you under that owner.
-
-To hide repositories from the dashboard, add selectors to `excluded_repositories`
-in `~/.config/workdash/config.json`, for example:
+Example with customized values:
 
 ```json
-"excluded_repositories": ["team/old-project", "archive/*"]
+{
+  "github_username": "octocat",
+  "repositories": ["octocat/*", "myorg/backend", "myorg/docs"],
+  "excluded_repositories": ["octocat/old-experiments", "myorg/archive/*"],
+  "todo_repository": "octocat/todos",
+  "workdir": "/home/octocat/worktrees",
+  "open": "firefox",
+  "open_needs_pane": false,
+  "analysis_viewer": {"command": "workdash view", "format": "markdown", "needs_pane": true},
+  "agents": {
+    "claude": {"analyze": "claude -p", "launch": "claude"},
+    "codex": {"analyze": "codex exec", "launch": "codex"}
+  },
+  "listens": ["192.168.1.20@192.168.1.30,192.168.1.0/24"]
+}
 ```
 
-Exclusions are case-insensitive and apply to the TUI work table, `workdash list`
-(text and JSON), and `POST /api/v0/list`. If the suggested item is hidden, no
-replacement is suggested. Exclusions do not affect `workdash ready`, dispatch,
-or actions on explicit targets. `--configure` adds an empty list if this setting
-is absent and leaves existing values unchanged.
-
-## TUI keybindings
-
-- `/` — search/filter the listed items by Type, Repo, or Title. Matching is
-  literal and case-insensitive, including the full repository and title. Search
-  by the displayed type and number (e.g. `IS 42`) or the legacy form
-  (e.g. `ISSUE#42`). Press `/` again to clear.
-- `v` — open the view menu for the selected item: `(v) view` reads it as a
-  Markdown document in a full-size floating pane, and `(o) open` opens its
-  GitHub URL with your configured viewer. Esc cancels.
-- `r` — refresh the list from GitHub.
-- `a` — analyze the selected item. Opens a dialog to open the cached analysis
-  (if any), or run a fresh analysis with any configured analysis agent. Fresh
-  analyses are cached and opened with your configured analysis viewer.
-- `c` — open the code menu for the selected item. Choose a numbered coding
-  agent, `(e) edit` for VSCode Copilot, `(d) branchdiff`, `(t) terminal`, or
-  `(r) auto review`, which asks which analysis agent reviews the item, shows a
-  progress dialog until the review finishes, and then reports the outcome.
-  `workdash` prepares a
-  dedicated git worktree for the item and starts the chosen tool in it, preloaded
-  with context about the issue or PR. If an agent is already running in the
-  item's worktree, choosing a numbered agent focuses its pane instead of launching another.
-- `d` — choose an agent that can code and analyze to start an autodispatch session for the selected issue or a linked issue
-  of an authored PR, including in another repository. A PR without a linked
-  issue cannot be dispatched. The chosen agent handles implementation, review, and rework; Esc cancels without starting a session. For work with a running session, `m` replaces `d` in the display; `d` still starts or replaces the session for the selected target.
-- `m` — toggle automerge for the selected work's running autodispatch session. If multiple sessions match, use `workdash info` and `workdash autodispatch-stop SESSION_ID` to leave only the intended session.
-- `w` — capture a todo. Opens a dialog asking for the todo text and an
-  optional target repository.
-- `q` — quit.
-
-## Todos
-
-Ideas and chores that show up while triaging can be captured as todos with `w`
-in the TUI, `workdash todo TEXT`, or the JSON API. A todo is an ordinary GitHub
-issue created in the single `todo_repository` from `config.json`, assigned to
-you and labeled `workdash-todo`, so it shows up on the dashboard like any other
-assigned issue. Create the repository on GitHub yourself; the label is created
-on first use.
-
-For long details, keep the title short and pass `--body`:
-
-```bash
-workdash todo "Plan the migration" --body "Research findings and next steps..."
-```
-
-`POST /api/v0/todo` likewise accepts an optional `body` string alongside `text`
-and `target`. The issue body starts with Workdash's metadata block; user content
-is appended after it without changing formatting. Omitting the body keeps the
-existing metadata-only output. The TUI continues to capture title-only todos.
-
-Close an issue in the configured todo repository with `workdash todo --close ITEM`.
-`ITEM` may be its Workdash ID, a number such as `42` or `#42`, or its GitHub
-issue URL. The command requires a running server; `--json` returns the closed
-issue's ID, repository, number, URL, and status. The API offers the same action
-as `POST /api/v0/todo_close` with an `item` string. The dashboard updates after
-GitHub confirms the close.
-
-A todo may name a GitHub target (`--target owner/repo`) or a git URL on any
-hosting service (`--target https://codeberg.org/owner/repo.git`). HTTPS (with or
-without `.git`), `ssh://`, `git://`, and scp-like `git@host:owner/repo.git` URLs
-are supported. URL targets are cloned with Git automatically; no manual clone
-or worktree preparation is needed. The issue still
-lives in the todo repository, but the item is listed under its target and its
-coding and terminal actions run in a worktree of the target checked
-out on a `wt-<number>` branch. Analysis uses an existing worktree or a temporary
-checkout of the target's default branch. URL targets display as their final `owner/repo`
-path segments, while metadata keeps the original URL. Targets with the same
-`owner/repo` on different hosts can have the same item ID; conflicting local
-directories are reported rather than reused.
-
-## Worktrees
-
-Coding actions operate on a per-item git worktree rooted under the
-configured `workdir`. Each tracked repository gets a local clone, and each work
-item gets its own worktree alongside it, so you can hop between items without
-disturbing other in-progress work. When an existing local branch is checked out
-into a new worktree, Workdash preserves its commits. Issue branches keep their
-upstream configuration; pull request branches track the pull request head.
-
-An authored pull request that closes an issue is treated as a request to code the
-issue. A pull request with no linked issue has its own worktree. If an issue is
-linked later, plan-first coding uses the issue worktree and leaves the old pull
-request checkout alone.
-
-## Local control server
-
-`workdash` starts the normal TUI and a JSON control API in the same
-process. It listens on `WORKDASH_HOST` (default `127.0.0.1:8765`) and stops all
-listeners when the TUI exits. Control requests use JSON; item artifact GETs return file contents or a JSON listing.
-
-A server writes its diagnostic log to `~/.config/workdash/workdash.log`, which
-each successful start replaces so it always describes the current run; a start
-that cannot bind leaves the existing log untouched. If the log cannot be
-written, startup fails and names the path instead of running without
-diagnostics. The log records server-side failures and where they happened, and
-omits raw command output and request bodies.
-
-For trusted LAN access, add listener entries to the `listens` list in `~/.config/workdash/config.json`, for example:
-
-```json
-"listens": ["192.168.1.5@192.168.1.10,192.168.1.11"]
-```
-
-Each listener needs a nonempty list of accepted source IPs or CIDR subnets
-(no hostnames). All supplied source IPs are shared across every
-listener, with localhost and the primary server IP always accepted.
-Access checks use the actual peer IP, never forwarding headers. Wildcard binds are
-rejected; extra listeners use the selected server port.
-If any listener cannot bind, the entire server startup fails.
-
-To list an item's `.workdash/` artifacts or retrieve one, URL-encode the `#` in
-its Workdash ID (otherwise it is interpreted as a URL fragment):
-
-```bash
-curl 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/'
-curl 'http://127.0.0.1:8765/api/items/owner/repo%23ISSUE-41/files/.workdash/PR_REVIEW.md'
-```
-
-The listing is a JSON success envelope with `result.entries`, a sorted array of
-names. Files are returned with a Content-Type inferred from the requested filename,
-or `application/octet-stream` when unknown. Compressed archives remain compressed
-when downloaded; compressed SVG images are decoded by the browser. Only files inside the existing
-worktree's `.workdash/` directory are available. These endpoints are read-only
-and use the same peer access checks as the control API.
-
-Control API requests require `X-Workdash` set to the installed Workdash version; the CLI sends it automatically. A mismatched or missing version is rejected with restart guidance. `POST /api/v0/info` accepts `panes` as `work` (the default), `all`, or `none`; `none` returns only the session, served addresses and version.
-Artifact GETs and GETs of analysis Markdown and HTML documents are exempt for
-browser viewing, but still require an allowed source IP. Cross-origin preflight
-requests are denied. The header prevents browser images and cross-origin JavaScript
-from invoking control APIs; it is not authentication and non-browser clients can
-send it. Artifact documents are sandboxed and cannot run scripts or submit forms.
-HTML analyses block scripts but can load HTTP(S) images, which can request other
-URLs, including read-only artifacts and analysis documents.
-
-**Trusted LAN only:** the API is intentionally unauthenticated plain HTTP.
-Allowed clients can execute dashboard actions; do not expose it to untrusted
-networks or treat the IP allowlist as authentication or encryption.
-
-Client commands `list`, `info`, `birdview`, `ready`, `dispatch`, `autodispatch`, `autodispatch-stop`, `analyze`, `code`, `terminal`, `todo`, `read`,
-`write`, `review`, and `close` accept `--host HOST[:PORT]` before or after the command.
-Set `WORKDASH_HOST` to an IPv4 address or IPv4 address:port to select the default
-for both server and clients; omitted ports use 8765. An explicit `--host` replaces
-that default, even if `WORKDASH_HOST` is invalid.
-A server dashboard already inside Zellij uses its current session, regardless
-of its name.
-Extra listener hosts and explicit client `--host` values may be IP addresses or DNS hostnames. Clients connect
-to the selected server without loading local GitHub, configuration, or Zellij state. Todo's `--target`
-still selects its repository, independently of the server host. `show-config`
-reports the selected default server address.
-
-## List command
-
-`workdash list` requires a running `workdash` session and emits one row
-per non-excluded dashboard item, sorted by last update (most recent first):
-
-```
-TYPE   repo#TYPE-N   YYYY-MM-DD   title
-```
-
-`TYPE` is `ISSUE`, `PR` (a PR you authored), `REVIEW` (for review-requested or
-already reviewed PRs), or `CHECK` (any other PR). The row ID is
-copy/paste-friendly: `repo#ISSUE-N`, `repo#PR-N`, `repo#REVIEW-N`,
-`repo#CHECK-N`, or `<target>#ISSUE-WT<n>` for a targeted todo. The suggested
-item's title is prefixed with `* `. If nothing matches, the output is
-`No work items found.`.
-
-Use `workdash list --refresh` to ask the server to refresh GitHub data before
-listing. Use `workdash list --json` to emit the same list as JSON records with
-item ID, type, kind, repository, number, title, URL, timestamps, and suggested
-status.
-
-## Ready command
-
-`workdash ready SCOPE [--json]` requires a running `workdash` session
-and lists the GitHub work that can be picked up next, read straight from GitHub
-rather than from the dashboard. It only reports: nothing is claimed or launched.
-
-`SCOPE` is one of:
-
-- `owner/repo`: every open issue of the repository, including linked open pull
-  requests in other repositories, and issues linked to its actionable authored pull requests.
-- An issue (`owner/repo#42`, `owner/repo#ISSUE-42`, a targeted todo ID, or an
-  issue URL): the issue and its native sub-issue descendants, recursively and
-  across repositories. A closed parent can scope open descendants.
-- `todo`: the server's todo repository.
-- `any`: every repository selected by the server's `repositories`, plus the todo
-  repository.
-
-Only issues are returned, never pull requests. An open issue is eligible when it
-has no open descendants or open `blocked by` issue and no live code pane holds
-its worktree. An open parent becomes eligible when all its descendants are
-closed: work on it can verify the overall goal. With no open linked pull request
-its action is `implement`. An issue linked to somebody else's open pull request
-is excluded; an authored open pull request must be pushable and need work:
-`address_review`, `fix_merge_conflicts`, or `fix_ci`. An issue whose pull request
-only waits for CI, review, or merge is absent. Unresolved inline review threads
-are actionable regardless of author, bot status, or subsequent pushes; general
-conversation comments and review bodies without a changes-requested verdict are not.
-A formal changes-requested review remains actionable across pushes regardless of reviewer
-identity, bot status, or whether it is minimized, until that reviewer is asked to review
-again or changes their verdict. The coding agent is instructed to
-address the review body, fix or explain and resolve each inline thread, and request
-re-review from each such reviewer; a failed request must be reported as a blocker.
-
-Issues with actionable authored pull requests come first, ordered by pull request
-age; unstarted issues follow, ordered by issue age. Each issue is
-listed once. If one pull request links multiple eligible issues in the scope, its
-work appears once, under the issue with the first repository name and issue number.
-All applicable reasons appear in priority order: review feedback,
-merge conflicts, then failing CI. The issue ID can be passed to `code`, `analyze`,
-or `terminal`; the linked pull request is context. `--json` includes the PR head
-and base SHAs, mergeability, CI status (`passing`, `failing`, `pending`,
-`no_checks`, or `unknown`), failing checks, and feedback references. CI status
-comes from GitHub check metadata and base-branch required checks, not repository
-files. No ready work prints `No ready work found.`; GitHub or Zellij failures
-are errors rather than an empty result.
-
-## Dispatch command
-
-`workdash dispatch SCOPE [--agent NAME] [--group NAME] [--host HOST] [--json]`
-asks the running server to select and launch at most one issue. Preview the same
-ordered candidates with `workdash ready SCOPE`; dispatch rechecks eligibility
-and skips candidates claimed by another caller. It uses the same scope forms as
-`ready`, including `todo` and `any`.
-
-```bash
-workdash dispatch owner/repo
-workdash dispatch owner/repo#42 --agent pi --group project --host dashboard.lan --json
-```
-
-Dispatch uses the issue as the coding target. If its authored pull request needs
-work, the agent resumes its existing branch with every applicable reason. The
-server supervises the new pane using autoclose after the client returns. The
-result reports `status=launched`, the issue, action, reasons, and actual pane ID;
-`status=no_ready_task` is a successful empty or exhausted scope. Unavailable
-GitHub or Zellij state and unconfirmed launches are errors, not empty results.
-The default Zellij group is the implementation repository's basename, including
-for a descendant in another repository; `--group` overrides it. The JSON API
-accepts `POST /api/v0/dispatch` with `scope` and optional `agent` and `group`.
-
-Dispatch returns immediately; it does not wait for completion, create
-sub-issues, merge, or run a scheduler. Supervision is subject to the limitations
-in *Autoclose supervision* below.
-
-## Autodispatch sessions
-
-`workdash autodispatch SCOPE [--group NAME] [--agent NAME] [--automerge]` starts a server-owned
-session and returns its ID without waiting for launched work. For an issue scope, it waits for the first readiness check and names an open blocker if there is one; a failure to check for blockers is an error. Other scopes return immediately. It uses the same scopes, readiness,
-parent behavior, claims and agent supervision as `dispatch`. Without `--group`, each task uses its implementation repository basename,
-including cross-repository work; `--group` overrides it. Each session dispatches one issue at a time, checks about every 30
-seconds for its pane to disappear, then synchronously reviews the linked open PR before checking readiness again. If there is no linked PR, review is skipped. The selected agent must support both coding and one-shot analysis. Review failure, including a failed or unconfirmed GitHub posting, fails the session and prevents automerge. The session fails before a tenth consecutive dispatch of the same issue; selecting another issue resets the count. By default it leaves PRs open. With `--automerge`, it merges only the unchanged reviewed head after rechecking feedback, checks, and mergeability. Actionable feedback, conflicts, or failing checks return to dispatch; the session waits and rechecks while a requested re-review, checks, or mergeability are pending or unknown. Incomplete review feedback fails the session. Stopping the session or disabling automerge ends the wait. A review already in progress cannot be used for automerge; enabling automerge during one starts a fresh review afterward. A head that changes during review or merge is reviewed again, with bounded retries. If a merge fails because of conflicts, the session continues to select ready work; other merge failures fail the session. The direct merge selects a method enabled in the repository settings, preferring squash, then merge commits, then rebase. It does not account for branch rulesets that further restrict merge methods, so GitHub may reject the selected method and fail the session. The review is agent-produced, not independent proof. Multiple independent sessions can run at once.
-
-Feedback and checks can change between Workdash's readiness lookup and the GitHub
-merge. The head SHA guard only protects against changes to the commit, not those
-other changes. Use GitHub-enforced branch protection for policies that must be
-enforced atomically at merge time; Workdash's recheck is not such a guarantee.
-
-`workdash info` and `workdash info --json` report sessions, their current task,
-status, elapsed time and any failure. The TUI shows running sessions, the three
-most recently started failed sessions, including failure details, and the three most
-recently started sessions with no work on their first check above the work table. Press Shift+Tab to focus progress and use the arrow keys or End to scroll it; press Tab to return to the work table. After three reminders and a further idle window with no pull request, a stuck session is blocked and remains visible. Any change in pane content resumes it and starts a fresh reminder window, whether caused by the agent or by input through Workdash or Zellij. Successful input through Workdash also resumes it immediately, even if the screen remains unchanged. The TUI does not provide a pane-input action. With progress focused, select a session with the arrow keys: `f` focuses its coding or active review pane while it is available, `m` toggles automerge for a running or blocked session, and `s` stops and removes it from progress, including a failed session. Stopping a blocked session closes its pane without changing the worktree. Stop a session with
-`workdash autodispatch-stop SESSION_ID`; stopping a blocked session closes its pane, while stopping a running session leaves its pane open. Starting another session for the same scope replaces the old one and also closes its pane if it is blocked. If the pane content has changed before either action closes it, the session still stops or is replaced, but that action leaves the recovered pane open. Starting an exact issue can still close its coding pane to dispatch ready work. A blocked pane is still checked for a later merged pull request.
-A dispatch already in progress may still finish launching its pane after stopping.
-Pane disappearance is not proof that the work was merged or completed.
-If dispatch, review, or the pane lookup fails, the session fails rather than treating the
-failure as an empty result. Sessions live only in the server process. After a
-restart, start another session on the same scope; readiness is checked afresh.
-
-The API accepts `POST /api/v0/autodispatch` with `scope` and optional `group` and
-`agent` and boolean `automerge`, and `POST /api/v0/autodispatch_stop` with the session `id`.
-Session state is included in `POST /api/v0/info` as `autodispatch_sessions`;
-its `group` is null when no override was configured.
-
-## Info command
-
-`workdash info [--json]` requires a running `workdash` session and
-reports live Workdash-owned Zellij panes for terminal-backed work actions,
-including pane title, cwd, command, tab, state, and mapped Workdash item.
-Agent panes map to the item for their launch worktree, even after changing
-directory. Terminal panes map by current working directory. When a mapping
-cannot be established, the item is `unknown`. Add `--all` to include other live
-non-plugin panes from the server-backed Workdash session as `kind=unknown` with
-unknown item mapping.
-
-## Birdview command
-
-```bash
-workdash birdview --host dashboard.lan
-workdash birdview --top 10 --format json
-```
-
-`birdview` shares a snapshot of ongoing autodispatch sessions, other live coding
-panes, loaded open pull requests, and recent dashboard items. It uses information
-already available to the server; it does not fetch GitHub data, read pane output,
-or run an analysis agent. Pane IDs can be used with `workdash read`.
-
-Each section shows up to five entries by default. Telegram MarkdownV2 is the
-default; it omits whole entries to fit within 4096 characters. Generic Markdown
-and JSON are also available. `POST /api/v0/birdview` accepts `top` and `format`.
-
-## Analyze command
-
-`workdash analyze ITEM [--agent NAME] [--group NAME] [--json]` requires a running
-`workdash` session and analyzes a work item. `ITEM` can be a row ID from
-`workdash list` (such as `owner/repo#ISSUE-123`), `owner/repo#123` for an issue,
-or a GitHub issue/PR URL. The item does not need to be on the dashboard: the
-server looks up any issue or pull request it can access on GitHub, without adding
-it to `workdash list` or to the included items. `workdash terminal` accepts the
-same items. It reuses a
-fresh cached analysis when available. Otherwise, the server reuses the item's
-existing worktree, or analyzes an issue in a disposable detached worktree of the
-code repository's default branch. Pull requests use their head worktree. The server
-runs the selected configured analysis agent in a Zellij pane named
-`analyse_<worktree>`. The pane opens in the tab named by `--group`, or else in the
-tab named after the code repository's basename. A fresh analysis needs a known
-Zellij session; a cached analysis works without one.
-
-The server analyze response includes Markdown and rendered HTML URLs using the
-request host. The CLI reports the Markdown URL; `--json` omits file content.
-
-## Review command
-
-`workdash review ITEM [--agent NAME] [--group NAME] [--json]` requires a running
-server. ITEM accepts the same references as `analyze`: a pull request or an issue
-with a linked open pull request. If there is no open pull request, it reports
-nothing to review. The server prepares the PR worktree and starts a background
-review in a Zellij pane named `review_<worktree>`, opened in the tab named by
-`--group` or else the code repository's basename, using the selected configured
-analysis agent without using the analysis cache. A review needs a known Zellij
-session. The command returns the
-started review, agent, and intended document path on the server without waiting for completion.
-The document may not exist yet, and a failed review may not produce it. The first analysis
-agent is selected by default. The agent needs GitHub access and permission to
-post reviews; a restricted analysis command may not be suitable.
-
-The agent is instructed to post only major findings as inline review comments,
-each beginning with 🤖, and submit a changes-requested review or approval as
-appropriate. It checks existing review threads and does not repeat
-already-described problems, regardless of who wrote them. For your own
-PR, based on the authenticated identity used to submit the review rather than
-the configured username, it submits a comment-only review, since GitHub does not
-permit self-approval or self-requested changes. If it cannot determine that
-identity, it is instructed not to submit a formal verdict and to report failure in the
-document. The agent writes a fresh document under the
-worktree's `.workdash/reviews/`, summarizing the outcome and explicitly listing
-posted comments or saying there were none. The document must begin with
-`Review outcome: success`, confirming that the review completed and all required
-GitHub postings succeeded. An explicit failure or an unconfirmed outcome fails
-the review; its document is retained for diagnosis. Starting a new review removes previous generated
-`review-<UUID>.md` documents in that worktree, except documents of active reviews;
-other files are left alone. If the document is missing or empty, Workdash retries
-once, asking the agent to check existing threads before posting again; a failed
-process or missing or empty document after
-retry is logged as an error by the server. Completion and the document path are
-logged by the server at debug logging level (`--debug`). Reviews are not supervised after the
-server exits. A concurrent request for the same pull request returns the same started information
-without starting another review; reviews of other pull requests can proceed.
-The document is agent-produced, not independent verification of GitHub's review state.
-`POST /api/v0/review` accepts `target` and optional `agent`.
-
-## Code command
-
-`workdash code ITEM [--agent NAME] [--group NAME] [--autostart] [--autoclose] [--json]` requires a running
-`workdash` session and launches a configured coding agent for a work
-item. `ITEM` accepts the same items as `workdash analyze`. With `--group NAME`,
-the server opens a new agent pane in the named Zellij tab, creating it if needed;
-without it the pane opens in the current tab. This also works with `--host`.
-An existing agent remains in its current tab regardless of the requested group.
-The API accepts the same option as a `group` string.
-
-At most one coding agent works in a worktree: its live `code_` Zellij pane is the
-claim, with no claim command or stored claim state. When an agent pane launched
-for the item's worktree is still live, including one started for another item
-sharing that worktree, wherever its cwd has moved, `code` starts nothing and reports `status` `already_running` with that
-pane. Otherwise it reports `launched` once the new pane is visible. If Zellij
-cannot list its panes, or a launched pane does not show up, `code` starts nothing
-and reports an error; a retry within a minute of an unconfirmed launch fails too.
-Command panes close when their command exits. If an agent exits before
-Workdash can see the new pane, the launch may be reported as unconfirmed.
-Terminal panes do not count. VSCode Copilot, offered only by the TUI, holds no
-claim and is not opened while an agent pane is live. In the TUI, `c` opens the
-code menu; choosing a numbered agent focuses any live agent pane for the worktree.
-Choosing terminal focuses an existing terminal in the worktree instead of opening
-another: a Workdash terminal, even when it runs a program or its shell changed
-directory, or a plain shell. Agent and diff panes are excluded, and so is a
-terminal in another worktree under the configured `workdir`, even one whose
-directory has the same name. Outside `workdir` a terminal carrying this
-worktree's Workdash title is treated as this worktree's terminal.
-
-By default, `workdash code` uses the same plan-first briefing as the TUI's `c`:
-for implementation, the agent proposes a plan and waits for your instructions
-before editing, committing, or pushing.
-
-With `--autostart`, the briefing ends with an appendix
-telling it to work without routine confirmation, commit, push, and open a pull
-request that closes the issue (or update the existing one), and verify the pull request's current head: CI `passing`, or GitHub reporting no required or
-observed checks (`no_checks`), and a clean merge. It never merges or closes
-anything, and the agent stays in its interactive pane. Commit and push are
-explicitly requested; if a force-push is needed, the briefing permits it only
-on the pull request branch, preferably with a lease and subject to repository
-restrictions. The state-specific task
-comes from the same GitHub classification as `ready`: an issue is implemented, an
-issue an open pull request of yours closes resumes that pull request in place, and a pull
-request with review feedback, merge conflicts, or failing CI is repaired on its
-own branch with every reason included. A pull request waiting on CI, review, or
-merge is described, not reworked, and somebody else's pull request stays a
-review-only session. The HTTP `POST /api/v0/code` takes optional boolean
-`autostart` and `autoclose`, both
-false when omitted. `already_running` injects nothing into the running agent.
-
-Naming an authored pull request that closes an issue is the same as naming the
-issue, with or without `--autostart`. Plan-first mode uses the issue checkout
-and briefing. Whether that checkout is new or existing, the briefing includes
-context and unresolved review threads from the newest open pull request you
-authored that closes the issue, if there is one. The agent is told to build on
-that work without assuming the checkout contains its commits. The pull request
-does not choose the checkout.
-Reviewing somebody else's pull request uses its cached pull request analysis
-instead; linked issues are background, not instructions to implement. An open
-parent whose descendants are closed is briefed to verify its goal and, if
-already implemented, prove the workflow with a test.
-
-Human output reports the status, item, agent, selected session, actual tab, cwd,
-pane title, and pane id when available, plus an `Autoclose` line saying whether
-monitoring was enabled when the request asked for autoclose. `--json` emits the
-same result as machine-readable JSON.
-
-### Autoclose supervision
-
-`workdash code ITEM --autoclose` leaves the agent in its normal interactive pane
-and asks the server to supervise the pane it just launched. The CLI polls
-nothing itself: it sends `autostart` and `autoclose` to the server, which owns
-the GitHub lookups, the messages, and the pane. Autoclose requires autostart, so
-the HTTP API answers `bad_request` (400) to `{"autoclose": true}` without
-`autostart: true`. In the CLI, `--autoclose` implies `--autostart`; the TUI's
-code menu asks for neither.
-`already_running` never turns a pane started elsewhere into a supervised one, and
-the response reports `autoclose_enabled` only when a request asked for it.
-
-About every 30 seconds the server compares the pane's screen with the previous
-check. New output postpones every decision. After 5 minutes without new output
-and without a message from Workdash, the server asks GitHub what the work still
-needs, using the same classification `workdash ready` uses, and sends the same
-instruction the agent was briefed with: implement the issue, fix failing checks,
-resolve merge conflicts, or address review feedback. A new head, check result,
-review, base head, or mergeability is a new state; the same pull request state is never
-messaged twice, and every message restarts the 5 minutes. A pull request that
-merged closes its pane on the next check, even while the agent is still writing.
-A previously merged pull request does not finish a reopened issue, which continues to
-receive implementation reminders. A pane explicitly targeting a pull request that
-merged before launch is left alone. GitHub reports merges only to the second, so a
-merge in the launch second is ambiguous and does not close the pane. A supervised session on somebody else's pull
-request is never messaged and closes only once that pull request merges after launch.
-
-Only a known pull request's state is read on every check: finding the pull
-request an issue now has, and deciding what an idle pane needs, each cost a whole
-work state, so each runs at most every five minutes. That lookup also finds a pull
-request that opened and merged since the previous one, so such work closes its
-pane at the next lookup, at most about five minutes late. If instruction text reached the pane, a failed Enter keystroke is retried
-on its own without typing the text again, unless the pane printed something since, which abandons that
-instruction instead of answering whatever the agent now asks.
-
-Work counts as finished only when GitHub reports the current head's checks as
-passing or verifiably absent, clean mergeability against the current base, and no
-outstanding review feedback, and the worktree holds no local work GitHub does not
-have: an edited file, a new file the agent never added, or a commit it lacks. Only
-the worktree's `.workdash/` artifact directory is left out of that check; any other
-local work keeps the pane open and the server logs that reason. That check reads
-the GitHub state of a pane already found idle, and the pane's identity and screen
-are compared once more right before closing; the worktree, branch, and pull
-request are left alone. Pending, unknown, or unavailable GitHub answers
-close nothing and report no success, and a failed GitHub or Zellij call backs off
-instead of messaging. A pull request closed without merging is neither completion
-nor work to redo on its own: its pane is left open, supervision of it stops, and
-the server logs that the pane needs review.
-
-**Limitation:** supervision lives only in the running `workdash`
-process, so it stops when the server restarts and never resumes on its own. The
-pane's identity is the session name, the pane ID, and the pane title Zellij
-reports after the launch, revalidated immediately before every message or close,
-and a pane whose identity stops matching is dropped from supervision for good:
-the action is abandoned and it is never messaged or closed again. A Zellij
-session recreated under the same name can reuse a pane ID, so this identity is
-the strongest evidence Zellij offers rather than a guarantee about which program
-owns the pane. Supervision is a heuristic: a silent long-running command, a
-pending question, or an agent waiting for permission looks exactly like a
-finished one, except when the pull request merges. A pane that cannot be checked
-surfaces only in the server log, as warnings spaced two, five, then fifteen
-minutes apart; once its checks keep failing at the longest of those waits, one
-further line reports the pane as stalled, and a stall after a successful check is
-reported again. When no pull request exists, the same work instruction is sent up to three times, each after a full idle window; another full idle window leaves the pane blocked. Pane activity postpones these decisions but does not reset the reminder count until the pane recovers from being blocked. A pull request state that does not change is never messaged twice.
-
-## Read and write commands
-
-`workdash read PANE_ID [--full] [--json]` requires a running `workdash`
-session and reads pane text through the server-backed pane content API. Human
-output prints the pane text directly. Add `--full` to request full scrollback.
-
-`workdash write PANE_ID TEXT [--raw] [--json]` requires a running
-`workdash` session and sends pane input through the server-backed pane
-send API. By default Workdash appends Enter; `--raw` or `--no-enter` sends the
-text exactly. Human output confirms that the pane accepted the input.
-
-## Show-config command
-
-`workdash show-config [--json]` reports configured analysis agents, configured
-coding agents, and the selected server address. It does not require a running
-server. The same information is also available from the JSON API for HTTP
-clients.
-
-## View command
-
-`workdash view TARGET` shows one document in the built-in viewer. `TARGET` is a
-local path, a `file://` URL, an HTTP or HTTPS URL, a GitHub issue or pull
-request URL, `owner/repo#NUMBER`, or a bare `NUMBER` or `#NUMBER` resolved
-against the current directory's `origin` remote. Only GitHub targets are looked
-up with `gh`; a local file never contacts GitHub. Whether a GitHub target is an
-issue or a pull request comes from GitHub, not from the URL. The command needs
-no running server.
-
-A GitHub document starts with the title, a metadata line, and a labels,
-assignees, milestone and comments line. A pull request also reports draft,
-mergeable, merge state and review decision, plus CI, reviews and review threads
-(capped at 50 threads, 100 comments per thread and 20 failing checks, with a
-truncation note). The description preserves its original Markdown; bare issue
-and pull request references are not converted to links. Sub-issues are listed as
-a table at every nesting level. A parent issue shows readiness, blockers, and
-linked pull request reviews and checks beside the tree. The viewer shows coding
-panes Workdash can match to the work and labels unavailable details. The parent
-keeps its GitHub state even if there is no ready work or a descendant remains open.
-
-Inside the viewer, activating a link to a Markdown document opens it in the same
-viewer, and activating a link to a GitHub issue or pull request shows that item
-the same way. A Markdown file hosted on GitHub is a repository page rather than
-a document, so that link goes to the configured `open` command. Relative links
-resolve against the directory of the viewed file or against the address of the
-remote document. Any other link runs the configured `open` command, and the
-viewer reports the command it used in its status line.
-While a document is fetched the viewer says that it is loading; when a link
-cannot be loaded or opened, the message goes to the status line and the current
-document stays on screen. `b` returns to the previous document and is offered
-only while there is one, and links to headings scroll within the current
-document. Following a document or item link never opens a pane and never
-replaces the running viewer, with or without Zellij.
-
-## Analysis cache
-
-Analyses produced with `a` or `workdash analyze` are cached under
-`~/.config/workdash/cache/` so that re-opening an item is instant. The cache is
-keyed by the item's GitHub
-`updated_at` timestamp, so any change on GitHub automatically invalidates the
-cached analysis and the next analyze action will re-run it.
-
-## Product behavior
-
-Canonical product behavior is described in [`features/`](features/).
-
-The `.feature` files are the source of truth for what the software does. They are product specifications first and executable BDD scenarios second.
-
-Implementation progress can be tracked separately.
-BDD is the integration point between humans and agents collaborating on the project as Workdash relied hevily on agents during its initial development cycle.
-
-### BDD-first development (mandatory)
-
-Every new feature **must** start with a BDD definition under [`features/`](features/), and every change to existing behavior **must** update the relevant `.feature` file **before** any implementation or test code is modified. The `.feature` files are the contract; code follows them, not the other way around.
-
-This applies to agents and humans alike. A change that lands code without a matching `features/` update is incomplete.
-
-## Tests
-
-From the repository root, run the default suite:
-
-```bash
-PYTHONPATH=src pytest
-```
-
-The browser security test is excluded by default. To run it, install Chromium
-(or Chrome) and Node.js with built-in WebSocket support, then run:
-
-```bash
-PYTHONPATH=src pytest -m browser
-```
-
-Set `CHROME_BIN` to the browser executable if it is not on `PATH`.
-
-### BDD suite
-
-`tests/bdd/` drives development from the `.feature` files in `features/`.
-`pytest_bdd.scenarios(...)` auto-generates one pytest test per `Scenario`,
-so adding a scenario to `features/` is enough to pull it into the suite.
-Step definitions live under `tests/bdd/steps/`; scenarios whose steps are
-not yet implemented fail with `StepDefinitionNotFoundError`, which is the
-intended TDD signal for BDD-first development.
-
-## License
-
-`workdash` is distributed under the terms of the GNU General Public License
-version 3. See [LICENSE](LICENSE) for the full text.
+## Contributing
+
+`workdash` is developed BDD-first: the scenarios in [`features/`](features/) are
+the product specification. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+workflow, and [LICENSE](LICENSE) for the GPLv3 license terms.
