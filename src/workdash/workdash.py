@@ -576,9 +576,7 @@ class WorkdashCommands:
                 needs_pane=config.open_needs_pane,
                 zellij_session=zellij_session,
             ),
-            view_callback=lambda item: open_item_document(
-                item.url, zellij_session=zellij_session, dashboard_address=dashboard_address
-            ),
+            view_callback=lambda item: open_item_document(item.url, zellij_session=zellij_session),
             open_markdown_callback=lambda path, item_url: open_markdown(
                 path,
                 config.analysis_viewer["command"],
@@ -587,7 +585,6 @@ class WorkdashCommands:
                 zellij_session=zellij_session,
                 focus=True,
                 item_url=item_url,
-                dashboard_address=dashboard_address,
             ),
             refresh_callback=lambda: (
                 session.list_items(refresh=True)

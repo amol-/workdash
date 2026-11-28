@@ -174,14 +174,11 @@ def _code_from_saved_analysis(analysis_dashboard, tmp_path, monkeypatch, offline
     config = backend.config
     issue = analysis_dashboard["issue"]
     viewer_args = []
-    viewer_env = {}
 
     def open_viewer(session, argv, *, executable):
         assert session == "workdash-main"
         executable_index = argv.index(executable)
         viewer_args.extend(argv[executable_index + 1 :])
-        if argv[4:5] == ["env"]:
-            viewer_env.update(arg.split("=", 1) for arg in argv[5:executable_index])
         return "terminal_17"
 
     async def open_saved_analysis(app):
@@ -230,10 +227,6 @@ def _code_from_saved_analysis(analysis_dashboard, tmp_path, monkeypatch, offline
             await _wait_for(pilot, lambda: "terminal_31" in status.render().plain)
             return status.render().plain
 
-    monkeypatch.setenv("WORKDASH_HOST", "127.0.0.1:8767")
-    monkeypatch.delenv("_WORKDASH_RESOLVED_VIEW_TARGET", raising=False)
-    for name, value in viewer_env.items():
-        monkeypatch.setenv(name, value)
     monkeypatch.setattr(view, "load_config", lambda: config)
     monkeypatch.setattr(view.subprocess, "run", offline_github)
     monkeypatch.setattr(

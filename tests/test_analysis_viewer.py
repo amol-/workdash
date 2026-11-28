@@ -69,7 +69,6 @@ def test_local_viewer_receives_encoded_url_with_correct_content(tmp_path, monkey
         "viewer --quiet",
         format=format,
         item_url="https://github.com/owner/repo/issues/42",
-        dashboard_address="127.0.0.1:8766",
     )
     expected = path if format == "markdown" else path.with_suffix(".html")
     opened.assert_called_once_with(
@@ -125,13 +124,11 @@ def test_builtin_analysis_viewer_receives_item_as_target_argument(
         needs_pane=needs_pane,
         zellij_session="workdash-main",
         item_url=item_url,
-        dashboard_address="127.0.0.1:8766",
     )
 
     argv = opened.call_args.args[1] if needs_pane else process.call_args.args[0]
     assert argv[-4:] == ["view", path.as_uri(), "--target", item_url]
-    assert f"_WORKDASH_RESOLVED_VIEW_TARGET={item_url}" in argv
-    assert "WORKDASH_HOST=127.0.0.1:8766" in argv
+    assert "env" not in argv
 
 
 def test_direct_analysis_viewer_keeps_running_without_blocking(tmp_path):

@@ -1514,9 +1514,8 @@ def test_cli_and_api_analysis_preserve_focus_in_real_zellij(tmp_path, monkeypatc
 
 
 @pytest.mark.skipif(shutil.which("zellij") is None, reason="Zellij is not installed")
-@pytest.mark.parametrize("selected", ["custom", "unset"])
 @pytest.mark.parametrize("repeat", range(2))
-def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected, repeat):
+def test_dashboard_in_existing_zellij_session_uses_the_sessions_host(tmp_path, repeat):
     import socket
 
     from workdash.control import WorkdashControlClient, WorkdashControlError
@@ -1525,10 +1524,10 @@ def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected
     sockets = _private_socket_dir()
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
-        old_port = probe.getsockname()[1]
+        session_port = probe.getsockname()[1]
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+        caller_port = probe.getsockname()[1]
     name = f"wd-{uuid.uuid4().hex[:8]}"
     received = tmp_path / "received"
     dashboard = tmp_path / "dashboard.py"
@@ -1540,8 +1539,7 @@ def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected
         "from workdash.config import WorkdashConfig, AgentConfig\n"
         f"Path({str(received)!r}).write_text(os.environ.get('WORKDASH_HOST', '<unset>'))\n"
         f"control.SERVER_LOG_PATH = Path({str(tmp_path / 'workdash.log')!r})\n"
-        + (f"control.SERVER_PORT = {port}\n" if selected == "unset" else "")
-        + "cli.GitHubClient.check_authentication = lambda self: None\n"
+        "cli.GitHubClient.check_authentication = lambda self: None\n"
         "cli.load_config = lambda: WorkdashConfig(github_username='test', open_command='xdg-open', "
         "analysis_viewer={'command': 'workdash view', 'format': 'markdown', 'needs_pane': True}, "
         "agents={'agent': AgentConfig(launch='sh')}, repositories=('owner/repo',), "
@@ -1552,13 +1550,10 @@ def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected
     wrapper = tmp_path / "wrapper.py"
     wrapper.write_text(
         "import sys\n"
-        "import workdash.control as control\n"
         "from workdash import launcher\n"
         f"launcher._build_direct_workdash_command = lambda args: [{sys.executable!r}, {str(dashboard)!r}]\n"
         "launcher.os.execvp = lambda *args: sys.exit(0)\n"
-        # The dashboard under test uses this default address too.
-        + (f"control.SERVER_PORT = {port}\n" if selected == "unset" else "")
-        + f"launcher.zellij.exec_zellij_wrapped_workdash(['--session', {name!r}, '--debug'])\n"
+        f"launcher.zellij.exec_zellij_wrapped_workdash(['--session', {name!r}, '--debug'])\n"
     )
     env = os.environ.copy()
     for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
@@ -1569,7 +1564,7 @@ def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected
         TERM="xterm-256color",
         HOME=_temporary_home(tmp_path),
         SHELL="/bin/sh",
-        WORKDASH_HOST=f"127.0.0.1:{old_port}",
+        WORKDASH_HOST=f"127.0.0.1:{session_port}",
         ZELLIJ_CONFIG_FILE=str(config),
         ZELLIJ_SOCKET_DIR=sockets.name,
     )
@@ -1591,14 +1586,11 @@ def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected
             time.sleep(0.1)
         else:
             pytest.fail("Zellij session did not start")
-        current = env.copy()
-        if selected == "unset":
-            del current["WORKDASH_HOST"]
-        else:
-            current["WORKDASH_HOST"] = f"127.0.0.1:{port}"
-        subprocess.run([sys.executable, str(wrapper)], env=current, check=True, timeout=15)
+        # Only this command's environment names the other address; the session keeps its own.
+        caller = {**env, "WORKDASH_HOST": f"127.0.0.1:{caller_port}"}
+        subprocess.run([sys.executable, str(wrapper)], env=caller, check=True, timeout=15)
         deadline = time.monotonic() + 15
-        client = WorkdashControlClient(f"127.0.0.1:{port}")
+        client = WorkdashControlClient(f"127.0.0.1:{session_port}")
         while time.monotonic() < deadline:
             try:
                 result = client.request("info")
@@ -1607,10 +1599,13 @@ def test_restart_uses_current_host_in_existing_zellij_session(tmp_path, selected
                 time.sleep(0.1)
         else:
             pytest.fail(
-                f"dashboard did not listen on {port}; received {received.read_text() if received.exists() else 'nothing'}"
+                f"dashboard did not listen on {session_port}; "
+                f"received {received.read_text() if received.exists() else 'nothing'}"
             )
-        assert received.read_text() == ("<unset>" if selected == "unset" else f"127.0.0.1:{port}")
+        assert received.read_text() == f"127.0.0.1:{session_port}"
         assert result["session"] == name
+        with pytest.raises(WorkdashControlError):
+            WorkdashControlClient(f"127.0.0.1:{caller_port}").request("info")
     finally:
         _cleanup_sessions(zellij, env, [(name, pid, fd)])
         sockets.cleanup()

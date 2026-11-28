@@ -24,7 +24,7 @@ import nh3
 from .agent_context import render_github_context
 from .config import LOCAL_BIN_PATH
 from .dashboard_record import DashboardRecords
-from .github_client import GitHubClient, parse_github_item_url
+from .github_client import GitHubClient
 from .models import REVIEW_KINDS, WorkItem, WorkItemKind, WorkItemType, display_repo
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -45,7 +45,6 @@ _ZELLIJ_PANE_MARKER_POLL_SECONDS = 0.2
 _ZELLIJ_PANE_MARKER_TIMEOUT_SECONDS = 5.0
 _PANE_WRAPPER_NAME = "workdash-pane"
 _ITEM_VIEW_WRAPPER_NAME = "workdash-view"
-RESOLVED_VIEW_TARGET_ENV = "_WORKDASH_RESOLVED_VIEW_TARGET"
 # Terminal control sequences in text captured from a pane or an error message.
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
 # Concurrent launches for one group must not each create their own tab.
@@ -85,7 +84,6 @@ def _run_browser_open(
     direct_nonblocking: bool = False,
     focus: bool = False,
     item_url: str | None = None,
-    dashboard_address: str | None = None,
 ) -> str:
     try:
         command_tokens = (
@@ -101,17 +99,8 @@ def _run_browser_open(
         or (Path(command_tokens[0]).is_absolute() and Path(command_tokens[0]).name == "workdash")
     )
     arguments = [target]
-    assignments = []
-    if built_in_viewer:
-        if item_url is not None:
-            if item := parse_github_item_url(item_url):
-                item_url = item.canonical_url
-                assignments.append(f"{RESOLVED_VIEW_TARGET_ENV}={item_url}")
-            arguments += ["--target", item_url]
-        if dashboard_address is not None:
-            # Zellij inherits its session's environment, not the dashboard's.
-            assignments.append(f"WORKDASH_HOST={dashboard_address}")
-    env_prefix = ["env", *assignments] if assignments else []
+    if built_in_viewer and item_url is not None:
+        arguments += ["--target", item_url]
     if needs_pane:
         session = zellij_session or os.getenv("ZELLIJ_SESSION_NAME")
         if not session:
@@ -128,7 +117,6 @@ def _run_browser_open(
                     "-c",
                     '"$@" || { printf "\\nPress Enter to close this pane.\\n"; read -r _; }',
                     _ITEM_VIEW_WRAPPER_NAME,
-                    *env_prefix,
                     *command_tokens,
                 ]
             pane_id = zellij.open_viewer(
@@ -147,7 +135,7 @@ def _run_browser_open(
     try:
         if direct_nonblocking:
             process = subprocess.Popen(
-                [*env_prefix, *command_tokens, *arguments],
+                [*command_tokens, *arguments],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -163,7 +151,7 @@ def _run_browser_open(
                     )
             return command_name
         subprocess.run(
-            [*env_prefix, *command_tokens, *arguments],
+            [*command_tokens, *arguments],
             check=True,
             capture_output=True,
             text=True,
@@ -206,9 +194,7 @@ def open_in_browser(
     )
 
 
-def open_item_document(
-    url: str, *, zellij_session: str | None, dashboard_address: str | None = None
-) -> str:
+def open_item_document(url: str, *, zellij_session: str | None) -> str:
     """Show a GitHub issue or pull request as an item document in a full-size pane."""
 
     return _run_browser_open(
@@ -217,7 +203,6 @@ def open_item_document(
         kind="URL",
         needs_pane=True,
         zellij_session=zellij_session,
-        dashboard_address=dashboard_address,
     )
 
 
@@ -262,9 +247,8 @@ def open_markdown(
     format: str = "html",
     focus: bool = False,
     item_url: str | None = None,
-    dashboard_address: str | None = None,
 ) -> None:
-    """Open a local analysis, passing the item and dashboard address to the viewer command."""
+    """Open a local analysis, passing the item to the viewer command."""
 
     if not isinstance(path, str) or not path.strip():
         raise ValueError("Path must be a non-empty string.")
@@ -283,7 +267,6 @@ def open_markdown(
         direct_nonblocking=True,
         focus=focus,
         item_url=item_url,
-        dashboard_address=dashboard_address,
         needs_pane=needs_pane,
         zellij_session=zellij_session,
     )
@@ -991,15 +974,7 @@ class Zellij:
                         text=True,
                     ).stdout.strip()
                 pane_id = _launch_zellij_pane(
-                    [
-                        "env",
-                        *(
-                            [f"WORKDASH_HOST={os.environ['WORKDASH_HOST']}"]
-                            if "WORKDASH_HOST" in os.environ
-                            else ["-u", "WORKDASH_HOST"]
-                        ),
-                        *workdash_command,
-                    ],
+                    workdash_command,
                     context="Failed to start dashboard in Zellij",
                     zellij_session=session_name,
                     tab_id=tab,

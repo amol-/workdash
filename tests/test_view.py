@@ -1042,18 +1042,17 @@ def test_explicit_issue_shorthand_rejects_prs_and_non_github_origins(
 
 
 @pytest.mark.parametrize(
-    ("target", "marker", "origin"),
+    ("target", "origin", "lookup"),
     [
-        ("owner/repo#ISSUE-12", None, None),
-        ("owner/repo#12", None, None),
-        ("#12", None, "git@github.com:owner/repo.git"),
-        ("#12", None, "owner/repo"),
-        (ISSUE_URL, None, None),
-        (ISSUE_URL, ISSUE_URL.replace("/owner/", "/Owner/"), None),
-        (ISSUE_URL, ISSUE_URL, None),
+        ("owner/repo#ISSUE-12", None, True),
+        ("owner/repo#12", None, True),
+        ("#12", "git@github.com:owner/repo.git", True),
+        ("#12", "owner/repo", True),
+        # A URL already names the item, so it is not looked up again.
+        (ISSUE_URL, None, False),
     ],
 )
-def test_target_identifies_item_without_rendering_it(tmp_path, monkeypatch, target, marker, origin):
+def test_target_identifies_item_without_rendering_it(tmp_path, monkeypatch, target, origin, lookup):
     from workdash.workdash import main
 
     monkeypatch.chdir(tmp_path)
@@ -1061,16 +1060,9 @@ def test_target_identifies_item_without_rendering_it(tmp_path, monkeypatch, targ
     path.parent.mkdir()
     path.write_text("# Report\n\n[Details](details.md)", encoding="utf-8")
     calls = []
-    monkeypatch.setattr(
-        view.subprocess,
-        "run",
-        fake_gh_view_run(issue_routes(), recorded=calls, fails=marker == ISSUE_URL),
-    )
+    monkeypatch.setattr(view.subprocess, "run", fake_gh_view_run(issue_routes(), recorded=calls))
     monkeypatch.setattr(GitHelper, "get_repo_root", lambda *args: "/repo")
     monkeypatch.setattr(GitHelper, "remote_url", lambda *args: origin)
-    monkeypatch.delenv("_WORKDASH_RESOLVED_VIEW_TARGET", raising=False)
-    if marker is not None:
-        monkeypatch.setenv("_WORKDASH_RESOLVED_VIEW_TARGET", marker)
     request = MagicMock()
     monkeypatch.setattr(WorkdashControlClient, "request", request)
     documents = _capture(monkeypatch)
@@ -1079,7 +1071,7 @@ def test_target_identifies_item_without_rendering_it(tmp_path, monkeypatch, targ
     [document] = documents
     assert document.item.canonical_url == ISSUE_URL
     assert document.source == path.as_uri() and document.content == path.read_text()
-    assert calls == ([] if marker == ISSUE_URL else [["gh", "api", "repos/owner/repo/issues/12"]])
+    assert calls == ([["gh", "api", "repos/owner/repo/issues/12"]] if lookup else [])
     request.assert_not_called()
 
 

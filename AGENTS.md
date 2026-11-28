@@ -20,6 +20,7 @@ Before starting any work, read these files in order:
 ## Zellij session assumptions
 
 - Workdash runs inside a Zellij session. Its actions operate only in that same session; cross-session capabilities are out of scope.
+- Every pane in a Zellij session, including panes Workdash opens, inherits the environment the session started with. `WORKDASH_HOST` is chosen before the session starts; changing it inside a running session is unsupported, so commands never propagate the server address to panes they open.
 - When Workdash quits, it no longer manages any remaining panes. On a later run, Workdash can discover panes it created in the current session and should generally reuse them rather than create duplicates.
 
 ## Verifying visual/TUI behavior

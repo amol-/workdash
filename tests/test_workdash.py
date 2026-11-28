@@ -489,8 +489,6 @@ def test_main_passes_configured_agent_choices_and_separate_viewers_to_tui(
                 "-c",
                 '"$@" || { printf "\\nPress Enter to close this pane.\\n"; read -r _; }',
                 "workdash-view",
-                "env",
-                "WORKDASH_HOST=127.0.0.1:8765",
                 "/usr/bin/workdash",
                 "view",
                 item.url,
@@ -627,13 +625,7 @@ def test_main_view_menu_reaches_the_launcher(
             "--close-on-exit",
         ]
         if key == "v":
-            assert viewer_argv[-5:] == [
-                "env",
-                "WORKDASH_HOST=127.0.0.1:19876",
-                tools["workdash"],
-                "view",
-                url,
-            ]
+            assert viewer_argv[-3:] == [tools["workdash"], "view", url]
         else:
             assert viewer_argv == browser_argv
     else:

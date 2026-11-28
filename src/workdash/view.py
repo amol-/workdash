@@ -81,7 +81,6 @@ class Document:
 
 def run_view(target: str, *, item_target: str | None = None) -> int:
     """Show the named document, optionally with a separate GitHub launch item."""
-    resolved_target = os.environ.pop(launcher.RESOLVED_VIEW_TARGET_ENV, None)
     try:
         item = None
         if item_target is not None:
@@ -92,7 +91,7 @@ def run_view(target: str, *, item_target: str | None = None) -> int:
                 raise RuntimeError(
                     f"Document argument {target!r} conflicts with --target: it already names an item."
                 )
-            item = _resolve_view_target(item_target, resolved_target)
+            item = _resolve_view_target(item_target)
         document = load_document(target)
         if item is not None:
             document = replace(document, item=item)
@@ -516,13 +515,12 @@ def _github_item(
     return None
 
 
-def _resolve_view_target(target: str, resolved_target: str | None) -> ParsedGitHubItemURL:
+def _resolve_view_target(target: str) -> ParsedGitHubItemURL:
     try:
         if url := parse_github_item_url(target):
-            if target == resolved_target == url.canonical_url:
-                return url
-            repo, number, kind = url.repo, url.number, url.item_type
-        elif todo := _TARGETED_TODO_RE.fullmatch(target.strip()):
+            # An item URL already names the repository, number and kind.
+            return url
+        if todo := _TARGETED_TODO_RE.fullmatch(target.strip()):
             repo = load_config().todo_repository
             if not is_repository_name(repo):
                 raise RuntimeError("No todo repository is configured.")
@@ -533,7 +531,7 @@ def _resolve_view_target(target: str, resolved_target: str | None) -> ParsedGitH
             if recorded_target != todo["repo"]:
                 raise RuntimeError("The todo does not name the requested target repository.")
             return item
-        elif bare := _BARE_NUMBER_RE.fullmatch(target.strip()):
+        if bare := _BARE_NUMBER_RE.fullmatch(target.strip()):
             repo, number, kind = _origin_repo(github_only=True), int(bare["number"]), None
         elif reference := _github_item(target):
             repo, number, kind = reference
