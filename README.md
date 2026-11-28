@@ -115,6 +115,27 @@ control API in the same process (default `127.0.0.1:8765`, override with
 Global flags: `--configure` (rerun the setup wizard), `--session NAME`,
 `--host HOST[:PORT]`, `--debug`, `--version`.
 
+## Agent-controlled dashboard
+
+Workdash is also designed to be driven by another agent, not just by a human
+in the TUI. Every CLI command in the table above calls the control API of the
+running dashboard, so an agent can list work, launch and supervise coding
+sessions, read and write agent panes, and capture todos — while a human keeps
+interacting with the same dashboard discursively through that intermediate
+agent.
+
+To let an agent orchestrate Workdash, install the [`workdash-control`
+skill](skills/workdash-control/SKILL.md) in that agent. The skill teaches it to
+use only `workdash` subcommands against the running server (never Zellij,
+GitHub, or the filesystem directly), e.g.:
+
+```bash
+workdash ready any --json                 # what is actionable next
+workdash code owner/repo#42 --agent pi    # launch a worker, get its pane_id
+workdash read terminal_3 --full           # follow the worker
+workdash write terminal_3 "focus on the failing test"
+```
+
 ## Configuration
 
 Configuration lives in `~/.config/workdash/config.json` (JSON). Edit it directly
