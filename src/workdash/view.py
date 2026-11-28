@@ -62,6 +62,10 @@ _MAX_CHECKS = 20
 _DIFF_HUNK_LINES = 10
 _DOCUMENT_SUFFIXES = (".md", ".markdown")
 _DOCUMENT_FETCH_TIMEOUT_SECONDS = 10
+# A viewer probes a busy or missing server a few times, then leaves the keys off.
+_LAUNCH_PROBE_ATTEMPTS = 3
+_LAUNCH_PROBE_RETRY_SECONDS = 0.5
+_LAUNCH_PROBE_TIMEOUT_SECONDS = 2
 # A Markdown file on GitHub is a repository page, not a document to fetch.
 _GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
 
@@ -365,24 +369,26 @@ class _MarkdownApp(App):
             self._set_status(f"{action} unavailable: {error}")
             return
 
-        timeout = 2
-        while True:
+        for attempt in range(1, _LAUNCH_PROBE_ATTEMPTS + 1):
             try:
-                config = await _in_daemon(lambda timeout=timeout: discover(timeout))
+                config = await _in_daemon(lambda: discover(_LAUNCH_PROBE_TIMEOUT_SECONDS))
             except WorkdashControlError as error:
-                if not self._loading:
-                    self._set_status(f"{action} unavailable: {error}")
-                if error.code != "server_unresponsive":
-                    return
-                timeout = 5
-                await asyncio.sleep(1)
+                retry = (
+                    error.code in {"server_unreachable", "server_unresponsive"}
+                    and attempt < _LAUNCH_PROBE_ATTEMPTS
+                )
+                if retry:
+                    await asyncio.sleep(_LAUNCH_PROBE_RETRY_SECONDS)
+                    continue
+                message = f"{action} unavailable: {error}"
             else:
+                message = launch_failure
                 self._launch_client = client
                 self._agents = config["agents"]
-                self.refresh_bindings()
-                if not self._loading:
-                    self._set_status(launch_failure)
-                return
+            self.refresh_bindings()
+            if not self._loading:
+                self._set_status(message)
+            return
 
     def _require_dashboard_session(self, client: WorkdashControlClient, *, timeout: float) -> None:
         if self._zellij_session:
@@ -544,13 +550,17 @@ def _fetch_github_item(
 ) -> tuple[dict, ParsedGitHubItemURL]:
     issue = _gh_json(["gh", "api", f"repos/{repo}/issues/{number}"])
     kind = WorkItemType.PR if "pull_request" in issue else WorkItemType.ISSUE
+    if expected_kind is not None and expected_kind != kind:
+        found, label = (
+            ("a pull request", "PR") if kind == WorkItemType.PR else ("an issue", "ISSUE")
+        )
+        raise RuntimeError(f"{repo}#{number} is {found}; use {repo}#{label}-{number}.")
     item = parse_github_item_url(issue.get("html_url"))
     if (
         item is None
         or item.item_type != kind
         or item.repo.lower() != repo.lower()
         or item.number != number
-        or (expected_kind is not None and expected_kind != kind)
     ):
         raise RuntimeError(f"GitHub did not return the requested item {repo}#{number}.")
     return issue, item
@@ -560,27 +570,16 @@ def _origin_repo(*, github_only: bool = False) -> str:
     """Return the ``owner/repo`` the current directory's ``origin`` remote points at."""
     git_helper = GitHelper()
     try:
-        remote_url = git_helper.remote_url(git_helper.get_repo_root(), "origin")
+        root = git_helper.get_repo_root()
+        remote_url = git_helper.remote_url(root, "origin")
     except RuntimeError as error:
         raise RuntimeError(f"Failed to resolve the current repository: {error}") from error
-    if github_only and remote_url:
-        identity = git_helper.repository_identity(remote_url)
-        github_host_with_port = {
-            "https": "github.com:443",
-            "ssh": "github.com:22",
-            "git": "github.com:9418",
-        }.get(urlsplit(remote_url).scheme)
-        if (
-            identity is None
-            or not (
-                identity[0] in {"github.com", github_host_with_port}
-                or (identity[0] == "ssh.github.com:443" and remote_url.startswith("ssh://"))
-            )
-            or not is_repository_name(identity[1])
-            or is_repository_name(remote_url)
-        ):
+    if github_only:
+        # The same check worktree reuse makes, so a resolved item is one a launch can reuse.
+        repo = git_helper.remote_repo(root, "origin")
+        if not repo:
             raise RuntimeError("The origin remote is not a GitHub repository.")
-        return identity[1]
+        return repo
     repo = git_helper.repo_from_remote_url(remote_url) if remote_url else ""
     if not repo:
         raise RuntimeError("Could not determine owner/repo from the origin remote.")

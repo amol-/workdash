@@ -979,7 +979,7 @@ def test_project_supplemental_reads_stop_at_a_deadline(monkeypatch):
         (["owner/repo#ISSUE-3", "--target", "owner/repo#ISSUE-12"], "conflicts with --target"),
         (["#3", "--target", "owner/repo#ISSUE-12"], "conflicts with --target"),
         (["report.md", "--target", "owner/repo#ISSUE-404"], "no such issue"),
-        (["report.md", "--target", "owner/repo#PR-12"], "GitHub did not return the requested item"),
+        (["report.md", "--target", "owner/repo#PR-12"], "is an issue; use owner/repo#ISSUE-12"),
     ],
 )
 def test_view_rejects_conflicting_or_unresolvable_targets(monkeypatch, capsys, args, reason):
@@ -1003,12 +1003,17 @@ def test_view_rejects_conflicting_or_unresolvable_targets(monkeypatch, capsys, a
 @pytest.mark.parametrize(
     ("target", "origin", "reason"),
     [
-        ("owner/repo#12", None, "GitHub did not return the requested item"),
-        ("#12", "git@github.com:owner/repo.git", "GitHub did not return the requested item"),
+        ("owner/repo#12", None, "is a pull request; use owner/repo#PR-12"),
+        ("#12", "git@github.com:owner/repo.git", "is a pull request; use owner/repo#PR-12"),
         ("#12", "https://codeberg.org/owner/repo.git", "origin remote is not a GitHub repository"),
         (
             "#12",
             "https://github.com:8443/owner/repo.git",
+            "origin remote is not a GitHub repository",
+        ),
+        (
+            "#12",
+            "ssh://git@ssh.github.com:443/owner/repo.git",
             "origin remote is not a GitHub repository",
         ),
     ],
@@ -1042,8 +1047,7 @@ def test_explicit_issue_shorthand_rejects_prs_and_non_github_origins(
         ("owner/repo#ISSUE-12", None, None),
         ("owner/repo#12", None, None),
         ("#12", None, "git@github.com:owner/repo.git"),
-        ("#12", None, "https://github.com:443/owner/repo.git"),
-        ("#12", None, "ssh://git@ssh.github.com:443/owner/repo.git"),
+        ("#12", None, "owner/repo"),
         (ISSUE_URL, None, None),
         (ISSUE_URL, ISSUE_URL.replace("/owner/", "/Owner/"), None),
         (ISSUE_URL, ISSUE_URL, None),
@@ -1130,7 +1134,11 @@ def test_disabled_launch_actions_explain_why(tmp_path, monkeypatch, offline):
     _run_viewer(monkeypatch, exercise)
     assert main(["view", str(path), *(["--target", ISSUE_URL] if offline else [])]) == 0
     if offline:
-        request.assert_called_once_with("show_config", timeout=2)
+        assert (
+            request.call_args_list
+            == [call("show_config", timeout=view._LAUNCH_PROBE_TIMEOUT_SECONDS)]
+            * view._LAUNCH_PROBE_ATTEMPTS
+        )
     else:
         request.assert_not_called()
 
@@ -1387,9 +1395,6 @@ def test_busy_viewer_server_recovers_without_navigation(tmp_path, monkeypatch):
     monkeypatch.setattr(WorkdashControlClient, "request", request)
 
     async def exercise(pilot, app):
-        await _wait_viewer(
-            pilot, lambda: "did not answer" in app.query_one("#status", Static).render().plain
-        )
         await _wait_viewer(
             pilot, lambda: all(app.screen.active_bindings[key].enabled for key in "cd")
         )

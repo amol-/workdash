@@ -119,12 +119,7 @@ def _run_view(target, item, key, scenario_state, monkeypatch):
                             await pilot.pause(0.01)
                     scenario_state["launch_status"] = status.render().plain
                 else:
-                    async with asyncio.timeout(4):
-                        while (
-                            not status.render().plain
-                            and app.screen.active_bindings["c"].enabled is not True
-                        ):
-                            await pilot.pause(0.01)
+                    await _wait_for_launch_actions(pilot, app)
                 scenario_state["actions"] = {
                     name: app.screen.active_bindings[name].enabled
                     for name in "cd"
@@ -141,6 +136,21 @@ def _run_view(target, item, key, scenario_state, monkeypatch):
     monkeypatch.setattr(view, "load_config", lambda: WorkdashConfig(github_username="testuser"))
     monkeypatch.setattr(App, "run", run)
     return main(["view", target, *(["--target", item] if item else [])])
+
+
+async def _wait_for_launch_actions(pilot, app):
+    """Wait until discovery settled: actions available, or disabled for a named reason."""
+    status = app.query_one("#status", Static)
+    async with asyncio.timeout(4):
+        while True:
+            plain = status.render().plain
+            if (
+                app.screen.active_bindings["c"].enabled is True
+                or "unavailable" in plain
+                or "no GitHub item" in plain
+            ):
+                return
+            await pilot.pause(0.01)
 
 
 @then("the viewer offers coding but not dispatch")
